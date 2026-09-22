@@ -31,6 +31,22 @@ class ContractSchemaTests(unittest.TestCase):
             with self.subTest(schema=name):
                 Draft202012Validator.check_schema(schema)
 
+    def test_every_reference_resolves_in_the_local_schema_set(self):
+        def refs(value):
+            if isinstance(value, dict):
+                if "$ref" in value:
+                    yield value["$ref"]
+                for child in value.values():
+                    yield from refs(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from refs(child)
+        for name, schema in self.schemas.items():
+            resolver = self.registry.resolver(schema["$id"])
+            for ref in refs(schema):
+                with self.subTest(schema=name, ref=ref):
+                    self.assertIsInstance(resolver.lookup(ref).contents, dict)
+
     def test_model_request_fixture(self):
         self.validate("model.schema.json", "ModelRequest", json.loads((FIXTURES / "model-request.valid.json").read_text()))
 

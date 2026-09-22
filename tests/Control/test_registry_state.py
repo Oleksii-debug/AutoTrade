@@ -73,9 +73,9 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(second["generation"], 2)
         self.assertEqual(created["run_id"], "run-b")
 
-    def test_different_semantic_key_can_run_in_parallel(self):
+    def test_disjoint_paths_can_run_in_parallel(self):
         first, _ = claim(empty_registry(), request(), expected_generation=0, now=NOW)
-        other = request("req-b", "run-b")
+        other = request("req-b", "run-b", scope=["src/AutoTrade.Providers.Bybit"])
         other["semantic_key"] = "provider-bybit"
         second, _ = claim(first, other, expected_generation=1, now=NOW)
         self.assertEqual(len(active_mutation_claims(second, now=NOW)), 2)

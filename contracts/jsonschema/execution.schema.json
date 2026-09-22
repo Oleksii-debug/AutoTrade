@@ -3,8 +3,267 @@
   "$id": "https://schemas.autotrade.local/1.0.0/execution.schema.json",
   "title": "AutoTrade execution contracts",
   "$defs": {
-    "OrderIntent": {"type": "object", "additionalProperties": false, "required": ["intent_id", "intent_version", "account_id", "environment", "instrument_version", "side", "quantity", "order_type", "time_in_force", "reduce_only", "maximum_cost", "maximum_slippage", "expires_at", "decision_ref", "portfolio_target_ref", "capability_snapshot_id", "expected_state_version", "client_order_id", "intent_hash"], "properties": {"intent_id": {"$ref": "common.schema.json#/$defs/Id"}, "intent_version": {"$ref": "common.schema.json#/$defs/Sequence"}, "account_id": {"type": "string", "minLength": 1}, "environment": {"$ref": "common.schema.json#/$defs/Environment"}, "instrument_version": {"type": "string", "minLength": 1}, "side": {"enum": ["BUY", "SELL"]}, "quantity": {"$ref": "common.schema.json#/$defs/Quantity"}, "order_type": {"type": "string", "minLength": 1}, "limit_price": {"$ref": "common.schema.json#/$defs/Decimal"}, "stop_price": {"$ref": "common.schema.json#/$defs/Decimal"}, "time_in_force": {"type": "string", "minLength": 1}, "reduce_only": {"type": "boolean"}, "position_side": {"type": "string", "minLength": 1}, "parent_intent_id": {"$ref": "common.schema.json#/$defs/Id"}, "oco_group": {"type": "string", "minLength": 1}, "multi_leg_group": {"type": "string", "minLength": 1}, "maximum_cost": {"$ref": "common.schema.json#/$defs/Money"}, "maximum_slippage": {"$ref": "common.schema.json#/$defs/Decimal"}, "expires_at": {"$ref": "common.schema.json#/$defs/UtcInstant"}, "decision_ref": {"type": "string", "minLength": 1}, "portfolio_target_ref": {"type": "string", "minLength": 1}, "capability_snapshot_id": {"$ref": "common.schema.json#/$defs/Id"}, "expected_state_version": {"$ref": "common.schema.json#/$defs/Sequence"}, "client_order_id": {"type": "string", "minLength": 1, "maxLength": 128}, "intent_hash": {"$ref": "common.schema.json#/$defs/Digest"}}},
-    "SubmissionAttempt": {"type": "object", "additionalProperties": false, "required": ["intent_ref", "attempt_id", "owner_epoch", "policy_epoch", "send_started_at", "transport_request_fingerprint", "outcome"], "properties": {"intent_ref": {"$ref": "common.schema.json#/$defs/Id"}, "attempt_id": {"$ref": "common.schema.json#/$defs/Id"}, "owner_epoch": {"$ref": "common.schema.json#/$defs/Sequence"}, "policy_epoch": {"$ref": "common.schema.json#/$defs/Sequence"}, "send_started_at": {"$ref": "common.schema.json#/$defs/UtcInstant"}, "transport_request_fingerprint": {"$ref": "common.schema.json#/$defs/Digest"}, "provider_order_id": {"type": "string", "minLength": 1}, "client_order_id": {"type": "string", "minLength": 1}, "response_evidence": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/EvidenceRef"}}, "outcome": {"enum": ["ACKNOWLEDGED", "REJECTED", "UNKNOWN"]}, "ambiguity_reason": {"type": "string", "minLength": 1}}},
-    "ExecutionFill": {"type": "object", "additionalProperties": false, "required": ["fill_id", "provider_execution_id", "instrument_version", "side", "last_quantity", "last_price", "trade_time", "receipt_time", "fees", "settlement_date", "evidence"], "properties": {"fill_id": {"$ref": "common.schema.json#/$defs/Id"}, "provider_execution_id": {"type": "string", "minLength": 1}, "provider_revision": {"type": "string", "minLength": 1}, "order_ref": {"type": ["string", "null"]}, "intent_ref": {"type": ["string", "null"]}, "instrument_version": {"type": "string", "minLength": 1}, "side": {"enum": ["BUY", "SELL"]}, "last_quantity": {"$ref": "common.schema.json#/$defs/Quantity"}, "last_price": {"$ref": "common.schema.json#/$defs/Decimal"}, "trade_time": {"$ref": "common.schema.json#/$defs/UtcInstant"}, "receipt_time": {"$ref": "common.schema.json#/$defs/UtcInstant"}, "fees": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/Money"}}, "liquidity_flag": {"type": "string", "minLength": 1}, "settlement_date": {"type": "string", "format": "date"}, "correction_reference": {"type": "string", "minLength": 1}, "evidence": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/EvidenceRef"}}}
+    "OrderIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "intent_id",
+        "intent_version",
+        "account_id",
+        "environment",
+        "instrument_version",
+        "side",
+        "quantity",
+        "order_type",
+        "time_in_force",
+        "reduce_only",
+        "maximum_cost",
+        "maximum_slippage",
+        "expires_at",
+        "decision_ref",
+        "portfolio_target_ref",
+        "capability_snapshot_id",
+        "expected_state_version",
+        "client_order_id",
+        "intent_hash"
+      ],
+      "properties": {
+        "intent_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "intent_version": {
+          "$ref": "common.schema.json#/$defs/Sequence"
+        },
+        "account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "environment": {
+          "$ref": "common.schema.json#/$defs/Environment"
+        },
+        "instrument_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "side": {
+          "enum": [
+            "BUY",
+            "SELL"
+          ]
+        },
+        "quantity": {
+          "$ref": "common.schema.json#/$defs/Quantity"
+        },
+        "order_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "limit_price": {
+          "$ref": "common.schema.json#/$defs/Decimal"
+        },
+        "stop_price": {
+          "$ref": "common.schema.json#/$defs/Decimal"
+        },
+        "time_in_force": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reduce_only": {
+          "type": "boolean"
+        },
+        "position_side": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parent_intent_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "oco_group": {
+          "type": "string",
+          "minLength": 1
+        },
+        "multi_leg_group": {
+          "type": "string",
+          "minLength": 1
+        },
+        "maximum_cost": {
+          "$ref": "common.schema.json#/$defs/Money"
+        },
+        "maximum_slippage": {
+          "$ref": "common.schema.json#/$defs/Decimal"
+        },
+        "expires_at": {
+          "$ref": "common.schema.json#/$defs/UtcInstant"
+        },
+        "decision_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "portfolio_target_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "capability_snapshot_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "expected_state_version": {
+          "$ref": "common.schema.json#/$defs/Sequence"
+        },
+        "client_order_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "intent_hash": {
+          "$ref": "common.schema.json#/$defs/Digest"
+        }
+      }
+    },
+    "SubmissionAttempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "intent_ref",
+        "attempt_id",
+        "owner_epoch",
+        "policy_epoch",
+        "send_started_at",
+        "transport_request_fingerprint",
+        "outcome"
+      ],
+      "properties": {
+        "intent_ref": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "attempt_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "owner_epoch": {
+          "$ref": "common.schema.json#/$defs/Sequence"
+        },
+        "policy_epoch": {
+          "$ref": "common.schema.json#/$defs/Sequence"
+        },
+        "send_started_at": {
+          "$ref": "common.schema.json#/$defs/UtcInstant"
+        },
+        "transport_request_fingerprint": {
+          "$ref": "common.schema.json#/$defs/Digest"
+        },
+        "provider_order_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "client_order_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "response_evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/EvidenceRef"
+          }
+        },
+        "outcome": {
+          "enum": [
+            "ACKNOWLEDGED",
+            "REJECTED",
+            "UNKNOWN"
+          ]
+        },
+        "ambiguity_reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "ExecutionFill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fill_id",
+        "provider_execution_id",
+        "instrument_version",
+        "side",
+        "last_quantity",
+        "last_price",
+        "trade_time",
+        "receipt_time",
+        "fees",
+        "settlement_date",
+        "evidence"
+      ],
+      "properties": {
+        "fill_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "provider_execution_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider_revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "order_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "intent_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "instrument_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "side": {
+          "enum": [
+            "BUY",
+            "SELL"
+          ]
+        },
+        "last_quantity": {
+          "$ref": "common.schema.json#/$defs/Quantity"
+        },
+        "last_price": {
+          "$ref": "common.schema.json#/$defs/Decimal"
+        },
+        "trade_time": {
+          "$ref": "common.schema.json#/$defs/UtcInstant"
+        },
+        "receipt_time": {
+          "$ref": "common.schema.json#/$defs/UtcInstant"
+        },
+        "fees": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/Money"
+          }
+        },
+        "liquidity_flag": {
+          "type": "string",
+          "minLength": 1
+        },
+        "settlement_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "correction_reference": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/EvidenceRef"
+          }
+        }
+      }
+    }
   }
 }

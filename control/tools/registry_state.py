@@ -75,10 +75,15 @@ def _normalized_scopes(value: Any) -> tuple[str, ...]:
         scope = raw.strip()
         if scope != raw:
             raise RegistryProtocolError("mutation_scope entries must be canonical")
+        if scope.startswith("/") or "\\" in scope or ":" in scope or any(c in scope for c in "*?[]\x00\n\r"):
+            raise RegistryProtocolError("mutation_scope must be literal repository-relative paths")
+        scope = scope.rstrip("/")
+        if any(part in {"", ".", ".."} for part in scope.split("/")):
+            raise RegistryProtocolError("mutation_scope must not contain empty/dot path segments")
         scopes.append(scope)
     if not scopes:
         raise RegistryProtocolError("mutation_scope must not be empty")
-    if len(set(scopes)) != len(scopes):
+    if len({s.casefold() for s in scopes}) != len(scopes):
         raise RegistryProtocolError("mutation_scope entries must be unique")
     return tuple(sorted(scopes))
 
@@ -96,13 +101,15 @@ def _active(claim: Mapping[str, Any], now: datetime) -> bool:
 
 
 def scope_overlap(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
-    if left.get("authority_family") != right.get("authority_family"):
-        return False
-    if left.get("semantic_key") != right.get("semantic_key"):
-        return False
-    left_scopes = set(_normalized_scopes(left.get("mutation_scope")))
-    right_scopes = set(_normalized_scopes(right.get("mutation_scope")))
-    return bool(left_scopes & right_scopes)
+    left_scopes = _normalized_scopes(left.get("mutation_scope"))
+    right_scopes = _normalized_scopes(right.get("mutation_scope"))
+    return any(path_covers(a, b) or path_covers(b, a) for a in left_scopes for b in right_scopes)
+
+
+def path_covers(parent: str, child: str) -> bool:
+    # Conservative on all platforms because the same checkout must work on Windows.
+    parent, child = parent.casefold(), child.casefold()
+    return child == parent or child.startswith(parent + "/")
 
 
 def _canonical_request(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -123,8 +130,11 @@ def _canonical_request(request: Mapping[str, Any]) -> dict[str, Any]:
         "mutation_scope": list(_normalized_scopes(request.get("mutation_scope"))),
         "lease_until": format_instant(parse_instant(_require_text(request, "lease_until"))),
         "base_head": _require_text(request, "base_head"),
-        "contract_versions": dict(request.get("contract_versions") or {}),
+        "contract_versions": request.get("contract_versions", {}),
     }
+    if not isinstance(claim["contract_versions"], Mapping):
+        raise RegistryProtocolError("contract_versions must be an object")
+    claim["contract_versions"] = dict(claim["contract_versions"])
     if not all(
         isinstance(k, str) and k and isinstance(v, str) and v
         for k, v in claim["contract_versions"].items()
@@ -161,6 +171,12 @@ def _validate_registry(registry: Mapping[str, Any]) -> None:
             raise RegistryProtocolError("duplicate request_id")
         seen_claim_ids.add(claim_id)
         seen_request_ids.add(request_id)
+        _canonical_request(claim)
+        if claim.get("status") not in {"ACTIVE", "EXPIRED", "RELEASED"}:
+            raise RegistryProtocolError("invalid claim status")
+        cg = claim.get("claim_generation")
+        if type(cg) is not int or not 1 <= cg <= generation:
+            raise RegistryProtocolError("invalid claim generation")
 
 
 def expire_leases(registry: Mapping[str, Any], *, now: str) -> dict[str, Any]:
@@ -193,15 +209,12 @@ def claim(
     now: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     _validate_registry(registry)
-    _require_generation(registry, expected_generation)
     resolved_now = parse_instant(now)
     canonical = _canonical_request(request)
-    if parse_instant(canonical["lease_until"]) <= resolved_now:
-        raise RegistryProtocolError("lease_until must be in the future")
 
     for existing in registry["claims"]:
         if existing.get("request_id") == canonical["request_id"]:
-            comparable = {
+            comparable = existing.get("original_request") or {
                 key: existing.get(key)
                 for key in (
                     "request_id",
@@ -220,6 +233,10 @@ def claim(
                 raise RegistryProtocolError("request_id reuse with different claim payload")
             return deepcopy(dict(registry)), deepcopy(dict(existing))
 
+    _require_generation(registry, expected_generation)
+    if parse_instant(canonical["lease_until"]) <= resolved_now:
+        raise RegistryProtocolError("lease_until must be in the future")
+
     if canonical["claim_mode"] in MUTATING_MODES:
         for existing in registry["claims"]:
             if (
@@ -237,6 +254,7 @@ def claim(
     created = {
         "claim_id": claim_id,
         **canonical,
+        "original_request": deepcopy(canonical),
         "status": "ACTIVE",
         "claimed_at": format_instant(resolved_now),
         "claim_generation": expected_generation + 1,
@@ -303,7 +321,7 @@ def release(
         raise RegistryProtocolError("claim_id not found")
     if target.get("run_id") != run_id:
         raise RegistryProtocolError("run_id does not own claim")
-    if target.get("status") != "ACTIVE":
+    if not _active(target, resolved_now):
         raise RegistryProtocolError("claim is not active")
 
     target["status"] = "RELEASED"

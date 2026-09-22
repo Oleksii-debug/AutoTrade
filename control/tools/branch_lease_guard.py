@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
+from control.tools.registry_state import _validate_registry, _normalized_scopes, path_covers, scope_overlap
+
 
 STATUSES = frozenset({"OK", "COLLISION", "AMBIGUOUS", "NO_LIVE_OWNER"})
 
@@ -72,6 +74,12 @@ def evaluate_guard(
         "evidence": [],
     }
 
+    try:
+        _validate_registry(registry)
+        mutation_scope = _normalized_scopes(mutation_scope)
+    except ValueError as exc:
+        return {**base, "status": "AMBIGUOUS", "evidence": [str(exc)]}
+
     generation = registry.get("generation")
     claims = registry.get("claims")
     if type(generation) is not int or generation < 0 or not isinstance(claims, list):
@@ -87,12 +95,10 @@ def evaluate_guard(
             continue
         if claim.get("claim_mode") not in {"SOURCE_MUTATION", "INTEGRATION"}:
             continue
-        if claim.get("semantic_key") != semantic_key or claim.get("authority_family") != authority_family:
-            continue
         claim_scopes = claim.get("mutation_scope")
         if not isinstance(claim_scopes, list):
             return {**base, "status": "AMBIGUOUS", "evidence": ["malformed claim scope"]}
-        if not scope_set.intersection(claim_scopes):
+        if not scope_overlap(claim, mutation_state):
             continue
         lease_until = claim.get("lease_until")
         try:
@@ -108,6 +114,10 @@ def evaluate_guard(
         return {**base, "status": "NO_LIVE_OWNER", "evidence": ["no overlapping live mutation owner"]}
 
     owner = owners[0]
+    if owner.get("semantic_key") != semantic_key or owner.get("authority_family") != authority_family:
+        return {**base, "status": "COLLISION", "evidence": ["path belongs to another semantic owner"]}
+    if not all(any(path_covers(a, b) for a in _normalized_scopes(owner["mutation_scope"])) for b in mutation_scope):
+        return {**base, "status": "AMBIGUOUS", "evidence": ["owner does not cover every changed path"]}
     owner_run_id = owner.get("run_id")
     if not isinstance(owner_run_id, str) or not owner_run_id:
         return {**base, "status": "AMBIGUOUS", "evidence": ["owner missing run_id"]}

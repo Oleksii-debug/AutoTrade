@@ -1,0 +1,8 @@
+# Resolved local Python 3.12 schema-test graph, 2026-09-22.
+# This exact-version development list is not the release SBOM or a hash lock.
+attrs==26.1.0
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+referencing==0.36.2
+rpds-py==2026.6.3
+typing-extensions==4.16.0

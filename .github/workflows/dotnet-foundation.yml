@@ -1,6 +1,7 @@
 name: dotnet-foundation
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - "global.json"
@@ -36,7 +37,7 @@ jobs:
         with:
           dotnet-version: "10.0.x"
       - run: dotnet --info
-      - run: dotnet restore src/AutoTrade.Contracts/AutoTrade.Contracts.csproj --locked-mode
-        continue-on-error: true
+      # Bootstrap has no NuGet package references yet. WP-03 must add committed
+      # package locks and locked-mode before introducing release dependencies.
       - run: dotnet restore src/AutoTrade.Contracts/AutoTrade.Contracts.csproj
       - run: dotnet build src/AutoTrade.Contracts/AutoTrade.Contracts.csproj --configuration Release --no-restore

@@ -34,3 +34,9 @@ Already materialized:
 Concurrent source mutation remains disabled until the registry/CAS path has exact-head CI and integration qualification.
 
 A document set, green unit suite, simulator result or one successful trade is not whole-product completion. Economic edge remains unproven until causal/forward evidence exists.
+
+## Start implementation from the current baseline
+
+Read [the implementation start guide](docs/engineering/15_FAST_IMPLEMENTATION_START.md) and [the finalization audit](docs/engineering/16_BASELINE_FINALIZATION_AUDIT.md). Install the pinned development requirements, then run `python tools/verify.py`. Update package fields only in `control/work-packages/bank.json` and run `python tools/baseline.py refresh`.
+
+Export an exact committed baseline with `python tools/baseline.py pack` after fetching registry refs. The exporter includes documents 00–16, product and source files, accessible HTML, registry snapshot, source revision and SHA-256 manifest. Generated archives are historical snapshots; live GitHub state may advance.

@@ -1,10 +1,10 @@
 # AutoTrade — reuse, evidence and migration map
 
-Baseline 2026-09-22. Decision owner: engineering architecture. This document owns reuse choices; document 02 owns the destination contracts. No source code was copied or imported during this task.
+Baseline 2026-09-22. Decision owner: engineering architecture. This document owns reuse choices; document 02 owns the destination contracts. The initial architecture audit copied no source. Subsequent authorized bootstrap work migrated neutral first-party primitives; the current paths, rights basis and remaining gates are recorded in `provenance/` and `control/qualification.json`.
 
 ## 1. Evidence discipline
 
-The audit read actual source and selected tests, not only READMEs. It is a targeted architectural audit, not an exhaustive correctness certification. No upstream suite was executed and no performance benchmark was run. GitHub source access became rate-limited during the initial audit, but follow-up research completed the previously missing read of `tests/test_replay_jsonl_integrity.py` and the full Nika model-gateway contracts. Document 14 records the additional exact evidence and narrowly supersedes the earlier uncertainty.
+The audit read actual source and selected tests, not only READMEs. It is a targeted architectural audit, not an exhaustive correctness certification. No upstream suite was executed and no performance benchmark was run. GitHub source access became rate-limited during the initial audit, but follow-up research completed the previously missing read of `tests/test_replay_jsonl_integrity.py` and the full Nika model-gateway contracts. Document 14 records the additional exact evidence. Its verified correction and SDK choices are integrated into this baseline; no supersession lookup is needed to resolve the LEAN pin.
 
 First-party snapshots:
 
@@ -117,3 +117,15 @@ Evaluate total cost as adoption + glue + verification + operations + upgrades + 
 Migration sequence: characterize A1/B1/B2 → clear provenance → neutralize imports → execute cross-platform fixtures → integrate only into research/artifact paths → remove any accidental financial authority. Engine sequence: pinned build → embedding harness → adapter mock → event reconciliation → financial oracle suite → crash suite → recorded provider fixtures → paper qualification. Candidate failure sends a documented issue to the dependency work package; it does not trigger silent greenfield replacement.
 
 Public advisory coverage is incomplete: several repository advisory endpoints were unavailable during research. No project is labelled vulnerability-free. Dependency/security checks are repeated on the exact release build. Source inspection, official documentation and open issue signals support the architecture; performance, Windows installation and live semantic correctness remain empirical acceptance gates.
+
+## 8. Integrated adapter and development reuse
+
+| Component | Destination / package | Qualification boundary |
+|---|---|---|
+| `JKorf/WhiteBit.Net`, inspected commit `5ef49daa517abe86a8e35a85256db184cffdfdb2`, MIT | `src/AutoTrade.Providers.WhiteBIT/`, WP-24 | Typed REST/WebSocket transport and upstream fixtures; explicit environment and account mode; client-ID reconciliation; spot/collateral economic units |
+| `JKorf/CryptoExchange.Net`, inspected commit `cecfbcba48b84ff56109c7d1c67f548ba0eabf22`, MIT | SDK transport dependencies, WP-03/18/21/24 | Coherent resolved version graph; actual-send authority after waiting/retry; request-count evidence; credential-safe logs; reconciliation quota |
+| `alpacahq/alpaca-trade-api-csharp`, inspected commit `42043eafdefa4fc2314ff24be8c08d533dffeeb8`, Apache-2.0 | WP-27, stable 7.2.2 qualification candidate | Inspected main is 8.0.0-beta6, not verified stable package source. Compare existing LEAN integration against thin SDK adapter; never duplicate submission ownership |
+| Microsoft `FakeTimeProvider` documentation | WP-18/21 deadline/revocation fixtures | Use only through injected clocks; SDK internal wall clocks require separate control |
+| Velopack official documentation | WP-50 installer/update screening | Exact source/package/license composition and Windows/NVDA evidence still required; DB rollback remains AutoTrade's responsibility |
+
+Exact source/test paths and inspected releases remain in document 14. The two documentation-level development candidates are described in document 15 and are not marked source-qualified or imported. Implementation-cost savings are qualitative until measured by the indicated spikes.

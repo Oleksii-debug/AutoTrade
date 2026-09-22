@@ -1,6 +1,7 @@
 name: research-primitives
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - "research/**"

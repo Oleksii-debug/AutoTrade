@@ -1,6 +1,7 @@
 name: control-plane
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - "control/tools/**"

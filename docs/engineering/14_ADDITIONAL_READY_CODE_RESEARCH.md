@@ -1,6 +1,6 @@
 # AutoTrade — additional ready-code research
 
-Addendum dated 2026-09-22. Existing documents 00–13, the product DOCX and the original ZIP are preserved. This document adds source-backed findings and narrowly supersedes earlier uncertainty where explicitly stated. At the time this addendum was written, no AutoTrade production code had been created. The repository has since been bootstrapped and neutral research primitives have begun migrating; this addendum remains evidence for the reuse decisions.
+Addendum dated 2026-09-22. Existing documents 00–13, the product DOCX and the original ZIP are preserved. This document retains source-backed research evidence. Its LEAN correction and SDK decisions have now been integrated into 00/01/08/09 and the canonical package bank. At the time this addendum was written, no AutoTrade production code had been created. The repository has since been bootstrapped and neutral research primitives have begun migrating; this addendum remains evidence for the reuse decisions.
 
 ## 1. Main findings already verified
 
@@ -8,7 +8,7 @@ Addendum dated 2026-09-22. Existing documents 00–13, the product DOCX and the 
 2. The `CryptoExchange.Net` family provides common transport, rate limiting, response models and test infrastructure. Its inspected .NET 10 target aligns with the proposed financial host. Shared transport can reduce duplicated adapter work without forcing all venue semantics into one generic order model.
 3. Alpaca has an official Apache-2.0 C# SDK. The latest stable release observed was 7.2.2, while the inspected main-branch project is 8.0.0-beta6. These are different adoption candidates; never call the main-branch API a verified stable package interface.
 4. Existing SDK behavior must be qualified at the actual send boundary. The inspected CryptoExchange.Net base client can retry a rate-limited request, and debug logging receives request/header information. AutoTrade must prevent hidden trading retries, enforce deadlines/authority for every actual outbound attempt, and redact/disable sensitive transport logs. Reuse is valuable when these boundaries are explicitly controlled.
-5. The previous LEAN hash uncertainty is now resolved: `985ef30ad3ac774218c5ac516b4cb0aa2655730f` IS a commit, dated 2026-09-18, with tree `4b163abf9fca60e731b76510b9ae6721ffff7e6c`. The earlier wording calling it a source-tree object is superseded by this verified mapping. Latest observed main is `b2a01cc15b09c1d448920f4af81c73f8b07ec7d4` with tree `cec48e907afd55523d50a6fe00c6c9d11962cb91`; the two later commits concern data-monitor report storage and future ticker year parsing. Keep the original reviewed commit as reproducible baseline, then review those deltas before updating.
+5. The previous LEAN hash uncertainty is now resolved: `985ef30ad3ac774218c5ac516b4cb0aa2655730f` IS a commit, dated 2026-09-18, with tree `4b163abf9fca60e731b76510b9ae6721ffff7e6c`. The earlier wording calling it a source-tree object is superseded by this verified mapping. At the 2026-09-22 research snapshot, observed main was `b2a01cc15b09c1d448920f4af81c73f8b07ec7d4` with tree `cec48e907afd55523d50a6fe00c6c9d11962cb91`; the two later commits concern data-monitor report storage and future ticker year parsing. Keep the original reviewed commit as reproducible baseline, then review those deltas before updating.
 
 ## 2. Source identity and release evidence
 
@@ -57,4 +57,6 @@ The full Nika `src/nika_core/model_gateway/contracts.py` was now read at `2f7be3
 
 ## 7. Evidence scope
 
-Primary evidence is the exact repository source, license, project file and release record named above. This follow-up has read source and tests selectively; it has not compiled dependencies, run upstream suites, contacted live brokers, imported code into AutoTrade or validated profitability. Further component dossiers and the concrete adoption sequence are added as this follow-up completes.
+Primary evidence is the exact repository source, license, project file and release record named above. That research read source and tests selectively; it did not compile these external SDKs, run their upstream suites, contact live brokers or validate profitability. Subsequent first-party migration and local bootstrap tests are separate repository evidence, recorded in document 16.
+
+This dossier is complete for the stated source-inspection scope. The concrete adoption sequence and additional documentation-level development aids are in document 15. Remaining package/build/Windows/provider qualification is assigned to the existing bank, not left as an unfinished research promise. No blanket SDK correctness or release-readiness claim is made.

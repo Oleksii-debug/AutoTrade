@@ -32,17 +32,18 @@
     "protocol_doc": "REGISTRY.md",
     "implementation": [
       "control/tools/registry_state.py",
-      "control/tools/branch_lease_guard.py"
+      "control/tools/branch_lease_guard.py",
+      "control/tools/registry_store.py"
     ],
     "tests": "tests/Control/test_registry_state.py",
-    "note": "Concurrent mutation remains disabled until cross-platform control-plane CI and CAS/branch update integration are qualified."
+    "note": "State/guard and Git storage primitives locally tested. Concurrent mutation disabled pending trusted service admission, per-claim fencing, protected branch publication and Windows/GitHub integration qualification."
   },
   "canonical_precedence": [
-    "live reviewed repository implementation/evidence",
-    "control/INDEX.json",
-    "explicit supersession in document 14 / CANONICAL_PRECEDENCE.md",
-    "documents 00-13",
-    "older Drive snapshots"
+    "approved product and engineering contracts define intended behavior",
+    "reviewed implementation and exact-source evidence establish actual behavior",
+    "control/INDEX.json resolves current bank/provenance/qualification",
+    "export SOURCE_REVISION and SHA manifest identify the snapshot",
+    "older Drive snapshots are historical"
   ],
   "control_issues": {
     "whole_product": 1,
@@ -54,5 +55,9 @@
   "product_spec_drive": {
     "file_id": "14dPC8myZlITdhnk8SQdJSflHmSkZG4fn",
     "modified_time": "2026-09-22T04:10:28.541Z"
-  }
+  },
+  "implementation_start": "docs/engineering/15_FAST_IMPLEMENTATION_START.md",
+  "finalization_audit": "docs/engineering/16_BASELINE_FINALIZATION_AUDIT.md",
+  "local_verification": "tools/verify.py",
+  "baseline_export": "tools/baseline.py"
 }

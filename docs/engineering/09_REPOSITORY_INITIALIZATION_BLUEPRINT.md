@@ -13,7 +13,7 @@ The repository itself contains AutoTrade contracts, host/policy integration, ada
 | Path | Responsibility / owner |
 |---|---|
 | `README.md`, `AGENTS.md`, `SECURITY.md`, `LICENSE`, `NOTICE` | Product goal, working rules, private disclosure process and chosen distribution terms |
-| `docs/engineering/00..09*.md` | This engineering baseline, versioned in repo after initialization |
+| `docs/engineering/00..16*.md` | This engineering baseline, versioned in repo after initialization |
 | `docs/adr/`, `docs/qualification/` | Decisions/migrations and evidence conventions |
 | `contracts/jsonschema/`, `contracts/openapi/`, `contracts/fixtures/` | Contract authority; versioned schemas and language-neutral examples |
 | `src/AutoTrade.Contracts/` | Generated C# types and strict serialization boundary |
@@ -36,7 +36,7 @@ The repository itself contains AutoTrade contracts, host/policy integration, ada
 | `third_party/`, `provenance/`, `licenses/` | Pinned foundations, import manifest, retained license texts/SBOM |
 | `build/`, `packaging/windows/`, `deploy/` | Reproducible build, signed installer and optional host deployment |
 | `.github/workflows/`, `.github/CODEOWNERS` | CI and semantic review ownership |
-| `control/` | Optional later machine-readable delivery/claim state; never runtime financial state |
+| `control/` | Current machine-readable delivery/claim state; never runtime financial state |
 
 The braces above denote separate actual directories to create, not literal filenames. Avoid a generic “utils” module accumulating financial authority. Generated types are changed through schemas; provider adapters cannot independently redefine shared money/order contracts.
 
@@ -59,7 +59,7 @@ Sports matches/teams/bookmaker odds, ticket win/loss/void settlement, sports-spe
 
 ## 5. Branch, review and CI strategy
 
-Protected `main` is always buildable. Use short-lived `wp/<id>/<semantic-slug>` branches and one principal semantic responsibility per PR. Draft PRs may establish dependent work, but merge only after required contracts and exact-head evidence pass. Stacked PRs record base dependencies; no duplicate independent implementation of the same work package. Resolve broad changes through a small reviewed contract migration followed by compatible implementation patches.
+Target policy: protected `main` remains buildable. Branch protection was not configured at the finalization audit; do not claim that gate is enforced until verified. Use short-lived `wp/<id>/<semantic-slug>` branches and one principal semantic responsibility per PR. Draft PRs may establish dependent work, but merge only after required contracts and exact-head evidence pass. Stacked PRs record base dependencies; no duplicate independent implementation of the same work package. Resolve broad changes through a small reviewed contract migration followed by compatible implementation patches.
 
 CI files: `contracts.yml`, `dotnet.yml`, `python.yml`, `web.yml`, `finance-recovery.yml`, `provider-contracts.yml`, `security-license.yml`, `windows-package.yml`, `qualification.yml`. Package/service boundaries determine test selection; shared-contract and journal changes trigger the relevant cross-language/cross-component matrix. Tests from untrusted contributions receive no live provider or signing secrets. Release signing is isolated from PR execution.
 
@@ -74,3 +74,13 @@ Integration uses the same simulator and canonical fixtures from every workstream
 ## 7. Initialization acceptance
 
 A clean clone on Windows and Linux builds the selected host/research tests from locked dependencies; Windows additionally packages the desktop shell. No private machine paths, hidden sitecustomize/import shadowing or undocumented runtime downloads are required. Simulator-only operation produces a reconstructed decision→risk→intent→fill→ledger→UI trace with zero LLM calls. License/provenance manifests are complete for imported source. Financial and causality fixtures fail when intentionally violated. No real trading credential is needed to demonstrate initialization acceptance.
+
+## 8. Current bootstrap and remaining initialization acceptance
+
+The repository, INDEX, 65-package bank, registry branch, schemas, neutral research utilities and C# anchor already exist. Do not reinitialize them. The verified LEAN commit above maps to tree `4b163abf9fca60e731b76510b9ae6721ffff7e6c`; this is recorded in `provenance/components.json`.
+
+`tools/verify.py` runs current bootstrap checks. `tools/baseline.py refresh` derives document 08 from the bank; `check` validates consistency; `pack` exports a specific commit with documents 00–16, product/source files, registry snapshot, accessible HTML and SHA-256 manifest. Preserve previous exports as history.
+
+SDK reuse starts with WhiteBit.Net/CryptoExchange.Net for WP-24 and the qualified LEAN/official Alpaca SDK route for WP-27, using document 14's evidence and document 15's acceptance steps. Neither SDK owns AutoTrade accounting or admission.
+
+Registry state/branch-guard logic and an atomic Git storage primitive are implemented and locally exercised. Authentication, trusted time, READY/dependency admission, per-claim fencing, authenticated writer evidence and protected GitHub publication still need deployment qualification; mode remains BOOTSTRAP_SINGLE_WRITER. Main and registry protection are requirements, not verified current configuration. The full clean-clone/financial-trace/Windows acceptance in section 7 is still open.

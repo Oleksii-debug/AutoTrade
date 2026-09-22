@@ -10,7 +10,6 @@
       "exact_scope": "Define all document-02 schemas, OpenAPI and common fixtures with version rules",
       "required_inputs": [
         "02_CANONICAL_CONTRACTS.md",
-        "02_CANONICAL_CONTRACTS.md",
         "Exact accepted artifacts of the approved engineering baseline"
       ],
       "affected_contracts": [
@@ -44,7 +43,7 @@
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
       "proposed_status": "IN_PROGRESS",
-      "status_note": "Canonical JSON Schema coverage now materializes common, event, instrument/market, information/dataset, decision/portfolio, authority/risk, execution, provider results, persistence/reconciliation, learning/science/jobs, model gateway and UI contracts; OpenAPI host entrypoint and common fixtures committed. Remaining WP-01 work: cross-language generated bindings/corpus equivalence, OpenAPI validation/codegen and version-change enforcement."
+      "status_note": "Canonical JSON Schema coverage now materializes common, event, instrument/market, information/dataset, decision/portfolio, authority/risk, execution, provider results, persistence/reconciliation, learning/science/jobs, model gateway and UI contracts; OpenAPI host entrypoint and common fixtures committed. Remaining WP-01 work: cross-language generated bindings/corpus equivalence, OpenAPI validation/codegen and version-change enforcement. Finalization repaired invalid execution JSON and added whole-schema reference resolution; no generated binding completion claimed."
     },
     {
       "id": "WP-02",
@@ -54,7 +53,9 @@
       "required_inputs": [
         "01_REUSE_AND_OPEN_SOURCE_MASTER_MAP.md",
         "02_CANONICAL_CONTRACTS.md",
-        "Exact accepted artifacts of WP-01, WP-03"
+        "Exact accepted artifacts of WP-01, WP-03",
+        "14_ADDITIONAL_READY_CODE_RESEARCH.md",
+        "15_FAST_IMPLEMENTATION_START.md"
       ],
       "affected_contracts": [
         "InstrumentVersion",
@@ -103,7 +104,9 @@
       "required_inputs": [
         "01_REUSE_AND_OPEN_SOURCE_MASTER_MAP.md",
         "02_CANONICAL_CONTRACTS.md",
-        "Exact accepted artifacts of the approved engineering baseline"
+        "Exact accepted artifacts of the approved engineering baseline",
+        "14_ADDITIONAL_READY_CODE_RESEARCH.md",
+        "15_FAST_IMPLEMENTATION_START.md"
       ],
       "affected_contracts": [
         "EvidenceRef",
@@ -127,7 +130,8 @@
       ],
       "acceptance_criteria": [
         "Each imported byte has a rights basis and hash; unresolved licenses prevent that import",
-        "Evidence records exact source SHA, input/schema versions, tests actually run and unresolved limits."
+        "Evidence records exact source SHA, input/schema versions, tests actually run and unresolved limits.",
+        "Inspected source commits and published package identities are separately recorded; all selected SDKs resolve one tested transitive graph."
       ],
       "integration_target": "Protected main through provenance/ and its contract/qualification evidence.",
       "forbidden_scope": [
@@ -195,7 +199,6 @@
       "exact_scope": "Implement append-only event journal, command dedupe, versions, outbox and migrations",
       "required_inputs": [
         "02_CANONICAL_CONTRACTS.md",
-        "02_CANONICAL_CONTRACTS.md",
         "Exact accepted artifacts of WP-01"
       ],
       "affected_contracts": [
@@ -240,7 +243,6 @@
       "authority_family": "ARTIFACT",
       "exact_scope": "Implement content-addressed artifact manifests, rights-aware export and orphan recovery",
       "required_inputs": [
-        "02_CANONICAL_CONTRACTS.md",
         "02_CANONICAL_CONTRACTS.md",
         "Exact accepted artifacts of WP-01, WP-04"
       ],
@@ -764,7 +766,6 @@
       "exact_scope": "Implement confirmation binding, autonomous policy, expiry/revocation and admissions",
       "required_inputs": [
         "02_CANONICAL_CONTRACTS.md",
-        "02_CANONICAL_CONTRACTS.md",
         "Exact accepted artifacts of WP-05, WP-16"
       ],
       "affected_contracts": [
@@ -812,7 +813,9 @@
       "required_inputs": [
         "03_DATA_MARKET_PROVIDER_EXECUTION_ARCHITECTURE.md",
         "02_CANONICAL_CONTRACTS.md",
-        "Exact accepted artifacts of WP-02, WP-17"
+        "Exact accepted artifacts of WP-02, WP-17",
+        "14_ADDITIONAL_READY_CODE_RESEARCH.md",
+        "15_FAST_IMPLEMENTATION_START.md"
       ],
       "affected_contracts": [
         "OrderIntent",
@@ -835,7 +838,8 @@
         "Crash before/after send",
         "revoke race",
         "duplicate outbox",
-        "timeout"
+        "timeout",
+        "Expiry/revocation during SDK quota wait and retry; actual outbound request count; stable client ID across reconciliation"
       ],
       "acceptance_criteria": [
         "No unsent revoked action crosses barrier; ambiguous sends stay reserved and reconcile",
@@ -958,7 +962,9 @@
       "required_inputs": [
         "03_DATA_MARKET_PROVIDER_EXECUTION_ARCHITECTURE.md",
         "02_CANONICAL_CONTRACTS.md",
-        "Exact accepted artifacts of WP-08, WP-19"
+        "Exact accepted artifacts of WP-08, WP-19",
+        "14_ADDITIONAL_READY_CODE_RESEARCH.md",
+        "15_FAST_IMPLEMENTATION_START.md"
       ],
       "affected_contracts": [
         "All Provider interface methods"
@@ -976,7 +982,8 @@
         "canonical fixtures"
       ],
       "tests": [
-        "Rejection, quota, clock, outage, ambiguity and correction scenario matrix"
+        "Rejection, quota, clock, outage, ambiguity and correction scenario matrix",
+        "Injected market versus authority clocks; deterministic stream gap/history lag; redacted recorded fixtures"
       ],
       "acceptance_criteria": [
         "Every interface can exercise success/failure/UNKNOWN deterministically without live credentials",
@@ -1102,7 +1109,9 @@
       "required_inputs": [
         "03_DATA_MARKET_PROVIDER_EXECUTION_ARCHITECTURE.md",
         "02_CANONICAL_CONTRACTS.md",
-        "Exact accepted artifacts of WP-08, WP-18, WP-20, WP-21"
+        "Exact accepted artifacts of WP-08, WP-18, WP-20, WP-21",
+        "14_ADDITIONAL_READY_CODE_RESEARCH.md",
+        "15_FAST_IMPLEMENTATION_START.md"
       ],
       "affected_contracts": [
         "Provider interface",
@@ -1126,7 +1135,8 @@
       "tests": [
         "Partial slippage-band cancel",
         "reduce-only resizing",
-        "endpoint-specific conditions"
+        "endpoint-specific conditions",
+        "Explicit SDK environment; coherent CryptoExchange.Net graph; no hidden financial retries; debug-log redaction; history pagination coverage"
       ],
       "acceptance_criteria": [
         "Account-discovered capability matrix and full execution/reconciliation evidence",
@@ -1253,7 +1263,9 @@
       "required_inputs": [
         "03_DATA_MARKET_PROVIDER_EXECUTION_ARCHITECTURE.md",
         "02_CANONICAL_CONTRACTS.md",
-        "Exact accepted artifacts of WP-08, WP-18, WP-20, WP-21"
+        "Exact accepted artifacts of WP-08, WP-18, WP-20, WP-21",
+        "14_ADDITIONAL_READY_CODE_RESEARCH.md",
+        "15_FAST_IMPLEMENTATION_START.md"
       ],
       "affected_contracts": [
         "Provider interface",
@@ -1279,7 +1291,8 @@
         "bracket race",
         "option levels",
         "polled assignment",
-        "delayed paper NTA"
+        "delayed paper NTA",
+        "Stable package versus inspected beta source; missing financial fields; one order submission owner"
       ],
       "acceptance_criteria": [
         "Activities and streams jointly reconcile; paper realism limitations exposed",
@@ -2371,7 +2384,9 @@
       "required_inputs": [
         "07_DESKTOP_WEB_ACCESSIBILITY_AND_RUNTIME.md",
         "02_CANONICAL_CONTRACTS.md",
-        "Exact accepted artifacts of WP-02, WP-45, WP-46, WP-49"
+        "Exact accepted artifacts of WP-02, WP-45, WP-46, WP-49",
+        "14_ADDITIONAL_READY_CODE_RESEARCH.md",
+        "15_FAST_IMPLEMENTATION_START.md"
       ],
       "affected_contracts": [
         "Release manifest",
@@ -2390,7 +2405,8 @@
         "WP-49"
       ],
       "reusable_code_sources": [
-        ".NET packaging and WebView2 supported distribution"
+        ".NET packaging and WebView2 supported distribution",
+        "Velopack: official-documentation candidate pending source/license/dependency and NVDA qualification"
       ],
       "tests": [
         "Clean Windows install",
@@ -2422,7 +2438,9 @@
       "required_inputs": [
         "07_DESKTOP_WEB_ACCESSIBILITY_AND_RUNTIME.md",
         "02_CANONICAL_CONTRACTS.md",
-        "Exact accepted artifacts of WP-01, WP-03"
+        "Exact accepted artifacts of WP-01, WP-03",
+        "14_ADDITIONAL_READY_CODE_RESEARCH.md",
+        "15_FAST_IMPLEMENTATION_START.md"
       ],
       "affected_contracts": [
         "All fixtures",
@@ -2438,7 +2456,8 @@
       ],
       "reusable_code_sources": [
         "Existing ecosystem test runners",
-        "reusable fixtures"
+        "reusable fixtures",
+        "tools/verify.py; tools/baseline.py; control/tools/registry_store.py"
       ],
       "tests": [
         "Intentional invariant violations",
@@ -2458,8 +2477,8 @@
         "Exclusive mutation key: CI / quality-pipeline",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Bootstrap workflows, schema/control/research suites and baseline validation/export implemented. Local Linux evidence is recorded; Windows/.NET runs, generated bindings and full financial/science/provider/release gates remain."
     },
     {
       "id": "WP-52",

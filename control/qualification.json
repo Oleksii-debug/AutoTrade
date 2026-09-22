@@ -3,7 +3,7 @@
   "baseline_date": "2026-09-22",
   "overall_status": "IMPLEMENTATION_STARTED",
   "gates": {
-    "engineering_baseline": "IMPORTED",
+    "engineering_baseline": "RECONCILED_00_16_WITH_GENERATED_BANK_AND_EXPORT_VALIDATION",
     "repository_bootstrap": "TRANSFER_BASELINE_COMPLETE",
     "reusable_code_migration": "IN_PROGRESS_CROSS_PLATFORM_CI_ADDED",
     "financial_runtime": "NOT_STARTED",
@@ -12,10 +12,10 @@
     "learning": "NOT_STARTED",
     "accessibility": "NOT_STARTED",
     "release": "NOT_STARTED",
-    "quality_pipeline": "BOOTSTRAP_PYTHON_CI_ONLY",
+    "quality_pipeline": "CONFIGURED_MULTI_PLATFORM_CI_PENDING_RUNNER_EXECUTION",
     "canonical_contracts": "IN_PROGRESS_FULL_SCHEMA_SURFACE_AND_OPENAPI_COMMITTED",
     "dependency_provenance": "IN_PROGRESS_EXACT_UPSTREAM_LICENSE_SNAPSHOT_RECORDED",
-    "control_plane": "IMPLEMENTED_UNQUALIFIED_REGISTRY_AND_BRANCH_GUARD",
+    "control_plane": "STATE_AND_GIT_STORAGE_LOCALLY_TESTED_DEPLOYED_SERVICE_UNQUALIFIED",
     "selected_first_party_reuse": "TRANSFER_COMPLETE_APPROVED_NEUTRAL_PRIMITIVES_AND_SWARM_INVARIANTS"
   },
   "evidence_notes": [
@@ -26,6 +26,8 @@
     "WP-03 bootstrap inventory records exact inspected revisions and license blob SHAs for LEAN, WhiteBit.Net, CryptoExchange.Net and Alpaca C# SDK; first-party root license absence recorded without inventing rights.",
     "Expanded document-02 contract surface committed across 11 JSON Schema files plus canonical host OpenAPI and fixtures; live CI/codegen evidence is still required.",
     "Autosport swarm lease/collision invariants adapted to AutoTrade registry-branch generation/CAS model; issue comments remain non-authoritative. Cross-platform control-plane CI and GitHub CAS integration still required before enabling concurrent mutation.",
-    "Canonical product specification text mirror imported from Drive file 14dPC8myZlITdhnk8SQdJSflHmSkZG4fn at modified time 2026-09-22T04:10:28.541Z for machine-readable repository access."
+    "Canonical product specification text mirror imported from Drive file 14dPC8myZlITdhnk8SQdJSflHmSkZG4fn at modified time 2026-09-22T04:10:28.541Z for machine-readable repository access.",
+    "2026-09-22 finalization repaired execution.schema.json syntax, added reference checks, fixed registry hierarchical path ownership and added atomic Git storage integration test. See docs/qualification/2026-09-22-local-baseline.json.",
+    "Both main and control/registry were unprotected with no repository rulesets at inspection. This is an open deployment gate, not permission to enable concurrent mutation."
   ]
 }

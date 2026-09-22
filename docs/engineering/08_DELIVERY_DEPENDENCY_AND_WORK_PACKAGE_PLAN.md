@@ -1,6 +1,6 @@
 # AutoTrade — delivery dependencies and implementation bank
 
-Baseline 2026-09-22. This is a plan for future implementation; no work package is represented as implemented. IDs are stable semantic responsibilities, not an activity quota. The matching JSON bank is the machine-readable source for package fields; the expanded entries below are its reading edition.
+Baseline 2026-09-22. This is the canonical implementation plan with current bootstrap progress recorded in the JSON bank. No whole-product or package completion is inferred from transferred files. IDs are stable semantic responsibilities, not an activity quota. The matching JSON bank is the machine-readable source for package fields; the expanded entries below are its reading edition.
 
 ## 1. Delivery model
 
@@ -41,13 +41,13 @@ The work-package bank below includes inputs, contracts, modules, dependencies, r
 
 ## 5. Work-package bank
 
-Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended below. They describe proposed files; none of those production files has been created by this architecture task.
+Generated from `control/work-packages/bank.json` by `python tools/baseline.py refresh`. Edit that bank, then refresh; status is evidence-bound.
 
 ### WP-01 — core-schemas
 
 - **Authority family:** CONTRACT
 - **Exact scope:** Define all document-02 schemas, OpenAPI and common fixtures with version rules
-- **Inputs:** 02_CANONICAL_CONTRACTS.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of the approved engineering baseline
+- **Inputs:** 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of the approved engineering baseline
 - **Contracts:** Common types; EventEnvelope; all command/event types
 - **Likely modules:** contracts/jsonschema/; contracts/openapi/; contracts/fixtures/
 - **Dependencies:** None (approved baseline required)
@@ -57,39 +57,42 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through contracts/jsonschema/ and its contract/qualification evidence.
 - **Forbidden scope:** Provider-specific financial semantics hidden in generic payloads; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: CONTRACT / core-schemas; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Canonical JSON Schema coverage now materializes common, event, instrument/market, information/dataset, decision/portfolio, authority/risk, execution, provider results, persistence/reconciliation, learning/science/jobs, model gateway and UI contracts; OpenAPI host entrypoint and common fixtures committed. Remaining WP-01 work: cross-language generated bindings/corpus equivalence, OpenAPI validation/codegen and version-change enforcement. Finalization repaired invalid execution JSON and added whole-schema reference resolution; no generated binding completion claimed.
 
 ### WP-02 — lean-adoption
 
 - **Authority family:** ENGINE
 - **Exact scope:** Embed pinned LEAN C# runtime and prove its integration seam without a second OMS
-- **Inputs:** 01_REUSE_AND_OPEN_SOURCE_MASTER_MAP.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-01, WP-03
+- **Inputs:** 01_REUSE_AND_OPEN_SOURCE_MASTER_MAP.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-01, WP-03; 14_ADDITIONAL_READY_CODE_RESEARCH.md; 15_FAST_IMPLEMENTATION_START.md
 - **Contracts:** InstrumentVersion; OrderIntent; ExecutionFill
 - **Likely modules:** src/AutoTrade.Engine.Lean/; tests/Integration/LeanAdoption
 - **Dependencies:** WP-01; WP-03
-- **Reuse sources:** QuantConnect/Lean commit 985ef30ad3ac774218c5ac516b4cb0aa2655730f (verified 2026-09-18); review later deltas before changing the pin
+- **Reuse sources:** QuantConnect/Lean commit 985ef30ad3ac774218c5ac516b4cb0aa2655730f verified as 2026-09-18 baseline; review later upstream deltas before changing the pin
 - **Tests:** Windows/Linux clean build; callback ordering; decimal; shutdown/restart harness
 - **Acceptance:** Reproducible build and simulator integration demonstrate required seams; blockers have measured alternatives; Evidence records exact source SHA, input/schema versions, tests actually run and unresolved limits.
 - **Integration target:** Protected main through src/AutoTrade.Engine.Lean/ and its contract/qualification evidence.
 - **Forbidden scope:** Greenfield replacement before the adoption evidence; uncontrolled upstream fork; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: ENGINE / lean-adoption; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-03 — dependency-policy
 
 - **Authority family:** PROVENANCE
 - **Exact scope:** Resolve exact dependency/model/data license obligations, pins, SBOM and distribution policy
-- **Inputs:** 01_REUSE_AND_OPEN_SOURCE_MASTER_MAP.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of the approved engineering baseline
+- **Inputs:** 01_REUSE_AND_OPEN_SOURCE_MASTER_MAP.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of the approved engineering baseline; 14_ADDITIONAL_READY_CODE_RESEARCH.md; 15_FAST_IMPLEMENTATION_START.md
 - **Contracts:** EvidenceRef; dependency and rights manifests
 - **Likely modules:** provenance/; licenses/; global.json; dependency locks
 - **Dependencies:** None (approved baseline required)
 - **Reuse sources:** Inspected upstream license texts and metadata
 - **Tests:** Notice completeness; transitive resolution; advisory review; clean restore
-- **Acceptance:** Each imported byte has a rights basis and hash; unresolved licenses prevent that import; Evidence records exact source SHA, input/schema versions, tests actually run and unresolved limits.
+- **Acceptance:** Each imported byte has a rights basis and hash; unresolved licenses prevent that import; Evidence records exact source SHA, input/schema versions, tests actually run and unresolved limits.; Inspected source commits and published package identities are separately recorded; all selected SDKs resolve one tested transitive graph.
 - **Integration target:** Protected main through provenance/ and its contract/qualification evidence.
 - **Forbidden scope:** Assuming public repository implies permission; importing ambiguous adapters; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PROVENANCE / dependency-policy; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Exact revision/license evidence recorded for LEAN, WhiteBit.Net, CryptoExchange.Net and Alpaca C# SDK; Autosport/Nika root license absence recorded. Transitive locks, advisories, first-party contributor rights, model/data rights and release SBOM remain.
 
 ### WP-04 — neutral-first-party
 
@@ -105,13 +108,14 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through research/autotrade_research/io/ and its contract/qualification evidence.
 - **Forbidden scope:** Sports ledger, GUI or orchestration import; financial DB writes through file helpers; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: REUSE / neutral-first-party; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Three neutral research primitives migrated from Autosport into AutoTrade with focused local 6/6 migration tests; Windows CI, full characterization and release rights qualification remain open.
 
 ### WP-05 — journal-outbox
 
 - **Authority family:** PERSISTENCE
 - **Exact scope:** Implement append-only event journal, command dedupe, versions, outbox and migrations
-- **Inputs:** 02_CANONICAL_CONTRACTS.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-01
+- **Inputs:** 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-01
 - **Contracts:** EventEnvelope; JournalTransaction; UiCommand
 - **Likely modules:** src/AutoTrade.Persistence/; tests/Recovery/Journal
 - **Dependencies:** WP-01
@@ -121,13 +125,14 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Persistence/ and its contract/qualification evidence.
 - **Forbidden scope:** Network send inside DB transaction; mutable source facts; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PERSISTENCE / journal-outbox; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-06 — immutable-store
 
 - **Authority family:** ARTIFACT
 - **Exact scope:** Implement content-addressed artifact manifests, rights-aware export and orphan recovery
-- **Inputs:** 02_CANONICAL_CONTRACTS.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-01, WP-04
+- **Inputs:** 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-01, WP-04
 - **Contracts:** EvidenceRef; DatasetManifest; ModelArtifact
 - **Likely modules:** src/AutoTrade.Data/Artifacts/; research/autotrade_research/artifacts/
 - **Dependencies:** WP-01; WP-04
@@ -137,7 +142,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Data/Artifacts/ and its contract/qualification evidence.
 - **Forbidden scope:** Artifact hashes presented as admin-proof security; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: ARTIFACT / immutable-store; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-07 — instrument-registry
 
@@ -153,7 +159,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Data/Instruments/ and its contract/qualification evidence.
 - **Forbidden scope:** Ticker as global identity; default 100-share option assumption; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: INSTRUMENT / instrument-registry; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-08 — account-capabilities
 
@@ -169,7 +176,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Providers.Abstractions/Capabilities/ and its contract/qualification evidence.
 - **Forbidden scope:** Country-based provider exclusion; unsupported action coercion; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: CAPABILITY / account-capabilities; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-09 — market-normalization
 
@@ -185,7 +193,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Data/Market/ and its contract/qualification evidence.
 - **Forbidden scope:** Inventing ticks from OHLC; using future finalized bars; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: DATA / market-normalization; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-10 — historical-vintages
 
@@ -201,7 +210,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Data/History/ and its contract/qualification evidence.
 - **Forbidden scope:** Replacing old vintages with latest revised data; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: DATA / historical-vintages; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-11 — news-macro-claims
 
@@ -217,7 +227,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Information/ and its contract/qualification evidence.
 - **Forbidden scope:** Unlicensed redistribution; source popularity as evidence of edge; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: INFORMATION / news-macro-claims; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-12 — causal-feeder
 
@@ -233,7 +244,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through research/autotrade_research/evaluation/replay/ and its contract/qualification evidence.
 - **Forbidden scope:** In-process conventions claimed as hostile-code isolation; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: REPLAY / causal-feeder; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-13 — execution-realism
 
@@ -249,7 +261,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Engine.Lean/Simulation/ and its contract/qualification evidence.
 - **Forbidden scope:** Paper/testnet fills labelled proof of live profitability; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: SIMULATION / execution-realism; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-14 — economic-ledger
 
@@ -265,7 +278,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Portfolio/Accounting/ and its contract/qualification evidence.
 - **Forbidden scope:** Sports win/loss ledger; silent float money coercion; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: FINANCE / economic-ledger; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-15 — reservations
 
@@ -281,7 +295,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Portfolio/Reservations/ and its contract/qualification evidence.
 - **Forbidden scope:** Ignoring pending cancel/unknown/manual exposure; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: FINANCE / reservations; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-16 — independent-risk
 
@@ -297,13 +312,14 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Risk/ and its contract/qualification evidence.
 - **Forbidden scope:** Risk penalties posted as cash expenses; VaR-only safety claims; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: RISK / independent-risk; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-17 — policy-confirmation
 
 - **Authority family:** AUTHORITY
 - **Exact scope:** Implement confirmation binding, autonomous policy, expiry/revocation and admissions
-- **Inputs:** 02_CANONICAL_CONTRACTS.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-05, WP-16
+- **Inputs:** 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-05, WP-16
 - **Contracts:** AuthorityPolicy; Confirmation; AdmissionRecord
 - **Likely modules:** src/AutoTrade.Execution/Authority/
 - **Dependencies:** WP-05; WP-16
@@ -313,23 +329,25 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Execution/Authority/ and its contract/qualification evidence.
 - **Forbidden scope:** Learning or agent votes modifying user authority; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: AUTHORITY / policy-confirmation; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-18 — guarded-dispatch
 
 - **Authority family:** EXECUTION
 - **Exact scope:** Implement last-send guard, durable attempts and provider-compatible client IDs
-- **Inputs:** 03_DATA_MARKET_PROVIDER_EXECUTION_ARCHITECTURE.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-02, WP-17
+- **Inputs:** 03_DATA_MARKET_PROVIDER_EXECUTION_ARCHITECTURE.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-02, WP-17; 14_ADDITIONAL_READY_CODE_RESEARCH.md; 15_FAST_IMPLEMENTATION_START.md
 - **Contracts:** OrderIntent; AdmissionRecord; SubmissionAttempt
 - **Likely modules:** src/AutoTrade.Execution/Dispatch/; src/AutoTrade.Engine.Lean/GuardedBrokerage/
 - **Dependencies:** WP-02; WP-17
 - **Reuse sources:** LEAN IBrokerage seam; execution-ledger UNKNOWN concepts
-- **Tests:** Crash before/after send; revoke race; duplicate outbox; timeout
+- **Tests:** Crash before/after send; revoke race; duplicate outbox; timeout; Expiry/revocation during SDK quota wait and retry; actual outbound request count; stable client ID across reconciliation
 - **Acceptance:** No unsent revoked action crosses barrier; ambiguous sends stay reserved and reconcile; Evidence records exact source SHA, input/schema versions, tests actually run and unresolved limits.
 - **Integration target:** Protected main through src/AutoTrade.Execution/Dispatch/ and its contract/qualification evidence.
 - **Forbidden scope:** Blind retry; claiming exactly-once external execution; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: EXECUTION / guarded-dispatch; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-19 — order-projection
 
@@ -345,7 +363,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Execution/Orders/ and its contract/qualification evidence.
 - **Forbidden scope:** Terminal status suppressing later economic corrections; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: EXECUTION / order-projection; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-20 — account-truth
 
@@ -361,23 +380,25 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Execution/Reconciliation/ and its contract/qualification evidence.
 - **Forbidden scope:** Empty recent-order page treated as definitive absence; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: RECONCILIATION / account-truth; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-21 — simulated-provider
 
 - **Authority family:** PROVIDER
 - **Exact scope:** Provide deterministic official-contract-shaped simulated provider for integration
-- **Inputs:** 03_DATA_MARKET_PROVIDER_EXECUTION_ARCHITECTURE.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-08, WP-19
+- **Inputs:** 03_DATA_MARKET_PROVIDER_EXECUTION_ARCHITECTURE.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-08, WP-19; 14_ADDITIONAL_READY_CODE_RESEARCH.md; 15_FAST_IMPLEMENTATION_START.md
 - **Contracts:** All Provider interface methods
 - **Likely modules:** tests/Providers/Simulator/; tests/Providers/ContractHarness/
 - **Dependencies:** WP-08; WP-19
 - **Reuse sources:** LEAN simulation; canonical fixtures
-- **Tests:** Rejection, quota, clock, outage, ambiguity and correction scenario matrix
+- **Tests:** Rejection, quota, clock, outage, ambiguity and correction scenario matrix; Injected market versus authority clocks; deterministic stream gap/history lag; redacted recorded fixtures
 - **Acceptance:** Every interface can exercise success/failure/UNKNOWN deterministically without live credentials; Evidence records exact source SHA, input/schema versions, tests actually run and unresolved limits.
 - **Integration target:** Protected main through tests/Providers/Simulator/ and its contract/qualification evidence.
 - **Forbidden scope:** Simulated success used as real-provider qualification; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PROVIDER / simulated-provider; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-22 — bybit-adapter
 
@@ -393,7 +414,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Providers.Bybit/ and its contract/qualification evidence.
 - **Forbidden scope:** Invented sandbox parity; copying unclear-license wrapper; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PROVIDER / bybit-adapter; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-23 — kraken-adapter
 
@@ -409,23 +431,25 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Providers.Kraken/ and its contract/qualification evidence.
 - **Forbidden scope:** Assumed public spot sandbox; withdrawals in agent tools; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PROVIDER / kraken-adapter; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-24 — whitebit-adapter
 
 - **Authority family:** PROVIDER
 - **Exact scope:** Qualify WhiteBIT spot/collateral streams, REST and exact order semantics
-- **Inputs:** 03_DATA_MARKET_PROVIDER_EXECUTION_ARCHITECTURE.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-08, WP-18, WP-20, WP-21
+- **Inputs:** 03_DATA_MARKET_PROVIDER_EXECUTION_ARCHITECTURE.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-08, WP-18, WP-20, WP-21; 14_ADDITIONAL_READY_CODE_RESEARCH.md; 15_FAST_IMPLEMENTATION_START.md
 - **Contracts:** Provider interface; WhiteBIT capability fixtures
 - **Likely modules:** src/AutoTrade.Providers.WhiteBIT/; tests/Providers/WhiteBIT/
 - **Dependencies:** WP-08; WP-18; WP-20; WP-21
-- **Reuse sources:** Official API; JKorf/WhiteBit.Net 4.4.0 + CryptoExchange.Net transport/test infrastructure after exact dependency qualification; CCXT only if a missing capability is proven equivalent
-- **Tests:** Partial slippage-band cancel; reduce-only resizing; endpoint-specific conditions
+- **Reuse sources:** Official WhiteBIT API; JKorf/WhiteBit.Net 4.4.0 candidate; CryptoExchange.Net shared transport/test infrastructure after exact dependency qualification
+- **Tests:** Partial slippage-band cancel; reduce-only resizing; endpoint-specific conditions; Explicit SDK environment; coherent CryptoExchange.Net graph; no hidden financial retries; debug-log redaction; history pagination coverage
 - **Acceptance:** Account-discovered capability matrix and full execution/reconciliation evidence; Evidence records exact source SHA, input/schema versions, tests actually run and unresolved limits.
 - **Integration target:** Protected main through src/AutoTrade.Providers.WhiteBIT/ and its contract/qualification evidence.
 - **Forbidden scope:** Country-based product exclusion; unverified universal test environment; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PROVIDER / whitebit-adapter; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-25 — binance-adapter
 
@@ -441,7 +465,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Providers.Binance/ and its contract/qualification evidence.
 - **Forbidden scope:** One spot adapter silently advertised as futures/options support; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PROVIDER / binance-adapter; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-26 — ibkr-adapter
 
@@ -457,23 +482,25 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Providers.IBKR/ and its contract/qualification evidence.
 - **Forbidden scope:** IPC asserted to erase GPL obligations; ticker-only routing; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PROVIDER / ibkr-adapter; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-27 — alpaca-adapter
 
 - **Authority family:** PROVIDER
 - **Exact scope:** Qualify Alpaca account/orders/activities and entitled equity/crypto/options
-- **Inputs:** 03_DATA_MARKET_PROVIDER_EXECUTION_ARCHITECTURE.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-08, WP-18, WP-20, WP-21
+- **Inputs:** 03_DATA_MARKET_PROVIDER_EXECUTION_ARCHITECTURE.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-08, WP-18, WP-20, WP-21; 14_ADDITIONAL_READY_CODE_RESEARCH.md; 15_FAST_IMPLEMENTATION_START.md
 - **Contracts:** Provider interface; Alpaca capability fixtures
 - **Likely modules:** src/AutoTrade.Providers.Alpaca/; tests/Providers/Alpaca/
 - **Dependencies:** WP-08; WP-18; WP-20; WP-21
-- **Reuse sources:** Official APIs; official Alpaca C# SDK stable 7.2.2 as a primary adapter candidate; LEAN route after exact rights/dependency verification
-- **Tests:** Client ID; bracket race; option levels; polled assignment; delayed paper NTA
+- **Reuse sources:** Official Alpaca APIs; Official Alpaca C# SDK stable 7.2.2 candidate; LEAN route after exact rights/dependency verification
+- **Tests:** Client ID; bracket race; option levels; polled assignment; delayed paper NTA; Stable package versus inspected beta source; missing financial fields; one order submission owner
 - **Acceptance:** Activities and streams jointly reconcile; paper realism limitations exposed; Evidence records exact source SHA, input/schema versions, tests actually run and unresolved limits.
 - **Integration target:** Protected main through src/AutoTrade.Providers.Alpaca/ and its contract/qualification evidence.
 - **Forbidden scope:** Assuming assignment always arrives on order WebSocket; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PROVIDER / alpaca-adapter; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-28 — futures-lifecycle
 
@@ -489,7 +516,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Portfolio/Futures/ and its contract/qualification evidence.
 - **Forbidden scope:** Continuous backadjusted series used as executable contract; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: FINANCE / futures-lifecycle; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-29 — perpetual-lifecycle
 
@@ -505,7 +533,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Portfolio/Perpetuals/ and its contract/qualification evidence.
 - **Forbidden scope:** One universal funding convention assumed across venues; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: FINANCE / perpetual-lifecycle; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-30 — options-lifecycle
 
@@ -521,7 +550,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Portfolio/Options/ and its contract/qualification evidence.
 - **Forbidden scope:** Premium equated with maximum short-option loss; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: FINANCE / options-lifecycle; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-31 — corporate-settlement
 
@@ -537,7 +567,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Portfolio/CorporateActions/ and its contract/qualification evidence.
 - **Forbidden scope:** Tax residence inferred; backadjusted data mutating live holdings twice; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: FINANCE / corporate-settlement; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-32 — allocation-objective
 
@@ -553,7 +584,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Portfolio/Allocation/ and its contract/qualification evidence.
 - **Forbidden scope:** Spending unfunded account capital; optimizing win rate only; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PORTFOLIO / allocation-objective; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-33 — deterministic-path
 
@@ -569,7 +601,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through research/autotrade_research/strategies/ and its contract/qualification evidence.
 - **Forbidden scope:** Hard-coded daily return/trade-count targets; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: STRATEGY / deterministic-path; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-34 — causal-features
 
@@ -585,7 +618,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through research/autotrade_research/features/ and its contract/qualification evidence.
 - **Forbidden scope:** Global fit on train+test; future regime classifier labels; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: FEATURE / causal-features; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-35 — protocol-registry
 
@@ -601,7 +635,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Science/Registry/ and its contract/qualification evidence.
 - **Forbidden scope:** Mutable experiment folder as canonical truth; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: SCIENCE / protocol-registry; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-36 — evaluation-gates
 
@@ -617,7 +652,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through research/autotrade_research/evaluation/ and its contract/qualification evidence.
 - **Forbidden scope:** Green software tests treated as proof of profitability; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: SCIENCE / evaluation-gates; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-37 — cumulative-episodes
 
@@ -633,7 +669,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Learning/Memory/ and its contract/qualification evidence.
 - **Forbidden scope:** Destructive upsert substituted for cumulative memory; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: MEMORY / cumulative-episodes; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-38 — continual-candidates
 
@@ -649,7 +686,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through research/autotrade_research/learning/ and its contract/qualification evidence.
 - **Forbidden scope:** Archive existence claimed as proof of no forgetting; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: LEARNING / continual-candidates; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-39 — routing-budgets
 
@@ -665,7 +703,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.ModelGateway/ and its contract/qualification evidence.
 - **Forbidden scope:** Silent remote fallback or unapproved weight download; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: MODEL / routing-budgets; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Nika Core model-gateway semantics have been characterized into canonical schema/provenance; implementation remains PLANNED.
 
 ### WP-40 — specialist-dag
 
@@ -681,7 +720,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Learning/Agents/ and its contract/qualification evidence.
 - **Forbidden scope:** Fixed decorative agent count; majority vote grants trading permission; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: AGENT / specialist-dag; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-41 — durable-research-jobs
 
@@ -697,7 +737,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Jobs/ and its contract/qualification evidence.
 - **Forbidden scope:** Financial order submission as a generic automatically retried job; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: JOB / durable-research-jobs; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-42 — champion-control
 
@@ -713,7 +754,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Science/Promotion/ and its contract/qualification evidence.
 - **Forbidden scope:** Promotion expands user authority/hard risk or deploys arbitrary code; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PROMOTION / champion-control; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-43 — host-state-commands
 
@@ -729,7 +771,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Host/Api/ and its contract/qualification evidence.
 - **Forbidden scope:** UI client as financial source of truth; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: API / host-state-commands; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-44 — semantic-web
 
@@ -745,7 +788,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through web/src/ and its contract/qualification evidence.
 - **Forbidden scope:** Custom inaccessible grid/visual-only risk status; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: UI / semantic-web; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-45 — windows-shell
 
@@ -761,7 +805,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Desktop/ and its contract/qualification evidence.
 - **Forbidden scope:** Separate desktop trading engine or local-PC-off uptime claim; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: DESKTOP / windows-shell; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-46 — secrets-auth
 
@@ -777,7 +822,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Host/Security/ and its contract/qualification evidence.
 - **Forbidden scope:** Loopback assumed unauthenticated-safe; keys in logs/artifacts; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: SECURITY / secrets-auth; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-47 — decision-traces
 
@@ -793,7 +839,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Host/Observability/ and its contract/qualification evidence.
 - **Forbidden scope:** Logs substituted for durable financial journal; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: OBSERVABILITY / decision-traces; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-48 — runtime-failure-control
 
@@ -809,7 +856,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Execution/Recovery/ and its contract/qualification evidence.
 - **Forbidden scope:** Automatic failover based only on lease timeout; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: RECOVERY / runtime-failure-control; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-49 — backup-restore
 
@@ -825,39 +873,42 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through src/AutoTrade.Persistence/Backup/ and its contract/qualification evidence.
 - **Forbidden scope:** Copying only live DB main file; promising zero loss after unbacked disk destruction; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: RECOVERY / backup-restore; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-50 — windows-packaging
 
 - **Authority family:** RELEASE
 - **Exact scope:** Implement reproducible signed installer, prerequisites, update and rollback
-- **Inputs:** 07_DESKTOP_WEB_ACCESSIBILITY_AND_RUNTIME.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-02, WP-45, WP-46, WP-49
+- **Inputs:** 07_DESKTOP_WEB_ACCESSIBILITY_AND_RUNTIME.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-02, WP-45, WP-46, WP-49; 14_ADDITIONAL_READY_CODE_RESEARCH.md; 15_FAST_IMPLEMENTATION_START.md
 - **Contracts:** Release manifest; schema compatibility; host state
 - **Likely modules:** packaging/windows/; build/; deploy/
 - **Dependencies:** WP-02; WP-45; WP-46; WP-49
-- **Reuse sources:** .NET packaging and WebView2 supported distribution
+- **Reuse sources:** .NET packaging and WebView2 supported distribution; Velopack: official-documentation candidate pending source/license/dependency and NVDA qualification
 - **Tests:** Clean Windows install; failed migration; downgrade compatibility; uninstall/data choice
 - **Acceptance:** Keyboard-operable signed artifacts update/restore safely on clean target; Evidence records exact source SHA, input/schema versions, tests actually run and unresolved limits.
 - **Integration target:** Protected main through packaging/windows/ and its contract/qualification evidence.
 - **Forbidden scope:** Release claimed from source-only build; old binary on incompatible DB; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: RELEASE / windows-packaging; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-51 — quality-pipeline
 
 - **Authority family:** CI
 - **Exact scope:** Implement contract, unit/property, finance/science, provider and Windows CI selection
-- **Inputs:** 07_DESKTOP_WEB_ACCESSIBILITY_AND_RUNTIME.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-01, WP-03
+- **Inputs:** 07_DESKTOP_WEB_ACCESSIBILITY_AND_RUNTIME.md; 02_CANONICAL_CONTRACTS.md; Exact accepted artifacts of WP-01, WP-03; 14_ADDITIONAL_READY_CODE_RESEARCH.md; 15_FAST_IMPLEMENTATION_START.md
 - **Contracts:** All fixtures; evidence manifest
 - **Likely modules:** .github/workflows/; tests/Integration/
 - **Dependencies:** WP-01; WP-03
-- **Reuse sources:** Existing ecosystem test runners; reusable fixtures
+- **Reuse sources:** Existing ecosystem test runners; reusable fixtures; tools/verify.py; tools/baseline.py; control/tools/registry_store.py
 - **Tests:** Intentional invariant violations; generated drift; secret isolation
 - **Acceptance:** Mandatory gates detect known-invalid builds and tie reports to exact head; Evidence records exact source SHA, input/schema versions, tests actually run and unresolved limits.
 - **Integration target:** Protected main through .github/workflows/ and its contract/qualification evidence.
 - **Forbidden scope:** Live/signing secrets in untrusted PR tests; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: CI / quality-pipeline; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Bootstrap workflows, schema/control/research suites and baseline validation/export implemented. Local Linux evidence is recorded; Windows/.NET runs, generated bindings and full financial/science/provider/release gates remain.
 
 ### WP-52 — untrusted-input-boundaries
 
@@ -873,7 +924,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through tests/Security/ and its contract/qualification evidence.
 - **Forbidden scope:** Executing arbitrary serialized models in financial host; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: SECURITY / untrusted-input-boundaries; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-53 — nvda-qualification
 
@@ -889,7 +941,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through qualification/nvda/ and its contract/qualification evidence.
 - **Forbidden scope:** Automated accessibility scan presented as full NVDA proof; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: ACCESSIBILITY / nvda-qualification; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-54 — release-candidate
 
@@ -905,7 +958,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through build/release/ and its contract/qualification evidence.
 - **Forbidden scope:** Floating dependencies or missing transitive license evidence; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: RELEASE / release-candidate; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-55 — whole-simulator-flow
 
@@ -921,7 +975,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through tests/Integration/WholeFlow/ and its contract/qualification evidence.
 - **Forbidden scope:** Mocked-away risk/persistence presented as integrated product; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: INTEGRATION / whole-simulator-flow; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-56 — scientific-learning
 
@@ -937,7 +992,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through docs/qualification/science/ and its contract/qualification evidence.
 - **Forbidden scope:** Promoting a visually good backtest despite invalid protocol; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: QUALIFICATION / scientific-learning; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-57 — forward-paper
 
@@ -953,7 +1009,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through docs/qualification/paper/ and its contract/qualification evidence.
 - **Forbidden scope:** Universal fixed duration/trade-count replacing registered power/coverage; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: QUALIFICATION / forward-paper; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-58 — bounded-real
 
@@ -969,7 +1026,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through docs/qualification/live/ and its contract/qualification evidence.
 - **Forbidden scope:** Architecture task authorizes real trades; withdrawals; unbounded live experiment; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: QUALIFICATION / bounded-real; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-59 — recovery-release
 
@@ -985,7 +1043,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through docs/qualification/recovery/ and its contract/qualification evidence.
 - **Forbidden scope:** Claiming external broker/funds recovery is guaranteed; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: QUALIFICATION / recovery-release; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-60 — whole-product-final
 
@@ -1001,7 +1060,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through docs/qualification/final/ and its contract/qualification evidence.
 - **Forbidden scope:** Calling one trade, green CI, source pass or a document set the finished program; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: QUALIFICATION / whole-product-final; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-61 — asset-provider-crosswalk
 
@@ -1017,7 +1077,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through tests/Integration/AssetProvider/ and its contract/qualification evidence.
 - **Forbidden scope:** Assuming all providers expose all assets or one test covers all combinations; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: INTEGRATION / asset-provider-crosswalk; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-62 — zero-model-economics
 
@@ -1033,7 +1094,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through docs/qualification/zero-model/ and its contract/qualification evidence.
 - **Forbidden scope:** Echo mock counted as a trading strategy; hidden paid fallback; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: QUALIFICATION / zero-model-economics; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-63 — source-agent-value
 
@@ -1049,7 +1111,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through research/autotrade_research/evaluation/ablation/ and its contract/qualification evidence.
 - **Forbidden scope:** Self-reported model quality or popularity used as evidence; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: SCIENCE / source-agent-value; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-64 — release-supply-chain
 
@@ -1065,7 +1128,8 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through docs/qualification/security/ and its contract/qualification evidence.
 - **Forbidden scope:** Architecture-date license snapshot treated as permanent approval; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: SECURITY / release-supply-chain; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 
 ### WP-65 — runtime-resource-budget
 
@@ -1081,4 +1145,6 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Integration target:** Protected main through tests/Integration/Performance/ and its contract/qualification evidence.
 - **Forbidden scope:** Unmeasured universal throughput or HFT claims; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PERFORMANCE / runtime-resource-budget; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
+- **Status:** PLANNED
+- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
 

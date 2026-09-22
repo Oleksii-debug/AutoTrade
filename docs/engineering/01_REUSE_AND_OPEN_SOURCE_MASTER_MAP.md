@@ -4,13 +4,13 @@ Baseline 2026-09-22. Decision owner: engineering architecture. This document own
 
 ## 1. Evidence discipline
 
-The audit read actual source and selected tests, not only READMEs. It is a targeted architectural audit, not an exhaustive correctness certification. No upstream suite was executed and no performance benchmark was run. GitHub source access became rate-limited on 2026-09-22 during follow-up reads. In particular, the planned additional read of `tests/test_replay_jsonl_integrity.py` and complete Nika gateway contracts could not be completed. These limitations are reflected below.
+The audit read actual source and selected tests, not only READMEs. It is a targeted architectural audit, not an exhaustive correctness certification. No upstream suite was executed and no performance benchmark was run. GitHub source access became rate-limited during the initial audit, but follow-up research completed the previously missing read of `tests/test_replay_jsonl_integrity.py` and the full Nika model-gateway contracts. Document 14 records the additional exact evidence and narrowly supersedes the earlier uncertainty.
 
 First-party snapshots:
 
 - [Autosport cb102d85f0c820c7097875191deca73e53ec94f5](https://github.com/Oleksii-debug/Autosport/tree/cb102d85f0c820c7097875191deca73e53ec94f5), commit observed 2026-09-21.
 - [Nika-Core 2f7be3389109d7dd6fb3bae40540fe0cf2eba695](https://github.com/Oleksii-debug/Nika-Core/tree/2f7be3389109d7dd6fb3bae40540fe0cf2eba695), commit observed 2026-09-15.
-- [LEAN repository](https://github.com/QuantConnect/Lean): reviewed Git source-tree object `985ef30ad3ac774218c5ac516b4cb0aa2655730f`. The associated commit SHA was not retained in the audit evidence and must be resolved before a build/import pin; tree and commit object identities are not interchangeable.
+- [LEAN repository](https://github.com/QuantConnect/Lean): follow-up verification established commit `985ef30ad3ac774218c5ac516b4cb0aa2655730f` (2026-09-18), tree `4b163abf9fca60e731b76510b9ae6721ffff7e6c`. Keep the exact commit identity in build provenance and review later deltas before updating.
 
 Newer commits do not invalidate this snapshot audit, but imports must compare the chosen new revision against it. At the inspected first-party snapshots, no root LICENSE/COPYING/NOTICE was found and the inspected pyproject files did not establish a reuse license. User ownership is useful context, not proof of rights to every contribution or dependency. A/B below are technical classifications; import requires a recorded owner/contributor rights basis and retained notices. Do not describe either repository as permissively licensed without that evidence.
 
@@ -22,7 +22,7 @@ Newer commits do not invalidate this snapshot audit, but imports must compare th
 - Symbols inspected: `strict_json_loads`, `DuplicateJsonKeyError`, `NonStandardJsonConstantError`, `InvalidJsonDomainError`, `jsonl_bytes_are_blank`.
 - Dependencies: standard-library JSON, math and typing; no trading or sports dependency in the inspected implementation.
 - Existing behavior: duplicate-key rejection; non-standard NaN/Infinity rejection; domain checks including invalid scalar/UTF-8 cases and oversized integer protection. Finite binary floats are accepted; that does not make them suitable for money.
-- Relevant tests: `tests/test_replay_jsonl_integrity.py` was located but its planned follow-up body read was rate-limited. Reviewed replay firewall tests supply related malformed/replay boundary context; do not claim a verified direct unit-test correspondence.
+- Relevant tests: follow-up research read `tests/test_replay_jsonl_integrity.py` at the audited Autosport commit. It explicitly covers duplicate top-level/nested keys, nonstandard constants, overflowing numbers, >640-digit integers, invalid UTF-8, lone surrogates, non-object records, physical line reporting and unreadable paths. The AutoTrade migration still requires its own neutral characterization suite.
 - Destination: `research/autotrade_research/io/strict_json.py`, only for research/import boundaries. .NET contracts use their own strict serializer configuration and common language-neutral fixtures.
 - Changes: preserve the neutral parser behavior and notices; add payload-byte and nesting limits at the caller; reject numeric JSON values for financial fields at schema validation. Do not turn this parser into a money library.
 - Risk: error classes and exact accepted scalar domain become an API; importing only the main function without its checks would weaken it.

@@ -49,5 +49,10 @@
     "roadmap_dependencies": 2,
     "dispatch_ownership": 3,
     "audit_integration": 4
+  },
+  "product_spec_text": "docs/product/PRODUCT_SPEC_CANONICAL.txt",
+  "product_spec_drive": {
+    "file_id": "14dPC8myZlITdhnk8SQdJSflHmSkZG4fn",
+    "modified_time": "2026-09-22T04:10:28.541Z"
   }
 }

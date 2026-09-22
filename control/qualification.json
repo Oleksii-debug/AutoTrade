@@ -4,7 +4,7 @@
   "overall_status": "IMPLEMENTATION_STARTED",
   "gates": {
     "engineering_baseline": "IMPORTED",
-    "repository_bootstrap": "IN_PROGRESS",
+    "repository_bootstrap": "TRANSFER_BASELINE_COMPLETE",
     "reusable_code_migration": "IN_PROGRESS_CROSS_PLATFORM_CI_ADDED",
     "financial_runtime": "NOT_STARTED",
     "providers": "NOT_STARTED",
@@ -15,7 +15,8 @@
     "quality_pipeline": "BOOTSTRAP_PYTHON_CI_ONLY",
     "canonical_contracts": "IN_PROGRESS_FULL_SCHEMA_SURFACE_AND_OPENAPI_COMMITTED",
     "dependency_provenance": "IN_PROGRESS_EXACT_UPSTREAM_LICENSE_SNAPSHOT_RECORDED",
-    "control_plane": "IMPLEMENTED_UNQUALIFIED_REGISTRY_AND_BRANCH_GUARD"
+    "control_plane": "IMPLEMENTED_UNQUALIFIED_REGISTRY_AND_BRANCH_GUARD",
+    "selected_first_party_reuse": "TRANSFER_COMPLETE_APPROVED_NEUTRAL_PRIMITIVES_AND_SWARM_INVARIANTS"
   },
   "evidence_notes": [
     "Focused local neutral migration suite: 6/6 passed before commit.",
@@ -24,6 +25,7 @@
     "First canonical JSON Schema tranche locally validated: 6/6 focused tests passed before commit; cross-platform GitHub Actions result remains live evidence.",
     "WP-03 bootstrap inventory records exact inspected revisions and license blob SHAs for LEAN, WhiteBit.Net, CryptoExchange.Net and Alpaca C# SDK; first-party root license absence recorded without inventing rights.",
     "Expanded document-02 contract surface committed across 11 JSON Schema files plus canonical host OpenAPI and fixtures; live CI/codegen evidence is still required.",
-    "Autosport swarm lease/collision invariants adapted to AutoTrade registry-branch generation/CAS model; issue comments remain non-authoritative. Cross-platform control-plane CI and GitHub CAS integration still required before enabling concurrent mutation."
+    "Autosport swarm lease/collision invariants adapted to AutoTrade registry-branch generation/CAS model; issue comments remain non-authoritative. Cross-platform control-plane CI and GitHub CAS integration still required before enabling concurrent mutation.",
+    "Canonical product specification text mirror imported from Drive file 14dPC8myZlITdhnk8SQdJSflHmSkZG4fn at modified time 2026-09-22T04:10:28.541Z for machine-readable repository access."
   ]
 }

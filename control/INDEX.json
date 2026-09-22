@@ -25,8 +25,12 @@
   "qualification": "control/qualification.json",
   "findings_dir": "control/findings/",
   "claims": {
-    "status": "NOT_ENABLED",
-    "target_branch": "control/registry"
+    "status": "BOOTSTRAP_BRANCH_CREATED_NOT_ENABLED",
+    "target_branch": "control/registry",
+    "registry_file": "registry.json",
+    "transition_log": "transitions.ndjson",
+    "protocol_doc": "REGISTRY.md",
+    "note": "Concurrent mutation remains disabled until atomic claim acceptance tests pass."
   },
   "canonical_precedence": [
     "live reviewed repository implementation/evidence",
@@ -34,5 +38,11 @@
     "explicit supersession in document 14 / CANONICAL_PRECEDENCE.md",
     "documents 00-13",
     "older Drive snapshots"
-  ]
+  ],
+  "control_issues": {
+    "whole_product": 1,
+    "roadmap_dependencies": 2,
+    "dispatch_ownership": 3,
+    "audit_integration": 4
+  }
 }

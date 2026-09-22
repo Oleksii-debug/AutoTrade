@@ -67,7 +67,7 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Contracts:** InstrumentVersion; OrderIntent; ExecutionFill
 - **Likely modules:** src/AutoTrade.Engine.Lean/; tests/Integration/LeanAdoption
 - **Dependencies:** WP-01; WP-03
-- **Reuse sources:** QuantConnect/Lean source tree 985ef30ad3ac774218c5ac516b4cb0aa2655730f; resolve associated commit before pinning
+- **Reuse sources:** QuantConnect/Lean commit 985ef30ad3ac774218c5ac516b4cb0aa2655730f (verified 2026-09-18); review later deltas before changing the pin
 - **Tests:** Windows/Linux clean build; callback ordering; decimal; shutdown/restart harness
 - **Acceptance:** Reproducible build and simulator integration demonstrate required seams; blockers have measured alternatives; Evidence records exact source SHA, input/schema versions, tests actually run and unresolved limits.
 - **Integration target:** Protected main through src/AutoTrade.Engine.Lean/ and its contract/qualification evidence.
@@ -419,7 +419,7 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Contracts:** Provider interface; WhiteBIT capability fixtures
 - **Likely modules:** src/AutoTrade.Providers.WhiteBIT/; tests/Providers/WhiteBIT/
 - **Dependencies:** WP-08; WP-18; WP-20; WP-21
-- **Reuse sources:** Official API; CCXT transport only if proven equivalent
+- **Reuse sources:** Official API; JKorf/WhiteBit.Net 4.4.0 + CryptoExchange.Net transport/test infrastructure after exact dependency qualification; CCXT only if a missing capability is proven equivalent
 - **Tests:** Partial slippage-band cancel; reduce-only resizing; endpoint-specific conditions
 - **Acceptance:** Account-discovered capability matrix and full execution/reconciliation evidence; Evidence records exact source SHA, input/schema versions, tests actually run and unresolved limits.
 - **Integration target:** Protected main through src/AutoTrade.Providers.WhiteBIT/ and its contract/qualification evidence.
@@ -467,7 +467,7 @@ Expanded entries are generated from `08_WORK_PACKAGE_BANK.json` and appended bel
 - **Contracts:** Provider interface; Alpaca capability fixtures
 - **Likely modules:** src/AutoTrade.Providers.Alpaca/; tests/Providers/Alpaca/
 - **Dependencies:** WP-08; WP-18; WP-20; WP-21
-- **Reuse sources:** Official APIs; LEAN candidate after rights verification
+- **Reuse sources:** Official APIs; official Alpaca C# SDK stable 7.2.2 as a primary adapter candidate; LEAN route after exact rights/dependency verification
 - **Tests:** Client ID; bracket race; option levels; polled assignment; delayed paper NTA
 - **Acceptance:** Activities and streams jointly reconcile; paper realism limitations exposed; Evidence records exact source SHA, input/schema versions, tests actually run and unresolved limits.
 - **Integration target:** Protected main through src/AutoTrade.Providers.Alpaca/ and its contract/qualification evidence.

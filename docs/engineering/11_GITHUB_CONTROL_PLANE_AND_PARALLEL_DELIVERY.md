@@ -1,6 +1,6 @@
 # AutoTrade — optional GitHub control plane
 
-Future design only. No repository, issues, PRs, automation or GitHub application was created in this architecture task.
+The repository and four human-facing canonical control issues now exist, and a dedicated `control/registry` branch has been bootstrapped. The atomic claim service/protocol is not yet enabled or qualified, so concurrent source mutation remains disabled during bootstrap.
 
 ## 1. Minimal canonical structure
 

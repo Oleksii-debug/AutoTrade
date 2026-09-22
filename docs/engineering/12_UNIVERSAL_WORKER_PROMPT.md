@@ -1,6 +1,6 @@
 # AutoTrade — universal worker prompt
 
-Use this prompt only after the AutoTrade repository has been intentionally initialized and development authorized. It is designed to remain unchanged while live control state evolves.
+The AutoTrade repository has now been intentionally initialized. Use this implementation prompt only when `control/INDEX.json` reports that the atomic claim path is enabled for concurrent mutation; until then, read-only research/audit is safe but source mutation remains bootstrap single-writer. The prompt is designed to remain unchanged while live control state evolves.
 
 ---
 

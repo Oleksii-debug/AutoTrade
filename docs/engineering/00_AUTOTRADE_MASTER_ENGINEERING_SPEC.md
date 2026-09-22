@@ -6,7 +6,7 @@ Engineering baseline: 2026-09-22. Owner: Oleksii. Objective: TIME_TO_WHOLE_FINIS
 
 The engineering package contains core documents 00–09, the machine-readable bank of 65 work packages, and optional development-operation documents 10–13 prepared after the core. This master is the entry point. The approved product document has been updated in place with twelve targeted changes. The package is an implementation baseline with explicit empirical qualification gates; it is not an implemented trading system. A ZIP and a derived accessible HTML reading edition accompany the canonical Markdown documents.
 
-The approved product source remains `AutoTrade — Final Product Specification (EN).docx` in the parent folder. All forty sections remain in scope. Research was performed on 2026-09-21–22. Existing repositories were reviewed at explicit commits; their test suites were read selectively, not executed. No AutoTrade repository, production implementation, issues or pull requests have been created.
+The approved product source remains `AutoTrade — Final Product Specification (EN).docx` in the parent folder. All forty sections remain in scope. Research was performed on 2026-09-21–22. Existing repositories were reviewed at explicit commits; their test suites were read selectively, not executed. Since publication of the Drive baseline, the AutoTrade GitHub repository has been bootstrapped, canonical control issues were created, and a narrow set of neutral first-party research primitives was migrated with focused local tests. This does not imply completion of the financial runtime or product qualification.
 
 ## Binding clarification from the owner
 
@@ -20,7 +20,7 @@ One final product is being built. Intermediate integration slices prove parts of
 
 ## 2. Foundation decision
 
-Use QuantConnect LEAN as the preferred reusable financial-engine foundation. The audit retained source-tree object `985ef30ad3ac774218c5ac516b4cb0aa2655730f`; its associated commit identity must be resolved and pinned by WP-02 before importing/building (a tree hash must not be misrepresented as a commit). The source is Apache-2.0 and covers orders, portfolios, buying power, instruments, corporate actions, calendars, fills and backtesting. Build an AutoTrade host and guarded brokerage integration around it. Avoid duplicating an entire OMS, portfolio engine or backtester.
+Use QuantConnect LEAN as the preferred reusable financial-engine foundation. Follow-up source verification established that `985ef30ad3ac774218c5ac516b4cb0aa2655730f` is a LEAN commit dated 2026-09-18 (tree `4b163abf9fca60e731b76510b9ae6721ffff7e6c`). WP-02 must pin the exact selected commit and review any later delta before adoption. The source is Apache-2.0 and covers orders, portfolios, buying power, instruments, corporate actions, calendars, fills and backtesting. Build an AutoTrade host and guarded brokerage integration around it. Avoid duplicating an entire OMS, portfolio engine or backtester.
 
 This is an architecture selection, not a completed adoption benchmark. The first implementation gate must prove embedding, packaging, decimal behavior, event ordering, restart/reconciliation and adapter isolation. If this gate exposes an unfixable requirement mismatch, the recorded alternate is NautilusTrader; do not develop two authoritative engines in parallel. A switch requires a requirement-by-requirement evidence comparison, including migration and licensing cost.
 

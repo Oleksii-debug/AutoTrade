@@ -1,6 +1,6 @@
 # AutoTrade — additional ready-code research
 
-Addendum dated 2026-09-22. Existing documents 00–13, the product DOCX and the original ZIP are preserved. This document adds source-backed findings and narrowly supersedes earlier uncertainty where explicitly stated. No AutoTrade production code or repository has been created.
+Addendum dated 2026-09-22. Existing documents 00–13, the product DOCX and the original ZIP are preserved. This document adds source-backed findings and narrowly supersedes earlier uncertainty where explicitly stated. At the time this addendum was written, no AutoTrade production code had been created. The repository has since been bootstrapped and neutral research primitives have begun migrating; this addendum remains evidence for the reuse decisions.
 
 ## 1. Main findings already verified
 

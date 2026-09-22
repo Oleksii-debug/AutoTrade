@@ -1,8 +1,9 @@
 {
   "schema_version": "1.0.0",
   "generation": 0,
-  "mode": "BOOTSTRAP_NOT_ENABLED",
+  "mode": "PROTOCOL_IMPLEMENTED_NOT_ENABLED",
   "updated_at": "2026-09-22T06:20:00Z",
   "claims": [],
-  "note": "Initial registry branch exists, but concurrent mutation remains disabled until claim CAS/acceptance tests are implemented."
+  "note": "Registry generation/CAS state semantics and branch-lease guard are implemented on main. Concurrent mutation remains disabled until cross-platform CI and GitHub fast-forward/CAS integration are qualified.",
+  "implementation_head": "98586c4b2a927f488ae8f6b9e9244eed2bc49465"
 }

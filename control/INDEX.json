@@ -25,12 +25,17 @@
   "qualification": "control/qualification.json",
   "findings_dir": "control/findings/",
   "claims": {
-    "status": "BOOTSTRAP_BRANCH_CREATED_NOT_ENABLED",
+    "status": "REGISTRY_PROTOCOL_IMPLEMENTED_UNQUALIFIED",
     "target_branch": "control/registry",
     "registry_file": "registry.json",
     "transition_log": "transitions.ndjson",
     "protocol_doc": "REGISTRY.md",
-    "note": "Concurrent mutation remains disabled until atomic claim acceptance tests pass."
+    "implementation": [
+      "control/tools/registry_state.py",
+      "control/tools/branch_lease_guard.py"
+    ],
+    "tests": "tests/Control/test_registry_state.py",
+    "note": "Concurrent mutation remains disabled until cross-platform control-plane CI and CAS/branch update integration are qualified."
   },
   "canonical_precedence": [
     "live reviewed repository implementation/evidence",

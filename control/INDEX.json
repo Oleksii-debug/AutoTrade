@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0.0",
+  "repository": "Oleksii-debug/AutoTrade",
+  "objective": "TIME_TO_WHOLE_FINISHED_AUTOTRADE",
+  "mode": "BOOTSTRAP_SINGLE_WRITER",
+  "baseline_date": "2026-09-22",
+  "engineering_master": "docs/engineering/00_AUTOTRADE_MASTER_ENGINEERING_SPEC.md",
+  "reuse_map": "docs/engineering/01_REUSE_AND_OPEN_SOURCE_MASTER_MAP.md",
+  "contracts": "docs/engineering/02_CANONICAL_CONTRACTS.md",
+  "provider_execution": "docs/engineering/03_DATA_MARKET_PROVIDER_EXECUTION_ARCHITECTURE.md",
+  "finance": "docs/engineering/04_PORTFOLIO_RISK_ECONOMIC_ARCHITECTURE.md",
+  "learning": "docs/engineering/05_LEARNING_MEMORY_AI_AND_AGENT_ARCHITECTURE.md",
+  "science": "docs/engineering/06_REPLAY_SCIENTIFIC_VALIDATION_ARCHITECTURE.md",
+  "ui_runtime": "docs/engineering/07_DESKTOP_WEB_ACCESSIBILITY_AND_RUNTIME.md",
+  "delivery_plan": "docs/engineering/08_DELIVERY_DEPENDENCY_AND_WORK_PACKAGE_PLAN.md",
+  "repository_blueprint": "docs/engineering/09_REPOSITORY_INITIALIZATION_BLUEPRINT.md",
+  "work_package_bank": "control/work-packages/bank.json",
+  "qualification": "control/qualification.json",
+  "claims": {
+    "status": "NOT_ENABLED",
+    "target_branch": "control/registry"
+  }
+}

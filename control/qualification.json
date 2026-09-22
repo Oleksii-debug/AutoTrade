@@ -12,11 +12,13 @@
     "learning": "NOT_STARTED",
     "accessibility": "NOT_STARTED",
     "release": "NOT_STARTED",
-    "quality_pipeline": "BOOTSTRAP_PYTHON_CI_ONLY"
+    "quality_pipeline": "BOOTSTRAP_PYTHON_CI_ONLY",
+    "canonical_contracts": "IN_PROGRESS_FIRST_SCHEMA_TRANCHE"
   },
   "evidence_notes": [
     "Focused local neutral migration suite: 6/6 passed before commit.",
     "This does not satisfy Windows CI, provenance release gate, or WP-04 completion.",
-    "GitHub Actions matrix added for Python 3.12 on Windows and Ubuntu; CI result must be read from live run before claiming cross-platform pass."
+    "GitHub Actions matrix added for Python 3.12 on Windows and Ubuntu; CI result must be read from live run before claiming cross-platform pass.",
+    "First canonical JSON Schema tranche locally validated: 6/6 focused tests passed before commit; cross-platform GitHub Actions result remains live evidence."
   ]
 }

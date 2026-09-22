@@ -70,8 +70,8 @@
         "WP-03"
       ],
       "reusable_code_sources": [
-        "QuantConnect/Lean source tree 985ef30ad3ac774218c5ac516b4cb0aa2655730f",
-        "resolve associated commit before pinning"
+        "QuantConnect/Lean commit 985ef30ad3ac774218c5ac516b4cb0aa2655730f verified as 2026-09-18 baseline",
+        "review later upstream deltas before changing the pin"
       ],
       "tests": [
         "Windows/Linux clean build",
@@ -185,8 +185,8 @@
         "Exclusive mutation key: REUSE / neutral-first-party",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Three neutral research primitives migrated from Autosport into AutoTrade with focused local 6/6 migration tests; Windows CI, full characterization and release rights qualification remain open."
     },
     {
       "id": "WP-05",
@@ -1119,8 +1119,9 @@
         "WP-21"
       ],
       "reusable_code_sources": [
-        "Official API",
-        "CCXT transport only if proven equivalent"
+        "Official WhiteBIT API",
+        "JKorf/WhiteBit.Net 4.4.0 candidate",
+        "CryptoExchange.Net shared transport/test infrastructure after exact dependency qualification"
       ],
       "tests": [
         "Partial slippage-band cancel",
@@ -1269,8 +1270,9 @@
         "WP-21"
       ],
       "reusable_code_sources": [
-        "Official APIs",
-        "LEAN candidate after rights verification"
+        "Official Alpaca APIs",
+        "Official Alpaca C# SDK stable 7.2.2 candidate",
+        "LEAN route after exact rights/dependency verification"
       ],
       "tests": [
         "Client ID",

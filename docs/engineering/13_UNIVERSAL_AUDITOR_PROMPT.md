@@ -1,6 +1,6 @@
 # AutoTrade — universal independent auditor prompt
 
-Use after intentional repository initialization and authorized development. The target is discovered from live state, not hard-coded temporary issue numbers.
+The repository has now been intentionally initialized. This auditor prompt may be used for read-only audit during bootstrap; any code mutation still requires the live ownership protocol to be enabled. The target is discovered from live state, not hard-coded temporary issue numbers.
 
 ---
 

@@ -138,8 +138,8 @@
         "Exclusive mutation key: PROVENANCE / dependency-policy",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Exact revision/license evidence recorded for LEAN, WhiteBit.Net, CryptoExchange.Net and Alpaca C# SDK; Autosport/Nika root license absence recorded. Transitive locks, advisories, first-party contributor rights, model/data rights and release SBOM remain."
     },
     {
       "id": "WP-04",

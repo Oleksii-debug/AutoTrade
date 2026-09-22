@@ -1,0 +1,35 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://schemas.autotrade.local/1.0.0/event.schema.json",
+  "title":"AutoTrade durable event contracts",
+  "$defs":{
+    "EventEnvelope":{
+      "type":"object","additionalProperties":false,
+      "required":["event_id","event_type","schema_version","aggregate_type","aggregate_id","aggregate_version","host_id","owner_epoch","environment","occurred_at","observed_at","committed_at","correlation_id","payload","payload_hash","evidence_refs"],
+      "properties":{
+        "event_id":{"$ref":"common.schema.json#/$defs/Id"},
+        "event_type":{"type":"string","minLength":1},
+        "schema_version":{"type":"string","pattern":"^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+        "aggregate_type":{"type":"string","minLength":1},
+        "aggregate_id":{"type":"string","minLength":1},
+        "aggregate_version":{"$ref":"common.schema.json#/$defs/Sequence"},
+        "host_id":{"type":"string","minLength":1},
+        "owner_epoch":{"$ref":"common.schema.json#/$defs/Sequence"},
+        "environment":{"$ref":"common.schema.json#/$defs/Environment"},
+        "occurred_at":{"$ref":"common.schema.json#/$defs/UtcInstant"},
+        "observed_at":{"$ref":"common.schema.json#/$defs/UtcInstant"},
+        "committed_at":{"$ref":"common.schema.json#/$defs/UtcInstant"},
+        "correlation_id":{"$ref":"common.schema.json#/$defs/Id"},
+        "causation_id":{"oneOf":[{"$ref":"common.schema.json#/$defs/Id"},{"type":"null"}]},
+        "payload":{},
+        "payload_hash":{"$ref":"common.schema.json#/$defs/Digest"},
+        "evidence_refs":{"type":"array","items":{"$ref":"common.schema.json#/$defs/EvidenceRef"}},
+        "provider_id":{"type":"string","minLength":1},
+        "account_id":{"type":"string","minLength":1},
+        "provider_event_id":{"type":"string","minLength":1},
+        "provider_sequence":{"$ref":"common.schema.json#/$defs/Sequence"},
+        "source_resolution":{"type":"string","minLength":1}
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "event_id":"44444444-4444-4444-8444-444444444444",
+  "event_type":"ExecutionFillObserved",
+  "schema_version":"1.0.0",
+  "aggregate_type":"account",
+  "aggregate_id":"paper-account-1",
+  "aggregate_version":"43",
+  "host_id":"host-local-1",
+  "owner_epoch":"2",
+  "environment":"PAPER",
+  "occurred_at":"2026-09-22T06:40:00Z",
+  "observed_at":"2026-09-22T06:40:01Z",
+  "committed_at":"2026-09-22T06:40:01Z",
+  "correlation_id":"55555555-5555-4555-8555-555555555555",
+  "causation_id":null,
+  "payload":{"kind":"fill"},
+  "payload_hash":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "evidence_refs":[]
+}

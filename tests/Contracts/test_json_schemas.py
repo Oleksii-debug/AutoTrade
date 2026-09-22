@@ -37,6 +37,15 @@ class ContractSchemaTests(unittest.TestCase):
     def test_order_intent_fixture(self):
         self.validate("execution.schema.json", "OrderIntent", json.loads((FIXTURES / "order-intent.valid.json").read_text()))
 
+    def test_event_envelope_fixture(self):
+        self.validate("event.schema.json", "EventEnvelope", json.loads((FIXTURES / "event-envelope.valid.json").read_text()))
+
+    def test_dataset_manifest_fixture(self):
+        self.validate("data.schema.json", "DatasetManifest", json.loads((FIXTURES / "dataset-manifest.valid.json").read_text()))
+
+    def test_ui_command_fixture(self):
+        self.validate("ui.schema.json", "UiCommand", json.loads((FIXTURES / "ui-command.valid.json").read_text()))
+
     def test_decimal_rejects_trailing_zero_exponent_and_negative_zero(self):
         common = self.schemas["common.schema.json"]
         validator = Draft202012Validator({"$ref": f"{common['$id']}#/$defs/Decimal"}, registry=self.registry)
@@ -57,6 +66,13 @@ class ContractSchemaTests(unittest.TestCase):
         capabilities = {"provider_id": "p", "kind": "CLOUD", "supports_private_data": True, "supports_tools": False, "supports_streaming": True, "supports_hard_cancellation": True}
         validator = Draft202012Validator({"$ref": f"{schema['$id']}#/$defs/ProviderCapabilities"}, registry=self.registry)
         self.assertFalse(validator.is_valid(capabilities))
+
+    def test_ui_command_unknown_fields_rejected(self):
+        fixture = json.loads((FIXTURES / "ui-command.valid.json").read_text())
+        fixture["financial_completion"] = True
+        schema = self.schemas["ui.schema.json"]
+        validator = Draft202012Validator({"$ref": f"{schema['$id']}#/$defs/UiCommand"}, registry=self.registry)
+        self.assertFalse(validator.is_valid(fixture))
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@
     "accessibility": "NOT_STARTED",
     "release": "NOT_STARTED",
     "quality_pipeline": "BOOTSTRAP_PYTHON_CI_ONLY",
-    "canonical_contracts": "IN_PROGRESS_FIRST_SCHEMA_TRANCHE",
+    "canonical_contracts": "IN_PROGRESS_FULL_SCHEMA_SURFACE_AND_OPENAPI_COMMITTED",
     "dependency_provenance": "IN_PROGRESS_EXACT_UPSTREAM_LICENSE_SNAPSHOT_RECORDED"
   },
   "evidence_notes": [
@@ -21,6 +21,7 @@
     "This does not satisfy Windows CI, provenance release gate, or WP-04 completion.",
     "GitHub Actions matrix added for Python 3.12 on Windows and Ubuntu; CI result must be read from live run before claiming cross-platform pass.",
     "First canonical JSON Schema tranche locally validated: 6/6 focused tests passed before commit; cross-platform GitHub Actions result remains live evidence.",
-    "WP-03 bootstrap inventory records exact inspected revisions and license blob SHAs for LEAN, WhiteBit.Net, CryptoExchange.Net and Alpaca C# SDK; first-party root license absence recorded without inventing rights."
+    "WP-03 bootstrap inventory records exact inspected revisions and license blob SHAs for LEAN, WhiteBit.Net, CryptoExchange.Net and Alpaca C# SDK; first-party root license absence recorded without inventing rights.",
+    "Expanded document-02 contract surface committed across 11 JSON Schema files plus canonical host OpenAPI and fixtures; live CI/codegen evidence is still required."
   ]
 }

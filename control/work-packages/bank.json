@@ -44,7 +44,7 @@
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
       "proposed_status": "IN_PROGRESS",
-      "status_note": "First JSON Schema 2020-12 tranche committed for common/model/authority/execution/market contracts with valid fixtures and focused local schema tests; full document-02 coverage, OpenAPI and generated language bindings remain."
+      "status_note": "Canonical JSON Schema coverage now materializes common, event, instrument/market, information/dataset, decision/portfolio, authority/risk, execution, provider results, persistence/reconciliation, learning/science/jobs, model gateway and UI contracts; OpenAPI host entrypoint and common fixtures committed. Remaining WP-01 work: cross-language generated bindings/corpus equivalence, OpenAPI validation/codegen and version-change enforcement."
     },
     {
       "id": "WP-02",

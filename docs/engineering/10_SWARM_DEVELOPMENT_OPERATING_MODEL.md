@@ -1,6 +1,6 @@
 # AutoTrade — optional parallel development operating model
 
-Prepared after the core engineering package was published. This is future development design, not a claim that any swarm/controller or AutoTrade repository has been created. The external launcher is assumed available and is not redesigned here.
+Prepared after the core engineering package was published. The AutoTrade repository now exists and its bootstrap control plane has started; this document remains the operating design for future high-concurrency development. The external launcher is assumed available and is not redesigned here.
 
 ## 1. Goal and concurrency rule
 

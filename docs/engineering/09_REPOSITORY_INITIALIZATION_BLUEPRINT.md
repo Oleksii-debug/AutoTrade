@@ -1,10 +1,10 @@
 # AutoTrade — repository initialization blueprint
 
-Recommended future repository: `Oleksii-debug/AutoTrade`, initially private while rights, credentials handling and distribution composition are qualified. This task does not create it. Private status is not an exemption from dependency licenses.
+Repository: `Oleksii-debug/AutoTrade`. It now exists and bootstrap migration has started. The earlier recommendation was to keep it private while rights, credentials handling and distribution composition are qualified; current repository visibility must be treated as live configuration rather than inferred from this historical recommendation. Visibility never exempts dependency-license obligations.
 
 ## 1. Start from a specific reusable foundation
 
-Start from a pinned LEAN integration, not an empty financial-engine implementation and not a copy of the entire Autosport product. The reviewed source-tree object in `QuantConnect/Lean` is `985ef30ad3ac774218c5ac516b4cb0aa2655730f`. WP-02 must resolve and record the associated source commit (or explicitly review the delta to a selected supported commit), because the retained tree object is not a verified commit pin. Use a submodule or reproducibly fetched source dependency behind a small integration project until upstream packaging is validated; record the exact artifact/source digest. A submodule must pin a commit, not a moving branch. Do not fork unless a demonstrated integration requirement needs a patch.
+Start from a pinned LEAN integration, not an empty financial-engine implementation and not a copy of the entire Autosport product. Follow-up verification established `985ef30ad3ac774218c5ac516b4cb0aa2655730f` as a LEAN commit dated 2026-09-18. WP-02 must record the exact selected commit/build artifact and explicitly review any later delta before updating the pin. Use a submodule or reproducibly fetched source dependency behind a small integration project until upstream packaging is validated; record the exact artifact/source digest. A submodule must pin a commit, not a moving branch. Do not fork unless a demonstrated integration requirement needs a patch.
 
 The repository itself contains AutoTrade contracts, host/policy integration, adapters, research, accessible UI, tests and evidence. LEAN's own license/notices remain with its source/binaries. First-party A/B imports occur only after provenance approval and characterization. No runtime dependency on Autosport or Nika is permitted merely to save extraction work.
 

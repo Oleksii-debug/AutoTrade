@@ -4,6 +4,7 @@
   "objective": "TIME_TO_WHOLE_FINISHED_AUTOTRADE",
   "mode": "BOOTSTRAP_SINGLE_WRITER",
   "baseline_date": "2026-09-22",
+  "product_spec": "docs/product/AutoTrade_Final_Product_Specification_EN.docx",
   "engineering_master": "docs/engineering/00_AUTOTRADE_MASTER_ENGINEERING_SPEC.md",
   "reuse_map": "docs/engineering/01_REUSE_AND_OPEN_SOURCE_MASTER_MAP.md",
   "contracts": "docs/engineering/02_CANONICAL_CONTRACTS.md",
@@ -14,10 +15,24 @@
   "ui_runtime": "docs/engineering/07_DESKTOP_WEB_ACCESSIBILITY_AND_RUNTIME.md",
   "delivery_plan": "docs/engineering/08_DELIVERY_DEPENDENCY_AND_WORK_PACKAGE_PLAN.md",
   "repository_blueprint": "docs/engineering/09_REPOSITORY_INITIALIZATION_BLUEPRINT.md",
+  "swarm_model": "docs/engineering/10_SWARM_DEVELOPMENT_OPERATING_MODEL.md",
+  "github_control_plane": "docs/engineering/11_GITHUB_CONTROL_PLANE_AND_PARALLEL_DELIVERY.md",
+  "worker_prompt": "docs/engineering/12_UNIVERSAL_WORKER_PROMPT.md",
+  "auditor_prompt": "docs/engineering/13_UNIVERSAL_AUDITOR_PROMPT.md",
+  "latest_addendum": "docs/engineering/14_ADDITIONAL_READY_CODE_RESEARCH.md",
+  "precedence": "docs/engineering/CANONICAL_PRECEDENCE.md",
   "work_package_bank": "control/work-packages/bank.json",
   "qualification": "control/qualification.json",
+  "findings_dir": "control/findings/",
   "claims": {
     "status": "NOT_ENABLED",
     "target_branch": "control/registry"
-  }
+  },
+  "canonical_precedence": [
+    "live reviewed repository implementation/evidence",
+    "control/INDEX.json",
+    "explicit supersession in document 14 / CANONICAL_PRECEDENCE.md",
+    "documents 00-13",
+    "older Drive snapshots"
+  ]
 }

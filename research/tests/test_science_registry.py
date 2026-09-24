@@ -124,6 +124,24 @@ class ScientificRegistryTests(unittest.TestCase):
             with self.assertRaisesRegex(ProtocolViolation, "longest"):
                 store.register_protocol(value)
 
+    def test_registered_purge_and_embargo_require_real_inter_period_gap(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            value = protocol()
+            value["validation_period"]["start"] = "2026-01-01T00:00:00Z"
+            with self.assertRaisesRegex(ProtocolViolation, "gap is shorter"):
+                store.register_protocol(value)
+
+    def test_embargo_must_cover_longest_registered_dependency_horizon(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            value = protocol()
+            value["horizons"] = [86400, 172800]
+            value["purge_embargo"]["purge_seconds"] = 172800
+            value["purge_embargo"]["embargo_seconds"] = 86400
+            with self.assertRaisesRegex(ProtocolViolation, "embargo_seconds"):
+                store.register_protocol(value)
+
     def test_boolean_or_negative_temporal_controls_fail_closed(self):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")

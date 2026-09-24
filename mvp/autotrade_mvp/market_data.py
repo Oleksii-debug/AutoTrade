@@ -7,9 +7,11 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
+import re
 from types import MappingProxyType
 from typing import Any, Mapping
-from uuid import NAMESPACE_URL, uuid5
+from urllib.parse import urlsplit
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .instruments import (
     InstrumentNotFound,
@@ -94,7 +96,47 @@ def _canonical(value: Any) -> str:
 def _evidence(value: Mapping[str, object]) -> Mapping[str, object]:
     if not isinstance(value, Mapping) or not value:
         raise MarketDataError("raw_evidence_ref is required")
-    return MappingProxyType(dict(value))
+    required = {"artifact_id", "sha256", "observed_at"}
+    allowed = required | {"source_uri", "rights_id"}
+    keys = set(value)
+    if required - keys:
+        raise MarketDataError("raw_evidence_ref is missing required fields")
+    if keys - allowed:
+        raise MarketDataError("raw_evidence_ref contains unknown fields")
+
+    artifact_id = _text(value["artifact_id"], "artifact_id")
+    try:
+        UUID(artifact_id)
+    except (ValueError, TypeError, AttributeError) as error:
+        raise MarketDataError("raw evidence artifact_id must be a UUID") from error
+
+    digest = _text(value["sha256"], "sha256")
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+        raise MarketDataError("raw evidence sha256 must be a canonical SHA-256 digest")
+
+    observed_at = _text(value["observed_at"], "observed_at")
+    if not observed_at.endswith("Z"):
+        raise MarketDataError("raw evidence observed_at must be UTC and end in Z")
+    try:
+        parsed = datetime.fromisoformat(observed_at[:-1] + "+00:00")
+    except ValueError as error:
+        raise MarketDataError("raw evidence observed_at must be an ISO date-time") from error
+    if parsed.utcoffset() != timedelta(0):
+        raise MarketDataError("raw evidence observed_at must be UTC")
+
+    normalized: dict[str, object] = {
+        "artifact_id": artifact_id,
+        "sha256": digest,
+        "observed_at": observed_at,
+    }
+    if "source_uri" in value:
+        source_uri = _text(value["source_uri"], "source_uri")
+        if not urlsplit(source_uri).scheme:
+            raise MarketDataError("raw evidence source_uri must be an absolute URI")
+        normalized["source_uri"] = source_uri
+    if "rights_id" in value:
+        normalized["rights_id"] = _text(value["rights_id"], "rights_id")
+    return MappingProxyType(normalized)
 
 
 @dataclass(frozen=True)
@@ -204,6 +246,49 @@ class MarketNormalizer:
         self._max_available_age = max_available_age
         self._last_sequence: dict[tuple[str, str, str, str], int] = {}
         self._seen_sequence: dict[tuple[str, str, str, str, int], tuple[str, str]] = {}
+        self._book_state: dict[tuple[str, str, str, str], str] = {}
+
+    @staticmethod
+    def _book_key(
+        provider_id: str,
+        venue_id: str,
+        provider_symbol: str,
+        stream: str,
+    ) -> tuple[str, str, str, str]:
+        return (
+            _text(provider_id, "provider_id"),
+            _text(venue_id, "venue_id"),
+            _text(provider_symbol, "provider_symbol"),
+            _text(stream, "stream"),
+        )
+
+    def book_state(
+        self,
+        *,
+        provider_id: str,
+        venue_id: str,
+        provider_symbol: str,
+        stream: str = "book",
+    ) -> str:
+        key = self._book_key(provider_id, venue_id, provider_symbol, stream)
+        return self._book_state.get(key, "UNINITIALIZED")
+
+    def require_executable_book(
+        self,
+        *,
+        provider_id: str,
+        venue_id: str,
+        provider_symbol: str,
+        stream: str = "book",
+    ) -> None:
+        state = self.book_state(
+            provider_id=provider_id,
+            venue_id=venue_id,
+            provider_symbol=provider_symbol,
+            stream=stream,
+        )
+        if state != "READY":
+            raise MarketDataError(f"book state is {state}; new risk is blocked")
 
     @staticmethod
     def _instrument_version_id(instrument: InstrumentVersion) -> str:
@@ -407,16 +492,45 @@ class MarketNormalizer:
             else:
                 new_sequence = True
                 last = self._last_sequence.get(stream_key)
-                if last is not None:
-                    if update.source_sequence > last + 1:
-                        flags.add("SEQUENCE_GAP")
-                    elif update.source_sequence < last:
-                        flags.add("OUT_OF_ORDER")
-                self._last_sequence[stream_key] = (
-                    update.source_sequence
-                    if last is None
-                    else max(last, update.source_sequence)
-                )
+                if update.kind == "BOOK_SNAPSHOT":
+                    # A verified snapshot is the recovery boundary and establishes
+                    # a new sequence baseline; an earlier gap must not poison it.
+                    self._last_sequence[stream_key] = update.source_sequence
+                else:
+                    if last is not None:
+                        if update.source_sequence > last + 1:
+                            flags.add("SEQUENCE_GAP")
+                        elif update.source_sequence < last:
+                            flags.add("OUT_OF_ORDER")
+                    self._last_sequence[stream_key] = (
+                        update.source_sequence
+                        if last is None
+                        else max(last, update.source_sequence)
+                    )
+
+        if update.kind in {"BOOK_SNAPSHOT", "BOOK_DELTA"}:
+            if update.source_sequence is None:
+                flags.add("BOOK_SEQUENCE_UNVERIFIED")
+                flags.add("BOOK_UNUSABLE")
+                self._book_state[stream_key] = "UNVERIFIED"
+            elif update.kind == "BOOK_SNAPSHOT":
+                if new_sequence:
+                    self._book_state[stream_key] = "READY"
+                elif self._book_state.get(stream_key) != "READY":
+                    # Replaying an old duplicate snapshot after a later gap cannot
+                    # silently re-authorize the book.
+                    flags.add("BOOK_UNUSABLE")
+            else:
+                current = self._book_state.get(stream_key, "UNINITIALIZED")
+                if (
+                    current != "READY"
+                    or "SEQUENCE_GAP" in flags
+                    or "OUT_OF_ORDER" in flags
+                ):
+                    self._book_state[stream_key] = "GAPPED"
+                    flags.add("BOOK_UNUSABLE")
+                else:
+                    self._book_state[stream_key] = "READY"
 
         identity_material = "|".join(
             [

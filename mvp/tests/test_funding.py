@@ -127,6 +127,43 @@ class FundingTests(unittest.TestCase):
                 sign_convention="POSITIVE_LONG_PAYS",
             )
 
+    def test_final_charge_cannot_be_known_before_effective_time(self):
+        with self.assertRaises(ValueError):
+            FundingEvent(
+                funding_id="funding:future-final",
+                revision=1,
+                kind="FINAL",
+                effective_at=moment(9),
+                available_at=moment(8),
+                settlement_currency="USD",
+                signed_notional=Decimal("1000"),
+                rate=Decimal("0.0001"),
+                sign_convention="POSITIVE_LONG_PAYS",
+                evidence_ref="artifact:invalid-final",
+            )
+
+    def test_revision_cannot_backdate_availability_or_change_sign_convention(self):
+        book = FundingRevisionBook()
+        book.record(event(kind="INDICATED", revision=1, available_hour=8))
+        with self.assertRaises(FundingConflict):
+            book.record(event(kind="FINAL", revision=2, available_hour=7))
+
+        changed_sign = FundingEvent(
+            funding_id="funding:BTC-PERP:20260924T08",
+            revision=2,
+            kind="FINAL",
+            effective_at=moment(8),
+            available_at=moment(9),
+            settlement_currency="USD",
+            signed_notional=Decimal("1000"),
+            rate=Decimal("0.0001"),
+            sign_convention="POSITIVE_LONG_RECEIVES",
+            evidence_ref="artifact:changed-sign",
+        )
+        with self.assertRaises(FundingConflict):
+            book.record(changed_sign)
+
+
 
 if __name__ == "__main__":
     unittest.main()

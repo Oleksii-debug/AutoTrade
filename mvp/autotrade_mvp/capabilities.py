@@ -93,23 +93,20 @@ def evaluate_capability(
 
     grouped: dict[str, list[CapabilityClaim]] = {kind: [] for kind in REQUIRED_KINDS}
     future: list[CapabilityClaim] = []
-    expired: list[CapabilityClaim] = []
+    expired_by_kind: dict[str, list[CapabilityClaim]] = {kind: [] for kind in REQUIRED_KINDS}
     for claim in evidence:
         if not isinstance(claim, CapabilityClaim):
             raise TypeError("claims must contain CapabilityClaim values")
         if claim.observed_at > now:
             future.append(claim)
         elif claim.expires_at <= now:
-            expired.append(claim)
+            expired_by_kind[claim.kind].append(claim)
         else:
             grouped[claim.kind].append(claim)
 
     reasons: list[str] = []
     if future:
         reasons.append("EVIDENCE.FUTURE")
-    if expired:
-        reasons.append("EVIDENCE.EXPIRED")
-
     conflicts = False
     denied = False
     unknown = False
@@ -120,7 +117,10 @@ def evaluate_capability(
         live_claims.extend(values)
         if not values:
             unknown = True
-            reasons.append(f"CAPABILITY.MISSING_{kind}")
+            if expired_by_kind[kind]:
+                reasons.append(f"CAPABILITY.EXPIRED_{kind}")
+            else:
+                reasons.append(f"CAPABILITY.MISSING_{kind}")
             continue
         distinct = {claim.value for claim in values}
         if "ALLOW" in distinct and "DENY" in distinct:
@@ -140,7 +140,7 @@ def evaluate_capability(
         status = "CONFLICT"
     elif denied:
         status = "DENIED"
-    elif unknown or expired:
+    elif unknown:
         status = "UNKNOWN"
     else:
         status = "VERIFIED"

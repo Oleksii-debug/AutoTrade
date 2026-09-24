@@ -20,7 +20,10 @@ lineages.
 - depth, item-count and byte budgets fail closed;
 - payload strings are treated only as data, including prompt-injection text;
 - each prepared export carries SHA-256, byte count, rights identity and source
-  references, and is reverified before atomic publication.
+  references, and is reverified before atomic publication;
+- re-verification parses the actual bytes again, rejects fractional JSON numbers,
+  duplicate object keys and any sensitive-key value that is not already redacted,
+  so recomputing a hash cannot bless a forged unsafe payload.
 
 ## Deliberate limits
 

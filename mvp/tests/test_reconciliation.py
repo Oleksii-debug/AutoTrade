@@ -331,6 +331,45 @@ class ReconciliationTests(unittest.TestCase):
             result.reasons,
         )
 
+    def test_snapshot_window_must_be_covered_by_reconciliation_window(self):
+        result = self.base(
+            snapshot_consistency=SnapshotConsistencyEvidence(
+                mode="ATOMIC",
+                query_started_at="2026-09-24T16:59:59Z",
+                query_completed_at="2026-09-24T18:00:00Z",
+            )
+        )
+        self.assertFalse(result.complete)
+        self.assertFalse(result.snapshot_consistent)
+        self.assertIn("ACCOUNT", result.blocking_resources)
+        self.assertIn(
+            "provider snapshot query window is outside reconciliation coverage",
+            result.reasons,
+        )
+
+    def test_snapshot_completion_after_coverage_end_blocks_unknown_absence(self):
+        unknown = UnknownSubmission.create(
+            attempt_id="a-window-mismatch",
+            client_order_id="missing-order",
+            started_at="2026-09-24T18:00:00Z",
+        )
+        result = self.base(
+            snapshot_consistency=SnapshotConsistencyEvidence(
+                mode="ATOMIC",
+                query_started_at="2026-09-24T18:00:00Z",
+                query_completed_at="2026-09-24T19:00:01Z",
+            ),
+            unknown_submissions=[unknown],
+            searched_client_order_ids=["missing-order"],
+            absence_coverage=absence_coverage(),
+        )
+        self.assertFalse(result.complete)
+        self.assertEqual(result.submission_resolutions[0].outcome, "UNKNOWN")
+        self.assertEqual(
+            result.submission_resolutions[0].evidence_reason,
+            "provider_snapshot_consistency_not_evidenced",
+        )
+
     def test_composed_snapshot_requires_buffer_replay_without_gap(self):
         result = self.base(
             snapshot_consistency=SnapshotConsistencyEvidence(

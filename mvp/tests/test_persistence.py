@@ -1,4 +1,5 @@
 from tempfile import TemporaryDirectory
+import sqlite3
 import unittest
 
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
@@ -176,6 +177,159 @@ class JournalStoreTests(unittest.TestCase):
             )
             self.assertTrue(inserted)
             self.assertEqual(saved, {"status": "RETRY"})
+
+
+    def test_v1_database_upgrades_atomically_without_losing_events(self):
+        class LegacyJournalStore(JournalStore):
+            SCHEMA_VERSION = 1
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            legacy = LegacyJournalStore(path)
+            legacy.append_event(event(), outbox_topic="events")
+            self.assertEqual(legacy.current_schema_version(), 1)
+
+            upgraded = JournalStore(path)
+            self.assertEqual(upgraded.current_schema_version(), 2)
+            self.assertEqual(
+                upgraded.load_events("account", "paper-1")[0]["event_id"],
+                "evt-1",
+            )
+            self.assertEqual(upgraded.pending_outbox()[0]["event_id"], "evt-1")
+
+    def test_failed_migration_rolls_back_schema_and_data_changes(self):
+        class BrokenMigrationStore(JournalStore):
+            SCHEMA_VERSION = 3
+
+            @classmethod
+            def _migration_statements(cls, version):
+                if version == 3:
+                    return (
+                        "CREATE TABLE migration_probe(value TEXT NOT NULL)",
+                        "CREATE TABL definitely_invalid(statement TEXT)",
+                    )
+                return super()._migration_statements(version)
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            healthy = JournalStore(path)
+            healthy.append_event(event())
+            self.assertEqual(healthy.current_schema_version(), 2)
+
+            with self.assertRaises(sqlite3.OperationalError):
+                BrokenMigrationStore(path)
+
+            connection = sqlite3.connect(path)
+            try:
+                versions = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT version FROM schema_migrations ORDER BY version"
+                    )
+                ]
+                probe = connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'migration_probe'"
+                ).fetchone()
+                event_count = connection.execute(
+                    "SELECT COUNT(*) FROM events"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+
+            self.assertEqual(versions, [1, 2])
+            self.assertIsNone(probe)
+            self.assertEqual(event_count, 1)
+
+    def test_projection_checkpoint_is_derived_fail_closed_state(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            store.append_event(event("evt-2", 2, {"kind": "fill", "quantity": "2"}))
+
+            state = {"net_quantity": "3"}
+            self.assertTrue(
+                store.save_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                    aggregate_version=2,
+                    state=state,
+                )
+            )
+            self.assertFalse(
+                store.save_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                    aggregate_version=2,
+                    state=state,
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "cannot outrun"):
+                store.save_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                    aggregate_version=3,
+                    state={"net_quantity": "999"},
+                )
+            with self.assertRaisesRegex(ValueError, "cannot regress"):
+                store.save_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                    aggregate_version=1,
+                    state={"net_quantity": "1"},
+                )
+
+            reopened = JournalStore(path)
+            checkpoint = reopened.load_projection_checkpoint(
+                projection_name="position",
+                aggregate_type="account",
+                aggregate_id="paper-1",
+            )
+            self.assertEqual(checkpoint["state"], state)
+            self.assertEqual(checkpoint["aggregate_version"], 2)
+
+            rebuilt = sum(
+                int(item["payload"]["quantity"])
+                for item in reopened.load_events("account", "paper-1")
+                if item["payload"].get("kind") == "fill"
+            )
+            self.assertEqual(str(rebuilt), checkpoint["state"]["net_quantity"])
+
+    def test_projection_checkpoint_tamper_is_detected(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            store.save_projection_checkpoint(
+                projection_name="position",
+                aggregate_type="account",
+                aggregate_id="paper-1",
+                aggregate_version=1,
+                state={"net_quantity": "1"},
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE projection_checkpoints SET state_json = ? "
+                    "WHERE projection_name = 'position'",
+                    ('{"net_quantity":"1000000"}',),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "hash does not match"):
+                JournalStore(path).load_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                )
 
 
 if __name__ == "__main__":

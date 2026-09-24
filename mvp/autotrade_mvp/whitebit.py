@@ -13,6 +13,10 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Mapping
+import base64
+import hashlib
+import hmac
+import json
 import re
 
 from .capabilities import CapabilitySnapshot
@@ -863,4 +867,165 @@ def paged_open_orders_request(
         "OPEN_ORDERS",
         "/api/v4/orders",
         body,
+    )
+
+
+_SECRET_FIELDS = frozenset(
+    {
+        "x-txc-apikey",
+        "x-txc-payload",
+        "x-txc-signature",
+        "api_key",
+        "apikey",
+        "api_secret",
+        "secret",
+        "secret_key",
+        "signature",
+    }
+)
+
+
+def redact_whitebit_debug(value):
+    """Recursively remove authentication material from diagnostic values."""
+    if isinstance(value, Mapping):
+        return {
+            key: (
+                "<redacted>"
+                if str(key).lower() in _SECRET_FIELDS
+                else redact_whitebit_debug(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_whitebit_debug(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_whitebit_debug(item) for item in value)
+    return value
+
+
+def _reject_binary_float(value, *, path: str = "parameters") -> None:
+    if isinstance(value, float):
+        raise WhiteBitAdapterError(f"{path} must not contain binary float")
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            _reject_binary_float(item, path=f"{path}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _reject_binary_float(item, path=f"{path}[{index}]")
+
+
+@dataclass(frozen=True)
+class WhiteBitSignedRequest:
+    endpoint: str
+    body: bytes
+    headers: Mapping[str, str]
+    nonce: int
+    nonce_window: bool
+
+    def safe_debug(self) -> Mapping[str, object]:
+        return MappingProxyType(
+            {
+                "endpoint": self.endpoint,
+                "nonce": self.nonce,
+                "nonce_window": self.nonce_window,
+                "body_length": len(self.body),
+                "headers": redact_whitebit_debug(self.headers),
+            }
+        )
+
+
+def sign_private_request(
+    *,
+    endpoint: str,
+    parameters: Mapping[str, object],
+    nonce: int,
+    api_key: str,
+    api_secret: str | bytes,
+    nonce_window: bool = False,
+    server_time_ms: int | None = None,
+) -> WhiteBitSignedRequest:
+    """Sign exact request bytes without allocating nonce or performing I/O."""
+    path = _text(endpoint, name="endpoint")
+    if not path.startswith("/api/v4/"):
+        raise WhiteBitAdapterError("endpoint must be an absolute WhiteBIT v4 path")
+    if not isinstance(parameters, Mapping):
+        raise TypeError("parameters must be a mapping")
+    if not isinstance(nonce, int) or isinstance(nonce, bool) or nonce <= 0:
+        raise WhiteBitAdapterError("nonce must be a positive integer")
+    if type(nonce_window) is not bool:
+        raise WhiteBitAdapterError("nonce_window must be boolean")
+    if nonce_window:
+        if (
+            not isinstance(server_time_ms, int)
+            or isinstance(server_time_ms, bool)
+            or server_time_ms <= 0
+        ):
+            raise WhiteBitAdapterError(
+                "nonceWindow requires positive server_time_ms evidence"
+            )
+        if abs(nonce - server_time_ms) > 5000:
+            raise WhiteBitAdapterError(
+                "nonce is outside the WhiteBIT ±5 second nonceWindow"
+            )
+    elif server_time_ms is not None:
+        raise WhiteBitAdapterError(
+            "server_time_ms is valid only when nonce_window is enabled"
+        )
+
+    key = _text(api_key, name="api_key")
+    if isinstance(api_secret, str):
+        secret = _text(api_secret, name="api_secret").encode("utf-8")
+    elif isinstance(api_secret, bytes) and api_secret:
+        secret = api_secret
+    else:
+        raise WhiteBitAdapterError("api_secret is required")
+
+    body_object = dict(parameters)
+    if "request" in body_object and body_object["request"] != path:
+        raise WhiteBitAdapterError("request field conflicts with endpoint")
+    if "nonce" in body_object and body_object["nonce"] != nonce:
+        raise WhiteBitAdapterError("nonce field conflicts with caller-owned nonce")
+    if (
+        "nonceWindow" in body_object
+        and body_object["nonceWindow"] != nonce_window
+    ):
+        raise WhiteBitAdapterError(
+            "nonceWindow field conflicts with requested signing mode"
+        )
+    body_object["request"] = path
+    body_object["nonce"] = nonce
+    if nonce_window:
+        body_object["nonceWindow"] = True
+    else:
+        body_object.pop("nonceWindow", None)
+
+    _reject_binary_float(body_object)
+    try:
+        body = json.dumps(
+            body_object,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise WhiteBitAdapterError(
+            "private request parameters must be JSON serializable"
+        ) from error
+    encoded_payload = base64.b64encode(body)
+    signature = hmac.new(secret, encoded_payload, hashlib.sha512).hexdigest()
+    headers = MappingProxyType(
+        {
+            "Content-Type": "application/json",
+            "X-TXC-APIKEY": key,
+            "X-TXC-PAYLOAD": encoded_payload.decode("ascii"),
+            "X-TXC-SIGNATURE": signature,
+        }
+    )
+    return WhiteBitSignedRequest(
+        endpoint=path,
+        body=body,
+        headers=headers,
+        nonce=nonce,
+        nonce_window=nonce_window,
     )

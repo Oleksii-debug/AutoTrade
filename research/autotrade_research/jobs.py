@@ -483,14 +483,21 @@ class ResearchJobStore:
         evidence = _require_immutable_artifact_ref(evidence_ref, "evidence_ref")
         if output_refs is not None and not isinstance(output_refs, list):
             raise ValueError("output_refs must be a list when provided")
-        outputs = [] if output_refs is None else [
-            _require_immutable_artifact_ref(value, "output_ref")
-            for value in output_refs
+        raw_outputs = [] if output_refs is None else [
+            _require_text(value, "output_ref") for value in output_refs
         ]
-        if normalized_verdict == "PROVEN_SUCCEEDED" and not outputs:
+        if normalized_verdict == "PROVEN_SUCCEEDED" and not raw_outputs:
             raise ValueError("PROVEN_SUCCEEDED requires output_refs")
-        if normalized_verdict != "PROVEN_SUCCEEDED" and outputs:
+        if normalized_verdict != "PROVEN_SUCCEEDED" and raw_outputs:
             raise ValueError("output_refs are valid only for PROVEN_SUCCEEDED")
+        outputs = (
+            [
+                _require_immutable_artifact_ref(value, "output_ref")
+                for value in raw_outputs
+            ]
+            if normalized_verdict == "PROVEN_SUCCEEDED"
+            else []
+        )
 
         current = _utc(now or datetime.now(timezone.utc))
         semantic_resolution = {

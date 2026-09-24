@@ -396,11 +396,18 @@ class MarketNormalizer:
             if raw.get("next_funding_at") is not None:
                 value = raw["next_funding_at"]
                 if isinstance(value, datetime):
-                    result["next_funding_at"] = _utc_text(_instant(value, "next_funding_at"))
+                    point = _instant(value, "next_funding_at")
                 elif isinstance(value, str) and value.endswith("Z"):
-                    result["next_funding_at"] = value
+                    try:
+                        point = datetime.fromisoformat(value[:-1] + "+00:00")
+                    except ValueError as error:
+                        raise MarketDataError(
+                            "next_funding_at must be an ISO UTC instant"
+                        ) from error
+                    point = _instant(point, "next_funding_at")
                 else:
                     raise MarketDataError("next_funding_at must be an UTC instant")
+                result["next_funding_at"] = _utc_text(point)
             return result
 
         if kind in {"MARK", "INDEX"}:

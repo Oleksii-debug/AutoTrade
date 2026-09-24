@@ -136,6 +136,90 @@ class InformationClaim:
         if self.untrusted_content is not True or self.permission_effect != "NONE":
             raise ValueError("information claims cannot grant authority")
 
+    def evidence_digest(self) -> str:
+        payload = {
+            "claim_id": self.claim_id,
+            "subject": self.subject,
+            "predicate": self.predicate,
+            "value": self.value,
+            "source_id": self.source_id,
+            "source_revision": self.source_revision,
+            "source_kind": self.source_kind,
+            "published_at": self.published_at.isoformat(),
+            "available_at": self.available_at.isoformat(),
+            "passage_hash": self.passage_hash,
+            "locator": self.locator,
+            "rights_basis": self.rights_basis,
+            "syndication_key": self.syndication_key,
+            "conflict_key": self.conflict_key,
+            "untrusted_content": self.untrusted_content,
+            "permission_effect": self.permission_effect,
+        }
+        return _digest(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+        )
+
+
+@dataclass(frozen=True)
+class InformationSnapshot:
+    """Causal, content-addressed view of claims visible at one replay cutoff."""
+
+    cutoff: datetime
+    claims: tuple[InformationClaim, ...]
+
+    def __post_init__(self) -> None:
+        cutoff = _time(self.cutoff, name="cutoff")
+        object.__setattr__(self, "cutoff", cutoff)
+        if not isinstance(self.claims, tuple):
+            raise ValueError("claims must be a tuple")
+
+        seen: set[str] = set()
+        for claim in self.claims:
+            if not isinstance(claim, InformationClaim):
+                raise ValueError("snapshot claims must be InformationClaim values")
+            if claim.available_at > cutoff:
+                raise ValueError("snapshot cannot contain future claims")
+            if claim.claim_id in seen:
+                raise ValueError("snapshot cannot contain duplicate claim identities")
+            seen.add(claim.claim_id)
+
+        canonical = tuple(
+            sorted(
+                self.claims,
+                key=lambda item: (item.available_at, item.published_at, item.claim_id),
+            )
+        )
+        if canonical != self.claims:
+            raise ValueError("snapshot claims must be in canonical order")
+
+    def to_manifest(self) -> dict[str, object]:
+        return {
+            "schema_version": "1.0.0",
+            "cutoff": self.cutoff.isoformat(),
+            "claims": [
+                {
+                    "claim_id": claim.claim_id,
+                    "evidence_digest": claim.evidence_digest(),
+                }
+                for claim in self.claims
+            ],
+        }
+
+    def digest(self) -> str:
+        return _digest(
+            json.dumps(
+                self.to_manifest(),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+        )
+
 
 class ClaimStore:
     def __init__(self):
@@ -244,6 +328,10 @@ class ClaimStore:
                 key=lambda item: (item.available_at, item.published_at, item.claim_id),
             )
         )
+
+    def snapshot_at(self, cutoff: datetime) -> InformationSnapshot:
+        time = _time(cutoff, name="cutoff")
+        return InformationSnapshot(cutoff=time, claims=self.available_at(time))
 
     def revisions(self, source_id: str) -> tuple[InformationClaim, ...]:
         identifier = _text(source_id, name="source_id")

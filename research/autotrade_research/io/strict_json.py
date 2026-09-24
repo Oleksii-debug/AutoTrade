@@ -6,6 +6,7 @@ from typing import Any
 
 _JSON_WHITESPACE_BYTES = b" \t\r\n"
 _JSON_INTEGER_MAX_DIGITS = 640
+_JSON_MAX_NESTING_DEPTH = 128
 
 
 class DuplicateJsonKeyError(ValueError):
@@ -51,9 +52,9 @@ def _parse_bounded_json_integer(value: str) -> int:
 
 
 def _validate_strict_json_value(root: object) -> None:
-    stack = [root]
+    stack = [(root, 0)]
     while stack:
-        value = stack.pop()
+        value, depth = stack.pop()
         if isinstance(value, str):
             try:
                 value.encode("utf-8")
@@ -67,8 +68,18 @@ def _validate_strict_json_value(root: object) -> None:
             if not math.isfinite(value):
                 raise InvalidJsonDomainError("non-finite JSON number")
         elif isinstance(value, list):
-            stack.extend(value)
+            child_depth = depth + 1
+            if child_depth > _JSON_MAX_NESTING_DEPTH:
+                raise InvalidJsonDomainError(
+                    f"JSON nesting exceeds {_JSON_MAX_NESTING_DEPTH} containers"
+                )
+            stack.extend((item, child_depth) for item in value)
         elif isinstance(value, dict):
+            child_depth = depth + 1
+            if child_depth > _JSON_MAX_NESTING_DEPTH:
+                raise InvalidJsonDomainError(
+                    f"JSON nesting exceeds {_JSON_MAX_NESTING_DEPTH} containers"
+                )
             for key, item in value.items():
                 try:
                     key.encode("utf-8")
@@ -76,7 +87,7 @@ def _validate_strict_json_value(root: object) -> None:
                     raise InvalidJsonDomainError(
                         "JSON object key contains invalid Unicode scalar"
                     ) from exc
-                stack.append(item)
+                stack.append((item, child_depth))
         else:
             raise InvalidJsonDomainError(
                 f"unsupported decoded JSON type: {type(value).__name__}"
@@ -85,6 +96,8 @@ def _validate_strict_json_value(root: object) -> None:
 
 def strict_json_loads(text: str) -> Any:
     """Decode one JSON value and reject ambiguous/non-canonical decoded domains."""
+    if not isinstance(text, str):
+        raise TypeError("text must be str; decode bytes explicitly at the boundary")
     raw = json.loads(
         text,
         object_pairs_hook=_unique_json_object,

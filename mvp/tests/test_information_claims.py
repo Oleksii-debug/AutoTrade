@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta, timezone
+import json
 import unittest
 
 from mvp.autotrade_mvp.information_claims import (
     ClaimStore,
     InformationClaim,
+    InformationSnapshot,
     SourceDocument,
 )
 
@@ -131,6 +133,111 @@ class InformationClaimTests(unittest.TestCase):
         )
         self.assertEqual(normalized.published_at, BASE)
         self.assertEqual(normalized.available_at, BASE + timedelta(hours=1))
+
+    def test_future_revision_cannot_change_earlier_snapshot_digest(self):
+        store = ClaimStore()
+        old = store.build_claim(
+            doc("corp", "r1", "first", available=0),
+            subject="X",
+            predicate="guidance",
+            value="10",
+        )
+        store.add(old)
+        cutoff = BASE + timedelta(hours=1)
+        before = store.snapshot_at(cutoff)
+
+        later = store.build_claim(
+            doc("corp", "r2", "revised", available=2),
+            subject="X",
+            predicate="guidance",
+            value="8",
+        )
+        store.add(later)
+        after = store.snapshot_at(cutoff)
+
+        self.assertEqual(before.claims, (old,))
+        self.assertEqual(after.claims, (old,))
+        self.assertEqual(before.digest(), after.digest())
+
+    def test_snapshot_digest_changes_when_revision_becomes_causally_visible(self):
+        store = ClaimStore()
+        old = store.build_claim(
+            doc("corp", "r1", "first", available=0),
+            subject="X",
+            predicate="guidance",
+            value="10",
+        )
+        later = store.build_claim(
+            doc("corp", "r2", "revised", available=2),
+            subject="X",
+            predicate="guidance",
+            value="8",
+        )
+        store.add(old)
+        store.add(later)
+
+        earlier = store.snapshot_at(BASE + timedelta(hours=1))
+        visible = store.snapshot_at(BASE + timedelta(hours=2))
+        self.assertNotEqual(earlier.digest(), visible.digest())
+        self.assertEqual(visible.claims, (old, later))
+
+    def test_snapshot_digest_commits_to_cutoff_even_when_claim_set_is_unchanged(self):
+        store = ClaimStore()
+        claim = store.build_claim(
+            doc("a", "r1", "plain"),
+            subject="X",
+            predicate="state",
+            value="up",
+        )
+        store.add(claim)
+        first = store.snapshot_at(BASE)
+        second = store.snapshot_at(BASE + timedelta(minutes=1))
+        self.assertEqual(first.claims, second.claims)
+        self.assertNotEqual(first.digest(), second.digest())
+
+    def test_snapshot_manifest_exposes_only_digests_not_extracted_content(self):
+        store = ClaimStore()
+        claim = store.build_claim(
+            doc("a", "r1", "raw passage must not be copied into manifest"),
+            subject="X",
+            predicate="comment",
+            value="sensitive extracted value",
+        )
+        store.add(claim)
+        manifest = store.snapshot_at(BASE).to_manifest()
+        encoded = json.dumps(manifest, sort_keys=True)
+        self.assertNotIn("raw passage", encoded)
+        self.assertNotIn("sensitive extracted value", encoded)
+        self.assertEqual(manifest["claims"][0]["claim_id"], claim.claim_id)
+        self.assertEqual(
+            manifest["claims"][0]["evidence_digest"],
+            claim.evidence_digest(),
+        )
+
+    def test_direct_snapshot_rejects_future_duplicate_and_noncanonical_claims(self):
+        store = ClaimStore()
+        early = store.build_claim(
+            doc("a", "r1", "early", available=0),
+            subject="A",
+            predicate="state",
+            value="up",
+        )
+        later = store.build_claim(
+            doc("b", "r1", "later", available=1),
+            subject="B",
+            predicate="state",
+            value="down",
+        )
+
+        with self.assertRaisesRegex(ValueError, "future claims"):
+            InformationSnapshot(cutoff=BASE, claims=(later,))
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            InformationSnapshot(cutoff=BASE, claims=(early, early))
+        with self.assertRaisesRegex(ValueError, "canonical order"):
+            InformationSnapshot(
+                cutoff=BASE + timedelta(hours=1),
+                claims=(later, early),
+            )
 
 
 if __name__ == "__main__":

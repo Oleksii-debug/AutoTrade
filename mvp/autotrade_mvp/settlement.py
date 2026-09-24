@@ -47,7 +47,7 @@ class SettlementObligation:
     def __post_init__(self) -> None:
         obligation_id = _text(self.obligation_id, name="obligation_id")
         cause_event_id = _text(self.cause_event_id, name="cause_event_id")
-        currency = _text(self.currency, name="currency")
+        currency = _text(self.currency, name="currency").upper()
         amount = _decimal(self.amount, name="amount")
         if amount == 0:
             raise ValueError("amount must be non-zero")
@@ -94,7 +94,7 @@ class SettlementBook:
     ) -> None:
         self._settled_cash: dict[str, Decimal] = {}
         for currency, amount in (settled_cash or {}).items():
-            unit = _text(currency, name="currency")
+            unit = _text(currency, name="currency").upper()
             if unit in self._settled_cash:
                 raise SettlementConflict(
                     "settled_cash contains duplicate normalized currency codes"
@@ -168,7 +168,7 @@ class SettlementBook:
         return tuple(settled)
 
     def snapshot(self, currency: str) -> SettlementSnapshot:
-        unit = _text(currency, name="currency")
+        unit = _text(currency, name="currency").upper()
         receivable = Decimal("0")
         payable = Decimal("0")
         for obligation in self._obligations.values():
@@ -210,7 +210,7 @@ def equity_cash_obligation(
     trade_date: date,
     settlement_date: date,
 ) -> SettlementObligation:
-    unit = _text(settlement_currency, name="settlement_currency")
+    unit = _text(settlement_currency, name="settlement_currency").upper()
     normalized_side = _text(side, name="side").upper()
     if normalized_side not in {"BUY", "SELL"}:
         raise ValueError("side must be BUY or SELL")

@@ -252,10 +252,7 @@ class MarketNormalizer:
         self._registry = registry
         self._max_available_age = max_available_age
         self._last_sequence: dict[tuple[str, str, str, str], int] = {}
-        self._seen_sequence: dict[
-            tuple[str, str, str, str, int, int],
-            tuple[str, str],
-        ] = {}
+        self._seen_sequence: dict[tuple[str, str, str, str, int], tuple[str, str]] = {}
 
     @staticmethod
     def _instrument_version_id(instrument: InstrumentVersion) -> str:
@@ -451,7 +448,6 @@ class MarketNormalizer:
         sequence_identity = (
             *stream_key,
             update.source_sequence,
-            update.revision,
         ) if update.source_sequence is not None else None
 
         new_sequence = False

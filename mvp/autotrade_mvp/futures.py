@@ -68,6 +68,7 @@ class FuturesContract:
     delivery_cutoff: datetime
     expiry: datetime
     settlement_method: Literal["CASH", "PHYSICAL"]
+    price_base_currency: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "instrument", _text(self.instrument, "instrument"))
@@ -88,6 +89,21 @@ class FuturesContract:
             raise FuturesError("delivery_cutoff cannot be after expiry")
         if self.settlement_method not in {"CASH", "PHYSICAL"}:
             raise FuturesError("settlement_method must be CASH or PHYSICAL")
+        if self.price_base_currency is not None:
+            object.__setattr__(
+                self,
+                "price_base_currency",
+                _text(self.price_base_currency, "price_base_currency"),
+            )
+        if self.payoff == "INVERSE":
+            if self.price_base_currency is None:
+                raise FuturesError(
+                    "inverse futures require explicit price_base_currency qualification"
+                )
+            if self.settlement_currency != self.price_base_currency:
+                raise FuturesError(
+                    "inverse settlement_currency must match the base currency produced by face/price"
+                )
 
 
 @dataclass(frozen=True)
@@ -162,7 +178,7 @@ def inverse_futures_pnl_exact(
     entry_price: Decimal | str | int,
     exit_price: Decimal | str | int,
 ) -> Fraction:
-    """Return exact settlement-currency P&L as a rational number.
+    """Return exact price-base-currency P&L as a rational number.
 
     For a contract whose multiplier is a quote-currency face value:
     contracts * face * (1 / entry - 1 / exit).

@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import json
 import unittest
 
 from research.autotrade_research.strategies.deterministic import (
@@ -130,6 +131,66 @@ class DeterministicStrategyTests(unittest.TestCase):
         strategy.ingest(original, simulation_time=original.available_at)
         with self.assertRaisesRegex(ValueError, "different observation content"):
             strategy.ingest(conflicting, simulation_time=conflicting.available_at)
+
+    def test_evicted_event_identity_survives_snapshot_restore(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="1",
+        )
+        for item in (obs(0, "100"), obs(1, "101"), obs(2, "102")):
+            strategy.ingest(item, simulation_time=item.available_at)
+
+        restored = ReturnThresholdBaseline.restore(strategy.snapshot())
+        evicted = obs(0, "100")
+        self.assertFalse(
+            restored.ingest(
+                evicted,
+                simulation_time=BASE + timedelta(minutes=3),
+            )
+        )
+
+        moved = CausalObservation.create(
+            event_id=evicted.event_id,
+            symbol="BBB",
+            available_at=BASE + timedelta(minutes=3),
+            price="100",
+        )
+        with self.assertRaisesRegex(ValueError, "different observation content"):
+            restored.ingest(
+                moved,
+                simulation_time=moved.available_at,
+            )
+
+    def test_snapshot_history_must_match_archived_event_content(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="1",
+        )
+        for item in (obs(0, "100"), obs(1, "101")):
+            strategy.ingest(item, simulation_time=item.available_at)
+        payload = json.loads(strategy.snapshot())
+        payload["history"]["AAA"][0]["price"] = "999"
+        tampered = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        with self.assertRaisesRegex(
+            ValueError,
+            "not bound to observation archive",
+        ):
+            ReturnThresholdBaseline.restore(tampered)
+
+    def test_legacy_snapshot_without_identity_archive_fails_closed(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="1",
+        )
+        strategy.ingest(obs(0, "100"), simulation_time=BASE)
+        payload = json.loads(strategy.snapshot())
+        payload["schema_version"] = 1
+        payload.pop("observation_archive")
+        with self.assertRaisesRegex(ValueError, "unsupported strategy snapshot"):
+            ReturnThresholdBaseline.restore(json.dumps(payload))
 
     def test_out_of_order_availability_is_rejected(self):
         strategy = ReturnThresholdBaseline(lookback=2, threshold="0.01", proposal_quantity="1")

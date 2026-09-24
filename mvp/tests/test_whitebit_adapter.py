@@ -15,6 +15,7 @@ from mvp.autotrade_mvp.whitebit import (
     WhiteBitOrderIntent,
     WhiteBitPageEvidence,
     absence_evidence_from_coverages,
+    decode_whitebit_json,
     execution_history_coverage,
     open_order_coverage,
     order_history_coverage,
@@ -399,6 +400,20 @@ class WhiteBitAdapterTests(unittest.TestCase):
                     "dealStock": "0",
                 }
             )
+
+    def test_provider_json_decoder_preserves_decimal_timestamp(self):
+        decoded = decode_whitebit_json(
+            '{"time":1593233939.123456,"amount":"0.001","id":123}'
+        )
+        self.assertIsInstance(decoded["time"], Decimal)
+        self.assertEqual(decoded["time"], Decimal("1593233939.123456"))
+        self.assertIsInstance(decoded["id"], int)
+
+    def test_provider_json_decoder_rejects_nonfinite_and_invalid_input(self):
+        with self.assertRaisesRegex(WhiteBitAdapterError, "non-finite"):
+            decode_whitebit_json('{"value":NaN}')
+        with self.assertRaisesRegex(WhiteBitAdapterError, "invalid"):
+            decode_whitebit_json('{"broken":')
 
     def test_unique_execution_deal_maps_to_reconciliation_fill(self):
         deal = parse_execution_deal(

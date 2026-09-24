@@ -30,21 +30,6 @@ from mvp.autotrade_mvp.reconciliation import (
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
 
 
-FENCING_EVIDENCE = [
-    {
-        "artifact_id": "11111111-1111-4111-8111-111111111111",
-        "sha256": "sha256:" + "a" * 64,
-        "observed_at": "2026-09-24T19:58:00Z",
-        "rights_id": "recovery:fencing",
-    },
-    {
-        "artifact_id": "22222222-2222-4222-8222-222222222222",
-        "sha256": "sha256:" + "b" * 64,
-        "observed_at": "2026-09-24T19:59:00Z",
-        "rights_id": "recovery:provider-session",
-    },
-]
-
 
 def _restore_instant(restored: Path, seconds: int) -> str:
     marker = json.loads(
@@ -55,12 +40,34 @@ def _restore_instant(restored: Path, seconds: int) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
-def _fencing_evidence(restored: Path | None = None):
-    values = [dict(item) for item in FENCING_EVIDENCE]
-    if restored is not None:
-        for index, item in enumerate(values, start=1):
-            item["observed_at"] = _restore_instant(restored, index)
-    return values
+def _fencing_evidence(restored: Path, **overrides):
+    marker = json.loads(
+        (restored / "RESTORE_RECONCILIATION_REQUIRED.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    payload = {
+        "schema_version": 1,
+        "kind": "AUTOTRADE_FENCING_ATTESTATION",
+        "backup_manifest_sha256": marker["backup_manifest_sha256"],
+        "source_sha": marker["source_sha"],
+        "old_owner_id": marker["source_owner_id"],
+        "old_owner_epoch": marker["source_owner_epoch"],
+        "new_owner_id": "restored-host",
+        "new_owner_epoch": marker["source_owner_epoch"] + 1,
+        "mechanism": "PROVIDER_SESSION_REVOKED",
+        "observed_at": _restore_instant(restored, 1),
+    }
+    payload.update(overrides)
+    return [_publish_json_artifact(restored / "artifacts", payload)]
+
+
+def _restore_controller(restored: Path) -> RecoveryController:
+    controller = RecoveryController()
+    controller.restore_owner(
+        RecoveryController.load_owner_fence(restored / "state" / "owner-fence.json")
+    )
+    return controller
 
 
 def _completed_at(restored: Path) -> str:
@@ -195,6 +202,14 @@ class BackupRestoreTests(unittest.TestCase):
         artifacts = root / "artifacts"
         run_vertical_slice([100, 101, 102, 103], state)
         _artifact_store(artifacts)
+        build_identity = _build_identity_artifact(artifacts)
+        (state / "build-identity.sha256").write_text(
+            build_identity + "\n",
+            encoding="ascii",
+        )
+        source_controller = RecoveryController()
+        source_controller.start("source-host")
+        source_controller.persist_owner_fence(state / "owner-fence.json")
         return state, artifacts
 
     def test_wal_active_backup_verifies_and_restore_is_fail_closed(self):
@@ -269,6 +284,7 @@ class BackupRestoreTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             state, artifacts = self._build_sources(root)
+            (state / "build-identity.sha256").unlink()
             backup = create_backup(state, artifacts, root / "backup")
             manifest = verify_backup(backup)
             self.assertIsNone(manifest["source_sha"])
@@ -282,6 +298,7 @@ class BackupRestoreTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             state, artifacts = self._build_sources(root)
+            (state / "build-identity.sha256").unlink()
             missing = "sha256:" + "f" * 64
             with self.assertRaisesRegex(BackupIntegrityError, "missing"):
                 create_backup(
@@ -321,8 +338,7 @@ class BackupRestoreTests(unittest.TestCase):
             restored = restore_backup(backup, root / "restored")
             self.assertTrue(restore_requires_reconciliation(restored))
 
-            controller = RecoveryController()
-            owner = controller.start("restored-host")
+            controller = _restore_controller(restored)
             proof = complete_restore_reconciliation(
                 restored,
                 controller=controller,
@@ -332,7 +348,10 @@ class BackupRestoreTests(unittest.TestCase):
             )
 
             self.assertEqual(controller.state, HostState.READY)
-            self.assertEqual(proof["owner_id"], owner.owner_id)
+            self.assertEqual(proof["source_owner_id"], "source-host")
+            self.assertEqual(proof["source_owner_epoch"], 1)
+            self.assertEqual(proof["owner_id"], "restored-host")
+            self.assertEqual(proof["owner_epoch"], 2)
             self.assertEqual(proof["blocking_resources"], [])
             self.assertFalse(restore_requires_reconciliation(restored))
             self.assertFalse(restore_requires_reconciliation(restored))
@@ -343,8 +362,7 @@ class BackupRestoreTests(unittest.TestCase):
             state, artifacts = self._build_sources(root)
             backup = create_backup(state, artifacts, root / "backup")
             restored = restore_backup(backup, root / "restored")
-            controller = RecoveryController()
-            controller.start("restored-host")
+            controller = _restore_controller(restored)
 
             proof = complete_restore_reconciliation(
                 restored,
@@ -366,8 +384,7 @@ class BackupRestoreTests(unittest.TestCase):
             state, artifacts = self._build_sources(root)
             backup = create_backup(state, artifacts, root / "backup")
             restored = restore_backup(backup, root / "restored")
-            controller = RecoveryController()
-            controller.start("restored-host")
+            controller = _restore_controller(restored)
 
             with self.assertRaisesRegex(BackupError, "incomplete"):
                 complete_restore_reconciliation(
@@ -385,8 +402,7 @@ class BackupRestoreTests(unittest.TestCase):
             state, artifacts = self._build_sources(root)
             backup = create_backup(state, artifacts, root / "backup")
             restored = restore_backup(backup, root / "restored")
-            controller = RecoveryController()
-            controller.start("restored-host")
+            controller = _restore_controller(restored)
 
             with self.assertRaisesRegex(BackupError, "fencing"):
                 complete_restore_reconciliation(
@@ -404,9 +420,8 @@ class BackupRestoreTests(unittest.TestCase):
             state, artifacts = self._build_sources(root)
             backup = create_backup(state, artifacts, root / "backup")
             restored = restore_backup(backup, root / "restored")
-            controller = RecoveryController()
-            controller.start("restored-host")
-            with self.assertRaisesRegex(BackupError, "canonical EvidenceRef"):
+            controller = _restore_controller(restored)
+            with self.assertRaisesRegex(BackupIntegrityError, "canonical SHA-256"):
                 complete_restore_reconciliation(
                     restored,
                     controller=controller,
@@ -416,70 +431,56 @@ class BackupRestoreTests(unittest.TestCase):
                 )
             self.assertTrue(restore_requires_reconciliation(restored))
 
-    def test_same_fencing_artifact_id_cannot_claim_different_bytes(self):
+    def test_missing_fencing_artifact_cannot_clear_gate(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             state, artifacts = self._build_sources(root)
             backup = create_backup(state, artifacts, root / "backup")
             restored = restore_backup(backup, root / "restored")
-            controller = RecoveryController()
-            controller.start("restored-host")
-
-            conflicting = _fencing_evidence(restored)
-            conflicting[1]["artifact_id"] = conflicting[0]["artifact_id"]
-            self.assertNotEqual(conflicting[1]["sha256"], conflicting[0]["sha256"])
-            with self.assertRaisesRegex(BackupError, "artifact_id"):
+            controller = _restore_controller(restored)
+            refs = _fencing_evidence(restored)
+            digest = refs[0].removeprefix("sha256:")
+            object_path = restored / "artifacts" / "objects" / "sha256" / digest[:2] / digest
+            object_path.unlink()
+            with self.assertRaisesRegex(BackupIntegrityError, "missing"):
                 complete_restore_reconciliation(
                     restored,
                     controller=controller,
                     reconciliation=_reconciliation(),
-                    fencing_evidence=conflicting,
+                    fencing_evidence=refs,
                     completed_at=_completed_at(restored),
                 )
             self.assertTrue(restore_requires_reconciliation(restored))
 
-    def test_same_fencing_bytes_cannot_be_counted_as_two_evidence_objects(self):
+    def test_same_fencing_artifact_cannot_be_counted_twice(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             state, artifacts = self._build_sources(root)
             backup = create_backup(state, artifacts, root / "backup")
             restored = restore_backup(backup, root / "restored")
-            controller = RecoveryController()
-            controller.start("restored-host")
-
-            duplicate_bytes = _fencing_evidence(restored)
-            duplicate_bytes[1]["sha256"] = duplicate_bytes[0]["sha256"]
-            with self.assertRaisesRegex(BackupError, "evidence bytes"):
-                complete_restore_reconciliation(
-                    restored,
-                    controller=controller,
-                    reconciliation=_reconciliation(),
-                    fencing_evidence=duplicate_bytes,
-                    completed_at=_completed_at(restored),
-                )
-            self.assertTrue(restore_requires_reconciliation(restored))
-
-    def test_duplicate_or_future_fencing_evidence_never_clears_gate(self):
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            state, artifacts = self._build_sources(root)
-            backup = create_backup(state, artifacts, root / "backup")
-            restored = restore_backup(backup, root / "restored")
-            controller = RecoveryController()
-            controller.start("restored-host")
-
-            duplicate = _fencing_evidence(restored)[:1] * 2
+            controller = _restore_controller(restored)
+            ref = _fencing_evidence(restored)[0]
             with self.assertRaisesRegex(BackupError, "unique"):
                 complete_restore_reconciliation(
                     restored,
                     controller=controller,
                     reconciliation=_reconciliation(),
-                    fencing_evidence=duplicate,
+                    fencing_evidence=[ref, ref],
                     completed_at=_completed_at(restored),
                 )
+            self.assertTrue(restore_requires_reconciliation(restored))
 
-            future = _fencing_evidence(restored)[:1]
-            future[0]["observed_at"] = _restore_instant(restored, 11)
+    def test_future_fencing_attestation_never_clears_gate(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = _restore_controller(restored)
+            future = _fencing_evidence(
+                restored,
+                observed_at=_restore_instant(restored, 11),
+            )
             with self.assertRaisesRegex(BackupError, "postdate"):
                 complete_restore_reconciliation(
                     restored,
@@ -490,34 +491,30 @@ class BackupRestoreTests(unittest.TestCase):
                 )
             self.assertTrue(restore_requires_reconciliation(restored))
 
-    def test_stale_or_semantically_unbound_fencing_evidence_cannot_clear_gate(self):
+    def test_wrong_old_owner_epoch_or_unsupported_fence_cannot_clear_gate(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             state, artifacts = self._build_sources(root)
             backup = create_backup(state, artifacts, root / "backup")
             restored = restore_backup(backup, root / "restored")
-            controller = RecoveryController()
-            controller.start("restored-host")
 
-            stale = _fencing_evidence(restored)[:1]
-            stale[0]["observed_at"] = _restore_instant(restored, -1)
-            with self.assertRaisesRegex(BackupError, "predate"):
+            wrong_epoch = _fencing_evidence(restored, old_owner_epoch=999)
+            with self.assertRaisesRegex(BackupError, "old owner/epoch"):
                 complete_restore_reconciliation(
                     restored,
-                    controller=controller,
+                    controller=_restore_controller(restored),
                     reconciliation=_reconciliation(),
-                    fencing_evidence=stale,
+                    fencing_evidence=wrong_epoch,
                     completed_at=_completed_at(restored),
                 )
 
-            unrelated = _fencing_evidence(restored)[:1]
-            unrelated[0]["rights_id"] = "recovery:unrelated"
-            with self.assertRaisesRegex(BackupError, "recovery:fencing"):
+            unsupported = _fencing_evidence(restored, mechanism="UNVERIFIED_CLAIM")
+            with self.assertRaisesRegex(BackupError, "mechanism"):
                 complete_restore_reconciliation(
                     restored,
-                    controller=controller,
+                    controller=_restore_controller(restored),
                     reconciliation=_reconciliation(),
-                    fencing_evidence=unrelated,
+                    fencing_evidence=unsupported,
                     completed_at=_completed_at(restored),
                 )
             self.assertTrue(restore_requires_reconciliation(restored))
@@ -528,8 +525,7 @@ class BackupRestoreTests(unittest.TestCase):
             state, artifacts = self._build_sources(root)
             backup = create_backup(state, artifacts, root / "backup")
             restored = restore_backup(backup, root / "restored")
-            controller = RecoveryController()
-            controller.start("restored-host")
+            controller = _restore_controller(restored)
             complete_restore_reconciliation(
                 restored,
                 controller=controller,
@@ -549,8 +545,7 @@ class BackupRestoreTests(unittest.TestCase):
             state, artifacts = self._build_sources(root)
             backup = create_backup(state, artifacts, root / "backup")
             restored = restore_backup(backup, root / "restored")
-            controller = RecoveryController()
-            controller.start("restored-host")
+            controller = _restore_controller(restored)
             complete_restore_reconciliation(
                 restored,
                 controller=controller,
@@ -595,8 +590,7 @@ class BackupRestoreTests(unittest.TestCase):
             state, artifacts = self._build_sources(root)
             backup = create_backup(state, artifacts, root / "backup")
             restored = restore_backup(backup, root / "restored")
-            controller = RecoveryController()
-            controller.start("restored-host")
+            controller = _restore_controller(restored)
             complete_restore_reconciliation(
                 restored,
                 controller=controller,

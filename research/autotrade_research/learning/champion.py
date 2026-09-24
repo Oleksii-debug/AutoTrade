@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import sqlite3
 
-from research.autotrade_research.science.registry import ScientificRegistry
+from autotrade_research.science.registry import ScientificRegistry
 
 
 def _time(value: datetime, *, name: str) -> datetime:

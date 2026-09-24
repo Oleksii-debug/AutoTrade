@@ -81,6 +81,93 @@ def _freeze_evidence(value: Mapping[str, object]) -> Mapping[str, object]:
 
 
 @dataclass(frozen=True)
+class CapabilityEvidenceCheck:
+    status: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        if self.status not in {"VALID", "UNKNOWN", "CONFLICTED"}:
+            raise ValueError("unsupported capability evidence check status")
+        _text(self.reason, "reason")
+
+
+_CAPABILITY_EVIDENCE_VERSION = 1
+_PRODUCER_KIND_BY_SOURCE = {
+    "DOCUMENTED": "PROVIDER_DOCUMENTATION",
+    "API": "PROVIDER_API",
+    "ACCOUNT": "ACCOUNT_CAPABILITY",
+    "INSTRUMENT": "INSTRUMENT_CAPABILITY",
+}
+
+
+class ArtifactCapabilityEvidenceVerifier:
+    """Verify capability authority against the canonical immutable artifact store.
+
+    The verifier is intentionally read-only.  It does not publish evidence and
+    cannot grant authority by itself; it only proves that a claim's EvidenceRef
+    resolves to immutable bytes whose manifest is bound to the same capability
+    source and exact account/instrument identity.
+    """
+
+    def __init__(self, store: object) -> None:
+        if not callable(getattr(store, "load_manifest", None)):
+            raise TypeError("store must provide load_manifest")
+        if not callable(getattr(store, "read_bytes", None)):
+            raise TypeError("store must provide read_bytes")
+        self._store = store
+
+    def verify(self, claim: "CapabilityClaim") -> CapabilityEvidenceCheck:
+        if not isinstance(claim, CapabilityClaim):
+            raise TypeError("claim must be CapabilityClaim")
+        ref = claim.evidence_ref
+        artifact_id = str(ref["artifact_id"])
+        try:
+            manifest = self._store.load_manifest(artifact_id)
+            # read_bytes re-verifies the content-addressed object, size and digest.
+            self._store.read_bytes(artifact_id)
+        except FileNotFoundError:
+            return CapabilityEvidenceCheck("UNKNOWN", "artifact_missing")
+        except (OSError, ValueError, TypeError, KeyError):
+            return CapabilityEvidenceCheck("CONFLICTED", "artifact_integrity_failure")
+
+        if manifest.get("sha256") != ref["sha256"]:
+            return CapabilityEvidenceCheck("CONFLICTED", "artifact_digest_mismatch")
+
+        metadata = manifest.get("metadata")
+        if type(metadata) is not dict:
+            return CapabilityEvidenceCheck("CONFLICTED", "artifact_metadata_missing")
+
+        expected = {
+            "capability_evidence_version": _CAPABILITY_EVIDENCE_VERSION,
+            "evidence_type": "CAPABILITY_CLAIM",
+            "producer_kind": _PRODUCER_KIND_BY_SOURCE[claim.source],
+            "capability_source": claim.source,
+            "provider_id": claim.provider_id,
+            "account_id": claim.account_id,
+            "entity_id": claim.entity_id,
+            "environment": claim.environment,
+            "instrument_version": claim.instrument_version,
+            "observed_at": str(ref["observed_at"]),
+        }
+        if any(metadata.get(key) != value for key, value in expected.items()):
+            return CapabilityEvidenceCheck("CONFLICTED", "artifact_identity_or_semantics_mismatch")
+
+        source_uri = ref.get("source_uri")
+        if source_uri is not None:
+            sources = manifest.get("source_refs")
+            if type(sources) is not list or source_uri not in sources:
+                return CapabilityEvidenceCheck("CONFLICTED", "artifact_source_provenance_mismatch")
+
+        rights_id = ref.get("rights_id")
+        if rights_id is not None:
+            rights = manifest.get("rights")
+            if type(rights) is not dict or rights.get("rights_id") != rights_id:
+                return CapabilityEvidenceCheck("CONFLICTED", "artifact_rights_mismatch")
+
+        return CapabilityEvidenceCheck("VALID", "immutable_artifact_verified")
+
+
+@dataclass(frozen=True)
 class CapabilityClaim:
     source: str
     provider_id: str
@@ -228,6 +315,7 @@ def derive_capability_snapshot(
     claims: Iterable[CapabilityClaim],
     observed_at: datetime,
     required_sources: frozenset[str] = SOURCES,
+    evidence_verifier: ArtifactCapabilityEvidenceVerifier | None = None,
 ) -> CapabilitySnapshot:
     point = _instant(observed_at, "observed_at")
     records = tuple(claims)
@@ -289,8 +377,18 @@ def derive_capability_snapshot(
         status = "EXPIRED"
     elif set_conflict or scalar_conflict:
         status = "CONFLICTED"
+    elif evidence_verifier is None:
+        # Syntactically valid EvidenceRef metadata is not authority.  A caller
+        # must resolve it against immutable stored bytes before VERIFIED exists.
+        status = "UNKNOWN"
     else:
-        status = "VERIFIED"
+        checks = tuple(evidence_verifier.verify(claim) for claim in live)
+        if any(check.status == "CONFLICTED" for check in checks):
+            status = "CONFLICTED"
+        elif any(check.status != "VALID" for check in checks):
+            status = "UNKNOWN"
+        else:
+            status = "VERIFIED"
 
     expires_at = min((claim.expires_at for claim in live), default=point)
     return CapabilitySnapshot(
@@ -309,7 +407,7 @@ def derive_capability_snapshot(
         native_protection=protection,
         rate_limit_policy_id=next(iter(rate_policies)) if len(rate_policies) == 1 else "CONFLICTED",
         data_entitlements=entitlements,
-        evidence=tuple(claim.evidence_ref for claim in records),
+        evidence=tuple(claim.evidence_ref for claim in live),
         status=status,
         sources=live_sources,
     )

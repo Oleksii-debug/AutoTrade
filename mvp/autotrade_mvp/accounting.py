@@ -39,6 +39,23 @@ class Posting:
     asset_or_currency: str
     signed_amount: Decimal
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "ledger_account",
+            _name(self.ledger_account, field="ledger_account"),
+        )
+        object.__setattr__(
+            self,
+            "asset_or_currency",
+            _name(self.asset_or_currency, field="asset_or_currency"),
+        )
+        object.__setattr__(
+            self,
+            "signed_amount",
+            _decimal(self.signed_amount, name="signed_amount"),
+        )
+
 
 @dataclass(frozen=True)
 class JournalTransaction:
@@ -46,6 +63,28 @@ class JournalTransaction:
     cause_event_id: str
     postings: tuple[Posting, ...]
     reverses_transaction_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "transaction_id",
+            _name(self.transaction_id, field="transaction_id"),
+        )
+        object.__setattr__(
+            self,
+            "cause_event_id",
+            _name(self.cause_event_id, field="cause_event_id"),
+        )
+        object.__setattr__(self, "postings", tuple(self.postings))
+        if self.reverses_transaction_id is not None:
+            object.__setattr__(
+                self,
+                "reverses_transaction_id",
+                _name(
+                    self.reverses_transaction_id,
+                    field="reverses_transaction_id",
+                ),
+            )
 
 
 def posting(ledger_account: str, asset_or_currency: str, signed_amount: Decimal | str | int) -> Posting:

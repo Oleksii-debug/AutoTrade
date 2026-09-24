@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -14,6 +15,10 @@ from research.autotrade_research.science.registry import (
 )
 
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+def digest(value: str) -> str:
+    return "sha256:" + sha256(value.encode("utf-8")).hexdigest()
 
 
 def protocol():
@@ -50,7 +55,7 @@ def approval(science, candidate="candidate-a", valid_days=1, status="PASS", *, c
     valid_until = BASE + timedelta(days=valid_days)
     result = {
         "candidate_id": candidate,
-        "artifact_hash": f"sha256:{candidate}",
+        "artifact_hash": digest(candidate),
         "evaluation_status": status,
         "retention_passed": True,
         "risk_passed": True,
@@ -74,7 +79,7 @@ def approval(science, candidate="candidate-a", valid_days=1, status="PASS", *, c
     )
     return CandidateApproval.create(
         candidate_id=candidate,
-        artifact_hash=f"sha256:{candidate}",
+        artifact_hash=digest(candidate),
         evidence_id=f"evidence:{candidate}",
         evidence_valid_until=valid_until,
         evaluation_status=status,
@@ -128,6 +133,43 @@ class ChampionRegistryTests(unittest.TestCase):
                     open_position_count=0, existing_position_policy=None,
                 )
 
+    def test_evidence_expires_at_the_exact_deadline(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            candidate = approval(science, valid_days=1)
+            with self.assertRaisesRegex(ValueError, "expired"):
+                registry.promote(
+                    candidate,
+                    expected_generation=0,
+                    now=BASE + timedelta(days=1),
+                    open_position_count=0,
+                    existing_position_policy=None,
+                )
+
+    def test_candidate_approval_requires_canonical_hashes(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            legitimate = approval(science)
+            with self.assertRaisesRegex(ValueError, "artifact_hash.*sha256"):
+                CandidateApproval.create(
+                    candidate_id=legitimate.candidate_id,
+                    artifact_hash="sha256:not-a-real-digest",
+                    evidence_id=legitimate.evidence_id,
+                    evidence_valid_until=legitimate.evidence_valid_until,
+                    evaluation_status=legitimate.evaluation_status,
+                    retention_passed=legitimate.retention_passed,
+                    risk_passed=legitimate.risk_passed,
+                    authority_scope_id=legitimate.authority_scope_id,
+                    protocol_id=legitimate.protocol_id,
+                    protocol_hash=legitimate.protocol_hash,
+                    evaluation_id=legitimate.evaluation_id,
+                    evaluation_result_hash=legitimate.evaluation_result_hash,
+                )
+
     def test_failed_evaluation_blocks_promotion(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
@@ -161,7 +203,7 @@ class ChampionRegistryTests(unittest.TestCase):
                 protocol_id=legitimate.protocol_id,
                 protocol_hash=legitimate.protocol_hash,
                 evaluation_id=legitimate.evaluation_id,
-                evaluation_result_hash="sha256:forged",
+                evaluation_result_hash="sha256:" + "f" * 64,
             )
             with self.assertRaises(ProtocolViolation):
                 registry.promote(

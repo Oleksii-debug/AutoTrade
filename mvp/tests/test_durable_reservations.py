@@ -14,7 +14,7 @@ from mvp.autotrade_mvp.reservations import (
 
 
 EVIDENCE = (
-    "artifact:provider-evidence@sha256:"
+    "artifact:11111111-1111-4111-8111-111111111111@sha256:"
     + "a" * 64
 )
 
@@ -406,7 +406,7 @@ class DurableReservationBookTests(unittest.TestCase):
                 reservation_id="r1",
                 outcome="PROVEN_ABSENT",
                 resolution_evidence=(
-                    "artifact:provider-evidence@sha256:"
+                    "artifact:11111111-1111-4111-8111-111111111111@sha256:"
                     + "A" * 64
                 ),
             )

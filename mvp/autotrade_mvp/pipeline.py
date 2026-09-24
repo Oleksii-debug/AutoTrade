@@ -27,6 +27,52 @@ def _money(value: Decimal | str | int | float) -> Decimal:
         raise ValueError("Money and quantity values must be finite")
     return numeric.quantize(MONEY_QUANTUM)
 
+def handle_market_data(prices: Iterable[float | str | Decimal]) -> list[Decimal]:
+    normalized: list[Decimal] = []
+    for value in prices:
+        try:
+            numeric = Decimal(str(value))
+        except (ValueError, ArithmeticError) as error:
+            raise ValueError("Prices must be finite and positive") from error
+        if not numeric.is_finite() or numeric <= 0:
+            raise ValueError("Prices must be finite and positive")
+        normalized_price = _money(numeric)
+        if normalized_price <= 0:
+            raise ValueError("Price is smaller than supported precision")
+        normalized.append(normalized_price)
+    if not normalized:
+        raise ValueError("At least one price is required")
+    return normalized
+
+def handle_strategy(prices: list[Decimal], quantity: Decimal) -> Decision:
+    return MovingAverageStrategy().decide(prices, quantity)
+
+def handle_risk(decision: Decision, current_position: Decimal, current_cash: Decimal, fee_rate: Decimal, max_abs_position: Decimal, max_notional: Decimal) -> tuple[bool, str]:
+    return RiskGate(max_abs_position, max_notional).admit(decision, current_position, current_cash, fee_rate)
+
+def handle_durable_order_intent(intent: OrderIntent, root: Path) -> None:
+    _persist_intent(root / "order-intents" / f"{intent.client_order_id}.json", intent)
+
+def handle_simulated_provider(intent: OrderIntent, fee_rate: Decimal, provider: SimulatedProvider) -> Fill:
+    return provider.execute(intent, fee_rate)
+
+def handle_economic_ledger(fill: Fill, ledger: EconomicLedger) -> bool:
+    return ledger.apply_fill(fill)
+
+def handle_reconciliation(provider: SimulatedProvider, ledger: EconomicLedger) -> bool:
+    return _reconcile(provider, ledger)
+
+def handle_portfolio(ledger: EconomicLedger, last_price: Decimal) -> Decimal:
+    return _money(ledger.cash + ledger.position * last_price)
+
+def handle_restart_recovery(state_dir: str | Path, initial_cash: Decimal) -> tuple[dict, bool]:
+    root = Path(state_dir)
+    checkpoint_path = root / "checkpoint.json"
+    return _read_state(checkpoint_path, initial_cash)
+
+def handle_learning_evidence(evidence: dict, evidence_path: Path, evidence_ids: set, evidence_records: dict) -> bool:
+    return _append_evidence(evidence_path, evidence)
+
 
 def _stable_hash(payload: object) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -299,7 +345,7 @@ def run_vertical_slice(
     root = Path(state_dir)
     checkpoint_path = root / "checkpoint.json"
     evidence_path = root / "learning-evidence.jsonl"
-    state, resumed = _read_state(checkpoint_path, starting_cash)
+    state, resumed = handle_restart_recovery(state_dir, starting_cash)
     if resumed and state.get("symbol", symbol) != symbol:
         raise ValueError("Checkpoint belongs to another symbol")
     ledger = EconomicLedger(Decimal(state["initial_cash"]), list(state.get("postings", [])))
@@ -313,7 +359,8 @@ def run_vertical_slice(
     }
     provider = SimulatedProvider(restored_fills)
     _reconcile(provider, ledger)
-    decision = MovingAverageStrategy().decide(normalized, quantity)
+    normalized = handle_market_data(prices)
+    decision = handle_strategy(normalized, quantity)
     intent = None
     fill = None
     risk_reason = "hold"
@@ -332,20 +379,17 @@ def run_vertical_slice(
         if intent.client_order_id in provider.fills:
             admitted, risk_reason = True, "already_filled"
         else:
-            admitted, risk_reason = RiskGate(position_limit, notional_limit).admit(
-                decision, ledger.position, ledger.cash, rate)
+            admitted, risk_reason = handle_risk(decision, ledger.position, ledger.cash, rate, position_limit, notional_limit)
         if admitted:
-            # Persist before execution. A crash leaves a recoverable intent;
-            # the simulated provider uses its stable ID to avoid a second fill.
-            _persist_intent(root / "order-intents" / f"{intent.client_order_id}.json", intent)
-            fill = provider.execute(intent, rate)
-            ledger.apply_fill(fill)
+            handle_durable_order_intent(intent, root)
+            fill = handle_simulated_provider(intent, rate, provider)
+            handle_economic_ledger(fill, ledger)
         else:
             intent = None
 
     last_price = normalized[-1]
-    reconciled = _reconcile(provider, ledger)
-    equity = _money(ledger.cash + ledger.position * last_price)
+    reconciled = handle_reconciliation(provider, ledger)
+    equity = handle_portfolio(ledger, last_price)
     evidence_ids = set(state.get("evidence_ids", []))
     evidence_records = dict(state.get("evidence_records", {}))
     evidence_id = "evidence-" + _stable_hash({
@@ -368,6 +412,7 @@ def run_vertical_slice(
         "recorded_at": datetime.now(timezone.utc).isoformat(),
     }
     evidence = evidence_records.get(evidence_id, fresh_evidence)
+    handle_learning_evidence(evidence, evidence_path, evidence_ids, evidence_records)
     if evidence_id in evidence_ids and evidence_id not in evidence_records and evidence_path.exists():
         # Upgrade a checkpoint written by the original MVP without changing
         # the historical economic snapshot for an already completed episode.

@@ -143,8 +143,14 @@ class EvidenceVerification:
     reason: str = ""
 
     def __post_init__(self) -> None:
+        if type(self.valid) is not bool or type(self.conflicted) is not bool:
+            raise CapabilityError("evidence verification flags must be boolean")
+        if not isinstance(self.reason, str):
+            raise CapabilityError("evidence verification reason must be text")
         if self.valid and self.conflicted:
             raise CapabilityError("evidence cannot be both valid and conflicted")
+        if not self.valid and not self.reason.strip():
+            raise CapabilityError("invalid evidence verification requires a reason")
 
 
 _CAPABILITY_PRODUCER_TYPES = {

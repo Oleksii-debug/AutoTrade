@@ -29,9 +29,6 @@ permissions:
 
 env:
   AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-  LEAN_REVISION: 985ef30ad3ac774218c5ac516b4cb0aa2655730f
-  LEAN_TREE: 4b163abf9fca60e731b76510b9ae6721ffff7e6c
-  LEAN_LICENSE_BLOB: 6faed93d21a1a9551b11434e87c9000a393d73f2
 
 jobs:
   exact-revision-probe:
@@ -49,16 +46,37 @@ jobs:
           ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
           path: autotrade
 
+      - name: Load approved LEAN provenance
+        id: lean-provenance
+        shell: pwsh
+        run: |
+          $document = Get-Content -Raw autotrade/provenance/components.json | ConvertFrom-Json
+          $matches = @($document.components | Where-Object { $_.name -eq "QuantConnect LEAN" })
+          if ($matches.Count -ne 1) {
+            throw "Expected exactly one QuantConnect LEAN provenance record."
+          }
+          $lean = $matches[0]
+          if ($lean.repository -ne "QuantConnect/Lean" -or $lean.license -ne "Apache-2.0") {
+            throw "LEAN provenance repository/license is not the approved baseline."
+          }
+          "revision=$($lean.revision)" >> $env:GITHUB_OUTPUT
+          "tree=$($lean.tree)" >> $env:GITHUB_OUTPUT
+          "license_blob=$($lean.license_blob_sha)" >> $env:GITHUB_OUTPUT
+
       - name: Checkout approved LEAN revision
         uses: actions/checkout@v7
         with:
           repository: QuantConnect/Lean
-          ref: ${{ env.LEAN_REVISION }}
+          ref: ${{ steps.lean-provenance.outputs.revision }}
           path: lean
           fetch-depth: 1
 
       - name: Verify exact LEAN source identity
         shell: pwsh
+        env:
+          LEAN_REVISION: ${{ steps.lean-provenance.outputs.revision }}
+          LEAN_TREE: ${{ steps.lean-provenance.outputs.tree }}
+          LEAN_LICENSE_BLOB: ${{ steps.lean-provenance.outputs.license_blob }}
         run: |
           $actualCommit = (git -C lean rev-parse HEAD).Trim()
           if ($actualCommit -ne $env:LEAN_REVISION) {
@@ -94,6 +112,9 @@ jobs:
         working-directory: autotrade
         env:
           LEAN_ROOT: ${{ github.workspace }}/lean
+          LEAN_REVISION: ${{ steps.lean-provenance.outputs.revision }}
+          LEAN_TREE: ${{ steps.lean-provenance.outputs.tree }}
+          LEAN_LICENSE_BLOB: ${{ steps.lean-provenance.outputs.license_blob }}
         run: |
           $evidenceDir = "artifacts/lean-adoption"
           New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null

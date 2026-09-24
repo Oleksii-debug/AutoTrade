@@ -12,6 +12,38 @@ from mvp.autotrade_mvp.settlement import (
 
 
 class SettlementBookTests(unittest.TestCase):
+    def test_obligation_constructor_canonicalizes_financial_fields(self):
+        obligation = SettlementObligation(
+            " obligation-1 ",
+            " fill-1 ",
+            " USD ",
+            "10.50",
+            date(2026, 9, 24),
+            date(2026, 9, 25),
+        )
+        self.assertEqual(obligation.obligation_id, "obligation-1")
+        self.assertEqual(obligation.cause_event_id, "fill-1")
+        self.assertEqual(obligation.currency, "USD")
+        self.assertIsInstance(obligation.amount, Decimal)
+        self.assertEqual(obligation.amount, Decimal("10.50"))
+
+        book = SettlementBook(obligations=(obligation,))
+        self.assertEqual(
+            book.snapshot("USD").unsettled_receivable,
+            Decimal("10.50"),
+        )
+
+    def test_obligation_rejects_non_date_temporal_fields(self):
+        with self.assertRaises(TypeError):
+            SettlementObligation(
+                "x",
+                "event",
+                "USD",
+                Decimal("1"),
+                "2026-09-24",
+                date(2026, 9, 25),
+            )
+
     def test_unsettled_sale_proceeds_are_not_spendable(self):
         book = SettlementBook(settled_cash={"USD": "100"})
         sale = equity_cash_obligation(

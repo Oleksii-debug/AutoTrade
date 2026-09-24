@@ -130,6 +130,8 @@ class RiskPolicy:
     max_venue_concentration_fraction: Decimal | None = None
     max_order_participation_fraction: Decimal | None = None
     max_abs_factor_exposure: Decimal | None = None
+    max_spread_fraction: Decimal | None = None
+    max_slippage_fraction: Decimal | None = None
 
     @classmethod
     def create(
@@ -149,6 +151,8 @@ class RiskPolicy:
         max_venue_concentration_fraction=None,
         max_order_participation_fraction=None,
         max_abs_factor_exposure=None,
+        max_spread_fraction=None,
+        max_slippage_fraction=None,
     ) -> "RiskPolicy":
         values = {
             "max_abs_position": _positive(max_abs_position, name="max_abs_position"),
@@ -170,6 +174,8 @@ class RiskPolicy:
             ("max_asset_concentration_fraction", max_asset_concentration_fraction),
             ("max_venue_concentration_fraction", max_venue_concentration_fraction),
             ("max_order_participation_fraction", max_order_participation_fraction),
+            ("max_spread_fraction", max_spread_fraction),
+            ("max_slippage_fraction", max_slippage_fraction),
         ):
             if raw_value is None:
                 optional_limits[name] = None
@@ -214,6 +220,8 @@ class RiskContext:
     venues: Mapping[str, str] | None = None
     liquidity_capacity: Mapping[str, Decimal] | None = None
     factor_loadings: Mapping[str, Mapping[str, Decimal]] | None = None
+    spread_fraction: Mapping[str, Decimal] | None = None
+    slippage_fraction: Mapping[str, Decimal] | None = None
 
     @classmethod
     def create(
@@ -236,6 +244,8 @@ class RiskContext:
         venues: Mapping[str, str] | None = None,
         liquidity_capacity: Mapping[str, object] | None = None,
         factor_loadings: Mapping[str, Mapping[str, object]] | None = None,
+        spread_fraction: Mapping[str, object] | None = None,
+        slippage_fraction: Mapping[str, object] | None = None,
     ) -> "RiskContext":
         if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
@@ -287,6 +297,24 @@ class RiskContext:
             factor_loadings or {},
             name="factor_loadings",
         )
+        normalized_spread = _normalize_mapping(
+            spread_fraction or {},
+            name="spread_fraction",
+            parser=lambda value, key: _positive(
+                value,
+                name=f"spread fraction {key}",
+                allow_zero=True,
+            ),
+        )
+        normalized_slippage = _normalize_mapping(
+            slippage_fraction or {},
+            name="slippage_fraction",
+            parser=lambda value, key: _positive(
+                value,
+                name=f"slippage fraction {key}",
+                allow_zero=True,
+            ),
+        )
         if not isinstance(stress_scenarios, Sequence) or isinstance(
             stress_scenarios,
             (str, bytes),
@@ -332,6 +360,8 @@ class RiskContext:
             venues=normalized_venues,
             liquidity_capacity=normalized_liquidity,
             factor_loadings=normalized_factor_loadings,
+            spread_fraction=normalized_spread,
+            slippage_fraction=normalized_slippage,
         )
 
 
@@ -434,6 +464,9 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
             participation_evidenced = False
         else:
             participation = intent.quantity / capacity
+
+    spread_observation = (context.spread_fraction or {}).get(intent.symbol)
+    slippage_observation = (context.slippage_fraction or {}).get(intent.symbol)
 
     factor_exposure = Decimal("0")
     base_factor_exposure = Decimal("0")
@@ -610,6 +643,24 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
             participation if participation_evidenced else "UNKNOWN",
             policy.max_order_participation_fraction,
             "order quantity must stay within evidenced liquidity participation policy",
+        )
+    if policy.max_spread_fraction is not None:
+        add(
+            "spread",
+            spread_observation is not None
+            and spread_observation <= policy.max_spread_fraction,
+            spread_observation if spread_observation is not None else "UNKNOWN",
+            policy.max_spread_fraction,
+            "evidenced execution spread must stay within policy",
+        )
+    if policy.max_slippage_fraction is not None:
+        add(
+            "slippage",
+            slippage_observation is not None
+            and slippage_observation <= policy.max_slippage_fraction,
+            slippage_observation if slippage_observation is not None else "UNKNOWN",
+            policy.max_slippage_fraction,
+            "evidenced execution slippage must stay within policy",
         )
     if policy.max_abs_factor_exposure is not None:
         add(

@@ -20,6 +20,8 @@ def policy(**overrides):
         max_venue_concentration_fraction=None,
         max_order_participation_fraction=None,
         max_abs_factor_exposure=None,
+        max_spread_fraction=None,
+        max_slippage_fraction=None,
     )
     values.update(overrides)
     return RiskPolicy.create(**values)
@@ -536,6 +538,43 @@ class IndependentRiskTests(unittest.TestCase):
     def test_factor_loading_rejects_binary_float(self):
         with self.assertRaises(TypeError):
             context(factor_loadings={"ABC": {"EQUITY": 1.0}})
+
+    def test_execution_quality_limits_fail_closed_on_missing_evidence(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(spread_fraction={}, slippage_fraction={}),
+            policy(max_spread_fraction="0.01", max_slippage_fraction="0.02"),
+        )
+        failed = {item.rule: item.observed for item in decision.rules if not item.passed}
+        self.assertEqual(failed["spread"], "UNKNOWN")
+        self.assertEqual(failed["slippage"], "UNKNOWN")
+
+    def test_execution_quality_limits_block_excess_cost(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(
+                spread_fraction={"ABC": "0.005"},
+                slippage_fraction={"ABC": "0.03"},
+            ),
+            policy(max_spread_fraction="0.01", max_slippage_fraction="0.02"),
+        )
+        spread = next(item for item in decision.rules if item.rule == "spread")
+        slippage = next(item for item in decision.rules if item.rule == "slippage")
+        self.assertTrue(spread.passed)
+        self.assertFalse(slippage.passed)
+        self.assertFalse(decision.admitted)
+
+    def test_execution_quality_evidence_rejects_binary_float(self):
+        with self.assertRaises(TypeError):
+            context(spread_fraction={"ABC": 0.01})
+        with self.assertRaises(TypeError):
+            context(slippage_fraction={"ABC": 0.01})
 
 
 if __name__ == "__main__":

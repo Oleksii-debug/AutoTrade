@@ -16,13 +16,25 @@ def protocol():
         "strategy": "deterministic baseline",
         "features": ["price_return"],
         "search_space": {"lookback": [5, 10]},
-        "train_period": "t0-t1",
-        "validation_period": "t1-t2",
-        "test_period": "t2-t3",
-        "forward_period": "future",
+        "train_period": {
+            "start": "2025-01-01T00:00:00Z",
+            "end": "2025-12-31T23:59:59Z",
+        },
+        "validation_period": {
+            "start": "2026-01-02T00:00:00Z",
+            "end": "2026-03-31T23:59:59Z",
+        },
+        "test_period": {
+            "start": "2026-04-02T00:00:00Z",
+            "end": "2026-06-30T23:59:59Z",
+        },
+        "forward_period": {
+            "start": "2026-07-02T00:00:00Z",
+            "end": "2026-09-30T23:59:59Z",
+        },
         "labels": ["net_return"],
-        "horizons": ["1d"],
-        "purge_embargo": {"purge": "1d", "embargo": "1d"},
+        "horizons": [86400],
+        "purge_embargo": {"purge_seconds": 86400, "embargo_seconds": 86400},
         "universe": ["AAA"],
         "cost_fill_model": "base-v1",
         "baselines": ["cash", "passive"],
@@ -67,6 +79,60 @@ class ScientificRegistryTests(unittest.TestCase):
             value["primary_metrics"] = []
             with self.assertRaisesRegex(ProtocolViolation, "cannot be empty"):
                 store.register_protocol(value)
+
+    def test_free_text_periods_are_rejected(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            value = protocol()
+            value["train_period"] = "t0-t1"
+            with self.assertRaisesRegex(ProtocolViolation, "train_period"):
+                store.register_protocol(value)
+
+    def test_overlapping_temporal_windows_are_rejected(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            value = protocol()
+            value["validation_period"]["start"] = "2025-12-01T00:00:00Z"
+            with self.assertRaisesRegex(ProtocolViolation, "overlaps"):
+                store.register_protocol(value)
+
+    def test_reversed_period_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            value = protocol()
+            value["test_period"] = {
+                "start": "2026-06-01T00:00:00Z",
+                "end": "2026-05-01T00:00:00Z",
+            }
+            with self.assertRaisesRegex(ProtocolViolation, "must precede"):
+                store.register_protocol(value)
+
+    def test_naive_or_non_utc_period_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            value = protocol()
+            value["forward_period"]["start"] = "2026-07-02T00:00:00"
+            with self.assertRaisesRegex(ProtocolViolation, "UTC"):
+                store.register_protocol(value)
+
+    def test_purge_must_cover_longest_registered_label_horizon(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            value = protocol()
+            value["horizons"] = [86400, 172800]
+            value["purge_embargo"]["purge_seconds"] = 86400
+            with self.assertRaisesRegex(ProtocolViolation, "longest"):
+                store.register_protocol(value)
+
+    def test_boolean_or_negative_temporal_controls_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            for invalid in (True, -1):
+                with self.subTest(invalid=invalid):
+                    value = protocol()
+                    value["purge_embargo"]["embargo_seconds"] = invalid
+                    with self.assertRaisesRegex(ProtocolViolation, "embargo_seconds"):
+                        store.register_protocol(value)
 
     def test_failed_and_discarded_trials_are_preserved(self):
         with TemporaryDirectory() as directory:

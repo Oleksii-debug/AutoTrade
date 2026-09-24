@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from mvp.autotrade_mvp.backup import (
     BACKUP_SCHEMA_VERSION,
+    BackupError,
     BackupCompatibilityError,
     BackupIntegrityError,
     create_backup,
@@ -16,6 +17,7 @@ from mvp.autotrade_mvp.backup import (
     restore_requires_reconciliation,
     verify_backup,
 )
+from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.pipeline import run_vertical_slice
 
 

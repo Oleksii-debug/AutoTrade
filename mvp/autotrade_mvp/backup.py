@@ -8,6 +8,7 @@ reconciliation before any future trading authority can be considered.
 
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -120,7 +121,7 @@ def _sqlite_schema_version(path: Path) -> int:
         raise BackupError("Durable journal is missing")
     uri = path.resolve().as_uri() + "?mode=ro"
     try:
-        with sqlite3.connect(uri, uri=True) as connection:
+        with closing(sqlite3.connect(uri, uri=True)) as connection:
             rows = connection.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
@@ -142,10 +143,13 @@ def _backup_sqlite(source: Path, destination: Path) -> tuple[str, int, int]:
     destination.parent.mkdir(parents=True, exist_ok=True)
     source_uri = source.resolve().as_uri() + "?mode=ro"
     try:
-        with sqlite3.connect(source_uri, uri=True) as source_db:
-            with sqlite3.connect(destination) as destination_db:
+        with closing(sqlite3.connect(source_uri, uri=True)) as source_db:
+            with closing(sqlite3.connect(destination)) as destination_db:
                 source_db.backup(destination_db)
                 destination_db.commit()
+                # A backup bundle must contain one self-contained SQLite payload.
+                # Do not leave WAL/SHM sidecars that are absent from the manifest.
+                destination_db.execute("PRAGMA journal_mode=DELETE")
     except sqlite3.Error as error:
         raise BackupError("SQLite backup failed") from error
     copied_schema = _sqlite_schema_version(destination)

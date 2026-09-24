@@ -107,7 +107,7 @@ class DispatchTests(unittest.TestCase):
             outbound = 0
 
             def crashing_append(envelope, *, outbox_topic=None):
-                if envelope["event_type"] == "SubmissionSent":
+                if envelope["event_type"] in {"SubmissionSent", "SubmissionUnknown"}:
                     raise RuntimeError("simulated process death before terminal journal")
                 return real_append(envelope, outbox_topic=outbox_topic)
 

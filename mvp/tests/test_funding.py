@@ -144,9 +144,9 @@ class FundingTests(unittest.TestCase):
 
     def test_revision_cannot_backdate_availability_or_change_sign_convention(self):
         book = FundingRevisionBook()
-        book.record(event(kind="INDICATED", revision=1, available_hour=8))
+        book.record(event(kind="INDICATED", revision=1, available_hour=9))
         with self.assertRaises(FundingConflict):
-            book.record(event(kind="FINAL", revision=2, available_hour=7))
+            book.record(event(kind="FINAL", revision=2, available_hour=8))
 
         changed_sign = FundingEvent(
             funding_id="funding:BTC-PERP:20260924T08",

@@ -33,7 +33,7 @@ def _text(value: str, *, name: str) -> str:
 
 
 def _digest(value: str, *, name: str) -> str:
-    result = _text(value, name=name).lower()
+    result = _text(value, name=name)
     if _SHA256.fullmatch(result) is None:
         raise CausalReplayError(f"{name} must be canonical sha256:<64 lowercase hex>")
     return result

@@ -4,6 +4,8 @@ import unittest
 from mvp.autotrade_mvp.reconciliation import (
     CoverageSurfaceEvidence,
     ProviderFillEvidence,
+    ProviderWorkingOrderEvidence,
+    SnapshotConsistencyEvidence,
     UnknownSubmission,
     reconcile_account,
 )
@@ -25,6 +27,16 @@ def fill(
         fee_currency="USD",
         trade_time="2026-09-24T18:00:00Z",
     )
+
+
+def snapshot(mode="ATOMIC", **overrides):
+    values = dict(
+        mode=mode,
+        query_started_at="2026-09-24T17:00:00Z",
+        query_completed_at="2026-09-24T19:00:00Z",
+    )
+    values.update(overrides)
+    return SnapshotConsistencyEvidence(**values)
 
 
 def absence_coverage(**overrides):
@@ -53,6 +65,7 @@ class ReconciliationTests(unittest.TestCase):
             provider_positions={"ABC": "1"},
             local_execution_ids=["e1"],
             provider_fills=[fill()],
+            snapshot_consistency=snapshot(),
             coverage_start="2026-09-24T17:00:00Z",
             coverage_end="2026-09-24T19:00:00Z",
             pagination_complete=True,
@@ -228,6 +241,104 @@ class ReconciliationTests(unittest.TestCase):
         )
         self.assertTrue(result.complete)
         self.assertEqual(dict(result.cash_differences), {})
+
+    def test_missing_snapshot_consistency_evidence_blocks_ready_state(self):
+        result = self.base(snapshot_consistency=None)
+        self.assertFalse(result.complete)
+        self.assertIn("ACCOUNT", result.blocking_resources)
+
+    def test_composed_snapshot_requires_complete_gap_free_replay(self):
+        incomplete = self.base(
+            snapshot_consistency=snapshot(
+                "COMPOSED",
+                buffered_stream_events=True,
+                replay_complete=False,
+                sequence_gap_detected=False,
+            )
+        )
+        self.assertFalse(incomplete.complete)
+        gap = self.base(
+            snapshot_consistency=snapshot(
+                "COMPOSED",
+                buffered_stream_events=True,
+                replay_complete=True,
+                sequence_gap_detected=True,
+            )
+        )
+        self.assertFalse(gap.complete)
+        complete = self.base(
+            snapshot_consistency=snapshot(
+                "COMPOSED",
+                buffered_stream_events=True,
+                replay_complete=True,
+                sequence_gap_detected=False,
+            )
+        )
+        self.assertTrue(complete.complete)
+
+    def test_unknown_send_can_resolve_to_exact_working_order_without_resend(self):
+        unknown = UnknownSubmission.create(
+            attempt_id="attempt-working",
+            client_order_id="client-working",
+            started_at="2026-09-24T18:00:00Z",
+        )
+        working = ProviderWorkingOrderEvidence.create(
+            provider_order_id="provider-working",
+            client_order_id="client-working",
+            instrument="ABC",
+            remaining_quantity="1",
+        )
+        result = self.base(
+            local_working_client_order_ids=["client-working"],
+            provider_working_orders=[working],
+            unknown_submissions=[unknown],
+            searched_client_order_ids=["client-working"],
+        )
+        resolution = result.submission_resolutions[0]
+        self.assertEqual(resolution.outcome, "OBSERVED_WORKING_ORDER")
+        self.assertEqual(resolution.provider_order_ids, ("provider-working",))
+        self.assertEqual(resolution.provider_execution_ids, ())
+        self.assertTrue(result.complete)
+
+    def test_external_working_order_blocks_affected_instrument(self):
+        result = self.base(
+            provider_working_orders=[
+                ProviderWorkingOrderEvidence.create(
+                    provider_order_id="manual-42",
+                    client_order_id=None,
+                    instrument="XYZ",
+                    remaining_quantity="3",
+                )
+            ]
+        )
+        self.assertFalse(result.complete)
+        self.assertEqual(
+            result.unexpected_working_provider_order_ids,
+            ("manual-42",),
+        )
+        self.assertIn("INSTRUMENT:XYZ", result.blocking_resources)
+
+    def test_duplicate_provider_client_order_mapping_fails_closed(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "client order id maps to multiple provider working orders",
+        ):
+            self.base(
+                provider_working_orders=[
+                    ProviderWorkingOrderEvidence.create(
+                        provider_order_id="p1",
+                        client_order_id="c-shared",
+                        instrument="ABC",
+                        remaining_quantity="1",
+                    ),
+                    ProviderWorkingOrderEvidence.create(
+                        provider_order_id="p2",
+                        client_order_id="c-shared",
+                        instrument="ABC",
+                        remaining_quantity="1",
+                    ),
+                ]
+            )
 
     def test_provider_execution_conflict_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "conflicting"):

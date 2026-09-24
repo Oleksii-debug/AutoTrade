@@ -87,12 +87,19 @@ def record_reconciliation_checkpoint(
     reconciliation_id: str,
     result: ReconciliationResult,
     observed_at: str,
+    owner_epoch: int,
+    environment: str,
 ) -> dict[str, Any]:
     """Persist one exact reconciliation outcome, idempotently for retries."""
 
     if not isinstance(store, JournalStore):
         raise TypeError("store must be JournalStore")
     rid = _text(reconciliation_id, name="reconciliation_id")
+    if not isinstance(owner_epoch, int) or isinstance(owner_epoch, bool) or owner_epoch < 1:
+        raise ValueError("owner_epoch must be a positive integer")
+    normalized_environment = _text(environment, name="environment").upper()
+    if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+        raise ValueError("environment is unsupported")
     payload = reconciliation_payload(result, observed_at=observed_at)
     existing = store.load_events("account_reconciliation", rid)
     if existing and existing[-1]["payload"] == payload:
@@ -114,8 +121,8 @@ def record_reconciliation_checkpoint(
         "aggregate_id": rid,
         "aggregate_version": str(version),
         "host_id": "local-mvp",
-        "owner_epoch": "1",
-        "environment": "SIMULATION",
+        "owner_epoch": str(owner_epoch),
+        "environment": normalized_environment,
         "occurred_at": payload["observed_at"],
         "observed_at": payload["observed_at"],
         "committed_at": payload["observed_at"],

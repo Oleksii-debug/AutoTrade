@@ -24,6 +24,7 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
     def spec(self, **overrides):
         values = dict(
             scenario_id="declared-host-load-a",
+            spec_digest=self.spec().digest,
             release_sha=RELEASE_SHA,
             configuration_hash=CONFIG_HASH,
             host_fingerprint=HOST_HASH,
@@ -148,6 +149,16 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
                 self.observation(scenario_id="different-load"),
             )
 
+    def test_same_scenario_id_cannot_reuse_observation_after_spec_mutation(self):
+        original = self.spec(max_p95_financial_latency_us=2_000_000)
+        observation = self.observation(spec_digest=original.digest)
+        changed = self.spec(max_p95_financial_latency_us=2_500_000)
+        self.assertEqual(original.scenario_id, changed.scenario_id)
+        self.assertEqual(original.release_sha, changed.release_sha)
+        self.assertNotEqual(original.digest, changed.digest)
+        with self.assertRaisesRegex(RuntimeBudgetError, "budget spec digest"):
+            evaluate_runtime_budget(changed, observation)
+
     def test_evidence_cannot_be_reused_across_release_config_or_host(self):
         with self.assertRaisesRegex(RuntimeBudgetError, "another release SHA"):
             evaluate_runtime_budget(
@@ -172,6 +183,8 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
             self.observation(configuration_hash="config")
         with self.assertRaisesRegex(RuntimeBudgetError, "sha256"):
             self.observation(host_fingerprint="host")
+        with self.assertRaisesRegex(RuntimeBudgetError, "sha256"):
+            self.observation(spec_digest="budget-v1")
 
     def test_real_journal_burst_probe_recovers_every_financial_event(self):
         # This is wiring evidence only. The generous thresholds deliberately do
@@ -197,8 +210,21 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
                 latencies.append((perf_counter_ns() - started) // 1_000)
 
             recovered = store.load_events("PERFORMANCE_PROBE", "burst-a")
+            budget_spec = RuntimeBudgetSpec(
+                scenario_id="journal-wiring-ci",
+                release_sha=RELEASE_SHA,
+                configuration_hash=CONFIG_HASH,
+                host_fingerprint=HOST_HASH,
+                strategy_horizon_us=60_000_000,
+                max_p95_financial_latency_us=60_000_000,
+                max_financial_staleness_us=60_000_000,
+                max_research_interference_us=60_000_000,
+                min_financial_samples=count,
+                min_research_samples=1,
+            )
             observation = RuntimeLoadObservation.create(
                 scenario_id="journal-wiring-ci",
+                spec_digest=budget_spec.digest,
                 release_sha=RELEASE_SHA,
                 configuration_hash=CONFIG_HASH,
                 host_fingerprint=HOST_HASH,
@@ -210,18 +236,7 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
                 reconnect_backlog_remaining=0,
             )
             decision = evaluate_runtime_budget(
-                RuntimeBudgetSpec(
-                    scenario_id="journal-wiring-ci",
-                    release_sha=RELEASE_SHA,
-                    configuration_hash=CONFIG_HASH,
-                    host_fingerprint=HOST_HASH,
-                    strategy_horizon_us=60_000_000,
-                    max_p95_financial_latency_us=60_000_000,
-                    max_financial_staleness_us=60_000_000,
-                    max_research_interference_us=60_000_000,
-                    min_financial_samples=count,
-                    min_research_samples=1,
-                ),
+                budget_spec,
                 observation,
             )
             self.assertEqual(len(store.pending_outbox(limit=100)), count)

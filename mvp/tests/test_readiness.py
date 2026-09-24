@@ -143,7 +143,7 @@ class RuntimeReadinessTests(unittest.TestCase):
             )
         )
         self.assertFalse(result.ready_for_read)
-        self.assertEqual(result.mode, RuntimeMode.DEGRADED)
+        self.assertEqual(result.mode, RuntimeMode.NOT_READY)
         self.assertIn("provider_native_protection_absent", result.warnings)
         self.assertIn("emergency_execution_path_unqualified", result.warnings)
 

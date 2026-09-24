@@ -93,6 +93,45 @@ class HostCommandStateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.update_operation(accepted.operation_id, "FAILED")
 
+    def test_unknown_preserves_uncertainty_and_can_only_resolve_terminally(self):
+        accepted = self.store.submit(self.command())
+        unknown = self.store.update_operation(
+            accepted.operation_id,
+            "UNKNOWN",
+            remaining_uncertainty=("provider_outcome_unresolved",),
+        )
+        self.assertEqual(unknown.phase, "UNKNOWN")
+        self.assertEqual(
+            unknown.remaining_uncertainty,
+            ("provider_outcome_unresolved",),
+        )
+        event = self.store.events_after("1")[0]
+        self.assertEqual(
+            event.payload["remaining_uncertainty"],
+            ["provider_outcome_unresolved"],
+        )
+        with self.assertRaisesRegex(ValueError, "only resolve"):
+            self.store.update_operation(
+                accepted.operation_id,
+                "RUNNING",
+                remaining_uncertainty=("still_unknown",),
+            )
+
+        resolved = self.store.update_operation(accepted.operation_id, "SUCCEEDED")
+        self.assertEqual(resolved.phase, "SUCCEEDED")
+        self.assertEqual(resolved.remaining_uncertainty, ())
+
+    def test_unknown_requires_uncertainty_and_terminal_cannot_hide_it(self):
+        accepted = self.store.submit(self.command())
+        with self.assertRaisesRegex(ValueError, "preserve remaining uncertainty"):
+            self.store.update_operation(accepted.operation_id, "UNKNOWN")
+        with self.assertRaisesRegex(ValueError, "cannot retain unresolved uncertainty"):
+            self.store.update_operation(
+                accepted.operation_id,
+                "FAILED",
+                remaining_uncertainty=("provider_outcome_unresolved",),
+            )
+
     def test_resumable_events_return_only_newer_items(self):
         accepted = self.store.submit(self.command())
         self.store.update_operation(accepted.operation_id, "RUNNING")

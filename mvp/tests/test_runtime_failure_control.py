@@ -126,6 +126,55 @@ class RuntimeRecoveryTests(unittest.TestCase):
         controller.record_reconciliation(consistent=True)
         controller.validate_sender(new_owner.owner_id, new_owner.epoch)
 
+    def test_recovery_boolean_contracts_reject_truthy_strings(self):
+        controller = RecoveryController()
+        owner = controller.start("host-a")
+
+        with self.assertRaisesRegex(TypeError, "consistent must be boolean"):
+            controller.record_reconciliation(consistent="false")
+        self.assertEqual(controller.state, HostState.RECOVERING)
+
+        controller.record_reconciliation(consistent=True)
+        self.assertEqual(controller.state, HostState.READY)
+
+        with self.assertRaisesRegex(TypeError, "writable must be boolean"):
+            controller.set_storage_writable("false")
+        with self.assertRaisesRegex(TypeError, "trusted must be boolean"):
+            controller.set_clock_trusted("false")
+        self.assertEqual(controller.state, HostState.READY)
+
+        with self.assertRaisesRegex(TypeError, "old_sender_fenced must be boolean"):
+            controller.transfer_owner(
+                new_owner_id="host-b",
+                old_sender_fenced="true",
+                reconciled=True,
+            )
+        with self.assertRaisesRegex(TypeError, "reconciled must be boolean"):
+            controller.transfer_owner(
+                new_owner_id="host-b",
+                old_sender_fenced=True,
+                reconciled="true",
+            )
+        self.assertEqual(controller.owner, owner)
+
+    def test_boolean_cannot_impersonate_owner_epoch_one(self):
+        controller, owner = self._ready()
+        self.assertEqual(owner.epoch, 1)
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            controller.validate_sender(owner.owner_id, True)
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            controller.validate_admission(True)
+
+    def test_transfer_owner_identity_is_canonical_before_comparison(self):
+        controller, owner = self._ready()
+        with self.assertRaisesRegex(ValueError, "differ"):
+            controller.transfer_owner(
+                new_owner_id=" host-a ",
+                old_sender_fenced=True,
+                reconciled=True,
+            )
+        self.assertEqual(controller.owner, owner)
+
     def test_durable_owner_epoch_survives_restart_and_fences_old_process(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

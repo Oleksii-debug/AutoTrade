@@ -84,6 +84,14 @@ def _write_bytes_durable(path: Path, payload: bytes) -> None:
             pass
 
 
+def _inside(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
 def _safe_relative_path(raw: str) -> Path:
     if not isinstance(raw, str) or not raw:
         raise BackupIntegrityError("Backup manifest path is invalid")
@@ -219,6 +227,8 @@ def create_backup(
         raise BackupError("Backup destination already exists")
     if not state.is_dir():
         raise BackupError("Runtime state directory is missing")
+    if _inside(target, state) or _inside(target, artifacts):
+        raise BackupError("Backup destination must be outside source directories")
     _validate_artifact_source(artifacts)
 
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -388,6 +398,8 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
     destination = Path(destination_root)
     if destination.exists():
         raise BackupError("Restore destination already exists")
+    if _inside(destination, backup):
+        raise BackupError("Restore destination must be outside the backup bundle")
     destination.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".autotrade-restore-", dir=destination.parent))
     try:

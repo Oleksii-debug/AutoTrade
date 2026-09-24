@@ -16,6 +16,9 @@ def policy(**overrides):
         max_fx_age_seconds="60",
         min_margin_headroom="0.20",
         max_stress_loss="500",
+        max_asset_concentration_fraction=None,
+        max_venue_concentration_fraction=None,
+        max_order_participation_fraction=None,
     )
     values.update(overrides)
     return RiskPolicy.create(**values)
@@ -350,6 +353,126 @@ class IndependentRiskTests(unittest.TestCase):
                 min_margin_headroom="0.2",
                 max_stress_loss="100",
             )
+
+
+    def test_configured_liquidity_participation_fails_closed_without_capacity(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        configured = policy(max_order_participation_fraction="0.10")
+
+        missing = evaluate_risk(intent, context(liquidity_capacity={}), configured)
+        missing_rule = next(
+            rule for rule in missing.rules if rule.rule == "liquidity_participation"
+        )
+        self.assertFalse(missing_rule.passed)
+        self.assertEqual(missing_rule.observed, "UNKNOWN")
+
+        oversized = evaluate_risk(
+            intent,
+            context(liquidity_capacity={"ABC": "5"}),
+            configured,
+        )
+        oversized_rule = next(
+            rule for rule in oversized.rules if rule.rule == "liquidity_participation"
+        )
+        self.assertFalse(oversized_rule.passed)
+        self.assertEqual(oversized_rule.observed, "0.2")
+
+    def test_asset_concentration_uses_whole_projected_portfolio(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(
+                positions={"ABC": "2", "XYZ": "10"},
+                asset_buckets={"ABC": "TECH", "XYZ": "INDUSTRIAL"},
+                stress_scenarios=(
+                    {"ABC": "-0.10", "XYZ": "-0.10"},
+                ),
+            ),
+            policy(max_asset_concentration_fraction="0.60"),
+        )
+        rule = next(rule for rule in decision.rules if rule.rule == "asset_concentration")
+        self.assertTrue(rule.passed)
+        self.assertEqual(rule.observed, "0.625")
+
+        blocked = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(
+                positions={"ABC": "2", "XYZ": "10"},
+                asset_buckets={"ABC": "TECH", "XYZ": "INDUSTRIAL"},
+                stress_scenarios=(
+                    {"ABC": "-0.10", "XYZ": "-0.10"},
+                ),
+            ),
+            policy(max_asset_concentration_fraction="0.60"),
+        )
+        # XYZ is 500 of 800 gross = 0.625, so the configured 0.60 cap blocks.
+        self.assertFalse(blocked.admitted)
+        self.assertIn(
+            "asset_concentration",
+            {item.rule for item in blocked.rules if not item.passed},
+        )
+
+    def test_concentration_requires_complete_bucket_and_venue_identity(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(
+                positions={"ABC": "2", "XYZ": "3"},
+                asset_buckets={"ABC": "TECH"},
+                venues={"ABC": "VENUE-A"},
+                stress_scenarios=(
+                    {"ABC": "-0.10", "XYZ": "-0.10"},
+                ),
+            ),
+            policy(
+                max_asset_concentration_fraction="1",
+                max_venue_concentration_fraction="1",
+            ),
+        )
+        failed = {item.rule: item.observed for item in decision.rules if not item.passed}
+        self.assertEqual(failed["asset_concentration"], "MISSING:XYZ")
+        self.assertEqual(failed["venue_concentration"], "MISSING:XYZ")
+
+    def test_balanced_concentration_and_liquidity_can_pass(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(
+                positions={"ABC": "2", "XYZ": "4"},
+                asset_buckets={"ABC": "TECH", "XYZ": "INDUSTRIAL"},
+                venues={"ABC": "VENUE-A", "XYZ": "VENUE-B"},
+                liquidity_capacity={"ABC": "10"},
+                stress_scenarios=(
+                    {"ABC": "-0.10", "XYZ": "-0.10"},
+                ),
+            ),
+            policy(
+                max_asset_concentration_fraction="0.60",
+                max_venue_concentration_fraction="0.60",
+                max_order_participation_fraction="0.20",
+            ),
+        )
+        self.assertTrue(decision.admitted)
+
+    def test_optional_risk_fractions_reject_float_and_values_above_one(self):
+        with self.assertRaises(TypeError):
+            policy(max_order_participation_fraction=0.1)
+        with self.assertRaises(ValueError):
+            policy(max_asset_concentration_fraction="1.01")
+        with self.assertRaises(ValueError):
+            policy(max_venue_concentration_fraction="1.01")
 
 
 if __name__ == "__main__":

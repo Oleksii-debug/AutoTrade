@@ -100,6 +100,48 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must not contain duplicates"):
                 store.append(duplicate)
 
+    def test_input_hash_must_be_canonical_sha256(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            for invalid in ("abc", "B" * 64, "g" * 64):
+                item = evidence_trace()
+                item["input_hash"] = invalid
+                with self.assertRaisesRegex(ValueError, "lowercase SHA-256"):
+                    store.append(item)
+
+    def test_link_identities_reject_surrounding_whitespace(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            item = evidence_trace()
+            item["evidence_refs"] = [" dataset-1"]
+            with self.assertRaisesRegex(ValueError, "canonical"):
+                store.append(item)
+
+            item = evidence_trace()
+            item["event_ids"] = ["event-market "]
+            with self.assertRaisesRegex(ValueError, "canonical"):
+                store.append(item)
+
+    def test_non_finite_attributes_never_enter_durable_hash_chain(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = evidence_trace()
+            item["attributes"]["diagnostic_score"] = float("nan")
+            with self.assertRaisesRegex(ValueError, "JSON compliant"):
+                store.append(item)
+            self.assertFalse(path.exists())
+
+    def test_tampered_non_finite_json_is_not_verified(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            store.append(evidence_trace())
+            raw = path.read_text(encoding="utf-8")
+            raw = raw.replace('"strategy":"baseline"', '"strategy":NaN')
+            path.write_text(raw, encoding="utf-8")
+            self.assertFalse(store.verify())
+
     def test_metric_backlog_is_bounded_and_redacts_labels(self):
         backlog = BoundedMetricBacklog(max_items=2)
         backlog.record("queue.delay", 1.0, token="a")

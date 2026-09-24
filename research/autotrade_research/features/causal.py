@@ -225,6 +225,8 @@ def training_row(
     cutoff = _time(training_cutoff, name="training_cutoff")
     if feature.symbol != label.symbol:
         raise ValueError("feature and label symbols differ")
+    if feature.decision_time != label.anchor_time:
+        raise ValueError("feature decision_time must equal label anchor_time")
     if feature.decision_time > cutoff:
         raise ValueError("feature is not available by training cutoff")
     if label.label_available_at > cutoff:

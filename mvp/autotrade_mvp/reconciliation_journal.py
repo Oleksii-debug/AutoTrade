@@ -171,8 +171,8 @@ def unresolved_attempt_ids_from_checkpoint(
     for item in resolutions:
         if not isinstance(item, Mapping):
             raise ValueError("submission resolution must be an object")
-        attempt_id = _text(str(item.get("attempt_id", "")), name="attempt_id")
-        outcome = _text(str(item.get("outcome", "")), name="outcome").upper()
+        attempt_id = _text(item.get("attempt_id"), name="attempt_id")
+        outcome = _text(item.get("outcome"), name="outcome").upper()
         if outcome == "UNKNOWN":
             unresolved.append(attempt_id)
     return tuple(sorted(set(unresolved)))
@@ -195,7 +195,7 @@ def unresolved_provider_activity_ids_from_checkpoint(
         if not isinstance(values, list):
             raise ValueError(f"checkpoint {name} must be a list")
     normalized = [
-        _text(str(value), name="provider_activity_id")
+        _text(value, name="provider_activity_id")
         for value in [*unexpected, *missing]
     ]
     return tuple(sorted(set(normalized)))
@@ -231,11 +231,11 @@ def unknown_submissions_from_dispatch(
             )
         payload = first["payload"]
         client_order_id = _text(
-            str(payload.get("client_order_id", "")),
+            payload.get("client_order_id"),
             name="client_order_id",
         )
         started_at = _instant(
-            str(payload.get("prepared_at", "")),
+            payload.get("prepared_at"),
             name="prepared_at",
         )
         last_type = events[-1]["event_type"]

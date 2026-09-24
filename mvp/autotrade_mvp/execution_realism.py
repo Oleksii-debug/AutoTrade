@@ -566,6 +566,25 @@ def simulate_execution(
                 warnings=tuple(warnings),
             )
 
+        # A stop-limit becomes executable only after the trigger event.  Even
+        # with top-of-book or book data, reusing the same observation as both
+        # trigger and post-trigger liquidity would manufacture favorable event
+        # ordering. Carry triggered state into the next observation instead.
+        return SimulatedExecution(
+            status="NO_FILL",
+            filled_quantity=Decimal("0"),
+            fill_price=None,
+            fee=Decimal("0"),
+            arrival_at=arrival_text,
+            trade_time=None,
+            triggered=True,
+            model_fingerprint=model.fingerprint,
+            scenario=model.scenario,
+            data_fidelity=model.data_fidelity,
+            reason="stop triggered; wait for later liquidity before limit execution",
+            warnings=tuple(warnings),
+        )
+
     if order.order_type in {"LIMIT", "STOP_LIMIT"}:
         if not _limit_touched(order, observation, model):
             return SimulatedExecution(

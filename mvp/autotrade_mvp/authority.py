@@ -490,3 +490,270 @@ class AuthorityService:
             if _instant(now, name="now") >= _instant(confirmation.expires_at, name="confirmation.expires_at"):
                 return False, "confirmation_expired"
         return True, "allowed"
+
+
+    def export_state(self) -> dict:
+        """Return a canonical JSON-compatible snapshot of authority state.
+
+        This is persistence data, not a cryptographic trust boundary.  The
+        durable journal is responsible for integrity and ordering; restore()
+        revalidates the financial authority identities and references.
+        """
+        def instrument(value: InstrumentVersionIdentity) -> dict:
+            return {"instrument_id": value.instrument_id, "version": value.version}
+
+        policies = []
+        for policy_id in sorted(self._policies):
+            policy = self._policies[policy_id]
+            policies.append(
+                {
+                    "policy_id": policy.policy_id,
+                    "account_id": policy.account_id,
+                    "environments": sorted(policy.environments),
+                    "instruments": [
+                        instrument(item) for item in sorted(policy.instruments)
+                    ],
+                    "actions": sorted(policy.actions),
+                    "max_notional": str(policy.max_notional),
+                    "expires_at": policy.expires_at,
+                    "autonomous": policy.autonomous,
+                    "valid_from": policy.valid_from,
+                    "protection_only": policy.protection_only,
+                }
+            )
+
+        confirmations = []
+        for confirmation_id in sorted(self._confirmations):
+            confirmation = self._confirmations[confirmation_id]
+            confirmations.append(
+                {
+                    "confirmation_id": confirmation.confirmation_id,
+                    "policy_id": confirmation.policy_id,
+                    "intent_hash": confirmation.intent_hash,
+                    "account_id": confirmation.account_id,
+                    "environment": confirmation.environment,
+                    "instrument": instrument(confirmation.instrument_version),
+                    "action": confirmation.action,
+                    "notional": str(confirmation.notional),
+                    "expires_at": confirmation.expires_at,
+                }
+            )
+
+        admissions = []
+        for admission_id in sorted(self._admissions):
+            record = self._admissions[admission_id]
+            admissions.append(
+                {
+                    "admission_id": record.admission_id,
+                    "policy_id": record.policy_id,
+                    "intent_hash": record.intent_hash,
+                    "account_id": record.account_id,
+                    "environment": record.environment,
+                    "instrument": instrument(record.instrument_version),
+                    "action": record.action,
+                    "notional": str(record.notional),
+                    "risk_reducing": record.risk_reducing,
+                    "state_version": record.state_version,
+                    "authority_epoch": record.authority_epoch,
+                    "outcome": record.outcome,
+                    "admitted_at": record.admitted_at,
+                    "confirmation_id": record.confirmation_id,
+                    "reason": record.reason,
+                    "request_fingerprint": record.request_fingerprint,
+                }
+            )
+
+        return {
+            "schema_version": 1,
+            "epoch": self._epoch,
+            "policies": policies,
+            "revocations": [
+                {
+                    "policy_id": policy_id,
+                    "reason": value[0],
+                    "revoked_at": value[1],
+                }
+                for policy_id, value in sorted(self._revocations.items())
+            ],
+            "confirmations": confirmations,
+            "used_confirmations": sorted(self._used_confirmations),
+            "admissions": admissions,
+        }
+
+    @classmethod
+    def restore(cls, state: dict) -> "AuthorityService":
+        """Rebuild authority state from one durable snapshot, fail closed."""
+        if not isinstance(state, dict) or state.get("schema_version") != 1:
+            raise ValueError("unsupported authority state schema")
+        service = cls()
+
+        policies = state.get("policies")
+        revocations = state.get("revocations")
+        confirmations = state.get("confirmations")
+        admissions = state.get("admissions")
+        used_confirmations = state.get("used_confirmations")
+        if not all(
+            isinstance(value, list)
+            for value in (
+                policies,
+                revocations,
+                confirmations,
+                admissions,
+                used_confirmations,
+            )
+        ):
+            raise ValueError("authority state collections must be lists")
+
+        seen_policy_ids: set[str] = set()
+        for item in policies:
+            if not isinstance(item, dict):
+                raise ValueError("policy snapshot entry must be an object")
+            instruments = item.get("instruments")
+            if not isinstance(instruments, list):
+                raise ValueError("policy instruments must be a list")
+            policy = AuthorityPolicy.create(
+                policy_id=item.get("policy_id"),
+                account_id=item.get("account_id"),
+                environments=item.get("environments"),
+                instruments=[
+                    InstrumentVersionIdentity(
+                        entry.get("instrument_id"), entry.get("version")
+                    )
+                    for entry in instruments
+                    if isinstance(entry, dict)
+                ],
+                actions=item.get("actions"),
+                max_notional=item.get("max_notional"),
+                expires_at=item.get("expires_at"),
+                autonomous=item.get("autonomous"),
+                valid_from=item.get("valid_from"),
+                protection_only=item.get("protection_only"),
+            )
+            if policy.policy_id in seen_policy_ids:
+                raise AuthorityConflict("duplicate policy in authority snapshot")
+            seen_policy_ids.add(policy.policy_id)
+            service.register_policy(policy)
+
+        for item in revocations:
+            if not isinstance(item, dict):
+                raise ValueError("revocation snapshot entry must be an object")
+            service.revoke_policy(
+                item.get("policy_id"),
+                reason=item.get("reason"),
+                revoked_at=item.get("revoked_at"),
+            )
+
+        seen_confirmation_ids: set[str] = set()
+        for item in confirmations:
+            if not isinstance(item, dict) or not isinstance(item.get("instrument"), dict):
+                raise ValueError("confirmation snapshot entry is invalid")
+            instrument = item["instrument"]
+            cid = item.get("confirmation_id")
+            if cid in seen_confirmation_ids:
+                raise AuthorityConflict("duplicate confirmation in authority snapshot")
+            seen_confirmation_ids.add(cid)
+            service.add_confirmation(
+                confirmation_id=cid,
+                policy_id=item.get("policy_id"),
+                intent_hash=item.get("intent_hash"),
+                account_id=item.get("account_id"),
+                environment=item.get("environment"),
+                instrument_id=instrument.get("instrument_id"),
+                instrument_version=instrument.get("version"),
+                action=item.get("action"),
+                notional=item.get("notional"),
+                expires_at=item.get("expires_at"),
+            )
+
+        restored_admissions: dict[str, AdmissionRecord] = {}
+        derived_used: set[str] = set()
+        for item in admissions:
+            if not isinstance(item, dict) or not isinstance(item.get("instrument"), dict):
+                raise ValueError("admission snapshot entry is invalid")
+            admission_id = _text(item.get("admission_id"), name="admission_id")
+            if admission_id in restored_admissions:
+                raise AuthorityConflict("duplicate admission in authority snapshot")
+            policy_id = _text(item.get("policy_id"), name="policy_id")
+            if policy_id not in service._policies:
+                raise ValueError("admission references missing policy")
+            instrument = item["instrument"]
+            identity = InstrumentVersionIdentity(
+                instrument.get("instrument_id"), instrument.get("version")
+            )
+            amount = _decimal(item.get("notional"), name="notional")
+            if amount < 0:
+                raise ValueError("admission notional must be non-negative")
+            state_version = item.get("state_version")
+            authority_epoch = item.get("authority_epoch")
+            risk_reducing = item.get("risk_reducing")
+            if (
+                not isinstance(state_version, int)
+                or isinstance(state_version, bool)
+                or state_version < 0
+            ):
+                raise ValueError("admission state_version is invalid")
+            if (
+                not isinstance(authority_epoch, int)
+                or isinstance(authority_epoch, bool)
+                or authority_epoch < 0
+                or authority_epoch > service._epoch
+            ):
+                raise ValueError("admission authority_epoch is invalid")
+            if not isinstance(risk_reducing, bool):
+                raise TypeError("admission risk_reducing must be boolean")
+            outcome = _text(item.get("outcome"), name="outcome").upper()
+            if outcome not in {"ADMITTED", "REJECTED"}:
+                raise ValueError("admission outcome is invalid")
+            admitted_at = _text(item.get("admitted_at"), name="admitted_at")
+            _instant(admitted_at, name="admitted_at")
+            confirmation_id = item.get("confirmation_id")
+            if confirmation_id is not None:
+                confirmation_id = _text(
+                    confirmation_id, name="confirmation_id"
+                )
+                if confirmation_id not in service._confirmations:
+                    raise ValueError("admission references missing confirmation")
+                if outcome != "ADMITTED":
+                    raise ValueError("rejected admission cannot consume confirmation")
+                derived_used.add(confirmation_id)
+            record = AdmissionRecord(
+                admission_id=admission_id,
+                policy_id=policy_id,
+                intent_hash=_text(item.get("intent_hash"), name="intent_hash"),
+                account_id=_text(item.get("account_id"), name="account_id"),
+                environment=_text(item.get("environment"), name="environment").upper(),
+                instrument_version=identity,
+                action=_text(item.get("action"), name="action").upper(),
+                notional=amount,
+                risk_reducing=risk_reducing,
+                state_version=state_version,
+                authority_epoch=authority_epoch,
+                outcome=outcome,
+                admitted_at=admitted_at,
+                confirmation_id=confirmation_id,
+                reason=_text(item.get("reason"), name="reason"),
+                request_fingerprint=_text(
+                    item.get("request_fingerprint"), name="request_fingerprint"
+                ),
+            )
+            restored_admissions[admission_id] = record
+
+        normalized_used = {
+            _text(value, name="used_confirmation")
+            for value in used_confirmations
+        }
+        if normalized_used != derived_used:
+            raise ValueError("used confirmation set does not match admitted records")
+        if not normalized_used <= set(service._confirmations):
+            raise ValueError("used confirmation references missing confirmation")
+
+        epoch = state.get("epoch")
+        if (
+            not isinstance(epoch, int)
+            or isinstance(epoch, bool)
+            or epoch != service._epoch
+        ):
+            raise ValueError("authority epoch does not match durable mutations")
+        service._admissions = restored_admissions
+        service._used_confirmations = normalized_used
+        return service

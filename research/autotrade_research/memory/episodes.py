@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -84,12 +86,20 @@ class ExperienceMemory:
                 """
             )
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         con = sqlite3.connect(self.path, timeout=30)
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA foreign_keys=ON")
-        return con
+        try:
+            yield con
+            con.commit()
+        except BaseException:
+            con.rollback()
+            raise
+        finally:
+            con.close()
 
     def append_episode(
         self,

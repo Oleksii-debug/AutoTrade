@@ -1,6 +1,8 @@
 """Atomic future-routing champion registry with evidence-bound promotion."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -97,11 +99,19 @@ class ChampionRegistry:
                 """
             )
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         con = sqlite3.connect(self.path, timeout=30)
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA journal_mode=WAL")
-        return con
+        try:
+            yield con
+            con.commit()
+        except BaseException:
+            con.rollback()
+            raise
+        finally:
+            con.close()
 
     def state(self) -> RoutingState:
         with self._connect() as con:

@@ -131,4 +131,12 @@ var regressed = callbacks.Observe(new OrderEvent
 Require(regressed.TimeRegressed, "Arrival-time regression was silently hidden.");
 Require(regressed.HasEconomicFill, "Final non-zero fill was not characterized.");
 
+var engineIdentity = LeanEngineAssemblyProbe.GetIdentity();
+Require(
+    engineIdentity.TypeName == "QuantConnect.Lean.Engine.Engine",
+    "The real LEAN Engine type was not resolved.");
+Require(
+    engineIdentity.AssemblyName == "QuantConnect.Lean.Engine",
+    "The real LEAN Engine assembly was not compiled into the project graph.");
+
 Console.WriteLine("WP02_LEAN_ADOPTION_PROBE_PASS");

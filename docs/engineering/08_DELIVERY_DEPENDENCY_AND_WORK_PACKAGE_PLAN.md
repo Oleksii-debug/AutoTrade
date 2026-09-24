@@ -278,8 +278,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Portfolio/Accounting/ and its contract/qualification evidence.
 - **Forbidden scope:** Sports win/loss ledger; silent float money coercion; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: FINANCE / economic-ledger; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Provider-neutral exact double-entry accounting foundation implemented in mvp/autotrade_mvp/accounting.py with per-asset/currency conservation, cash and position projections, external flows, third-currency fees/rebates, explicit FX clearing, exact reversals and duplicate/double-reversal protection. Independent economic reference vectors cover cash round trip, linear/inverse futures, funding, split, deposit neutrality and bust/correction. Remaining WP-14 work: production journal persistence integration, lot/basis and realized/unrealized projection policy, settled/unsettled cash, full FX valuation freshness, derivative lifecycle postings, corrections from provider events and exact-head cross-platform qualification.
 
 ### WP-15 — reservations
 
@@ -295,8 +295,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Portfolio/Reservations/ and its contract/qualification evidence.
 - **Forbidden scope:** Ignoring pending cancel/unknown/manual exposure; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: FINANCE / reservations; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Conservative reservation foundation implemented in mvp/autotrade_mvp/reservations.py with multi-resource availability, duplicate-safe immutable reservations, partial consumption, UNKNOWN retention, evidenced terminal release and overlap protection. Additional invariants prohibit FILLED from releasing unconsumed remainder and prohibit REJECTED/PROVEN_ABSENT from erasing consumed exposure. Remaining WP-15 work: bind reservations atomically to accounting/admission transactions, provider fill quantities and fee/slippage bounds; add persistence/restart/concurrency stress and exact-head cross-platform qualification.
 
 ### WP-16 — independent-risk
 

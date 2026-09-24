@@ -143,9 +143,11 @@ def _seconds_decimal_to_utc(value: object, *, name: str) -> str:
     if seconds < 0:
         raise ProviderCoreError(f"{name} must be non-negative")
     whole = int(seconds)
-    micros = int((seconds - Decimal(whole)) * Decimal("1000000"))
+    micros = (seconds - Decimal(whole)) * Decimal("1000000")
+    if micros != micros.to_integral_value():
+        raise ProviderCoreError(f"{name} has precision finer than one microsecond")
     instant = datetime.fromtimestamp(whole, tz=timezone.utc) + timedelta(
-        microseconds=micros
+        microseconds=int(micros)
     )
     return instant.isoformat(timespec="microseconds").replace("+00:00", "Z")
 

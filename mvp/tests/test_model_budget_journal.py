@@ -86,6 +86,7 @@ class DurableModelBudgetTests(unittest.TestCase):
             self.assertTrue(
                 first.reconcile_unbilled(
                     billing_id="invoice-1",
+                    request_id="req-1",
                     billed="0.2",
                 )
             )
@@ -95,6 +96,7 @@ class DurableModelBudgetTests(unittest.TestCase):
             self.assertFalse(
                 restarted.reconcile_unbilled(
                     billing_id="invoice-1",
+                    request_id="req-1",
                     billed="0.2",
                 )
             )
@@ -102,9 +104,36 @@ class DurableModelBudgetTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "idempotency identity conflicts"):
                 restarted.reconcile_unbilled(
                     billing_id="invoice-1",
+                    request_id="req-1",
                     billed="0.1",
                 )
             self.assertEqual(restarted.snapshot(), expected)
+
+    def test_billing_identity_cannot_move_between_requests_after_restart(self):
+        with TemporaryDirectory() as directory:
+            _, first = open_budget(directory, ceiling="2")
+            first.reserve("req-1", "0.5")
+            first.reserve("req-2", "0.5")
+            first.settle("req-1", incurred="0.1", estimated_unbilled="0.2")
+            first.settle("req-2", incurred="0.1", estimated_unbilled="0.2")
+            self.assertTrue(
+                first.reconcile_unbilled(
+                    billing_id="invoice-shared",
+                    request_id="req-1",
+                    billed="0.1",
+                )
+            )
+
+            _, restarted = open_budget(directory, ceiling="2")
+            with self.assertRaisesRegex(
+                ValueError,
+                "idempotency identity conflicts",
+            ):
+                restarted.reconcile_unbilled(
+                    billing_id="invoice-shared",
+                    request_id="req-2",
+                    billed="0.1",
+                )
 
     def test_release_is_durable_across_restart(self):
         with TemporaryDirectory() as directory:

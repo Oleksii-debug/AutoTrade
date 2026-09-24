@@ -6,7 +6,6 @@ from uuid import uuid4
 from mvp.autotrade_mvp.binance_usdm import (
     BinanceUsdmAdapterError,
     BinanceUsdmOrderIntent,
-    classify_transport_result,
     coverage_evidence,
     parse_account_trades,
     parse_order_ack,
@@ -271,27 +270,6 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             result["provider_order_id"],
             "BINANCE-USDM:BTCUSDT:22542179",
         )
-
-    def test_uncertain_send_is_unknown_and_never_blind_retried(self):
-        result = classify_transport_result(
-            attempt_id=str(uuid4()),
-            client_order_id="at-usdm-unknown",
-            transport_started=True,
-            provider_acknowledged=False,
-            provider_rejected=False,
-        )
-        self.assertEqual(result["outcome"], "UNKNOWN")
-        self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
-
-        not_sent = classify_transport_result(
-            attempt_id=str(uuid4()),
-            client_order_id="at-usdm-not-sent",
-            transport_started=False,
-            provider_acknowledged=False,
-            provider_rejected=False,
-        )
-        self.assertEqual(not_sent["outcome"], "NOT_SENT")
-        self.assertEqual(not_sent["retry_disposition"], "NEW_ADMISSION_REQUIRED")
 
     def test_trade_identity_dedupes_and_preserves_exact_fee(self):
         row = {

@@ -237,6 +237,9 @@ def derive_capability_snapshot(
     if required != SOURCES:
         raise CapabilityError("all canonical capability sources are required for verification")
 
+    if any(not isinstance(claim, CapabilityClaim) for claim in records):
+        raise TypeError("claims must contain CapabilityClaim values")
+
     first = records[0]
     identity = (
         first.provider_id,
@@ -245,9 +248,7 @@ def derive_capability_snapshot(
         first.environment,
         first.instrument_version,
     )
-    for claim in records:
-        if not isinstance(claim, CapabilityClaim):
-            raise TypeError("claims must contain CapabilityClaim values")
+    for claim in records[1:]:
         other = (
             claim.provider_id,
             claim.account_id,

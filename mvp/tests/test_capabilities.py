@@ -237,7 +237,10 @@ class CapabilityFoundationTests(unittest.TestCase):
             observed_at=NOW,
         )
         self.assertEqual(snapshot.status, "VERIFIED")
-        self.assertEqual(snapshot.sources, frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}))
+        self.assertEqual(
+            snapshot.sources,
+            frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}),
+        )
 
     def test_overlapping_live_claims_from_same_source_are_intersected(self):
         claims = list(complete_claims())
@@ -264,6 +267,28 @@ class CapabilityFoundationTests(unittest.TestCase):
             observed_at=NOW,
         )
         self.assertEqual(snapshot.status, "CONFLICTED")
+
+    def test_collection_fields_reject_string_values(self):
+        original = claim("API")
+        with self.assertRaisesRegex(CapabilityError, "must be a collection"):
+            CapabilityClaim(
+                source=original.source,
+                provider_id=original.provider_id,
+                account_id=original.account_id,
+                entity_id=original.entity_id,
+                environment=original.environment,
+                instrument_version=original.instrument_version,
+                observed_at=original.observed_at,
+                expires_at=original.expires_at,
+                supported_order_types="LIMIT",
+                time_in_force=original.time_in_force,
+                permission_scopes=original.permission_scopes,
+                position_mode=original.position_mode,
+                native_protection=original.native_protection,
+                rate_limit_policy_id=original.rate_limit_policy_id,
+                data_entitlements=original.data_entitlements,
+                evidence_ref=original.evidence_ref,
+            )
 
     def test_future_dated_evidence_is_conflicted_not_expired(self):
         claims = list(complete_claims())

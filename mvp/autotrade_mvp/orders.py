@@ -60,6 +60,7 @@ class IntentSnapshot:
     unknown: bool
     filled_quantity: Decimal
     remaining_quantity: Decimal
+    overfill_quantity: Decimal
     operational_state: str
     oco_group: str | None
     parent_intent_id: str | None
@@ -259,6 +260,10 @@ class OrderProjection:
             raise KeyError(original_id)
         correction_id = _text(correction_fill_id, name="correction_fill_id")
         execution_id = _text(provider_execution_id, name="provider_execution_id")
+        if execution_id != original.provider_execution_id:
+            raise OrderProjectionConflict(
+                "fill correction must preserve provider_execution_id"
+            )
         revision = _text(provider_revision, name="provider_revision")
         qty = _decimal(quantity, name="corrected quantity")
         px = _decimal(price, name="corrected price")
@@ -313,11 +318,14 @@ class OrderProjection:
         intent = self._require_intent(intent_id)
         filled = self.filled_quantity(intent.intent_id)
         remaining = max(intent.ordered_quantity - filled, Decimal("0"))
+        overfill = max(filled - intent.ordered_quantity, Decimal("0"))
         if intent.rejected:
             state = "REJECTED"
+        elif overfill > 0:
+            state = "OVERFILLED_AFTER_CANCEL" if intent.cancel_confirmed else "OVERFILLED"
         elif intent.cancel_confirmed:
             state = "CANCELED_WITH_LATE_FILL" if filled > 0 else "CANCELED"
-        elif filled >= intent.ordered_quantity:
+        elif filled == intent.ordered_quantity:
             state = "FILLED"
         elif filled > 0:
             state = "PARTIALLY_FILLED"
@@ -341,6 +349,7 @@ class OrderProjection:
             unknown=intent.unknown,
             filled_quantity=filled,
             remaining_quantity=remaining,
+            overfill_quantity=overfill,
             operational_state=state,
             oco_group=intent.oco_group,
             parent_intent_id=intent.parent_intent_id,

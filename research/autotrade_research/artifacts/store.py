@@ -10,7 +10,7 @@ import tempfile
 from typing import Any
 from uuid import UUID
 
-from .durable_publish import atomic_write_json, sha256_file
+from .durable_publish import atomic_write_json, sha256_file, sync_parent_directory
 from .resource_lock import ResourceLock
 from ..io.strict_json import strict_json_loads
 
@@ -202,6 +202,7 @@ class ArtifactStore:
                         raise ArtifactIntegrityError("staged artifact hash changed")
                     os.replace(temporary, object_path)
                     temporary = None
+                    sync_parent_directory(object_path)
                 finally:
                     if temporary is not None:
                         try:
@@ -265,6 +266,7 @@ class ArtifactStore:
                 os.fsync(handle.fileno())
             os.replace(temporary, target)
             temporary = None
+            sync_parent_directory(target)
         finally:
             if temporary is not None:
                 try:

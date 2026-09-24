@@ -356,6 +356,31 @@ class DispatchTests(unittest.TestCase):
             )
             self.assertEqual(events[-1]["payload"]["owner_epoch"], 1)
 
+    def test_event_envelope_records_actual_owner_epoch(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                owner_token="host-generation-seven",
+                owner_epoch=7,
+            )
+
+            result = dispatcher.dispatch(
+                attempt_id="epoch-seven-a1",
+                intent_id="i-epoch-seven",
+                intent_hash="h-epoch-seven",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _hash, _now: (False, "blocked-for-test"),
+                transport_send=lambda *_args: self.fail("transport must not run"),
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            events = store.load_events("submission_attempt", "epoch-seven-a1")
+            self.assertEqual([event["owner_epoch"] for event in events], ["7", "7"])
+            self.assertEqual(events[0]["payload"]["owner_epoch"], 7)
+
     def test_owner_epoch_must_be_positive_integer(self):
         with TemporaryDirectory() as directory:
             with self.assertRaises(ValueError):

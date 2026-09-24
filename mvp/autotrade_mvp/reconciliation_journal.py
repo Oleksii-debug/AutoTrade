@@ -102,7 +102,12 @@ def record_reconciliation_checkpoint(
         raise ValueError("environment is unsupported")
     payload = reconciliation_payload(result, observed_at=observed_at)
     existing = store.load_events("account_reconciliation", rid)
-    if existing and existing[-1]["payload"] == payload:
+    if (
+        existing
+        and existing[-1]["payload"] == payload
+        and existing[-1].get("owner_epoch") == str(owner_epoch)
+        and existing[-1].get("environment") == normalized_environment
+    ):
         return existing[-1]
 
     version = store.next_aggregate_version("account_reconciliation", rid)

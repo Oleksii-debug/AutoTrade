@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.whitebit import (
     WhiteBitMarketRules,
     WhiteBitOrderIntent,
     WhiteBitPageEvidence,
+    WhiteBitRecoveryCheckpoint,
     absence_evidence_from_coverages,
     collateral_balance_request,
     decode_whitebit_json,
@@ -43,6 +44,8 @@ from mvp.autotrade_mvp.whitebit import (
     spot_balance_request,
     validate_client_order_id,
     validate_intent_market_rules,
+    validate_websocket_endpoint,
+    websocket_recovery_policy,
 )
 
 
@@ -810,6 +813,93 @@ class WhiteBitAdapterTests(unittest.TestCase):
         )
         self.assertEqual(dict(all_assets.body), {})
         self.assertEqual(dict(one_asset.body), {"ticker": "BTC"})
+
+    def test_current_websocket_host_is_required(self):
+        self.assertEqual(
+            validate_websocket_endpoint("wss://wss.whitebit.com/ws"),
+            "wss://wss.whitebit.com/ws",
+        )
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "deprecated",
+        ):
+            validate_websocket_endpoint("wss://api.whitebit.com/ws")
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "unqualified",
+        ):
+            validate_websocket_endpoint("wss://example.invalid/ws")
+
+    def test_positions_recover_only_after_new_full_snapshot(self):
+        policy = websocket_recovery_policy("positions")
+        self.assertTrue(policy.full_snapshot_on_subscribe)
+        self.assertFalse(policy.requires_backfill)
+        before_snapshot = WhiteBitRecoveryCheckpoint(
+            channel="POSITIONS",
+            baseline_observed=False,
+            subscription_confirmed=True,
+            backfill_complete=False,
+            full_snapshot_observed=False,
+        )
+        self.assertFalse(before_snapshot.recovered)
+        after_snapshot = WhiteBitRecoveryCheckpoint(
+            channel="POSITIONS",
+            baseline_observed=False,
+            subscription_confirmed=True,
+            backfill_complete=False,
+            full_snapshot_observed=True,
+        )
+        self.assertTrue(after_snapshot.recovered)
+
+    def test_incremental_balance_requires_baseline_and_subscription(self):
+        policy = websocket_recovery_policy("balance_spot")
+        self.assertEqual(policy.query_method, "balanceSpot_request")
+        self.assertTrue(policy.requires_backfill)
+        no_baseline = WhiteBitRecoveryCheckpoint(
+            channel="BALANCE_SPOT",
+            baseline_observed=False,
+            subscription_confirmed=True,
+            backfill_complete=True,
+            full_snapshot_observed=False,
+        )
+        self.assertFalse(no_baseline.recovered)
+        complete = WhiteBitRecoveryCheckpoint(
+            channel="BALANCE_SPOT",
+            baseline_observed=True,
+            subscription_confirmed=True,
+            backfill_complete=True,
+            full_snapshot_observed=False,
+        )
+        self.assertTrue(complete.recovered)
+
+    def test_event_stream_reconnect_requires_backfill_not_just_resubscribe(self):
+        for channel in ("DEALS", "ORDERS_EXECUTED"):
+            with self.subTest(channel=channel):
+                policy = websocket_recovery_policy(channel)
+                self.assertEqual(policy.state_model, "EVENT_STREAM")
+                incomplete = WhiteBitRecoveryCheckpoint(
+                    channel=channel,
+                    baseline_observed=True,
+                    subscription_confirmed=True,
+                    backfill_complete=False,
+                    full_snapshot_observed=False,
+                )
+                self.assertFalse(incomplete.recovered)
+                complete = WhiteBitRecoveryCheckpoint(
+                    channel=channel,
+                    baseline_observed=True,
+                    subscription_confirmed=True,
+                    backfill_complete=True,
+                    full_snapshot_observed=False,
+                )
+                self.assertTrue(complete.recovered)
+
+    def test_unknown_stream_channel_is_not_assumed_recoverable(self):
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "unqualified",
+        ):
+            websocket_recovery_policy("orders_magic")
 
     def test_private_signer_uses_exact_body_and_caller_owned_nonce(self):
         nonce = 1_790_280_000_123

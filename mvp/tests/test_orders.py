@@ -152,5 +152,39 @@ class OrderProjectionTests(unittest.TestCase):
             )
 
 
+    def test_provider_overfill_is_explicit_not_silently_clamped(self):
+        book = OrderProjection()
+        book.register_intent(intent_id="i1", side="BUY", quantity="1")
+        book.observe_fill(
+            fill_id="f1", provider_execution_id="exec-1", intent_id="i1",
+            side="BUY", quantity="1.25", price="100",
+        )
+        state = book.snapshot("i1")
+        self.assertEqual(state.remaining_quantity, Decimal("0"))
+        self.assertEqual(state.overfill_quantity, Decimal("0.25"))
+        self.assertEqual(state.operational_state, "OVERFILLED")
+
+    def test_correction_cannot_switch_provider_execution_identity(self):
+        book = OrderProjection()
+        book.register_intent(intent_id="i1", side="BUY", quantity="1")
+        book.observe_fill(
+            fill_id="f1", provider_execution_id="exec-1", intent_id="i1",
+            side="BUY", quantity="1", price="100",
+        )
+        with self.assertRaisesRegex(
+            OrderProjectionConflict,
+            "provider_execution_id",
+        ):
+            book.correct_fill(
+                "f1",
+                correction_fill_id="f1-r2",
+                provider_execution_id="exec-other",
+                quantity="1",
+                price="101",
+                provider_revision="2",
+            )
+
+
+
 if __name__ == "__main__":
     unittest.main()

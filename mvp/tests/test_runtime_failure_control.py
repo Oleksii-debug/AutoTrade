@@ -2,6 +2,7 @@ import unittest
 
 from mvp.autotrade_mvp.reconciliation import (
     CoverageSurfaceEvidence,
+    ReconciliationResult,
     SnapshotConsistencyEvidence,
     UnknownSubmission,
     reconcile_account,
@@ -123,6 +124,28 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.assertEqual(attempt.provider_execution_ids, ["exec-7", "exec-8"])
         self.assertEqual(attempt.retry_disposition, "NEVER")
         self.assertEqual(controller.state, HostState.READY)
+
+    def test_forged_reconciliation_result_cannot_authorize_retry(self):
+        with self.assertRaisesRegex(
+            TypeError,
+            "only be created by canonical reconcile_account",
+        ):
+            ReconciliationResult(
+                complete=True,
+                matched_execution_ids=(),
+                unexpected_execution_ids=(),
+                missing_local_execution_ids=(),
+                matched_working_client_order_ids=(),
+                unexpected_working_provider_order_ids=(),
+                missing_local_working_client_order_ids=(),
+                mismatched_working_client_order_ids=(),
+                snapshot_consistent=True,
+                cash_differences={},
+                position_differences={},
+                submission_resolutions=(),
+                blocking_resources=(),
+                reasons=(),
+            )
 
     def test_absence_requires_canonical_reconciliation_before_retry(self):
         attempt = OutboundAttempt("a1", "intent-1", 1)

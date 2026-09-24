@@ -106,6 +106,11 @@ class ReservationBook:
                 )
             return existing
 
+        if any(record.intent_id == iid for record in self._records.values()):
+            raise ReservationConflict(
+                "intent_id already has a different reservation"
+            )
+
         for resource, amount in needed.items():
             if resource not in availability:
                 raise InsufficientAvailable(f"No availability evidence for {resource}")

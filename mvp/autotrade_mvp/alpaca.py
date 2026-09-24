@@ -665,6 +665,16 @@ class AlpacaMlegOrderIntent:
             raise AlpacaAdapterError(
                 "every multi-leg option must share the canonical underlying"
             )
+        instrument_versions = [leg.instrument_version for leg in leg_values]
+        if len(instrument_versions) != len(set(instrument_versions)):
+            raise AlpacaAdapterError(
+                "multi-leg instrument versions must be unique; use ratio_quantity"
+            )
+        provider_symbols = [leg.symbol for leg in leg_values]
+        if len(provider_symbols) != len(set(provider_symbols)):
+            raise AlpacaAdapterError(
+                "multi-leg provider symbols must be unique; use ratio_quantity"
+            )
 
         common_divisor = 0
         for leg in leg_values:

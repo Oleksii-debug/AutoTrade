@@ -33,7 +33,7 @@ jobs:
           python-version: "3.12"
       - run: python -m unittest mvp.tests.test_zero_model_qualification -v
       - name: Generate exact-head qualification evidence
-        run: python qualification/zero_model/qualify.py --source-sha "$GITHUB_SHA" --output "$RUNNER_TEMP/zero-model-evidence.json"
+        run: python -m qualification.zero_model.qualify --source-sha "$GITHUB_SHA" --output "$RUNNER_TEMP/zero-model-evidence.json"
       - uses: actions/upload-artifact@v4
         with:
           name: zero-model-qualification-${{ github.sha }}

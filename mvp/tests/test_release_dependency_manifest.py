@@ -74,7 +74,11 @@ class ReleaseDependencyManifestTests(unittest.TestCase):
                         "qualified": True,
                         "schema_version": "1.0.0",
                         "source_sha": "a" * 40,
-                        "evidence_refs": ["artifact://qualification/1"],
+                        "evidence_refs": [{
+                            "artifact_id": "qualification-1",
+                            "sha256": "sha256:" + "b" * 64,
+                            "observed_at": "2026-09-24T20:00:00Z",
+                        }],
                     }
                 ),
                 encoding="utf-8",
@@ -86,6 +90,40 @@ class ReleaseDependencyManifestTests(unittest.TestCase):
             self.assertTrue(qualified)
             self.assertIsNone(reason)
 
+
+    def test_opaque_or_mutable_evidence_refs_cannot_qualify_release(self):
+        with TemporaryDirectory() as directory:
+            evidence = Path(directory) / "evidence.json"
+            base = {
+                "qualified": True,
+                "schema_version": "1.0.0",
+                "source_sha": "a" * 40,
+            }
+            invalid_refs = (
+                ["artifact://qualification/1"],
+                [{
+                    "artifact_id": "qualification-1",
+                    "sha256": "sha256:" + "b" * 63,
+                    "observed_at": "2026-09-24T20:00:00Z",
+                }],
+                [{
+                    "artifact_id": "qualification-1",
+                    "sha256": "sha256:" + "b" * 64,
+                    "observed_at": "2026-09-24T20:00:00+02:00",
+                }],
+            )
+            for refs in invalid_refs:
+                with self.subTest(refs=refs):
+                    evidence.write_text(
+                        json.dumps({**base, "evidence_refs": refs}),
+                        encoding="utf-8",
+                    )
+                    qualified, reason = release_evidence_document(
+                        evidence,
+                        label="test evidence",
+                    )
+                    self.assertFalse(qualified)
+                    self.assertEqual(reason, "invalid_evidence_refs")
 
     def test_advisory_evidence_for_another_dependency_graph_is_rejected(self):
         expected_graph = {
@@ -99,7 +137,11 @@ class ReleaseDependencyManifestTests(unittest.TestCase):
                 "qualified": True,
                 "schema_version": "1.0.0",
                 "source_sha": "a" * 40,
-                "evidence_refs": ["artifact://advisories/1"],
+                "evidence_refs": [{
+                    "artifact_id": "advisories-1",
+                    "sha256": "sha256:" + "c" * 64,
+                    "observed_at": "2026-09-24T20:00:00Z",
+                }],
             }
             evidence.write_text(json.dumps(base), encoding="utf-8")
             qualified, reason = dependency_advisory_evidence_document(

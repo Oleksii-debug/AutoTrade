@@ -6,13 +6,23 @@ from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
     CapabilityError,
     CapabilityRegistry,
-    derive_capability_snapshot,
+    EvidenceVerification,
+    derive_capability_snapshot as _derive_capability_snapshot,
 )
 
 
 NOW = datetime(2026, 9, 24, 16, 0, tzinfo=timezone.utc)
 SNAPSHOT_1 = "11111111-1111-4111-8111-111111111111"
 SNAPSHOT_2 = "22222222-2222-4222-8222-222222222222"
+
+
+def _trusted_test_evidence(_claim: CapabilityClaim) -> EvidenceVerification:
+    return EvidenceVerification(valid=True)
+
+
+def derive_capability_snapshot(**kwargs):
+    kwargs.setdefault("evidence_verifier", _trusted_test_evidence)
+    return _derive_capability_snapshot(**kwargs)
 
 
 def claim(
@@ -59,6 +69,15 @@ def complete_claims(**overrides):
 
 
 class CapabilityFoundationTests(unittest.TestCase):
+    def test_self_asserted_evidence_without_verifier_is_unknown(self):
+        snapshot = _derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(),
+            observed_at=NOW,
+        )
+        self.assertEqual(snapshot.status, "UNKNOWN")
+        self.assertEqual(snapshot.sources, frozenset())
+
     def test_verified_snapshot_is_exact_intersection(self):
         claims = (
             claim("DOCUMENTED", order_types=("LIMIT", "MARKET"), tif=("DAY", "GTC")),

@@ -402,6 +402,7 @@ class ModelRoutingDecision:
     revision: str | None
     estimated_cost: Decimal
     expected_latency_ms: int | None
+    deadline_ms: int
     price_evidence_sha256: str | None
     quality_evidence_sha256: str | None
     reproducibility_limitations: tuple[str, ...]
@@ -432,6 +433,7 @@ def _fallback(policy: ModelRoutingPolicy, task: ModelTask, reason: str) -> Model
         revision=None,
         estimated_cost=Decimal("0"),
         expected_latency_ms=None,
+        deadline_ms=policy.deadline_ms,
         price_evidence_sha256=None,
         quality_evidence_sha256=None,
         reproducibility_limitations=(),
@@ -536,8 +538,178 @@ def route_model(
         revision=chosen.revision,
         estimated_cost=cost,
         expected_latency_ms=chosen.expected_latency_ms,
+        deadline_ms=policy.deadline_ms,
         price_evidence_sha256=chosen.price_evidence_sha256,
         quality_evidence_sha256=chosen.quality_evidence_sha256,
         reproducibility_limitations=chosen.reproducibility_limitations,
         fallback_evidence_sha256=None,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ModelCallObservation:
+    """Provider/runtime facts observed after a planned model call boundary."""
+
+    reservation_id: str
+    model_id: str
+    provider: str
+    model_name: str
+    revision: str | None
+    provider_call_id: str
+    elapsed_ms: int
+    actual_input_tokens: int
+    actual_output_tokens: int
+    billed_cost: Decimal | None
+    output_schema_valid: bool
+    evidence_sha256: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        reservation_id: str,
+        model_id: str,
+        provider: str,
+        model_name: str,
+        revision: str | None,
+        provider_call_id: str,
+        elapsed_ms: int,
+        actual_input_tokens: int,
+        actual_output_tokens: int,
+        billed_cost=None,
+        output_schema_valid: bool,
+        evidence_sha256: str,
+    ) -> "ModelCallObservation":
+        if type(output_schema_valid) is not bool:
+            raise ModelRoutingError("output_schema_valid must be boolean")
+        normalized_revision = None
+        if revision is not None:
+            normalized_revision = _text(revision, name="revision")
+        normalized_cost = None
+        if billed_cost is not None:
+            normalized_cost = _decimal(billed_cost, name="billed_cost")
+        return cls(
+            reservation_id=_text(reservation_id, name="reservation_id"),
+            model_id=_text(model_id, name="model_id"),
+            provider=_text(provider, name="provider"),
+            model_name=_text(model_name, name="model_name"),
+            revision=normalized_revision,
+            provider_call_id=_text(provider_call_id, name="provider_call_id"),
+            elapsed_ms=_positive_int(elapsed_ms, name="elapsed_ms", allow_zero=True),
+            actual_input_tokens=_positive_int(
+                actual_input_tokens, name="actual_input_tokens", allow_zero=True
+            ),
+            actual_output_tokens=_positive_int(
+                actual_output_tokens, name="actual_output_tokens", allow_zero=True
+            ),
+            billed_cost=normalized_cost,
+            output_schema_valid=output_schema_valid,
+            evidence_sha256=_hash(evidence_sha256, name="evidence_sha256"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ModelCallRecord:
+    task_id: str
+    reservation_id: str
+    provider_call_id: str
+    model_id: str
+    provider: str
+    model_name: str
+    planned_revision: str | None
+    actual_revision: str | None
+    elapsed_ms: int
+    deadline_ms: int
+    deadline_met: bool
+    actual_input_tokens: int
+    actual_output_tokens: int
+    billing_status: str
+    cost: Decimal
+    output_schema_valid: bool
+    usable: bool
+    evidence_sha256: str
+    reproducibility_limitations: tuple[str, ...]
+
+    @property
+    def authorizes_trading(self) -> bool:
+        return False
+
+
+def record_model_call(
+    *,
+    decision: ModelRoutingDecision,
+    observation: ModelCallObservation,
+    budget: ModelBudgetLedger,
+) -> ModelCallRecord:
+    """Bind post-call facts to the reserved route and update exact cost state.
+
+    Identity mismatch is rejected before budget state is mutated. A deadline miss
+    or invalid output schema is retained as negative operational evidence rather
+    than being silently retried or called usable.
+    """
+
+    if not isinstance(decision, ModelRoutingDecision):
+        raise TypeError("decision must be ModelRoutingDecision")
+    if not isinstance(observation, ModelCallObservation):
+        raise TypeError("observation must be ModelCallObservation")
+    if not isinstance(budget, ModelBudgetLedger):
+        raise TypeError("budget must be ModelBudgetLedger")
+    if decision.outcome != "MODEL" or decision.reservation_id is None:
+        raise ModelRoutingError("only a reserved MODEL decision can record a model call")
+    if observation.reservation_id != decision.reservation_id:
+        raise ModelRoutingError("model call reservation identity mismatch")
+    identity_pairs = (
+        (observation.model_id, decision.model_id, "model_id"),
+        (observation.provider, decision.provider, "provider"),
+        (observation.model_name, decision.model_name, "model_name"),
+    )
+    for actual, planned, name in identity_pairs:
+        if actual != planned:
+            raise ModelRoutingError(f"actual {name} does not match reserved route")
+    if decision.revision is not None and observation.revision != decision.revision:
+        raise ModelRoutingError("actual model revision does not match reserved revision")
+
+    if observation.billed_cost is None:
+        budget.mark_unbilled(
+            decision.reservation_id,
+            estimated_cost=decision.estimated_cost,
+        )
+        billing_status = "ESTIMATED_UNBILLED"
+        cost = decision.estimated_cost
+    else:
+        budget.record_billing(
+            decision.reservation_id,
+            billed_cost=observation.billed_cost,
+        )
+        billing_status = "FINAL"
+        cost = observation.billed_cost
+
+    deadline_met = observation.elapsed_ms <= decision.deadline_ms
+    usable = deadline_met and observation.output_schema_valid
+    limitations = list(decision.reproducibility_limitations)
+    if decision.revision is None and observation.revision is not None:
+        limitations = [
+            value for value in limitations if value != "UNKNOWN_MODEL_REVISION"
+        ]
+
+    return ModelCallRecord(
+        task_id=decision.task_id,
+        reservation_id=decision.reservation_id,
+        provider_call_id=observation.provider_call_id,
+        model_id=observation.model_id,
+        provider=observation.provider,
+        model_name=observation.model_name,
+        planned_revision=decision.revision,
+        actual_revision=observation.revision,
+        elapsed_ms=observation.elapsed_ms,
+        deadline_ms=decision.deadline_ms,
+        deadline_met=deadline_met,
+        actual_input_tokens=observation.actual_input_tokens,
+        actual_output_tokens=observation.actual_output_tokens,
+        billing_status=billing_status,
+        cost=cost,
+        output_schema_valid=observation.output_schema_valid,
+        usable=usable,
+        evidence_sha256=observation.evidence_sha256,
+        reproducibility_limitations=tuple(limitations),
     )

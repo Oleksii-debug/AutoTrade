@@ -16,6 +16,7 @@ from .host_api import (
     CommandResult,
     EventGap,
     HostEvent,
+    HostCommandStore,
     OperationResult,
     command_result_payload,
 )
@@ -27,6 +28,7 @@ class JournalBackedHostCommandStore:
 
     AGGREGATE_TYPE = "HOST_CONTROL"
     AGGREGATE_ID = "host"
+    SUPPORTED_ACTIONS = HostCommandStore.SUPPORTED_ACTIONS
     TERMINAL_PHASES = {"SUCCEEDED", "FAILED", "CANCELLED"}
     UPDATE_PHASES = {"RUNNING", "WAITING_EXTERNAL", "UNKNOWN", *TERMINAL_PHASES}
 
@@ -162,6 +164,30 @@ class JournalBackedHostCommandStore:
             raise PermissionError("Session is not authorized for actor")
 
         current = self.state_version
+        if action not in self.SUPPORTED_ACTIONS:
+            rejected = CommandResult(
+                command_id=command_id,
+                status="REJECTED",
+                state_version=str(current),
+                reason_codes=("unsupported_action",),
+            )
+            try:
+                stored, _ = self._journal.record_command(
+                    command_id=command_id,
+                    idempotency_key=idempotency_key,
+                    request=dict(command),
+                    result=self._result_dict(rejected),
+                    state_version=current,
+                )
+            except ValueError as error:
+                return CommandResult(
+                    command_id=command_id,
+                    status="CONFLICT",
+                    state_version=str(current),
+                    reason_codes=(self._conflict_reason(error),),
+                )
+            return self._command_result(stored)
+
         expected = int(expected_raw)
         if expected != current:
             conflict = CommandResult(

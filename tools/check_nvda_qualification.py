@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -56,12 +57,28 @@ def validate_evidence(
     environment = evidence.get("environment")
     if not isinstance(environment, dict):
         raise NvdaQualificationError("environment must be an object")
-    for field in ("windows_version", "nvda_version", "input_mode"):
+    for field in ("windows_version", "assistive_technology", "nvda_version", "input_mode"):
         _required_text(environment.get(field), name=f"environment.{field}")
-    if environment.get("input_mode") != "keyboard-only":
-        raise NvdaQualificationError("qualification must be keyboard-only")
-    if not str(environment.get("windows_version")).startswith("Windows 11"):
-        raise NvdaQualificationError("qualification must run on Windows 11")
+    required_environment = requirements.get("required_environment")
+    if not isinstance(required_environment, dict):
+        raise NvdaQualificationError("requirements.required_environment must be an object")
+    required_os = _required_text(required_environment.get("os_family"), name="requirements.os_family")
+    required_at = _required_text(
+        required_environment.get("assistive_technology"),
+        name="requirements.assistive_technology",
+    )
+    required_input = _required_text(
+        required_environment.get("input_mode"),
+        name="requirements.input_mode",
+    )
+    if environment.get("input_mode") != required_input:
+        raise NvdaQualificationError(f"qualification must be {required_input}")
+    if not str(environment.get("windows_version")).startswith(required_os):
+        raise NvdaQualificationError(f"qualification must run on {required_os}")
+    if environment.get("assistive_technology") != required_at:
+        raise NvdaQualificationError(
+            f"qualification must use required assistive technology: {required_at}"
+        )
     if evidence.get("release_artifact") is not True:
         raise NvdaQualificationError("qualification must run against the delivered release artifact")
 
@@ -85,11 +102,16 @@ def validate_evidence(
     required = requirements.get("workflows")
     if not isinstance(required, list) or not required:
         raise NvdaQualificationError("requirements contain no workflows")
-    required_ids = {
-        _required_text(item.get("id"), name="requirements.workflow.id")
-        for item in required
-        if isinstance(item, dict)
-    }
+    required_id_list: list[str] = []
+    for item in required:
+        if not isinstance(item, dict):
+            raise NvdaQualificationError("requirements.workflow must be an object")
+        required_id_list.append(
+            _required_text(item.get("id"), name="requirements.workflow.id")
+        )
+    if len(required_id_list) != len(set(required_id_list)):
+        raise NvdaQualificationError("requirements.workflow ids must be unique")
+    required_ids = set(required_id_list)
     if set(by_id) != required_ids:
         missing = sorted(required_ids - set(by_id))
         extra = sorted(set(by_id) - required_ids)
@@ -99,6 +121,13 @@ def validate_evidence(
 
     reviewer = _required_text(evidence.get("reviewer"), name="reviewer")
     observed_at = _required_text(evidence.get("observed_at"), name="observed_at")
+    try:
+        observed_instant = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise NvdaQualificationError("observed_at must be an ISO timestamp") from error
+    if observed_instant.tzinfo is None:
+        raise NvdaQualificationError("observed_at must include timezone")
+    observed_at = observed_instant.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     return {
         "schema_version": "1.0.0",
         "qualified": True,

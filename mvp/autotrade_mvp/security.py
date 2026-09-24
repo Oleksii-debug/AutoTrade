@@ -9,6 +9,7 @@ for an explicitly authorized execution identity, account scope and purpose.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import re
 import secrets
 import time
@@ -63,6 +64,7 @@ class SecurityBoundary:
 
     _ROLES = {"OWNER", "OPERATOR", "RESEARCHER", "OBSERVER"}
     _EXECUTION_ROLES = {"OWNER", "OPERATOR"}
+    _CREDENTIAL_PURPOSES = {"TRADE", "READ_ONLY"}
 
     def __init__(
         self,
@@ -72,13 +74,22 @@ class SecurityBoundary:
     ) -> None:
         if not allowed_origins:
             raise ValueError("At least one authenticated origin is required")
-        normalized_origins = frozenset(
+        normalized_origins = {
             _required_text(value, name="allowed origin") for value in allowed_origins
-        )
-        self._allowed_origins = normalized_origins
+        }
+        self._paired_origins = set(normalized_origins)
         self._now = now or time.time
         self._sessions: dict[str, Session] = {}
         self._records: dict[str, _SecretRecord] = {}
+
+    def _now_value(self) -> float:
+        value = self._now()
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise RuntimeError("Session clock must return a numeric timestamp")
+        numeric = float(value)
+        if not math.isfinite(numeric) or numeric < 0:
+            raise RuntimeError("Session clock is not trustworthy")
+        return numeric
 
     def create_session(
         self,
@@ -93,8 +104,10 @@ class SecurityBoundary:
         normalized_origin = _required_text(origin, name="origin")
         if normalized_role not in self._ROLES:
             raise PermissionError("Unknown role")
-        if normalized_origin not in self._allowed_origins:
+        if normalized_origin not in self._paired_origins:
             raise PermissionError("Origin is not paired")
+        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
+            raise ValueError("Session lifetime must be an integer number of seconds")
         if ttl_seconds <= 0 or ttl_seconds > 3600:
             raise ValueError("Session lifetime is outside the permitted bound")
         session = Session(
@@ -102,7 +115,7 @@ class SecurityBoundary:
             subject=normalized_subject,
             role=normalized_role,
             origin=normalized_origin,
-            expires_at=self._now() + ttl_seconds,
+            expires_at=self._now_value() + ttl_seconds,
         )
         self._sessions[session.token] = session
         return session
@@ -114,17 +127,62 @@ class SecurityBoundary:
         required_roles: set[str] | None = None,
         origin: str | None = None,
     ) -> Session:
-        session = self._sessions.get(token)
+        normalized_token = _required_text(token, name="session token")
+        session = self._sessions.get(normalized_token)
         if session is None:
             raise PermissionError("Unknown session")
-        if self._now() >= session.expires_at:
-            self._sessions.pop(token, None)
+        if session.origin not in self._paired_origins:
+            self._sessions.pop(normalized_token, None)
+            raise PermissionError("Session origin is no longer paired")
+        if self._now_value() >= session.expires_at:
+            self._sessions.pop(normalized_token, None)
             raise PermissionError("Session expired")
-        if origin is not None and origin != session.origin:
+        if origin is not None and _required_text(origin, name="origin") != session.origin:
             raise PermissionError("Session origin mismatch")
-        if required_roles is not None and session.role not in required_roles:
-            raise PermissionError("Role is not authorized")
+        if required_roles is not None:
+            normalized_roles = {
+                _required_text(role, name="required role").upper() for role in required_roles
+            }
+            if not normalized_roles or not normalized_roles.issubset(self._ROLES):
+                raise PermissionError("Unknown required role")
+            if session.role not in normalized_roles:
+                raise PermissionError("Role is not authorized")
         return session
+
+    def revoke_session(self, token: str) -> None:
+        normalized_token = _required_text(token, name="session token")
+        if self._sessions.pop(normalized_token, None) is None:
+            raise PermissionError("Unknown session")
+
+    def pair_origin(
+        self,
+        token: str,
+        *,
+        origin: str,
+        new_origin: str,
+    ) -> str:
+        self.validate_session(token, required_roles={"OWNER"}, origin=origin)
+        normalized = _required_text(new_origin, name="new origin")
+        self._paired_origins.add(normalized)
+        return normalized
+
+    def unpair_origin(
+        self,
+        token: str,
+        *,
+        origin: str,
+        paired_origin: str,
+    ) -> None:
+        owner = self.validate_session(token, required_roles={"OWNER"}, origin=origin)
+        normalized = _required_text(paired_origin, name="paired origin")
+        if normalized not in self._paired_origins:
+            raise PermissionError("Origin is not paired")
+        if normalized == owner.origin and len(self._paired_origins) == 1:
+            raise PermissionError("Cannot remove the final authenticated origin")
+        self._paired_origins.remove(normalized)
+        for session_token, session in list(self._sessions.items()):
+            if session.origin == normalized:
+                self._sessions.pop(session_token, None)
 
     def register_secret(
         self,
@@ -142,10 +200,10 @@ class SecurityBoundary:
         normalized_account = _required_text(account_id, name="account_id")
         normalized_provider = _required_text(provider, name="provider")
         normalized_purpose = _required_text(purpose, name="purpose").upper()
+        if normalized_purpose not in self._CREDENTIAL_PURPOSES:
+            raise PermissionError("Credential purpose is unsupported")
         if not isinstance(secret_value, str) or not secret_value:
             raise ValueError("Secret value must not be empty")
-        if normalized_purpose in {"WITHDRAWAL", "TRANSFER", "EXTERNAL_TRANSFER"}:
-            raise PermissionError("Withdrawal and external-transfer credentials are unsupported")
         handle_id = "cred_" + secrets.token_hex(16)
         handle = CredentialHandle(
             handle_id=handle_id,
@@ -172,9 +230,10 @@ class SecurityBoundary:
     ) -> CredentialHandle:
         self.validate_session(token, required_roles={"OWNER"}, origin=origin)
         record = self._require_active_record(handle_id)
-        if record.owner_identity != owner_identity:
+        normalized_owner = _required_text(owner_identity, name="owner_identity")
+        if record.owner_identity != normalized_owner:
             raise PermissionError("Secret identity mismatch")
-        if not new_secret_value:
+        if not isinstance(new_secret_value, str) or not new_secret_value:
             raise ValueError("Secret value must not be empty")
         new_handle = CredentialHandle(
             handle_id=record.handle.handle_id,
@@ -197,7 +256,8 @@ class SecurityBoundary:
     ) -> None:
         self.validate_session(token, required_roles={"OWNER"}, origin=origin)
         record = self._require_active_record(handle_id)
-        if record.owner_identity != owner_identity:
+        normalized_owner = _required_text(owner_identity, name="owner_identity")
+        if record.owner_identity != normalized_owner:
             raise PermissionError("Secret identity mismatch")
         record.active = False
 
@@ -213,15 +273,20 @@ class SecurityBoundary:
         purpose: str,
     ) -> str:
         self.validate_session(token, required_roles=self._EXECUTION_ROLES, origin=origin)
+        if not isinstance(handle, CredentialHandle):
+            raise PermissionError("Credential handle is invalid")
         record = self._require_active_record(handle.handle_id)
         current = record.handle
         if handle != current:
             raise PermissionError("Credential handle generation is stale")
-        if execution_identity != record.owner_identity:
+        if _required_text(execution_identity, name="execution_identity") != record.owner_identity:
             raise PermissionError("Execution identity cannot decrypt this credential")
-        if account_id != current.account_id or provider != current.provider:
+        if (
+            _required_text(account_id, name="account_id") != current.account_id
+            or _required_text(provider, name="provider") != current.provider
+        ):
             raise PermissionError("Credential scope mismatch")
-        if purpose.upper() != current.purpose:
+        if _required_text(purpose, name="purpose").upper() != current.purpose:
             raise PermissionError("Credential purpose mismatch")
         return record.value
 
@@ -249,8 +314,35 @@ class SecurityBoundary:
             return tuple(SecurityBoundary.redact(item) for item in value)
         return value
 
+    def redact_for_diagnostics(self, value: object) -> object:
+        """Redact sensitive keys plus any currently known raw secret material."""
+        keyed = self.redact(value)
+        known = tuple(
+            record.value
+            for record in self._records.values()
+            if record.active and record.value
+        )
+
+        def scrub(item: object) -> object:
+            if isinstance(item, dict):
+                return {key: scrub(child) for key, child in item.items()}
+            if isinstance(item, list):
+                return [scrub(child) for child in item]
+            if isinstance(item, tuple):
+                return tuple(scrub(child) for child in item)
+            if isinstance(item, str):
+                result = item
+                for secret_value in known:
+                    if secret_value in result:
+                        result = result.replace(secret_value, "[REDACTED]")
+                return result
+            return item
+
+        return scrub(keyed)
+
     def _require_active_record(self, handle_id: str) -> _SecretRecord:
-        record = self._records.get(handle_id)
+        normalized_handle = _required_text(handle_id, name="handle_id")
+        record = self._records.get(normalized_handle)
         if record is None or not record.active:
             raise PermissionError("Credential is unavailable")
         return record

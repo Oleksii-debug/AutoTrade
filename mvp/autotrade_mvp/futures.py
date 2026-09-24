@@ -202,9 +202,7 @@ def settle_fraction(
     )
     with localcontext() as context:
         context.prec = precision
-        exact_decimal = numerator / denominator
-        units = (exact_decimal / step).to_integral_value(rounding=mode)
-        return units * step
+        return (numerator / denominator).quantize(step, rounding=mode)
 
 
 def apply_variation_margin(

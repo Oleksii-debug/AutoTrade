@@ -1,3 +1,4 @@
+from decimal import Decimal
 import unittest
 
 from qualification.zero_model.qualify import qualify
@@ -27,7 +28,7 @@ class ZeroModelQualificationTests(unittest.TestCase):
         self.assertEqual(economics["economic_edge_claim"], "UNPROVEN_SIMULATION_ONLY")
         self.assertEqual(economics["evidence_count"], 1)
         self.assertEqual(economics["trade_count"], 1)
-        self.assertGreaterEqual(float(economics["total_fees"]), 0)
+        self.assertGreaterEqual(Decimal(economics["total_fees"]), Decimal("0"))
 
         small = evidence["small_capital"]
         self.assertEqual(small["status"], "risk_rejected")
@@ -46,7 +47,7 @@ class ZeroModelQualificationTests(unittest.TestCase):
         self.assertFalse(claims["all_wp62_workflows_qualified"])
 
     def test_source_sha_is_exact_not_a_label_or_prefix(self):
-        for invalid in ("abc", "g" * 40, "a" * 39, "a" * 41):
+        for invalid in ("abc", "g" * 40, "a" * 39, "a" * 41, "A" * 40, " " + "a" * 40, "a" * 40 + " "):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(ValueError):
                     qualify(invalid)

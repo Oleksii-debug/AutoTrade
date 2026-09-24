@@ -53,13 +53,15 @@ class RiskIntent:
             raise ValueError("side must be BUY or SELL")
         if not isinstance(expected_state_version, int) or isinstance(expected_state_version, bool) or expected_state_version < 0:
             raise ValueError("expected_state_version must be a non-negative integer")
+        if not isinstance(reduce_only, bool):
+            raise TypeError("reduce_only must be a boolean")
         return cls(
             symbol=symbol.strip(),
             side=normalized_side,
             quantity=_positive(quantity, name="quantity"),
             price=_positive(price, name="price"),
             expected_state_version=expected_state_version,
-            reduce_only=bool(reduce_only),
+            reduce_only=reduce_only,
         )
 
 
@@ -158,6 +160,17 @@ class RiskContext:
             {k: _decimal(v, name=f"stress shock {k}") for k, v in scenario.items()}
             for scenario in stress_scenarios
         )
+        normalized_drawdown = _positive(
+            drawdown_fraction,
+            name="drawdown_fraction",
+            allow_zero=True,
+        )
+        if normalized_drawdown > 1:
+            raise ValueError("drawdown_fraction cannot exceed 1")
+        if not isinstance(capability_allowed, bool):
+            raise TypeError("capability_allowed must be a boolean")
+        if borrow_available is not None and not isinstance(borrow_available, bool):
+            raise TypeError("borrow_available must be a boolean or None")
         return cls(
             state_version=state_version,
             equity=_positive(equity, name="equity"),
@@ -165,11 +178,11 @@ class RiskContext:
             marks=normalized_marks,
             reserved_position_delta=normalized_reserved,
             daily_pnl=_decimal(daily_pnl, name="daily_pnl"),
-            drawdown_fraction=_positive(drawdown_fraction, name="drawdown_fraction", allow_zero=True),
+            drawdown_fraction=normalized_drawdown,
             market_data_age_seconds=_positive(market_data_age_seconds, name="market_data_age_seconds", allow_zero=True),
             fx_age_seconds=normalized_fx,
             margin_headroom=_positive(margin_headroom, name="margin_headroom", allow_zero=True),
-            capability_allowed=bool(capability_allowed),
+            capability_allowed=capability_allowed,
             borrow_available=borrow_available,
             stress_scenarios=scenarios,
         )
@@ -221,7 +234,9 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
     net = abs(sum(notionals.values(), Decimal("0")))
     gross_leverage = gross / context.equity
     net_leverage = net / context.equity
-    single_notional = abs(resulting * context.marks[intent.symbol])
+    mark_notional = abs(resulting * context.marks[intent.symbol])
+    intent_notional = intent.quantity * intent.price
+    single_notional = max(mark_notional, intent_notional)
 
     worst_stress_loss = Decimal("0")
     for scenario in context.stress_scenarios:
@@ -336,7 +351,10 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         "new or increased short exposure requires affirmative borrow evidence",
     )
 
-    reduces_absolute_exposure = abs(resulting) <= abs(base_position)
+    reduces_absolute_exposure = (
+        abs(resulting) <= abs(base_position)
+        and base_position * resulting >= 0
+    )
     reduce_only_ok = not intent.reduce_only or reduces_absolute_exposure
     add(
         "reduce_only",

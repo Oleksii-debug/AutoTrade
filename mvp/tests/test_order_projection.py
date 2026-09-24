@@ -72,6 +72,55 @@ class OrderProjectionTests(unittest.TestCase):
                 price="10",
             )
 
+    def test_cancel_request_is_pending_until_provider_confirmation(self):
+        item = order(requested_quantity="5")
+        item.request_cancel()
+        snap = item.snapshot()
+        self.assertEqual(snap.state, "CANCEL_REQUESTED")
+        self.assertTrue(snap.cancel_requested)
+        self.assertFalse(snap.cancel_confirmed)
+        self.assertEqual(snap.open_quantity, Decimal("5"))
+
+        item.confirm_cancel()
+        confirmed = item.snapshot()
+        self.assertEqual(confirmed.state, "CANCELLED")
+        self.assertTrue(confirmed.cancel_requested)
+        self.assertTrue(confirmed.cancel_confirmed)
+        self.assertEqual(confirmed.open_quantity, Decimal("5"))
+
+    def test_fill_during_pending_cancel_remains_live_economic_truth(self):
+        item = order(requested_quantity="5")
+        item.request_cancel()
+        item.record_fill(
+            fill_id="f-pending",
+            provider_execution_id="exec-pending",
+            quantity="2",
+            price="10",
+        )
+        pending = item.snapshot()
+        self.assertEqual(pending.state, "PARTIALLY_FILLED_CANCEL_REQUESTED")
+        self.assertEqual(pending.filled_quantity, Decimal("2"))
+        self.assertEqual(pending.open_quantity, Decimal("3"))
+        self.assertFalse(pending.cancel_confirmed)
+
+        item.confirm_cancel()
+        confirmed = item.snapshot()
+        self.assertEqual(confirmed.state, "PARTIALLY_FILLED_CANCELLED")
+        self.assertEqual(confirmed.filled_quantity, Decimal("2"))
+        self.assertEqual(confirmed.open_quantity, Decimal("3"))
+
+    def test_overfill_during_pending_cancel_is_explicit(self):
+        item = order(requested_quantity="1")
+        item.request_cancel()
+        item.record_fill(
+            fill_id="late-overfill",
+            provider_execution_id="exec-late-overfill",
+            quantity="1.2",
+            price="10",
+        )
+        self.assertEqual(item.state, "OVERFILLED_DURING_CANCEL")
+        self.assertFalse(item.snapshot().cancel_confirmed)
+
     def test_partial_fill_then_cancel_keeps_executed_quantity(self):
         item = order(requested_quantity="5")
         item.record_fill(

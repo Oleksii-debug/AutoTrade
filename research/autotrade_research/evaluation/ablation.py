@@ -6,15 +6,27 @@ causality, profitability or statistical significance by itself.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Iterable
 
 
-def _decimal(value: Decimal | int | str | float, field: str) -> Decimal:
-    number = Decimal(str(value))
+def _decimal(value: Decimal | int | str, field: str) -> Decimal:
+    if isinstance(value, bool) or isinstance(value, float):
+        raise ValueError(f"{field} must use exact decimal input")
+    try:
+        number = value if isinstance(value, Decimal) else Decimal(value)
+    except (InvalidOperation, TypeError, ValueError) as error:
+        raise ValueError(f"{field} must be finite") from error
     if not number.is_finite():
         raise ValueError(f"{field} must be finite")
     return number
+
+
+def _utc(value: datetime, field: str) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{field} must be timezone-aware")
+    return value.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -22,6 +34,7 @@ class AblationOutcome:
     case_id: str
     input_fingerprint: str
     variant: str
+    information_cutoff: datetime
     utility: Decimal
     cost: Decimal
     elapsed_ms: int
@@ -33,6 +46,11 @@ class AblationOutcome:
             raise ValueError("case_id and input_fingerprint are required")
         if self.variant not in {"FULL", "ABLATED"}:
             raise ValueError("variant must be FULL or ABLATED")
+        object.__setattr__(
+            self,
+            "information_cutoff",
+            _utc(self.information_cutoff, "information_cutoff"),
+        )
         if self.elapsed_ms < 0 or self.deadline_ms <= 0:
             raise ValueError("elapsed_ms must be non-negative and deadline_ms positive")
         if len(self.components) != len(set(self.components)):
@@ -65,6 +83,8 @@ class AblationPair:
             raise ValueError("matched outcomes must share case_id")
         if self.full.input_fingerprint != self.ablated.input_fingerprint:
             raise ValueError("matched outcomes must share exact input_fingerprint")
+        if self.full.information_cutoff != self.ablated.information_cutoff:
+            raise ValueError("matched outcomes must share exact information_cutoff")
         if self.full.deadline_ms != self.ablated.deadline_ms:
             raise ValueError("matched outcomes must use the same deadline budget")
         full_components = set(self.full.components)

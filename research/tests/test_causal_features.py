@@ -4,6 +4,7 @@ import unittest
 
 from research.autotrade_research.features.causal import (
     FeaturePoint,
+    LabelPoint,
     SourceValue,
     fit_normalizer,
     make_forward_label,
@@ -103,7 +104,6 @@ class CausalFeatureTests(unittest.TestCase):
                 "x",
             )
         with self.assertRaises(ValueError):
-            from research.autotrade_research.features.causal import LabelPoint
             LabelPoint(
                 symbol="AAA",
                 anchor_time=BASE,

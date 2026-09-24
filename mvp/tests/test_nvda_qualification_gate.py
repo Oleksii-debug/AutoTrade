@@ -1,3 +1,4 @@
+from hashlib import sha256
 import json
 from pathlib import Path
 import subprocess
@@ -40,7 +41,9 @@ def complete_evidence():
                 "passed": True,
                 "keyboard_steps": f"Keyboard-only steps for {item['id']}",
                 "nvda_observation": f"Observed NVDA output for {item['id']}",
-                "evidence_ref": f"artifact://nvda/{item['id']}",
+                "evidence_ref": "sha256:" + sha256(
+                    item["id"].encode("utf-8")
+                ).hexdigest(),
             }
             for item in REQUIREMENTS["workflows"]
         ],
@@ -144,6 +147,23 @@ class NvdaQualificationGateTests(unittest.TestCase):
         with self.assertRaisesRegex(NvdaQualificationError, "delivered release"):
             validate_evidence(evidence, REQUIREMENTS)
 
+    def test_workflow_evidence_refs_must_be_unique_immutable_hashes(self):
+        malformed = complete_evidence()
+        malformed["workflows"][0]["evidence_ref"] = "artifact://nvda/claim"
+        with self.assertRaisesRegex(NvdaQualificationError, "immutable sha256"):
+            validate_evidence(malformed, REQUIREMENTS)
+
+        duplicated = complete_evidence()
+        duplicated["workflows"][1]["evidence_ref"] = duplicated["workflows"][0]["evidence_ref"]
+        with self.assertRaisesRegex(NvdaQualificationError, "must be unique"):
+            validate_evidence(duplicated, REQUIREMENTS)
+
+    def test_schema_versions_must_match_supported_contract(self):
+        evidence = complete_evidence()
+        evidence["schema_version"] = "2.0.0"
+        with self.assertRaisesRegex(NvdaQualificationError, "schema_version"):
+            validate_evidence(evidence, REQUIREMENTS)
+
     def test_exact_source_and_artifact_hashes_are_mandatory(self):
         for field, value, message in (
             ("source_sha", "main", "40-character"),
@@ -156,6 +176,38 @@ class NvdaQualificationGateTests(unittest.TestCase):
                 message,
             ):
                 validate_evidence(evidence, REQUIREMENTS)
+
+    def test_qualified_status_cannot_escape_nvda_evidence_directory(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            status = root / "status.json"
+            status.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0.0",
+                        "qualified": True,
+                        "source_sha": "a" * 40,
+                        "artifact_sha256": "sha256:" + "b" * 64,
+                        "evidence_file": "../outside.json",
+                        "evidence_sha256": "sha256:" + "c" * 64,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "tools/check_nvda_qualification.py",
+                    "--check-status",
+                    "--status",
+                    str(status),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("inside qualification/nvda", result.stderr)
 
     def test_qualified_checked_status_requires_evidence_digest(self):
         with TemporaryDirectory() as directory:

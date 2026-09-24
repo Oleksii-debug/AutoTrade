@@ -66,6 +66,7 @@ class PerpetualContract:
     multiplier: Decimal
     payoff: Literal["LINEAR", "INVERSE"] = "LINEAR"
     face_currency: str | None = None
+    price_quote_currency: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "instrument_id", _text(self.instrument_id, "instrument_id"))
@@ -88,6 +89,27 @@ class PerpetualContract:
                 "face_currency",
                 _text(self.face_currency, "face_currency"),
             )
+        if self.price_quote_currency is not None:
+            object.__setattr__(
+                self,
+                "price_quote_currency",
+                _text(self.price_quote_currency, "price_quote_currency"),
+            )
+
+
+def _require_inverse_units(contract: PerpetualContract) -> None:
+    if contract.payoff != "INVERSE":
+        raise PerpetualError("inverse economics require an INVERSE contract")
+    if contract.face_currency is None:
+        raise PerpetualError("inverse contract requires explicit face_currency qualification")
+    if contract.price_quote_currency is None:
+        raise PerpetualError(
+            "inverse contract requires explicit price_quote_currency qualification"
+        )
+    if contract.face_currency != contract.price_quote_currency:
+        raise PerpetualError(
+            "inverse face_currency must match the currency of quoted prices"
+        )
 
 
 @dataclass(frozen=True)
@@ -280,10 +302,7 @@ def inverse_perpetual_pnl_exact(
     multiplier cannot silently be interpreted as inverse face value.
     """
 
-    if contract.payoff != "INVERSE":
-        raise PerpetualError("inverse_perpetual_pnl_exact requires an INVERSE contract")
-    if contract.face_currency is None:
-        raise PerpetualError("inverse contract requires explicit face_currency qualification")
+    _require_inverse_units(contract)
     contracts = _decimal(signed_contracts, "signed_contracts")
     face = _decimal(contract.multiplier, "multiplier", positive=True)
     entry = _decimal(entry_price, "entry_price", positive=True)
@@ -306,10 +325,7 @@ def inverse_funding_cashflow_exact(
 ) -> tuple[str, Fraction]:
     """Return exact inverse funding cashflow in settlement currency."""
 
-    if contract.payoff != "INVERSE":
-        raise PerpetualError("inverse_funding_cashflow_exact requires an INVERSE contract")
-    if contract.face_currency is None:
-        raise PerpetualError("inverse contract requires explicit face_currency qualification")
+    _require_inverse_units(contract)
     snapshot.require_valid(at)
     contracts = _decimal(signed_contracts, "signed_contracts")
     rate = _decimal(funding_rate, "funding_rate")
@@ -333,8 +349,7 @@ def inverse_stressed_loss_exact(
 ) -> Fraction:
     """Return exact positive loss for an adverse inverse-contract price move."""
 
-    if contract.payoff != "INVERSE":
-        raise PerpetualError("inverse_stressed_loss_exact requires an INVERSE contract")
+    _require_inverse_units(contract)
     contracts = _decimal(signed_contracts, "signed_contracts")
     if contracts == 0:
         return Fraction(0, 1)

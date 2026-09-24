@@ -186,7 +186,7 @@ def qualify_supply_chain(evidence: SupplyChainEvidence) -> SupplyChainQualificat
 
     if not evidence.model_data_rights:
         record("model_data_rights", _INCONCLUSIVE, "SUPPLY_CHAIN.MODEL_DATA_RIGHTS_MISSING")
-    for item in evidence.model_data_rights:
+    for item in sorted(evidence.model_data_rights, key=lambda value: value.artifact_id):
         prefix = "rights:" + item.artifact_id
         bound = item.reviewed_for_release_sha == evidence.release_commit_sha
         record(prefix + ":release_binding", _PASS if bound else _FAIL, "SUPPLY_CHAIN.STALE_RIGHTS_REVIEW:" + item.artifact_id)
@@ -199,9 +199,37 @@ def qualify_supply_chain(evidence: SupplyChainEvidence) -> SupplyChainQualificat
     canonical = json.dumps(
         {
             "release": evidence.release_commit_sha,
+            "built_from": evidence.built_from_commit_sha,
             "sbom": evidence.sbom_hash,
             "provenance": evidence.provenance_hash,
             "lock": evidence.dependency_lock_hash,
+            "distributed_component_ids": sorted(evidence.distributed_component_ids),
+            "components": [
+                {
+                    "component_id": item.component_id,
+                    "version": item.version,
+                    "declared_artifact_hash": item.declared_artifact_hash,
+                    "observed_artifact_hash": item.observed_artifact_hash,
+                    "source_revision": item.source_revision,
+                    "license_status": item.license_status,
+                    "distribution_rights": item.distribution_rights,
+                    "advisory_status": item.advisory_status,
+                    "notice_required": item.notice_required,
+                    "notice_present": item.notice_present,
+                    "reviewed_for_release_sha": item.reviewed_for_release_sha,
+                }
+                for item in sorted(evidence.components, key=lambda value: value.component_id)
+            ],
+            "model_data_rights": [
+                {
+                    "artifact_id": item.artifact_id,
+                    "artifact_hash": item.artifact_hash,
+                    "use_scope": item.use_scope,
+                    "rights_status": item.rights_status,
+                    "reviewed_for_release_sha": item.reviewed_for_release_sha,
+                }
+                for item in sorted(evidence.model_data_rights, key=lambda value: value.artifact_id)
+            ],
             "checks": checks,
             "reasons": sorted(set(reasons)),
         },

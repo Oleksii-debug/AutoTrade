@@ -141,6 +141,12 @@ class OnlineLearningEnvelopeTests(unittest.TestCase):
         self.assertEqual(baseline.status, changed.status)
         self.assertNotEqual(baseline.decision_id, changed.decision_id)
 
+    def test_decision_identity_binds_exact_envelope_policy(self):
+        baseline = evaluate_online_update(envelope(max_drift_score="0.25"), update())
+        revised = evaluate_online_update(envelope(max_drift_score="0.30"), update())
+        self.assertEqual(baseline.status, revised.status)
+        self.assertNotEqual(baseline.decision_id, revised.decision_id)
+
     def test_future_last_update_timestamp_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "last_update_at cannot be after observed_at"):
             update(last_update_at=NOW + timedelta(seconds=1))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -47,7 +48,7 @@ class JournalStore:
         return connection
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
@@ -111,7 +112,7 @@ class JournalStore:
 
     def get_event(self, event_id: str) -> dict[str, Any] | None:
         self._require_text(event_id, "event_id")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             row = connection.execute(
                 """
                 SELECT event_id, event_type, aggregate_type, aggregate_id,
@@ -136,7 +137,7 @@ class JournalStore:
     def next_aggregate_version(self, aggregate_type: str, aggregate_id: str) -> int:
         self._require_text(aggregate_type, "aggregate_type")
         self._require_text(aggregate_id, "aggregate_id")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             current = connection.execute(
                 "SELECT MAX(aggregate_version) FROM events WHERE aggregate_type = ? AND aggregate_id = ?",
                 (aggregate_type, aggregate_id),
@@ -164,7 +165,7 @@ class JournalStore:
         if outbox_topic is not None:
             self._require_text(outbox_topic, "outbox_topic")
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute("SELECT * FROM events WHERE event_id = ?", (event_id,)).fetchone()
             if existing is not None:
@@ -227,7 +228,7 @@ class JournalStore:
     def load_events(self, aggregate_type: str, aggregate_id: str) -> list[dict[str, Any]]:
         self._require_text(aggregate_type, "aggregate_type")
         self._require_text(aggregate_id, "aggregate_id")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             rows = connection.execute(
                 """
                 SELECT event_id, event_type, aggregate_type, aggregate_id,
@@ -255,7 +256,7 @@ class JournalStore:
     def pending_outbox(self, *, limit: int = 100) -> list[dict[str, Any]]:
         if not isinstance(limit, int) or limit < 1 or limit > 1000:
             raise ValueError("limit must be between 1 and 1000")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             rows = connection.execute(
                 """
                 SELECT outbox_id, event_id, topic, payload_json, created_at
@@ -279,7 +280,7 @@ class JournalStore:
 
     def mark_outbox_delivered(self, outbox_id: str) -> bool:
         self._require_text(outbox_id, "outbox_id")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT delivered_at FROM outbox WHERE outbox_id = ?", (outbox_id,)
@@ -313,7 +314,7 @@ class JournalStore:
         request_hash = payload_digest(request)
         result_json = canonical_json(result)
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 "SELECT * FROM command_dedupe WHERE idempotency_key = ?", (idempotency_key,)

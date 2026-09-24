@@ -13,6 +13,7 @@ from .persistence import JournalStore, canonical_json, payload_digest
 
 
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
+SenderCheck = Callable[[str, int], None]
 TransportSend = Callable[[str, Mapping[str, Any], Callable[[], None]], Any]
 
 
@@ -98,10 +99,14 @@ class GuardedDispatcher:
         store: JournalStore,
         *,
         owner_token: str | None = None,
+        owner_epoch: int = 1,
         prepared_lease_seconds: int = 60,
     ):
         self.store = store
         self.owner_token = owner_token or str(uuid4())
+        if not isinstance(owner_epoch, int) or isinstance(owner_epoch, bool) or owner_epoch < 1:
+            raise ValueError("owner_epoch must be a positive integer")
+        self.owner_epoch = owner_epoch
         if not isinstance(prepared_lease_seconds, int) or isinstance(prepared_lease_seconds, bool) or prepared_lease_seconds < 1:
             raise ValueError("prepared_lease_seconds must be a positive integer")
         self.prepared_lease_seconds = prepared_lease_seconds
@@ -199,6 +204,7 @@ class GuardedDispatcher:
         transport_send: TransportSend,
         client_id_max_length: int = 32,
         final_barrier_clock: Callable[[], str] | None = None,
+        sender_check: SenderCheck | None = None,
     ) -> DispatchOutcome:
         for value, name in (
             (attempt_id, "attempt_id"),
@@ -244,6 +250,7 @@ class GuardedDispatcher:
             "request_hash": request_hash,
             "client_order_id": client_order_id,
             "owner_token": self.owner_token,
+            "owner_epoch": self.owner_epoch,
             "prepared_at": _instant(now).isoformat().replace("+00:00", "Z"),
         }
         prepared = self._append(
@@ -295,6 +302,24 @@ class GuardedDispatcher:
                         now=barrier_now,
                     )
                     raise DispatchBlocked("final_barrier_clock_moved_backwards")
+            if sender_check is not None:
+                try:
+                    sender_check(self.owner_token, self.owner_epoch)
+                except Exception as error:
+                    barrier_reason = f"sender_fence_rejected:{type(error).__name__}"
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionBlocked",
+                        version=2,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": barrier_reason,
+                            "owner_token": self.owner_token,
+                            "owner_epoch": self.owner_epoch,
+                        },
+                        now=barrier_now,
+                    )
+                    raise DispatchBlocked(barrier_reason) from error
             allowed_now, barrier_reason = authority_check(intent_hash, barrier_now)
             if not allowed_now:
                 self._append(
@@ -312,6 +337,7 @@ class GuardedDispatcher:
                 payload={
                     "client_order_id": client_order_id,
                     "owner_token": self.owner_token,
+                    "owner_epoch": self.owner_epoch,
                     "reason": "final_send_barrier_passed",
                 },
                 now=barrier_now,

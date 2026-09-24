@@ -191,6 +191,134 @@ class AccountingFoundationTests(unittest.TestCase):
         with self.assertRaises(AccountingConflict):
             book.append(changed)
 
+    def test_same_economic_cause_cannot_be_booked_under_two_transaction_ids(self):
+        book = EconomicBook()
+        first = book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="provider-activity-1",
+            currency="USD",
+            amount="100",
+        )
+        duplicate_cause = book_external_cash_flow(
+            transaction_id="cash-2",
+            cause_event_id="provider-activity-1",
+            currency="USD",
+            amount="100",
+        )
+        self.assertTrue(book.append(first))
+        with self.assertRaisesRegex(AccountingConflict, "cause_event_id"):
+            book.append(duplicate_cause)
+        self.assertEqual(book.cash("USD"), Decimal("100"))
+        self.assertEqual(len(book.transactions), 1)
+
+    def test_same_fill_cause_cannot_double_position_or_fee(self):
+        book = EconomicBook()
+        first = book_equity_fill(
+            transaction_id="fill-posting-1",
+            cause_event_id="provider-execution-abc",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="2",
+            price="100",
+            fee="1",
+        )
+        duplicate = book_equity_fill(
+            transaction_id="fill-posting-2",
+            cause_event_id="provider-execution-abc",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="2",
+            price="100",
+            fee="1",
+        )
+        book.append(first)
+        with self.assertRaises(AccountingConflict):
+            book.append(duplicate)
+        self.assertEqual(book.position("ABC"), Decimal("2"))
+        self.assertEqual(book.fee_expense("USD"), Decimal("1"))
+
+    def test_reversal_requires_its_own_distinct_cause_event(self):
+        book = EconomicBook()
+        original = book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="provider-cash-event",
+            currency="USD",
+            amount="100",
+        )
+        book.append(original)
+        reversal = reverse_transaction(
+            original,
+            transaction_id="cash-reversal",
+            cause_event_id="provider-cash-event",
+        )
+        with self.assertRaisesRegex(AccountingConflict, "cause_event_id"):
+            book.append(reversal)
+        self.assertEqual(book.cash("USD"), Decimal("100"))
+
+    def test_constructor_detects_duplicate_cause_history(self):
+        first = book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="same-cause",
+            currency="USD",
+            amount="100",
+        )
+        second = book_external_cash_flow(
+            transaction_id="cash-2",
+            cause_event_id="same-cause",
+            currency="USD",
+            amount="-100",
+        )
+        with self.assertRaisesRegex(AccountingConflict, "cause_event_id"):
+            EconomicBook([first, second])
+
+    def test_canonical_cause_identity_cannot_be_bypassed_with_whitespace(self):
+        book = EconomicBook()
+        first = JournalTransaction(
+            transaction_id="raw-1",
+            cause_event_id=" provider-execution-abc ",
+            postings=(
+                posting("CASH:USD", "USD", "100"),
+                posting("EXTERNAL_EQUITY:USD", "USD", "-100"),
+            ),
+        )
+        second = JournalTransaction(
+            transaction_id="raw-2",
+            cause_event_id="provider-execution-abc",
+            postings=(
+                posting("CASH:USD", "USD", "100"),
+                posting("EXTERNAL_EQUITY:USD", "USD", "-100"),
+            ),
+        )
+        self.assertTrue(book.append(first))
+        with self.assertRaisesRegex(AccountingConflict, "cause_event_id"):
+            book.append(second)
+        self.assertEqual(book.cash("USD"), Decimal("100"))
+
+    def test_canonical_transaction_identity_cannot_be_split_with_whitespace(self):
+        book = EconomicBook()
+        first = JournalTransaction(
+            transaction_id=" tx-1 ",
+            cause_event_id="cause-a",
+            postings=(
+                posting("CASH:USD", "USD", "100"),
+                posting("EXTERNAL_EQUITY:USD", "USD", "-100"),
+            ),
+        )
+        changed = JournalTransaction(
+            transaction_id="tx-1",
+            cause_event_id="cause-b",
+            postings=(
+                posting("CASH:USD", "USD", "200"),
+                posting("EXTERNAL_EQUITY:USD", "USD", "-200"),
+            ),
+        )
+        self.assertTrue(book.append(first))
+        with self.assertRaisesRegex(AccountingConflict, "transaction_id"):
+            book.append(changed)
+        self.assertEqual(book.cash("USD"), Decimal("100"))
+
     def test_unbalanced_transaction_is_rejected(self):
         transaction = JournalTransaction(
             transaction_id="bad",

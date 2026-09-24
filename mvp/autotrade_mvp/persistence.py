@@ -34,9 +34,18 @@ class JournalStore:
 
     SCHEMA_VERSION = 1
 
-    def __init__(self, path: str | Path, *, read_only: bool = False):
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        read_only: bool = False,
+        immutable: bool = False,
+    ):
         self.path = Path(path)
         self.read_only = read_only
+        self.immutable = immutable
+        if self.immutable and not self.read_only:
+            raise ValueError("immutable journal access requires read_only=True")
         if self.read_only:
             if not self.path.is_file():
                 raise FileNotFoundError(self.path)
@@ -47,7 +56,8 @@ class JournalStore:
     @contextmanager
     def _connect(self):
         if self.read_only:
-            uri = self.path.resolve().as_uri() + "?mode=ro"
+            query = "?mode=ro&immutable=1" if self.immutable else "?mode=ro"
+            uri = self.path.resolve().as_uri() + query
             connection = sqlite3.connect(
                 uri,
                 uri=True,

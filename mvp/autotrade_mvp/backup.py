@@ -8,6 +8,7 @@ reconciliation before any future trading authority can be considered.
 
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -115,12 +116,13 @@ def _copy_stable_file(source: Path, destination: Path) -> tuple[str, int]:
     return digest, len(payload)
 
 
-def _sqlite_schema_version(path: Path) -> int:
+def _sqlite_schema_version(path: Path, *, immutable: bool = False) -> int:
     if not path.is_file():
         raise BackupError("Durable journal is missing")
-    uri = path.resolve().as_uri() + "?mode=ro"
+    query = "?mode=ro&immutable=1" if immutable else "?mode=ro"
+    uri = path.resolve().as_uri() + query
     try:
-        with sqlite3.connect(uri, uri=True) as connection:
+        with closing(sqlite3.connect(uri, uri=True)) as connection:
             rows = connection.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
@@ -142,13 +144,13 @@ def _backup_sqlite(source: Path, destination: Path) -> tuple[str, int, int]:
     destination.parent.mkdir(parents=True, exist_ok=True)
     source_uri = source.resolve().as_uri() + "?mode=ro"
     try:
-        with sqlite3.connect(source_uri, uri=True) as source_db:
-            with sqlite3.connect(destination) as destination_db:
+        with closing(sqlite3.connect(source_uri, uri=True)) as source_db:
+            with closing(sqlite3.connect(destination)) as destination_db:
                 source_db.backup(destination_db)
                 destination_db.commit()
     except sqlite3.Error as error:
         raise BackupError("SQLite backup failed") from error
-    copied_schema = _sqlite_schema_version(destination)
+    copied_schema = _sqlite_schema_version(destination, immutable=True)
     if copied_schema != schema_version:
         raise BackupIntegrityError("SQLite backup changed the journal schema")
     return _sha256_file(destination), destination.stat().st_size, schema_version
@@ -283,7 +285,10 @@ def create_backup(
             stage / "state" / "learning-evidence.jsonl"
         ).is_file():
             try:
-                build_diagnostic_snapshot(stage / "state")
+                build_diagnostic_snapshot(
+                    stage / "state",
+                    immutable_journal=True,
+                )
             except ValueError as error:
                 raise BackupIntegrityError(
                     "Runtime state, journal and evidence are not one consistent snapshot"
@@ -383,7 +388,10 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
     journal_relative = "state/journal.sqlite3"
     if journal_relative not in expected_paths:
         raise BackupIntegrityError("Backed-up journal is missing")
-    if _sqlite_schema_version(root / journal_relative) != JournalStore.SCHEMA_VERSION:
+    if _sqlite_schema_version(
+        root / journal_relative,
+        immutable=True,
+    ) != JournalStore.SCHEMA_VERSION:
         raise BackupCompatibilityError("Backed-up journal schema is incompatible")
 
     artifact_manifests = [

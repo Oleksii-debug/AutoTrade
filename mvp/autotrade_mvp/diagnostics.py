@@ -161,8 +161,17 @@ def _read_evidence(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def build_diagnostic_snapshot(state_dir: str | Path) -> DiagnosticSnapshot:
-    """Reconstruct decision traces from durable evidence plus the event journal."""
+def build_diagnostic_snapshot(
+    state_dir: str | Path,
+    *,
+    immutable_journal: bool = False,
+) -> DiagnosticSnapshot:
+    """Reconstruct decision traces from durable evidence plus the event journal.
+
+    immutable_journal is only for a self-contained SQLite backup copy after
+    the backup API has completed. Live WAL-backed runtime state must keep the
+    default so committed WAL frames remain visible.
+    """
 
     root = Path(state_dir)
     checkpoint = _read_json(root / "checkpoint.json")
@@ -184,7 +193,11 @@ def build_diagnostic_snapshot(state_dir: str | Path) -> DiagnosticSnapshot:
     journal_path = root / "journal.sqlite3"
     if not journal_path.is_file():
         raise ValueError("Durable journal is missing")
-    store = JournalStore(journal_path, read_only=True)
+    store = JournalStore(
+        journal_path,
+        read_only=True,
+        immutable=immutable_journal,
+    )
     events = store.load_events("simulation_portfolio", symbol)
 
     traces: list[DecisionTrace] = []

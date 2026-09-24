@@ -52,6 +52,16 @@ class JournalStoreTests(unittest.TestCase):
             with self.assertRaises(sqlite3.OperationalError):
                 reader.append_event(event("evt-ro", 2))
 
+            immutable_reader = JournalStore(path, read_only=True, immutable=True)
+            self.assertEqual(
+                len(immutable_reader.load_events("account", "paper-1")),
+                1,
+            )
+            self.assertEqual(journal_path.read_bytes(), before)
+
+            with self.assertRaisesRegex(ValueError, "requires read_only"):
+                JournalStore(path, immutable=True)
+
     def test_payload_tamper_and_version_gap_fail_closed(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

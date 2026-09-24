@@ -1,6 +1,7 @@
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import MappingProxyType
 import unittest
 
 from mvp.autotrade_mvp.host_api import HostCommandStore
@@ -288,6 +289,34 @@ class SecurityBoundaryTests(unittest.TestCase):
             origin="http://127.0.0.1:8765",
         )
         self.assertEqual(session.origin, "http://127.0.0.1:8765")
+
+    def test_origin_is_canonicalized_and_invalid_port_fails_closed(self):
+        canonical = SecurityBoundary(
+            allowed_origins={"https://LOCAL.AUTOTRADE.INVALID:443/"}
+        )
+        session = canonical.create_session(
+            subject="owner",
+            role="OWNER",
+            origin="https://local.autotrade.invalid",
+        )
+        self.assertEqual(session.origin, "https://local.autotrade.invalid")
+        with self.assertRaisesRegex(ValueError, "port"):
+            SecurityBoundary(
+                allowed_origins={"https://local.autotrade.invalid:99999"}
+            )
+
+    def test_diagnostic_redaction_covers_mapping_proxy_and_sets(self):
+        self._credential()
+        redacted = self.boundary.redact_for_diagnostics(
+            MappingProxyType(
+                {
+                    "safe": {"top-secret"},
+                    "nested": MappingProxyType({"note": "prefix top-secret suffix"}),
+                }
+            )
+        )
+        self.assertNotIn("top-secret", repr(redacted))
+        self.assertIn("[REDACTED]", repr(redacted))
 
     def test_unpair_then_repair_never_revives_old_token(self):
         paired = self.boundary.pair_origin(

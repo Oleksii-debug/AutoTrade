@@ -281,9 +281,17 @@ class ResearchJobStoreTests(unittest.TestCase):
                     verdict="PROVEN_SUCCEEDED",
                     evidence_ref=evidence,
                     output_refs=outputs,
-                    now=resolved_at,
+                    now=resolved_at + timedelta(seconds=30),
                 )
             )
+            with self.assertRaises(JobConflictError):
+                store.resolve_waiting_external(
+                    job["job_id"],
+                    verdict="PROVEN_SUCCEEDED",
+                    evidence_ref=evidence,
+                    output_refs=["artifact:different-output"],
+                    now=resolved_at + timedelta(seconds=31),
+                )
             with self.assertRaises(JobConflictError):
                 store.resolve_waiting_external(
                     job["job_id"],

@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Mapping
-from uuid import NAMESPACE_URL, uuid5
+from uuid import UUID, NAMESPACE_URL, uuid5
 
 from .persistence import JournalStore, payload_digest
 from .reservations import (
@@ -42,15 +42,19 @@ def _immutable_evidence_ref(value: str) -> str:
             "resolution_evidence must bind an immutable artifact and SHA-256 digest"
         )
     artifact_id, digest = reference[len("artifact:"):].split(marker, 1)
-    if not artifact_id or any(ch.isspace() for ch in artifact_id):
-        raise ValueError("resolution_evidence artifact identity is invalid")
+    try:
+        artifact_id = str(UUID(artifact_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise ValueError(
+            "resolution_evidence artifact identity must be a UUID"
+        ) from error
     if len(digest) != 64 or any(
         ch not in "0123456789abcdef" for ch in digest
     ):
         raise ValueError(
             "resolution_evidence must use canonical lowercase SHA-256"
         )
-    return reference
+    return f"artifact:{artifact_id}@sha256:{digest}"
 
 def _decimal(value, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):

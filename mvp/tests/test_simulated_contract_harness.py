@@ -108,6 +108,52 @@ class SimulatedProviderContractHarnessTests(unittest.TestCase):
         )
         self.assertEqual(visible["verdict"], "FOUND")
 
+    def test_history_lag_rejects_invalid_coverage_and_evidence_is_canonical_utc(self):
+        harness = SimulatedProviderContractHarness()
+        harness.script_submission(
+            "lagged-canonical",
+            SubmissionDirective(
+                "UNKNOWN",
+                persist_unknown=True,
+                history_visible_at="2026-09-24T18:05:00Z",
+            ),
+        )
+        harness.transport_send(
+            "lagged-canonical",
+            request(now="2026-09-24T20:00:00+02:00"),
+            lambda: None,
+        )
+
+        early = harness.query_order(
+            client_order_id="lagged-canonical",
+            coverage_start="2026-09-24T19:00:00+02:00",
+            coverage_end="2026-09-24T20:04:00+02:00",
+            pagination_complete=True,
+            now="2026-09-24T20:04:00+02:00",
+        )
+        self.assertEqual(early["verdict"], "INCONCLUSIVE")
+        self.assertEqual(
+            early["evidence"][0]["observed_at"],
+            "2026-09-24T18:04:00Z",
+        )
+
+        with self.assertRaisesRegex(ValueError, "must not precede"):
+            harness.query_order(
+                client_order_id="lagged-canonical",
+                coverage_start="2026-09-24T18:10:00Z",
+                coverage_end="2026-09-24T18:00:00Z",
+                pagination_complete=True,
+                now="2026-09-24T18:04:00Z",
+            )
+        with self.assertRaisesRegex(TypeError, "pagination_complete"):
+            harness.query_order(
+                client_order_id="lagged-canonical",
+                coverage_start="2026-09-24T17:00:00Z",
+                coverage_end="2026-09-24T18:00:00Z",
+                pagination_complete=1,
+                now="2026-09-24T18:04:00Z",
+            )
+
     def test_quota_is_reserved_for_recovery_and_blocks_before_send(self):
         provider = SimulatedProvider()
         harness = SimulatedProviderContractHarness(

@@ -27,6 +27,14 @@ def _value(mapping: dict[str, Any] | None, key: str, default: str = "Unavailable
     return str(value)
 
 
+def _replay_verification_text(value: Any) -> str:
+    if value is True:
+        return "passed"
+    if value is False:
+        return "failed"
+    return "unavailable"
+
+
 def format_accessible_status(
     status: dict[str, Any],
     economic_report: dict[str, Any] | None = None,
@@ -63,7 +71,7 @@ def format_accessible_status(
     replay_verified = status.get("replay_verified")
     lines.extend(
         [
-            f"Replay verification: {'passed' if replay_verified is True else 'failed'}",
+            f"Replay verification: {_replay_verification_text(replay_verified)}",
             f"Instrument: {_value(status, 'symbol')}",
             f"Initial capital: {_value(status, 'initial_cash')}",
             f"Recorded evidence items: {_value(status, 'evidence_count', '0')}",

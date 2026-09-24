@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import unittest
 
@@ -208,7 +209,7 @@ class CapabilityFoundationTests(unittest.TestCase):
                 at=NOW + timedelta(minutes=5),
             )
 
-    def test_snapshot_id_is_immutable_and_duplicate_source_is_rejected(self):
+    def test_snapshot_id_is_immutable(self):
         snapshot = derive_capability_snapshot(
             snapshot_id=SNAPSHOT_1,
             claims=complete_claims(),
@@ -218,12 +219,122 @@ class CapabilityFoundationTests(unittest.TestCase):
         registry.add(snapshot)
         registry.add(snapshot)
 
-        with self.assertRaisesRegex(CapabilityError, "duplicate capability source"):
-            derive_capability_snapshot(
-                snapshot_id=SNAPSHOT_2,
-                claims=(claim("API"), claim("API")),
-                observed_at=NOW,
-                required_sources=frozenset({"API"}),
+        with self.assertRaisesRegex(CapabilityError, "snapshot_id"):
+            registry.add(replace(snapshot, status="UNKNOWN"))
+
+    def test_expired_historical_claim_does_not_poison_newer_live_claim(self):
+        claims = list(complete_claims())
+        claims.append(
+            claim(
+                "ACCOUNT",
+                observed_at=NOW - timedelta(minutes=20),
+                expires_at=NOW - timedelta(minutes=10),
+            )
+        )
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=claims,
+            observed_at=NOW,
+        )
+        self.assertEqual(snapshot.status, "VERIFIED")
+        self.assertEqual(
+            snapshot.sources,
+            frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}),
+        )
+
+    def test_overlapping_live_claims_from_same_source_are_intersected(self):
+        claims = list(complete_claims())
+        claims.append(claim("ACCOUNT", order_types=("LIMIT",)))
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=claims,
+            observed_at=NOW,
+        )
+        self.assertEqual(snapshot.status, "VERIFIED")
+        self.assertEqual(snapshot.supported_order_types, frozenset({"LIMIT"}))
+
+    def test_conflicting_live_refresh_fails_closed(self):
+        claims = [
+            claim("DOCUMENTED", order_types=("LIMIT", "MARKET")),
+            claim("API", order_types=("LIMIT", "MARKET")),
+            claim("ACCOUNT", order_types=("LIMIT",)),
+            claim("ACCOUNT", order_types=("MARKET",)),
+            claim("INSTRUMENT", order_types=("LIMIT", "MARKET")),
+        ]
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=claims,
+            observed_at=NOW,
+        )
+        self.assertEqual(snapshot.status, "CONFLICTED")
+
+    def test_collection_fields_reject_string_values(self):
+        original = claim("API")
+        with self.assertRaisesRegex(CapabilityError, "must be a collection"):
+            CapabilityClaim(
+                source=original.source,
+                provider_id=original.provider_id,
+                account_id=original.account_id,
+                entity_id=original.entity_id,
+                environment=original.environment,
+                instrument_version=original.instrument_version,
+                observed_at=original.observed_at,
+                expires_at=original.expires_at,
+                supported_order_types="LIMIT",
+                time_in_force=original.time_in_force,
+                permission_scopes=original.permission_scopes,
+                position_mode=original.position_mode,
+                native_protection=original.native_protection,
+                rate_limit_policy_id=original.rate_limit_policy_id,
+                data_entitlements=original.data_entitlements,
+                evidence_ref=original.evidence_ref,
+            )
+
+    def test_future_dated_evidence_is_conflicted_not_expired(self):
+        claims = list(complete_claims())
+        claims[-1] = claim(
+            "INSTRUMENT",
+            observed_at=NOW + timedelta(seconds=1),
+            expires_at=NOW + timedelta(minutes=10),
+        )
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=claims,
+            observed_at=NOW,
+        )
+        self.assertEqual(snapshot.status, "CONFLICTED")
+
+    def test_evidence_reference_is_strict_and_immutable(self):
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(),
+            observed_at=NOW,
+        )
+        with self.assertRaises(TypeError):
+            snapshot.evidence[0]["sha256"] = "sha256:" + "b" * 64
+        original = claim("API")
+        with self.assertRaisesRegex(CapabilityError, "sha256"):
+            CapabilityClaim(
+                source=original.source,
+                provider_id=original.provider_id,
+                account_id=original.account_id,
+                entity_id=original.entity_id,
+                environment=original.environment,
+                instrument_version=original.instrument_version,
+                observed_at=original.observed_at,
+                expires_at=original.expires_at,
+                supported_order_types=original.supported_order_types,
+                time_in_force=original.time_in_force,
+                permission_scopes=original.permission_scopes,
+                position_mode=original.position_mode,
+                native_protection=original.native_protection,
+                rate_limit_policy_id=original.rate_limit_policy_id,
+                data_entitlements=original.data_entitlements,
+                evidence_ref={
+                    "artifact_id": "33333333-3333-4333-8333-333333333333",
+                    "sha256": "bad",
+                    "observed_at": "2026-09-24T15:59:00Z",
+                },
             )
 
     def test_contract_projection_contains_current_fail_closed_status(self):

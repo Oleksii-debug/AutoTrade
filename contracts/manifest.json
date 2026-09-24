@@ -3,6 +3,7 @@
   "json_schema_draft": "https://json-schema.org/draft/2020-12/schema",
   "schema_base_uri": "https://schemas.autotrade.local/1.0.0/",
   "schemas": [
+    "authority.schema.json",
     "common.schema.json",
     "data.schema.json",
     "decision.schema.json",

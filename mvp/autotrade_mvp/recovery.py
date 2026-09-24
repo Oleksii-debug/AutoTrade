@@ -77,9 +77,28 @@ class OutboundAttempt:
     def prove_absent(self, evidence_refs: Iterable[str]) -> None:
         if self.phase is not SendPhase.SENT_UNKNOWN:
             raise ValueError("Absence proof requires an uncertain sent attempt")
-        refs = [item for item in evidence_refs if item]
-        if len(refs) < 2:
-            raise ValueError("Absence proof requires independent evidence")
+        refs = [item.strip() for item in evidence_refs if isinstance(item, str) and item.strip()]
+        if len(refs) != len(set(refs)):
+            raise ValueError("Absence proof evidence must be unique")
+        required_prefixes = {
+            "client-order-lookup:",
+            "open-orders:",
+            "order-history:",
+            "executions:",
+            "activities:",
+        }
+        observed = {
+            prefix
+            for prefix in required_prefixes
+            if any(item.lower().startswith(prefix) for item in refs)
+        }
+        missing = sorted(required_prefixes - observed)
+        if missing:
+            raise ValueError(
+                "Absence proof requires explicit client-order lookup plus complete "
+                "open-order, order-history, execution and activity evidence; missing: "
+                + ", ".join(missing)
+            )
         self.phase = SendPhase.PROVEN_ABSENT
         self.evidence.extend(refs)
 

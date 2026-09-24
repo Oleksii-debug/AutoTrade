@@ -370,6 +370,23 @@ class ReconciliationTests(unittest.TestCase):
             "provider_snapshot_consistency_not_evidenced",
         )
 
+    def test_atomic_snapshot_with_sequence_gap_is_not_consistent(self):
+        result = self.base(
+            snapshot_consistency=SnapshotConsistencyEvidence(
+                mode="ATOMIC",
+                query_started_at="2026-09-24T17:00:00Z",
+                query_completed_at="2026-09-24T19:00:00Z",
+                sequence_gap_detected=True,
+            )
+        )
+        self.assertFalse(result.snapshot_consistent)
+        self.assertFalse(result.complete)
+        self.assertIn("ACCOUNT", result.blocking_resources)
+        self.assertIn(
+            "provider snapshot stream contains a sequence gap",
+            result.reasons,
+        )
+
     def test_composed_snapshot_requires_buffer_replay_without_gap(self):
         result = self.base(
             snapshot_consistency=SnapshotConsistencyEvidence(

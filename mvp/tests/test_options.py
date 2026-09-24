@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import unittest
 
@@ -284,6 +284,7 @@ class OptionRiskEvidenceTests(unittest.TestCase):
             market_as_of=at(17),
             calculated_at=at(18),
             expires_at=at(19),
+            maximum_market_age=timedelta(hours=2),
             delta="0.52",
             gamma="0.03",
             vega="12.5",
@@ -327,6 +328,7 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                 market_as_of=at(17),
                 calculated_at=at(18),
                 expires_at=at(19),
+                maximum_market_age=timedelta(hours=2),
                 delta="0",
                 gamma="0",
                 vega="0",
@@ -360,6 +362,7 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                 market_as_of=at(17),
                 calculated_at=at(18),
                 expires_at=at(19),
+                maximum_market_age=timedelta(hours=2),
                 delta="0",
                 gamma="0",
                 vega="0",
@@ -378,6 +381,7 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                 market_as_of=at(17),
                 calculated_at=at(18),
                 expires_at=at(19),
+                maximum_market_age=timedelta(hours=2),
                 delta="0",
                 gamma="0",
                 vega="0",
@@ -405,6 +409,73 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                 evidence,
                 instrument="OPT:PUT",
                 at=datetime(2026, 9, 25, 18, 30, tzinfo=timezone.utc),
+            )
+
+
+    def test_market_snapshot_age_expires_independently_of_calculation_expiry(self):
+        evidence = OptionRiskEvidence(
+            instrument="OPT:CALL",
+            model_id="scenario-greeks",
+            model_version="1.2.0",
+            source_sha="a" * 40,
+            input_digest="sha256:" + "b" * 64,
+            schema_version=1,
+            market_as_of=at(17),
+            calculated_at=datetime(2026, 9, 25, 17, 30, tzinfo=timezone.utc),
+            expires_at=datetime(2026, 9, 25, 21, 0, tzinfo=timezone.utc),
+            maximum_market_age=timedelta(hours=2),
+            delta="0.52",
+            gamma="0.03",
+            vega="12.5",
+            theta="-4.2",
+            rho="1.1",
+            scenarios=(
+                OptionScenarioResult(
+                    scenario_id="stress",
+                    underlying_price="80",
+                    implied_volatility="0.55",
+                    pnl="-725.25",
+                ),
+            ),
+        )
+        require_current_option_risk(
+            evidence,
+            instrument="OPT:CALL",
+            at=datetime(2026, 9, 25, 18, 59, tzinfo=timezone.utc),
+        )
+        with self.assertRaisesRegex(OptionError, "market evidence is stale"):
+            require_current_option_risk(
+                evidence,
+                instrument="OPT:CALL",
+                at=datetime(2026, 9, 25, 19, 1, tzinfo=timezone.utc),
+            )
+
+    def test_market_snapshot_cannot_be_stale_when_risk_is_calculated(self):
+        with self.assertRaisesRegex(OptionError, "stale at calculation"):
+            OptionRiskEvidence(
+                instrument="OPT:CALL",
+                model_id="model",
+                model_version="1",
+                source_sha="a" * 40,
+                input_digest="sha256:" + "b" * 64,
+                schema_version=1,
+                market_as_of=at(17),
+                calculated_at=at(18),
+                expires_at=at(20),
+                maximum_market_age=timedelta(minutes=30),
+                delta="0",
+                gamma="0",
+                vega="0",
+                theta="0",
+                rho="0",
+                scenarios=(
+                    OptionScenarioResult(
+                        scenario_id="stress",
+                        underlying_price="100",
+                        implied_volatility="0.3",
+                        pnl="-1",
+                    ),
+                ),
             )
 
 

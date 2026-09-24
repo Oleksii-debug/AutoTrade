@@ -68,6 +68,37 @@
     return value;
   }
 
+  function canonicalEnvironment(value, name) {
+    const token = requiredText(value, name);
+    if (!["REPLAY", "SIMULATION", "PAPER", "LIVE"].includes(token)) {
+      throw new Error(name + " is not a canonical environment");
+    }
+    return token;
+  }
+
+  function utcInstant(value, name) {
+    const token = requiredText(value, name);
+    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/.exec(token);
+    if (match === null) {
+      throw new Error(name + " must be a canonical UTC instant");
+    }
+    const [, year, month, day, hour, minute, second] = match;
+    const parts = [year, month, day, hour, minute, second].map(Number);
+    const [y, m, d, h, min, s] = parts;
+    const probe = new Date(Date.UTC(y, m - 1, d, h, min, s));
+    if (
+      probe.getUTCFullYear() !== y ||
+      probe.getUTCMonth() !== m - 1 ||
+      probe.getUTCDate() !== d ||
+      probe.getUTCHours() !== h ||
+      probe.getUTCMinutes() !== min ||
+      probe.getUTCSeconds() !== s
+    ) {
+      throw new Error(name + " must be a canonical UTC instant");
+    }
+    return token;
+  }
+
   function requiredStringArray(value, name) {
     if (!Array.isArray(value) ||
         value.some((item) => typeof item !== "string" || item.length === 0)) {
@@ -109,10 +140,10 @@
     return {
       version: exactCounter(snapshot.state_version, "state_version"),
       cursor: exactCounter(snapshot.event_cursor, "event_cursor"),
-      serverTime: requiredText(snapshot.server_time, "server_time"),
+      serverTime: utcInstant(snapshot.server_time, "server_time"),
       hostId: requiredText(snapshot.host_id, "host_id"),
       accountId: requiredText(snapshot.account_id, "account_id"),
-      environment: requiredText(snapshot.environment, "environment"),
+      environment: canonicalEnvironment(snapshot.environment, "environment"),
       permissionSummary,
       connectionFreshness,
       portfolio: requiredObject(snapshot.portfolio, "portfolio"),
@@ -185,8 +216,8 @@
     return {
       operationId,
       phase: result.phase,
-      startedAt: requiredText(result.started_at, "started_at"),
-      updatedAt: requiredText(result.updated_at, "updated_at"),
+      startedAt: utcInstant(result.started_at, "started_at"),
+      updatedAt: utcInstant(result.updated_at, "updated_at"),
       affectedRefs: requiredStringArray(result.affected_refs, "affected_refs"),
       evidence: result.evidence,
       remainingUncertainty: requiredStringArray(

@@ -30,18 +30,24 @@ def persist_authority_snapshot(
     if not isinstance(committed_at, str) or not committed_at.strip():
         raise ValueError("committed_at is required")
 
+    authority_id = authority_id.strip()
+    event_id = event_id.strip()
     payload = {
-        "authority_id": authority_id.strip(),
+        "authority_id": authority_id,
         "state": service.export_state(),
     }
+    existing = store.get_event(event_id)
+    aggregate_version = (
+        existing["aggregate_version"]
+        if existing is not None
+        else store.next_aggregate_version(AUTHORITY_AGGREGATE_TYPE, authority_id)
+    )
     envelope = {
-        "event_id": event_id.strip(),
+        "event_id": event_id,
         "event_type": AUTHORITY_EVENT_TYPE,
         "aggregate_type": AUTHORITY_AGGREGATE_TYPE,
-        "aggregate_id": authority_id.strip(),
-        "aggregate_version": store.next_aggregate_version(
-            AUTHORITY_AGGREGATE_TYPE, authority_id.strip()
-        ),
+        "aggregate_id": authority_id,
+        "aggregate_version": aggregate_version,
         "payload": payload,
         "payload_hash": payload_digest(payload),
         "committed_at": committed_at.strip(),

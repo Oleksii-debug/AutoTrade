@@ -64,7 +64,7 @@ class SecurityBoundary:
 
     _ROLES = {"OWNER", "OPERATOR", "RESEARCHER", "OBSERVER"}
     _EXECUTION_ROLES = {"OWNER", "OPERATOR"}
-    _CREDENTIAL_PURPOSES = {"TRADE", "READ_ONLY"}
+    _CREDENTIAL_PURPOSES = {"TRADE", "READ"}
 
     def __init__(
         self,

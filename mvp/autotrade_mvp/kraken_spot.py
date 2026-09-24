@@ -8,7 +8,7 @@ holds no credential and grants no financial authority.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Mapping
@@ -16,6 +16,7 @@ from uuid import UUID
 import re
 
 from .capabilities import CapabilitySnapshot
+from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
 class KrakenSpotAdapterError(ValueError):
@@ -286,3 +287,120 @@ def derivatives_supported_by_this_module() -> bool:
     """Make the separation explicit: Kraken Derivatives needs its own adapter."""
 
     return False
+
+
+def _seconds_to_utc(value, *, name: str) -> str:
+    seconds = _decimal(value, name=name)
+    if seconds < 0:
+        raise KrakenSpotAdapterError(f"{name} cannot be negative")
+    micros = seconds * Decimal("1000000")
+    if micros != micros.to_integral_value():
+        raise KrakenSpotAdapterError(f"{name} has precision finer than one microsecond")
+    total_micros = int(micros)
+    whole_seconds, remainder = divmod(total_micros, 1_000_000)
+    instant = datetime.fromtimestamp(whole_seconds, tz=timezone.utc) + timedelta(
+        microseconds=remainder
+    )
+    return instant.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def parse_trade_history(
+    response: Mapping[str, object],
+    *,
+    instrument_versions: Mapping[str, str],
+    client_ids_by_provider_order: Mapping[str, str],
+    fee_currency_by_pair: Mapping[str, str],
+) -> tuple[ProviderFillEvidence, ...]:
+    """Map recorded Kraken TradesHistory rows into canonical unique fills.
+
+    Kraken trade rows do not safely imply AutoTrade instrument versions, client
+    identities or fee currency. Those mappings must come from separately
+    evidenced metadata/order state and are therefore explicit inputs.
+    """
+
+    if not isinstance(response, Mapping):
+        raise TypeError("response must be a mapping")
+    raw_errors = response.get("error")
+    if isinstance(raw_errors, (str, bytes)) or not isinstance(raw_errors, (list, tuple)):
+        raise KrakenSpotAdapterError("Kraken error field must be a sequence")
+    if any(str(value) for value in raw_errors):
+        raise KrakenSpotAdapterError("Kraken TradesHistory response was not successful")
+    result = response.get("result")
+    if not isinstance(result, Mapping):
+        raise KrakenSpotAdapterError("TradesHistory result must be an object")
+    trades = result.get("trades")
+    if not isinstance(trades, Mapping):
+        raise KrakenSpotAdapterError("TradesHistory trades must be an object")
+    for name, value in (
+        ("instrument_versions", instrument_versions),
+        ("client_ids_by_provider_order", client_ids_by_provider_order),
+        ("fee_currency_by_pair", fee_currency_by_pair),
+    ):
+        if not isinstance(value, Mapping):
+            raise TypeError(f"{name} must be a mapping")
+
+    fills: list[ProviderFillEvidence] = []
+    for trade_id, raw in trades.items():
+        execution_id = _text(str(trade_id), name="trade id")
+        if not isinstance(raw, Mapping):
+            raise KrakenSpotAdapterError(f"trade {execution_id} must be an object")
+        pair = _text(str(raw.get("pair", "")), name="pair")
+        provider_order_id = _text(str(raw.get("ordertxid", "")), name="ordertxid")
+        if pair not in instrument_versions:
+            raise KrakenSpotAdapterError(f"unmapped Kraken pair: {pair}")
+        if pair not in fee_currency_by_pair:
+            raise KrakenSpotAdapterError(
+                f"missing evidenced fee currency for Kraken pair: {pair}"
+            )
+        client_id = client_ids_by_provider_order.get(provider_order_id)
+        if client_id is not None:
+            client_id = validate_spot_client_order_id(client_id)
+        fills.append(
+            ProviderFillEvidence.create(
+                provider_execution_id=execution_id,
+                client_order_id=client_id,
+                instrument=_text(instrument_versions[pair], name="instrument_version"),
+                quantity=raw.get("vol"),
+                price=raw.get("price"),
+                fee_amount=raw.get("fee", "0"),
+                fee_currency=_text(fee_currency_by_pair[pair], name="fee_currency"),
+                trade_time=_seconds_to_utc(raw.get("time"), name="time"),
+            )
+        )
+    return tuple(fills)
+
+
+def coverage_evidence(
+    *,
+    surface: str,
+    coverage_start: str,
+    coverage_end: str,
+    pagination_complete: bool,
+    consistency_horizon_satisfied: bool,
+    qualified_exclusion_semantics: bool = False,
+) -> CoverageSurfaceEvidence:
+    """Create canonical coverage without guessing provider absence semantics."""
+
+    normalized = _text(surface, name="surface").upper()
+    if normalized not in {
+        "OPEN_ORDERS",
+        "ORDER_HISTORY",
+        "EXECUTIONS",
+        "ACTIVITIES",
+    }:
+        raise KrakenSpotAdapterError("unsupported Kraken reconciliation surface")
+    for name, value in (
+        ("pagination_complete", pagination_complete),
+        ("consistency_horizon_satisfied", consistency_horizon_satisfied),
+        ("qualified_exclusion_semantics", qualified_exclusion_semantics),
+    ):
+        if type(value) is not bool:
+            raise TypeError(f"{name} must be boolean")
+    return CoverageSurfaceEvidence(
+        surface=normalized,
+        coverage_start=coverage_start,
+        coverage_end=coverage_end,
+        pagination_complete=pagination_complete,
+        consistency_horizon_satisfied=consistency_horizon_satisfied,
+        provider_semantics_exclude_execution=qualified_exclusion_semantics,
+    )

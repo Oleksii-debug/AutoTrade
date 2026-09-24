@@ -322,9 +322,15 @@ class IbkrExecutionEvidence:
         quantity,
         price,
     ) -> "IbkrExecutionEvidence":
+        if (
+            not isinstance(permanent_order_id, int)
+            or isinstance(permanent_order_id, bool)
+            or permanent_order_id <= 0
+        ):
+            raise IbkrWebAdapterError("permanent_order_id must be a positive integer")
         return cls(
             execution_id=_text(execution_id, name="execution_id"),
-            permanent_order_id=_text(str(permanent_order_id), name="permanent_order_id"),
+            permanent_order_id=str(permanent_order_id),
             account_id=_text(account_id, name="account_id"),
             quantity=_decimal(quantity, name="quantity", positive=True),
             price=_decimal(price, name="price", positive=True),
@@ -588,6 +594,7 @@ def execution_to_reconciliation_fill(
     execution: IbkrExecutionEvidence,
     *,
     client_order_id: str | None,
+    expected_account_id: str,
     instrument: str,
     fee_amount,
     fee_currency: str,
@@ -601,6 +608,9 @@ def execution_to_reconciliation_fill(
 
     if not isinstance(execution, IbkrExecutionEvidence):
         raise TypeError("execution must be IbkrExecutionEvidence")
+    account = _text(expected_account_id, name="expected_account_id")
+    if execution.account_id != account:
+        raise IbkrWebAdapterError("execution account does not match reconciliation account")
     client_id = None if client_order_id is None else validate_coid(client_order_id)
     return ProviderFillEvidence.create(
         provider_execution_id=execution.execution_id,

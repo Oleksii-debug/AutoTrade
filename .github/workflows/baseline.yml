@@ -28,9 +28,9 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install -r requirements-dev.txt
-      - run: python tools/verify.py
+      - run: python tools/baseline.py check
       - name: Write exact-head baseline evidence
-        run: python tools/write_ci_evidence.py --suite baseline --command "python tools/verify.py" --output "artifacts/baseline-${{ runner.os }}.json"
+        run: python tools/write_ci_evidence.py --suite baseline --command "python tools/baseline.py check" --output "artifacts/baseline-${{ runner.os }}.json"
       - name: Upload exact-head baseline evidence
         uses: actions/upload-artifact@v4
         with:

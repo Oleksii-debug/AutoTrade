@@ -9,6 +9,7 @@ on:
       - ".editorconfig"
       - "src/**/*.cs"
       - "src/**/*.csproj"
+      - "src/**/*.xaml"
       - "contracts/**"
       - ".github/workflows/dotnet-foundation.yml"
   pull_request:
@@ -18,6 +19,7 @@ on:
       - ".editorconfig"
       - "src/**/*.cs"
       - "src/**/*.csproj"
+      - "src/**/*.xaml"
       - "contracts/**"
       - ".github/workflows/dotnet-foundation.yml"
 
@@ -41,3 +43,13 @@ jobs:
       # package locks and locked-mode before introducing release dependencies.
       - run: dotnet restore src/AutoTrade.Contracts/AutoTrade.Contracts.csproj
       - run: dotnet build src/AutoTrade.Contracts/AutoTrade.Contracts.csproj --configuration Release --no-restore
+
+  desktop-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+      - run: dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj
+      - run: dotnet build src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --configuration Release --no-restore

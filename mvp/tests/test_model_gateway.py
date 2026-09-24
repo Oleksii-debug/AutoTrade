@@ -307,7 +307,7 @@ class BudgetLedgerTests(unittest.TestCase):
             estimated_unbilled=Decimal("0.5"),
         )
         with self.assertRaisesRegex(ValueError, "exact decimal"):
-            ledger.reconcile_unbilled(billing_id="bill-float", billed=0.1)
+            ledger.reconcile_unbilled(billing_id="bill-float", request_id="req", billed=0.1)
 
     def test_reservation_is_idempotent(self):
         from mvp.autotrade_mvp.model_gateway import BudgetLedger
@@ -352,24 +352,105 @@ class BudgetLedgerTests(unittest.TestCase):
         ledger = BudgetLedger(Decimal("2"))
         ledger.reserve("req", Decimal("1"))
         ledger.settle("req", incurred=Decimal("0.2"), estimated_unbilled=Decimal("0.5"))
-        ledger.reconcile_unbilled(billing_id="invoice-line-1", billed=Decimal("0.3"))
+        ledger.reconcile_unbilled(billing_id="invoice-line-1", request_id="req", billed=Decimal("0.3"))
         first = ledger.snapshot()
-        ledger.reconcile_unbilled(billing_id="invoice-line-1", billed=Decimal("0.3"))
+        ledger.reconcile_unbilled(billing_id="invoice-line-1", request_id="req", billed=Decimal("0.3"))
         second = ledger.snapshot()
         self.assertEqual(first, second)
         with self.assertRaisesRegex(ValueError, "conflict"):
             ledger.reconcile_unbilled(
                 billing_id="invoice-line-1",
+                request_id="req",
                 billed=Decimal("0.2"),
             )
         self.assertEqual(ledger.snapshot(), second)
+
+
+    def test_actual_billing_overrun_is_preserved_and_blocks_future_budget(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+
+        ledger = BudgetLedger(Decimal("1"))
+        ledger.reserve("req", Decimal("0.4"))
+        ledger.settle("req", incurred=Decimal("0"), estimated_unbilled=Decimal("0.4"))
+        ledger.reconcile_unbilled(
+            billing_id="provider-invoice-line-1",
+            request_id="req",
+            billed=Decimal("1.2"),
+        )
+        snap = ledger.snapshot()
+        self.assertEqual(Decimal("1.2"), snap.incurred)
+        self.assertEqual(Decimal("0"), snap.estimated_unbilled)
+        self.assertEqual(Decimal("0"), snap.available)
+        with self.assertRaisesRegex(ValueError, "budget exhausted"):
+            ledger.reserve("another", Decimal("0.01"))
+
+    def test_billing_never_consumes_another_requests_unbilled_estimate(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+
+        ledger = BudgetLedger(Decimal("3"))
+        ledger.reserve("req-a", Decimal("0.5"))
+        ledger.reserve("req-b", Decimal("0.5"))
+        ledger.settle("req-a", incurred=Decimal("0"), estimated_unbilled=Decimal("0.5"))
+        ledger.settle("req-b", incurred=Decimal("0"), estimated_unbilled=Decimal("0.5"))
+        ledger.reconcile_unbilled(
+            billing_id="bill-a",
+            request_id="req-a",
+            billed=Decimal("0.6"),
+        )
+        snap = ledger.snapshot()
+        self.assertEqual(Decimal("0.6"), snap.incurred)
+        self.assertEqual(Decimal("0.5"), snap.estimated_unbilled)
+
+    def test_unknown_request_billing_fails_without_mutating_budget(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+
+        ledger = BudgetLedger(Decimal("2"))
+        before = ledger.snapshot()
+        with self.assertRaisesRegex(ValueError, "matching settled request"):
+            ledger.reconcile_unbilled(
+                billing_id="orphan-bill",
+                request_id="missing",
+                billed=Decimal("0.2"),
+            )
+        self.assertEqual(before, ledger.snapshot())
+
+    def test_billing_identity_binds_request_and_amount(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+
+        ledger = BudgetLedger(Decimal("2"))
+        for request_id in ("a", "b"):
+            ledger.reserve(request_id, Decimal("0.5"))
+            ledger.settle(
+                request_id,
+                incurred=Decimal("0"),
+                estimated_unbilled=Decimal("0.5"),
+            )
+        ledger.reconcile_unbilled(
+            billing_id="same-provider-line",
+            request_id="a",
+            billed=Decimal("0.3"),
+        )
+        stable = ledger.snapshot()
+        ledger.reconcile_unbilled(
+            billing_id="same-provider-line",
+            request_id="a",
+            billed=Decimal("0.3"),
+        )
+        self.assertEqual(stable, ledger.snapshot())
+        with self.assertRaisesRegex(ValueError, "conflict"):
+            ledger.reconcile_unbilled(
+                billing_id="same-provider-line",
+                request_id="b",
+                billed=Decimal("0.3"),
+            )
+        self.assertEqual(stable, ledger.snapshot())
 
     def test_unbilled_reconciliation_moves_cost_to_incurred(self):
         from mvp.autotrade_mvp.model_gateway import BudgetLedger
         ledger = BudgetLedger(Decimal("2"))
         ledger.reserve("req", Decimal("1"))
         ledger.settle("req", incurred=Decimal("0.2"), estimated_unbilled=Decimal("0.5"))
-        ledger.reconcile_unbilled(billing_id="bill-1", billed=Decimal("0.3"))
+        ledger.reconcile_unbilled(billing_id="bill-1", request_id="req", billed=Decimal("0.3"))
         snap = ledger.snapshot()
         self.assertEqual(Decimal("0.5"), snap.incurred)
         self.assertEqual(Decimal("0.2"), snap.estimated_unbilled)

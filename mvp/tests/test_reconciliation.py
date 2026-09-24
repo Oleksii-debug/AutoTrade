@@ -387,12 +387,35 @@ class ReconciliationTests(unittest.TestCase):
             result.reasons,
         )
 
+    def test_composed_snapshot_requires_explicit_stream_watermarks(self):
+        with self.assertRaisesRegex(ValueError, "stream_watermark_start"):
+            SnapshotConsistencyEvidence(
+                mode="COMPOSED",
+                query_started_at="2026-09-24T17:00:00Z",
+                query_completed_at="2026-09-24T19:00:00Z",
+                buffered_stream_events=True,
+                replay_complete=True,
+                sequence_gap_detected=False,
+            )
+        with self.assertRaisesRegex(ValueError, "stream_watermark_end"):
+            SnapshotConsistencyEvidence(
+                mode="COMPOSED",
+                query_started_at="2026-09-24T17:00:00Z",
+                query_completed_at="2026-09-24T19:00:00Z",
+                buffered_stream_events=True,
+                replay_complete=True,
+                sequence_gap_detected=False,
+                stream_watermark_start="seq:100",
+            )
+
     def test_composed_snapshot_requires_buffer_replay_without_gap(self):
         result = self.base(
             snapshot_consistency=SnapshotConsistencyEvidence(
                 mode="COMPOSED",
                 query_started_at="2026-09-24T17:00:00Z",
                 query_completed_at="2026-09-24T19:00:00Z",
+                stream_watermark_start="seq:100",
+                stream_watermark_end="seq:200",
                 buffered_stream_events=True,
                 replay_complete=False,
                 sequence_gap_detected=False,
@@ -406,6 +429,8 @@ class ReconciliationTests(unittest.TestCase):
                 mode="COMPOSED",
                 query_started_at="2026-09-24T17:00:00Z",
                 query_completed_at="2026-09-24T19:00:00Z",
+                stream_watermark_start="seq:100",
+                stream_watermark_end="seq:200",
                 buffered_stream_events=True,
                 replay_complete=True,
                 sequence_gap_detected=False,
@@ -419,6 +444,8 @@ class ReconciliationTests(unittest.TestCase):
                 mode="COMPOSED",
                 query_started_at="2026-09-24T17:00:00Z",
                 query_completed_at="2026-09-24T19:00:00Z",
+                stream_watermark_start="seq:100",
+                stream_watermark_end="seq:200",
                 buffered_stream_events=True,
                 replay_complete=True,
                 sequence_gap_detected=True,

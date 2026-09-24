@@ -109,10 +109,12 @@ def ensure_durable_file(path: str | Path) -> None:
         os.fsync(handle.fileno())
 
 
-def _sync_parent_directory(path: Path) -> None:
+def sync_parent_directory(path: str | Path) -> None:
+    """Durably publish a directory-entry change where the platform supports it."""
+    destination = Path(path)
     if os.name == "nt":
         return
-    directory_fd = os.open(path.parent, os.O_RDONLY)
+    directory_fd = os.open(destination.parent, os.O_RDONLY)
     try:
         os.fsync(directory_fd)
     finally:
@@ -157,7 +159,7 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
         with durable_path_lock(destination):
             os.replace(temporary, destination)
             temporary = None
-            _sync_parent_directory(destination)
+            sync_parent_directory(destination)
     finally:
         if temporary is not None:
             try:

@@ -64,6 +64,23 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertEqual(len(checkpoint["postings"]), 2)
             self.assertEqual(len(list((Path(directory) / "order-intents").glob("*.json"))), 2)
 
+    def test_multi_episode_buy_hold_sell_restart(self):
+        with TemporaryDirectory() as directory:
+            episodes = [[100, 101, 102, 103], [100, 100, 100], [103, 102, 101, 100]]
+            results = run_multi_episode(episodes, directory)
+            self.assertEqual([item.decision for item in results], ["BUY", "HOLD", "SELL"])
+            self.assertEqual([item.status for item in results], ["filled", "hold", "filled"])
+            self.assertEqual(results[-1].position, 0)
+            self.assertEqual(results[-1].evidence_count, 3)
+            restarted = run_multi_episode(episodes, directory)
+            self.assertEqual([item.decision for item in restarted], ["BUY", "HOLD", "SELL"])
+            self.assertEqual([item.status for item in restarted], ["filled", "hold", "filled"])
+            self.assertEqual(restarted[-1].position, 0)
+            self.assertEqual(restarted[-1].evidence_count, 3)
+            checkpoint = json.loads((Path(directory) / "checkpoint.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(checkpoint["postings"]), 2)
+            self.assertEqual(len(list((Path(directory) / "order-intents").glob("*.json"))), 2)
+
     def test_intent_is_durable_before_simulated_execution(self):
         with TemporaryDirectory() as directory:
             with patch.object(SimulatedProvider, "execute", side_effect=RuntimeError("simulated crash")):
@@ -74,6 +91,23 @@ class VerticalSliceTests(unittest.TestCase):
             recovered = run_vertical_slice([100, 101, 102, 103], directory)
             self.assertEqual(recovered.status, "filled")
             self.assertEqual(recovered.position, 1)
+
+    def test_multi_episode_buy_hold_sell_restart_recovery(self):
+        with TemporaryDirectory() as directory:
+            episodes = [[100, 101, 102, 103], [100, 100, 100], [103, 102, 101, 100]]
+            results = run_multi_episode(episodes, directory)
+            self.assertEqual([item.decision for item in results], ["BUY", "HOLD", "SELL"])
+            self.assertEqual([item.status for item in results], ["filled", "hold", "filled"])
+            self.assertEqual(results[-1].position, 0)
+            self.assertEqual(results[-1].evidence_count, 3)
+            with patch.object(SimulatedProvider, "execute", side_effect=RuntimeError("simulated crash")):
+                with self.assertRaisesRegex(RuntimeError, "simulated crash"):
+                    run_multi_episode(episodes, directory)
+            restarted = run_multi_episode(episodes, directory)
+            self.assertEqual([item.decision for item in restarted], ["BUY", "HOLD", "SELL"])
+            self.assertEqual([item.status for item in restarted], ["filled", "hold", "filled"])
+            self.assertEqual(restarted[-1].position, 0)
+            self.assertEqual(restarted[-1].evidence_count, 3)
 
     def test_missing_evidence_after_checkpoint_is_repaired(self):
         with TemporaryDirectory() as directory:

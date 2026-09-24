@@ -366,5 +366,43 @@ class IbkrWebAdapterTests(unittest.TestCase):
 
 
 
+    def test_regulated_instrument_requires_manual_indicator_evidence(self):
+        with self.assertRaisesRegex(IbkrWebAdapterError, "manual_indicator is required"):
+            IbkrWebOrderIntent.create(
+                instrument_version="AAPL-CONID-265598:v1",
+                account_id="U1234567",
+                contract=IbkrContractIdentity(conid=265598),
+                side="BUY",
+                order_type="MARKET",
+                time_in_force="DAY",
+                quantity="1",
+                regulatory_manual_indicator_required=True,
+            )
+
+    def test_automated_manual_indicator_false_is_preserved_when_required(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+            regulatory_manual_indicator_required=True,
+            manual_indicator=False,
+            ext_operator="autotrade",
+        )
+        prepared = prepare_normalized_order(
+            intent,
+            client_order_id="at-regulated-1",
+            capability=capability(),
+            session=ready_session(),
+            at=NOW,
+        )
+        self.assertIs(prepared.fields["manualIndicator"], False)
+        self.assertEqual(prepared.fields["extOperator"], "autotrade")
+
+
+
 if __name__ == "__main__":
     unittest.main()

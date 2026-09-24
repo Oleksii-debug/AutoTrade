@@ -1,6 +1,6 @@
 import unittest
 
-from mvp.autotrade_mvp.host_api import EventGap, HostCommandStore
+from mvp.autotrade_mvp.host_api import EventGap, HostCommandStore, operation_result_payload
 
 
 class HostCommandStateTests(unittest.TestCase):
@@ -83,6 +83,25 @@ class HostCommandStateTests(unittest.TestCase):
             self.store.submit(self.command(session="forged"))
         self.assertEqual(self.store.state_version, 0)
         self.assertEqual(self.store.cursor, 0)
+
+    def test_internal_operation_version_does_not_drift_canonical_payload(self):
+        accepted = self.store.submit(self.command())
+        operation = self.store.get_operation(accepted.operation_id)
+        self.assertEqual(operation.state_version, "1")
+        payload = operation_result_payload(operation)
+        self.assertNotIn("state_version", payload)
+        self.assertEqual(
+            set(payload),
+            {
+                "operation_id",
+                "phase",
+                "started_at",
+                "updated_at",
+                "affected_refs",
+                "evidence",
+                "remaining_uncertainty",
+            },
+        )
 
     def test_operation_completion_is_separate_versioned_transition(self):
         accepted = self.store.submit(self.command())

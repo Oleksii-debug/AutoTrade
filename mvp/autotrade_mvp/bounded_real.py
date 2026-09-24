@@ -91,6 +91,39 @@ class BoundedRealEnvelope:
     max_single_notional: Decimal
     max_gross_leverage: Decimal
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "envelope_id", _text(self.envelope_id, name="envelope_id")
+        )
+        object.__setattr__(
+            self, "source_sha", _sha(self.source_sha, name="source_sha")
+        )
+        object.__setattr__(
+            self, "account_id", _text(self.account_id, name="account_id")
+        )
+        object.__setattr__(
+            self, "provider_id", _text(self.provider_id, name="provider_id")
+        )
+        object.__setattr__(
+            self, "policy_id", _text(self.policy_id, name="policy_id")
+        )
+        object.__setattr__(
+            self, "allowed_actions", _actions(self.allowed_actions)
+        )
+        object.__setattr__(
+            self, "max_capital", _decimal(self.max_capital, name="max_capital")
+        )
+        object.__setattr__(
+            self,
+            "max_single_notional",
+            _decimal(self.max_single_notional, name="max_single_notional"),
+        )
+        object.__setattr__(
+            self,
+            "max_gross_leverage",
+            _decimal(self.max_gross_leverage, name="max_gross_leverage"),
+        )
+
     @classmethod
     def create(
         cls,
@@ -130,6 +163,30 @@ class QualificationEvidence:
     envelope_id: str
     passed: bool
     unresolved_blockers: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        blockers = tuple(
+            _text(value, name="unresolved_blocker")
+            for value in self.unresolved_blockers
+        )
+        if len(blockers) != len(set(blockers)):
+            raise ValueError("unresolved_blockers must be unique")
+        object.__setattr__(
+            self, "evidence_id", _text(self.evidence_id, name="evidence_id")
+        )
+        object.__setattr__(
+            self,
+            "evidence_kind",
+            _text(self.evidence_kind, name="evidence_kind").upper(),
+        )
+        object.__setattr__(
+            self, "source_sha", _sha(self.source_sha, name="source_sha")
+        )
+        object.__setattr__(
+            self, "envelope_id", _text(self.envelope_id, name="envelope_id")
+        )
+        object.__setattr__(self, "passed", _bool(self.passed, name="passed"))
+        object.__setattr__(self, "unresolved_blockers", blockers)
 
     @classmethod
     def create(
@@ -173,6 +230,39 @@ class BoundedRealObservations:
     protection_verified: bool
     unauthorized_action_count: int
     unresolved_unknown_count: int
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.observed_fill_count, "observed_fill_count"),
+            (self.unauthorized_action_count, "unauthorized_action_count"),
+            (self.unresolved_unknown_count, "unresolved_unknown_count"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        object.__setattr__(
+            self, "source_sha", _sha(self.source_sha, name="source_sha")
+        )
+        object.__setattr__(
+            self, "envelope_id", _text(self.envelope_id, name="envelope_id")
+        )
+        object.__setattr__(
+            self, "provider_id", _text(self.provider_id, name="provider_id")
+        )
+        object.__setattr__(
+            self, "account_id", _text(self.account_id, name="account_id")
+        )
+        for field_name in (
+            "observed_partial_fill",
+            "all_fills_reconciled",
+            "fees_reconciled",
+            "revocation_verified",
+            "protection_verified",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _bool(getattr(self, field_name), name=field_name),
+            )
 
     @classmethod
     def create(

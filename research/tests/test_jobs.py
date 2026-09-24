@@ -3,8 +3,10 @@ from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
+from autotrade_research.artifacts.store import ArtifactStore
 from autotrade_research.jobs import (
     JobBudgetError,
     JobConflictError,
@@ -176,6 +178,86 @@ class ResearchJobStoreTests(unittest.TestCase):
             job, _ = self._enqueue(first_store, "persisted")
             second_store = ResearchJobStore(path)
             self.assertEqual(second_store.get(job["job_id"])["dedupe_key"], "persisted")
+
+    def test_crash_after_artifact_publish_retries_without_double_acceptance(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs = ResearchJobStore(root / "jobs.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            job, _ = self._enqueue(jobs, "artifact-crash")
+            claimed = jobs.claim("worker-a", now=self.now, lease_seconds=30)
+            generation = int(claimed["generation"])
+            rights = {"storage": True, "export": False}
+
+            with patch.object(jobs, "succeed", side_effect=RuntimeError("simulated crash")):
+                with self.assertRaises(RuntimeError):
+                    jobs.publish_result_bytes(
+                        job["job_id"],
+                        worker_id="worker-a",
+                        generation=generation,
+                        artifact_store=artifacts,
+                        data=b"candidate-result",
+                        media_type="application/octet-stream",
+                        rights=rights,
+                        now=self.now + timedelta(seconds=1),
+                    )
+
+            self.assertEqual(jobs.get(job["job_id"])["state"], "RUNNING")
+            self.assertEqual(len(list((root / "artifacts" / "manifests").glob("*.json"))), 1)
+
+            manifest, accepted = jobs.publish_result_bytes(
+                job["job_id"],
+                worker_id="worker-a",
+                generation=generation,
+                artifact_store=artifacts,
+                data=b"candidate-result",
+                media_type="application/octet-stream",
+                rights=rights,
+                now=self.now + timedelta(seconds=2),
+            )
+            self.assertTrue(accepted)
+            final = jobs.get(job["job_id"])
+            self.assertEqual(final["state"], "SUCCEEDED")
+            self.assertEqual(len(final["output_refs"]), 1)
+            self.assertIn(manifest["artifact_id"], final["output_refs"][0])
+            self.assertEqual(len(list((root / "artifacts" / "manifests").glob("*.json"))), 1)
+
+    def test_different_result_bytes_cannot_replace_crash_published_artifact(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs = ResearchJobStore(root / "jobs.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            job, _ = self._enqueue(jobs, "artifact-conflict")
+            claimed = jobs.claim("worker-a", now=self.now, lease_seconds=30)
+            generation = int(claimed["generation"])
+            rights = {"storage": True, "export": False}
+
+            with patch.object(jobs, "succeed", side_effect=RuntimeError("simulated crash")):
+                with self.assertRaises(RuntimeError):
+                    jobs.publish_result_bytes(
+                        job["job_id"],
+                        worker_id="worker-a",
+                        generation=generation,
+                        artifact_store=artifacts,
+                        data=b"first-result",
+                        media_type="application/octet-stream",
+                        rights=rights,
+                        now=self.now + timedelta(seconds=1),
+                    )
+
+            with self.assertRaises(ValueError):
+                jobs.publish_result_bytes(
+                    job["job_id"],
+                    worker_id="worker-a",
+                    generation=generation,
+                    artifact_store=artifacts,
+                    data=b"different-result",
+                    media_type="application/octet-stream",
+                    rights=rights,
+                    now=self.now + timedelta(seconds=2),
+                )
+            self.assertEqual(jobs.get(job["job_id"])["state"], "RUNNING")
+
 
 
 if __name__ == "__main__":

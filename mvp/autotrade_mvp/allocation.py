@@ -44,6 +44,8 @@ class AllocationCandidate:
     lot_size: Decimal
     cost_rate: Decimal = Decimal("0")
     capital_requirement_rate: Decimal = Decimal("1")
+    min_notional: Decimal = Decimal("0")
+    fee_floor: Decimal = Decimal("0")
 
     @classmethod
     def create(
@@ -55,6 +57,8 @@ class AllocationCandidate:
         lot_size,
         cost_rate=0,
         capital_requirement_rate=1,
+        min_notional=0,
+        fee_floor=0,
     ) -> "AllocationCandidate":
         return cls(
             symbol=_text(symbol, name="symbol"),
@@ -66,6 +70,8 @@ class AllocationCandidate:
                 capital_requirement_rate,
                 name="capital_requirement_rate",
             ),
+            min_notional=_positive(min_notional, name="min_notional", allow_zero=True),
+            fee_floor=_positive(fee_floor, name="fee_floor", allow_zero=True),
         )
 
 
@@ -152,7 +158,18 @@ def _evaluate(
         scaled = candidate.desired_notional * scale
         quantity = _round_quantity(scaled, candidate.price, candidate.lot_size)
         notional = quantity * candidate.price
-        cost = abs(notional) * candidate.cost_rate
+        # Provider/account minimums are hard feasibility constraints. A rounded
+        # order below the explicit minimum is not executable and therefore
+        # becomes a no-trade target instead of being advertised as feasible.
+        if quantity != 0 and abs(notional) < candidate.min_notional:
+            quantity = Decimal("0")
+            notional = Decimal("0")
+        proportional_cost = abs(notional) * candidate.cost_rate
+        cost = (
+            max(proportional_cost, candidate.fee_floor)
+            if notional != 0
+            else Decimal("0")
+        )
         notionals[candidate.symbol] = notional
         total_cost += cost
         capital_required += abs(notional) * candidate.capital_requirement_rate

@@ -98,7 +98,13 @@ class OptionContract:
         )
         if self.exercise_cutoff > self.expiry:
             raise OptionError("exercise_cutoff cannot be after expiry")
-        object.__setattr__(self, "deliverable", tuple(self.deliverable))
+        deliverable = tuple(self.deliverable)
+        if any(not isinstance(leg, DeliverableLeg) for leg in deliverable):
+            raise OptionError("deliverable must contain DeliverableLeg values")
+        asset_ids = [leg.asset_id for leg in deliverable]
+        if len(asset_ids) != len(set(asset_ids)):
+            raise OptionError("deliverable asset_id values must be unique")
+        object.__setattr__(self, "deliverable", deliverable)
         if self.settlement_method == "PHYSICAL":
             if not self.deliverable:
                 raise OptionError("physical option requires explicit adjusted deliverable")

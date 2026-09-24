@@ -44,6 +44,18 @@ def _normalize_mapping(values, *, name: str, parser) -> dict[str, Decimal]:
     return normalized
 
 
+def _normalize_text_mapping(values, *, name: str) -> dict[str, str]:
+    if not isinstance(values, Mapping):
+        raise TypeError(f"{name} must be a mapping")
+    normalized: dict[str, str] = {}
+    for raw_key, raw_value in values.items():
+        key = _identity_key(raw_key, name=name)
+        if key in normalized:
+            raise ValueError(f"{name} keys must be unique after normalization")
+        normalized[key] = _identity_key(raw_value, name=f"{name} value")
+    return normalized
+
+
 @dataclass(frozen=True)
 class RiskIntent:
     symbol: str
@@ -95,6 +107,9 @@ class RiskPolicy:
     max_fx_age_seconds: Decimal
     min_margin_headroom: Decimal
     max_stress_loss: Decimal
+    max_asset_concentration_fraction: Decimal | None = None
+    max_venue_concentration_fraction: Decimal | None = None
+    max_order_participation_fraction: Decimal | None = None
 
     @classmethod
     def create(
@@ -110,6 +125,9 @@ class RiskPolicy:
         max_fx_age_seconds,
         min_margin_headroom,
         max_stress_loss,
+        max_asset_concentration_fraction=None,
+        max_venue_concentration_fraction=None,
+        max_order_participation_fraction=None,
     ) -> "RiskPolicy":
         values = {
             "max_abs_position": _positive(max_abs_position, name="max_abs_position"),
@@ -125,7 +143,21 @@ class RiskPolicy:
         }
         if values["max_drawdown_fraction"] > 1:
             raise ValueError("max_drawdown_fraction cannot exceed 1")
-        return cls(**values)
+
+        optional_limits: dict[str, Decimal | None] = {}
+        for name, raw_value in (
+            ("max_asset_concentration_fraction", max_asset_concentration_fraction),
+            ("max_venue_concentration_fraction", max_venue_concentration_fraction),
+            ("max_order_participation_fraction", max_order_participation_fraction),
+        ):
+            if raw_value is None:
+                optional_limits[name] = None
+                continue
+            fraction = _positive(raw_value, name=name, allow_zero=True)
+            if fraction > 1:
+                raise ValueError(f"{name} cannot exceed 1")
+            optional_limits[name] = fraction
+        return cls(**values, **optional_limits)
 
 
 @dataclass(frozen=True)
@@ -143,6 +175,9 @@ class RiskContext:
     capability_allowed: bool
     borrow_available: bool | None
     stress_scenarios: Sequence[Mapping[str, Decimal]]
+    asset_buckets: Mapping[str, str] | None = None
+    venues: Mapping[str, str] | None = None
+    liquidity_capacity: Mapping[str, Decimal] | None = None
 
     @classmethod
     def create(
@@ -161,6 +196,9 @@ class RiskContext:
         capability_allowed: bool = True,
         borrow_available: bool | None = True,
         stress_scenarios: Sequence[Mapping[str, object]] = (),
+        asset_buckets: Mapping[str, str] | None = None,
+        venues: Mapping[str, str] | None = None,
+        liquidity_capacity: Mapping[str, object] | None = None,
     ) -> "RiskContext":
         if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
@@ -188,6 +226,23 @@ class RiskContext:
             parser=lambda value, key: _positive(
                 value,
                 name=f"FX age {key}",
+                allow_zero=True,
+            ),
+        )
+        normalized_asset_buckets = _normalize_text_mapping(
+            asset_buckets or {},
+            name="asset_buckets",
+        )
+        normalized_venues = _normalize_text_mapping(
+            venues or {},
+            name="venues",
+        )
+        normalized_liquidity = _normalize_mapping(
+            liquidity_capacity or {},
+            name="liquidity_capacity",
+            parser=lambda value, key: _positive(
+                value,
+                name=f"liquidity capacity {key}",
                 allow_zero=True,
             ),
         )
@@ -232,6 +287,9 @@ class RiskContext:
             capability_allowed=capability_allowed,
             borrow_available=borrow_available,
             stress_scenarios=scenarios,
+            asset_buckets=normalized_asset_buckets,
+            venues=normalized_venues,
+            liquidity_capacity=normalized_liquidity,
         )
 
 
@@ -292,6 +350,48 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
     mark_notional = abs(resulting * context.marks[intent.symbol])
     intent_notional = intent.quantity * intent.price
     single_notional = max(mark_notional, intent_notional)
+
+    asset_concentration = Decimal("0")
+    asset_concentration_complete = True
+    missing_asset_buckets: set[str] = set()
+    if policy.max_asset_concentration_fraction is not None and gross > 0:
+        asset_groups: dict[str, Decimal] = {}
+        asset_map = context.asset_buckets or {}
+        for symbol, notional in notionals.items():
+            bucket = asset_map.get(symbol)
+            if bucket is None:
+                missing_asset_buckets.add(symbol)
+                continue
+            asset_groups[bucket] = asset_groups.get(bucket, Decimal("0")) + abs(notional)
+        asset_concentration_complete = not missing_asset_buckets
+        if asset_concentration_complete and asset_groups:
+            asset_concentration = max(asset_groups.values()) / gross
+
+    venue_concentration = Decimal("0")
+    venue_concentration_complete = True
+    missing_venues: set[str] = set()
+    if policy.max_venue_concentration_fraction is not None and gross > 0:
+        venue_groups: dict[str, Decimal] = {}
+        venue_map = context.venues or {}
+        for symbol, notional in notionals.items():
+            venue = venue_map.get(symbol)
+            if venue is None:
+                missing_venues.add(symbol)
+                continue
+            venue_groups[venue] = venue_groups.get(venue, Decimal("0")) + abs(notional)
+        venue_concentration_complete = not missing_venues
+        if venue_concentration_complete and venue_groups:
+            venue_concentration = max(venue_groups.values()) / gross
+
+    participation = Decimal("0")
+    participation_evidenced = True
+    if policy.max_order_participation_fraction is not None:
+        liquidity_map = context.liquidity_capacity or {}
+        capacity = liquidity_map.get(intent.symbol)
+        if capacity is None or capacity <= 0:
+            participation_evidenced = False
+        else:
+            participation = intent.quantity / capacity
 
     stress_symbols = set(notionals)
     stress_coverage_complete = bool(context.stress_scenarios) or not stress_symbols
@@ -396,6 +496,41 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         policy.max_net_leverage,
         "net leverage must stay within policy",
     )
+    if policy.max_asset_concentration_fraction is not None:
+        add(
+            "asset_concentration",
+            asset_concentration_complete
+            and asset_concentration <= policy.max_asset_concentration_fraction,
+            (
+                asset_concentration
+                if asset_concentration_complete
+                else "MISSING:" + ",".join(sorted(missing_asset_buckets))
+            ),
+            policy.max_asset_concentration_fraction,
+            "projected gross exposure by asset bucket must stay within policy",
+        )
+    if policy.max_venue_concentration_fraction is not None:
+        add(
+            "venue_concentration",
+            venue_concentration_complete
+            and venue_concentration <= policy.max_venue_concentration_fraction,
+            (
+                venue_concentration
+                if venue_concentration_complete
+                else "MISSING:" + ",".join(sorted(missing_venues))
+            ),
+            policy.max_venue_concentration_fraction,
+            "projected gross exposure by venue must stay within policy",
+        )
+    if policy.max_order_participation_fraction is not None:
+        add(
+            "liquidity_participation",
+            participation_evidenced
+            and participation <= policy.max_order_participation_fraction,
+            participation if participation_evidenced else "UNKNOWN",
+            policy.max_order_participation_fraction,
+            "order quantity must stay within evidenced liquidity participation policy",
+        )
     daily_loss = max(-context.daily_pnl, Decimal("0"))
     add(
         "daily_loss",

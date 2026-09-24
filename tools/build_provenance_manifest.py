@@ -15,6 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "provenance" / "release-dependency-manifest.json"
 PIN = re.compile(r"^([A-Za-z0-9_.-]+)==([^=\s]+)$")
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+SHA256_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
+UTC_EVIDENCE_TIME = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$"
+)
 
 
 def release_evidence_document(path: Path, *, label: str) -> tuple[bool, str | None]:
@@ -35,12 +39,29 @@ def release_evidence_document(path: Path, *, label: str) -> tuple[bool, str | No
     if not isinstance(source_sha, str) or GIT_SHA.fullmatch(source_sha) is None:
         return False, "invalid_source_sha"
     refs = value.get("evidence_refs")
-    if (
-        not isinstance(refs, list)
-        or not refs
-        or any(not isinstance(item, str) or not item.strip() for item in refs)
-    ):
+    if not isinstance(refs, list) or not refs:
         return False, "missing_evidence_refs"
+
+    seen: set[tuple[str, str]] = set()
+    for item in refs:
+        if not isinstance(item, dict):
+            return False, "invalid_evidence_refs"
+        artifact_id = item.get("artifact_id")
+        digest = item.get("sha256")
+        observed_at = item.get("observed_at")
+        if (
+            not isinstance(artifact_id, str)
+            or not artifact_id.strip()
+            or not isinstance(digest, str)
+            or SHA256_ID.fullmatch(digest) is None
+            or not isinstance(observed_at, str)
+            or UTC_EVIDENCE_TIME.fullmatch(observed_at) is None
+        ):
+            return False, "invalid_evidence_refs"
+        identity = (artifact_id.strip(), digest)
+        if identity in seen:
+            return False, "invalid_evidence_refs"
+        seen.add(identity)
     return True, None
 
 

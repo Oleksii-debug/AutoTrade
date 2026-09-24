@@ -50,6 +50,49 @@ class EquityState:
     accrued_financing: Decimal = Decimal("0")
     recalled_quantity: Decimal = Decimal("0")
 
+    def __post_init__(self) -> None:
+        borrowed = _positive(
+            self.borrowed_quantity,
+            name="borrowed_quantity",
+            allow_zero=True,
+        )
+        recalled = _positive(
+            self.recalled_quantity,
+            name="recalled_quantity",
+            allow_zero=True,
+        )
+        if recalled > borrowed:
+            raise ValueError("recalled_quantity cannot exceed borrowed_quantity")
+        object.__setattr__(self, "symbol", _text(self.symbol, name="symbol"))
+        object.__setattr__(self, "quantity", _decimal(self.quantity, name="quantity"))
+        object.__setattr__(
+            self,
+            "total_basis",
+            _positive(self.total_basis, name="total_basis", allow_zero=True),
+        )
+        object.__setattr__(
+            self,
+            "settled_cash",
+            _decimal(self.settled_cash, name="settled_cash"),
+        )
+        object.__setattr__(
+            self,
+            "unsettled_cash",
+            _decimal(self.unsettled_cash, name="unsettled_cash"),
+        )
+        object.__setattr__(self, "currency", _text(self.currency, name="currency"))
+        object.__setattr__(self, "borrowed_quantity", borrowed)
+        object.__setattr__(
+            self,
+            "accrued_financing",
+            _positive(
+                self.accrued_financing,
+                name="accrued_financing",
+                allow_zero=True,
+            ),
+        )
+        object.__setattr__(self, "recalled_quantity", recalled)
+
     @classmethod
     def create(
         cls,
@@ -92,6 +135,41 @@ class CorporateEvent:
     effective_date: date
     source_revision: str
     payload: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        kind = _text(self.kind, name="kind").upper()
+        if kind not in {"SPLIT", "CASH_DIVIDEND", "MERGER_CASH", "DELIST"}:
+            raise ValueError("unsupported corporate event kind")
+        if not isinstance(self.effective_date, date):
+            raise ValueError("effective_date is required")
+        if not isinstance(self.payload, Mapping):
+            raise ValueError("payload must be a mapping")
+
+        normalized_payload: dict[str, str] = {}
+        for raw_key, raw_value in self.payload.items():
+            key = _text(raw_key, name="payload key")
+            if key in normalized_payload:
+                raise ValueError(
+                    "corporate-event payload keys must be unique after normalization"
+                )
+            if isinstance(raw_value, bool) or isinstance(raw_value, float):
+                raise TypeError(
+                    "corporate-event numeric payload must use exact decimal input"
+                )
+            if not isinstance(raw_value, (str, int, Decimal)):
+                raise TypeError(
+                    "corporate-event payload values must be text or exact decimal input"
+                )
+            normalized_payload[key] = str(raw_value)
+
+        object.__setattr__(self, "event_id", _text(self.event_id, name="event_id"))
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(
+            self,
+            "source_revision",
+            _text(self.source_revision, name="source_revision"),
+        )
+        object.__setattr__(self, "payload", normalized_payload)
 
     @classmethod
     def create(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from types import MappingProxyType
 from typing import Mapping
 
 
@@ -54,9 +55,9 @@ def _amounts(values: Mapping[str, Decimal | str | int], *, allow_zero: bool = Fa
 class ReservationSnapshot:
     reservation_id: str
     intent_id: str
-    original: dict[str, Decimal]
-    remaining: dict[str, Decimal]
-    consumed: dict[str, Decimal]
+    original: Mapping[str, Decimal]
+    remaining: Mapping[str, Decimal]
+    consumed: Mapping[str, Decimal]
     state: str
     resolution_evidence: str | None = None
 
@@ -119,9 +120,11 @@ class ReservationBook:
         snapshot = ReservationSnapshot(
             reservation_id=rid,
             intent_id=iid,
-            original=dict(needed),
-            remaining=dict(needed),
-            consumed={resource: Decimal("0") for resource in needed},
+            original=MappingProxyType(dict(needed)),
+            remaining=MappingProxyType(dict(needed)),
+            consumed=MappingProxyType(
+                {resource: Decimal("0") for resource in needed}
+            ),
             state="WORKING",
         )
         self._records[rid] = snapshot
@@ -150,9 +153,9 @@ class ReservationBook:
         updated = ReservationSnapshot(
             reservation_id=current.reservation_id,
             intent_id=current.intent_id,
-            original=dict(current.original),
-            remaining=remaining,
-            consumed=consumed,
+            original=current.original,
+            remaining=MappingProxyType(remaining),
+            consumed=MappingProxyType(consumed),
             state=current.state,
             resolution_evidence=current.resolution_evidence,
         )
@@ -168,9 +171,9 @@ class ReservationBook:
         updated = ReservationSnapshot(
             reservation_id=current.reservation_id,
             intent_id=current.intent_id,
-            original=dict(current.original),
-            remaining=dict(current.remaining),
-            consumed=dict(current.consumed),
+            original=current.original,
+            remaining=current.remaining,
+            consumed=current.consumed,
             state="UNKNOWN",
         )
         self._records[current.reservation_id] = updated
@@ -197,9 +200,11 @@ class ReservationBook:
         updated = ReservationSnapshot(
             reservation_id=current.reservation_id,
             intent_id=current.intent_id,
-            original=dict(current.original),
-            remaining={resource: Decimal("0") for resource in current.remaining},
-            consumed=dict(current.consumed),
+            original=current.original,
+            remaining=MappingProxyType(
+                {resource: Decimal("0") for resource in current.remaining}
+            ),
+            consumed=current.consumed,
             state=normalized,
             resolution_evidence=evidence,
         )

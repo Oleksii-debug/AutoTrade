@@ -23,7 +23,7 @@ from typing import Any, Mapping, Sequence
 from .diagnostics import build_diagnostic_snapshot
 from .persistence import JournalStore
 from .reconciliation import ReconciliationResult
-from .recovery import HostState, RecoveryController
+from .recovery import HostState, OwnerFence, RecoveryController
 
 
 BACKUP_SCHEMA_VERSION = 1
@@ -339,6 +339,15 @@ def create_backup(
     _validate_artifact_source(artifacts)
     source_sha: str | None = None
     composition_sha256: str | None = None
+    owner_fence_path = state / "owner-fence.json"
+    source_owner: OwnerFence | None = None
+    source_owner_fence_sha256: str | None = None
+    if owner_fence_path.is_file():
+        try:
+            source_owner = RecoveryController.load_owner_fence(owner_fence_path)
+        except ValueError as error:
+            raise BackupIntegrityError("Runtime owner fence snapshot is invalid") from error
+        source_owner_fence_sha256 = "sha256:" + _sha256_file(owner_fence_path)
     if build_identity_sha256 is not None:
         build_identity_sha256 = _canonical_sha256_ref(
             build_identity_sha256,
@@ -371,6 +380,7 @@ def create_backup(
         for source in [
             state / "checkpoint.json",
             state / "learning-evidence.jsonl",
+            owner_fence_path,
         ]:
             if source.exists():
                 relative = Path("state") / source.name
@@ -424,6 +434,8 @@ def create_backup(
         unresolved_limits = ["RECONCILIATION_REQUIRED_AFTER_RESTORE"]
         if build_identity_sha256 is None:
             unresolved_limits.append("SOURCE_SHA_UNBOUND")
+        if source_owner is None:
+            unresolved_limits.append("OWNER_FENCE_UNBOUND")
         manifest = {
             "schema_version": BACKUP_SCHEMA_VERSION,
             "created_at": _utc_now(),
@@ -431,6 +443,9 @@ def create_backup(
             "source_sha_bound": source_sha is not None,
             "build_identity_sha256": build_identity_sha256,
             "composition_sha256": composition_sha256,
+            "source_owner_id": source_owner.owner_id if source_owner is not None else None,
+            "source_owner_epoch": source_owner.epoch if source_owner is not None else None,
+            "source_owner_fence_sha256": source_owner_fence_sha256,
             "unresolved_limits": unresolved_limits,
             "journal_schema_version": journal_schema,
             "reconciliation_required_after_restore": True,
@@ -510,6 +525,38 @@ def verify_backup(
             raise BackupIntegrityError("Unbound backup must declare SOURCE_SHA_UNBOUND")
     else:
         raise BackupIntegrityError("Backup source-SHA binding flag is invalid")
+    owner_id = manifest.get("source_owner_id")
+    owner_epoch = manifest.get("source_owner_epoch")
+    owner_fence_sha256 = manifest.get("source_owner_fence_sha256")
+    owner_path = root / "state" / "owner-fence.json"
+    if owner_id is None and owner_epoch is None and owner_fence_sha256 is None:
+        if "OWNER_FENCE_UNBOUND" not in unresolved_limits:
+            raise BackupIntegrityError("Unbound backup must declare OWNER_FENCE_UNBOUND")
+    else:
+        if "OWNER_FENCE_UNBOUND" in unresolved_limits:
+            raise BackupIntegrityError("Bound owner fence cannot declare OWNER_FENCE_UNBOUND")
+        if (
+            not isinstance(owner_id, str)
+            or not owner_id.strip()
+            or isinstance(owner_epoch, bool)
+            or not isinstance(owner_epoch, int)
+            or owner_epoch < 1
+        ):
+            raise BackupIntegrityError("Backup owner fence metadata is invalid")
+        owner_fence_sha256 = _canonical_sha256_ref(
+            owner_fence_sha256,
+            name="source_owner_fence_sha256",
+        )
+        if not owner_path.is_file():
+            raise BackupIntegrityError("Backed-up owner fence snapshot is missing")
+        if owner_fence_sha256 != "sha256:" + _sha256_file(owner_path):
+            raise BackupIntegrityError("Backed-up owner fence digest does not match")
+        try:
+            owner_fence = RecoveryController.load_owner_fence(owner_path)
+        except ValueError as error:
+            raise BackupIntegrityError("Backed-up owner fence snapshot is invalid") from error
+        if owner_fence.owner_id != owner_id or owner_fence.epoch != owner_epoch:
+            raise BackupIntegrityError("Backup owner fence metadata does not match snapshot")
     if expected_source_sha is not None:
         requested_source = _exact_git_sha(
             expected_source_sha,
@@ -647,6 +694,9 @@ def restore_backup(
             .strip(),
             "source_sha": manifest["source_sha"],
             "build_identity_sha256": manifest["build_identity_sha256"],
+            "source_owner_id": manifest["source_owner_id"],
+            "source_owner_epoch": manifest["source_owner_epoch"],
+            "source_owner_fence_sha256": manifest["source_owner_fence_sha256"],
         }
         _write_bytes_durable(stage / RESTORE_MARKER_NAME, _canonical_json(marker))
         os.replace(stage, destination)

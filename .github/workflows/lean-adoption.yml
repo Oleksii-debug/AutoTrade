@@ -95,16 +95,46 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
-      - name: Build and run non-sending adoption probe
+      - name: Build and run repeatable non-sending adoption probe
         shell: pwsh
         working-directory: autotrade
         env:
           LEAN_ROOT: ${{ github.workspace }}/lean
         run: |
-          dotnet run `
-            --project tests/Integration/LeanAdoption/LeanAdoptionProbe.csproj `
-            --configuration Release `
-            "-p:LeanRoot=$env:LEAN_ROOT"
+          $project = "tests/Integration/LeanAdoption/LeanAdoptionProbe.csproj"
+          dotnet build $project --configuration Release "-p:LeanRoot=$env:LEAN_ROOT"
+          if ($LASTEXITCODE -ne 0) {
+            throw "LEAN adoption build failed."
+          }
+
+          $first = @(& dotnet run --project $project --configuration Release --no-build "-p:LeanRoot=$env:LEAN_ROOT")
+          if ($LASTEXITCODE -ne 0) {
+            throw "First LEAN adoption probe failed."
+          }
+          $second = @(& dotnet run --project $project --configuration Release --no-build "-p:LeanRoot=$env:LEAN_ROOT")
+          if ($LASTEXITCODE -ne 0) {
+            throw "Second LEAN adoption probe failed."
+          }
+
+          $firstText = ($first -join [Environment]::NewLine).Trim()
+          $secondText = ($second -join [Environment]::NewLine).Trim()
+          if ($firstText -ne "WP02_LEAN_ADOPTION_PROBE_PASS") {
+            throw "Unexpected first probe output: $firstText"
+          }
+          if ($secondText -ne $firstText) {
+            throw "Repeated probe output changed across clean process starts."
+          }
+
+          $autoTradeTrackedChanges = @(git status --porcelain --untracked-files=no)
+          if ($autoTradeTrackedChanges.Count -ne 0) {
+            throw "LEAN adoption probe mutated tracked AutoTrade source."
+          }
+          $leanTrackedChanges = @(git -C $env:LEAN_ROOT status --porcelain --untracked-files=no)
+          if ($leanTrackedChanges.Count -ne 0) {
+            throw "LEAN adoption probe mutated tracked LEAN source."
+          }
+
+          Write-Output $firstText
 
 
       - name: Write exact-head adoption evidence

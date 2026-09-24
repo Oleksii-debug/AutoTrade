@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from hashlib import sha256
+import json
 from typing import Mapping, Sequence
 
 
@@ -530,6 +532,35 @@ class RiskDecision:
     net_leverage: Decimal
     worst_stress_loss: Decimal
     rules: tuple[RiskRuleResult, ...]
+
+
+def risk_decision_fingerprint(decision: RiskDecision) -> str:
+    if not isinstance(decision, RiskDecision):
+        raise TypeError("decision must be a RiskDecision")
+    payload = {
+        "admitted": decision.admitted,
+        "resulting_position": str(decision.resulting_position),
+        "gross_leverage": str(decision.gross_leverage),
+        "net_leverage": str(decision.net_leverage),
+        "worst_stress_loss": str(decision.worst_stress_loss),
+        "rules": [
+            {
+                "rule": item.rule,
+                "passed": item.passed,
+                "observed": item.observed,
+                "limit": item.limit,
+                "reason": item.reason,
+            }
+            for item in decision.rules
+        ],
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
 
 
 def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) -> RiskDecision:

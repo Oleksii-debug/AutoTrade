@@ -1,7 +1,13 @@
 from decimal import Decimal
 import unittest
 
-from mvp.autotrade_mvp.risk import RiskContext, RiskIntent, RiskPolicy, evaluate_risk
+from mvp.autotrade_mvp.risk import (
+    RiskContext,
+    RiskIntent,
+    RiskPolicy,
+    evaluate_risk,
+    risk_decision_fingerprint,
+)
 
 
 def policy(**overrides):
@@ -812,6 +818,36 @@ class IndependentRiskTests(unittest.TestCase):
             context(futures_delivery_headroom_seconds={"ABC": 3600.0})
         with self.assertRaises(TypeError):
             policy(min_futures_delivery_headroom_seconds=3600.0)
+
+    def test_risk_decision_fingerprint_is_deterministic_and_evidence_sensitive(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        configured = policy(max_clock_age_seconds="5")
+        first = evaluate_risk(
+            intent,
+            context(clock_age_seconds="1"),
+            configured,
+        )
+        repeated = evaluate_risk(
+            intent,
+            context(clock_age_seconds="1"),
+            configured,
+        )
+        changed = evaluate_risk(
+            intent,
+            context(clock_age_seconds="2"),
+            configured,
+        )
+        first_hash = risk_decision_fingerprint(first)
+        self.assertEqual(first_hash, risk_decision_fingerprint(repeated))
+        self.assertNotEqual(first_hash, risk_decision_fingerprint(changed))
+        self.assertEqual(len(first_hash), 64)
+
+    def test_risk_decision_fingerprint_rejects_wrong_type(self):
+        with self.assertRaises(TypeError):
+            risk_decision_fingerprint({"admitted": True})
 
 
 if __name__ == "__main__":

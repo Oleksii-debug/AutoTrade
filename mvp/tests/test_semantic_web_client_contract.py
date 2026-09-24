@@ -59,11 +59,14 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("function exactCounter(value, name)", js)
         self.assertIn("Number.isSafeInteger(value)", js)
         self.assertIn("return BigInt(token)", js)
-        self.assertIn("state.version = exactCounter(", js)
-        self.assertIn("state.cursor = exactCounter(", js)
+        self.assertIn('version: exactCounter(snapshot.state_version, "state_version")', js)
+        self.assertIn('cursor: exactCounter(snapshot.event_cursor, "event_cursor")', js)
         self.assertIn("expected_state_version: state.version.toString()", js)
+        self.assertIn("return BigInt(token)", js)
         self.assertNotIn("Number.parseInt(snapshot.state_version", js)
         self.assertNotIn("Number.parseInt(snapshot.event_cursor", js)
+        self.assertNotIn("Number(snapshot.state_version", js)
+        self.assertNotIn("Number(snapshot.event_cursor", js)
 
     def test_snapshot_counters_cannot_silently_regress(self):
         js = APP.read_text(encoding="utf-8")
@@ -93,7 +96,63 @@ class SemanticWebClientContractTests(unittest.TestCase):
             "No durable financial or safety outcome is being claimed",
             js,
         )
-        self.assertIn("expected_state_version: String(state.version)", js)
+        self.assertIn("expected_state_version: state.version.toString()", js)
+
+    def test_command_identity_comes_only_from_authenticated_host_projection(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("const actor = permissionSummary.actor", js)
+        self.assertIn("const session = permissionSummary.session", js)
+        self.assertIn("actor: state.sessionIdentity.actor", js)
+        self.assertIn("session: state.sessionIdentity.session", js)
+        self.assertIn(
+            "if (!state.snapshotReady || state.sessionIdentity === null)",
+            js,
+        )
+        self.assertIn('<button type="submit" disabled>Submit command</button>', html)
+
+    def test_snapshot_uses_only_canonical_ui_snapshot_fields(self):
+        js = APP.read_text(encoding="utf-8")
+        for required in (
+            "snapshot.host_id",
+            "snapshot.account_id",
+            "snapshot.environment",
+            "snapshot.permission_summary",
+            "snapshot.connection_freshness",
+            "snapshot.portfolio",
+            "snapshot.risk",
+            "snapshot.strategy",
+            "snapshot.jobs",
+            "snapshot.reason_codes",
+        ):
+            self.assertIn(required, js)
+        for forbidden in (
+            "snapshot.active_host",
+            "snapshot.host ??",
+            "snapshot.account ??",
+            "snapshot.stale",
+            "snapshot.ready",
+            "snapshot.last_evidence_at",
+        ):
+            self.assertNotIn(forbidden, js)
+
+    def test_incomplete_freshness_fails_closed_and_never_claims_current(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn(
+            'throw new Error("connection_freshness evidence is required")',
+            js,
+        )
+        self.assertIn("setCommandAvailability(false)", js)
+        self.assertIn("Host-provided freshness evidence at ", js)
+        self.assertNotIn("Current as of", js)
+
+    def test_command_result_is_validated_against_canonical_contract(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function parseCommandResult(value, expectedCommandId)", js)
+        self.assertIn('["ACCEPTED", "REJECTED", "CONFLICT"]', js)
+        self.assertIn("CommandResult command_id does not match", js)
+        self.assertIn("field_errors must be an array", js)
+        self.assertIn("response.status !== 200 && response.status !== 409", js)
 
     def test_keyboard_and_high_contrast_rules_are_explicit(self):
         css = CSS.read_text(encoding="utf-8")

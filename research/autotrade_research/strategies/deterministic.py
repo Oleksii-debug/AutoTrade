@@ -44,6 +44,18 @@ class CausalObservation:
     available_at: datetime
     price: Decimal
 
+    def __post_init__(self) -> None:
+        event_id = _text(self.event_id, name="event_id")
+        symbol = _text(self.symbol, name="symbol")
+        available_at = _time(self.available_at, name="available_at")
+        price = _decimal(self.price, name="price")
+        if price <= 0:
+            raise ValueError("price must be positive")
+        object.__setattr__(self, "event_id", event_id)
+        object.__setattr__(self, "symbol", symbol)
+        object.__setattr__(self, "available_at", available_at)
+        object.__setattr__(self, "price", price)
+
     @classmethod
     def create(cls, *, event_id: str, symbol: str, available_at: datetime, price) -> "CausalObservation":
         value = _decimal(price, name="price")

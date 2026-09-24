@@ -158,6 +158,28 @@ def _backup_sqlite(source: Path, destination: Path) -> tuple[str, int, int]:
     return _sha256_file(destination), destination.stat().st_size, schema_version
 
 
+def _normalize_sqlite_snapshot(path: Path) -> tuple[str, int]:
+    """Fold transient WAL state into one stable backup payload before hashing."""
+
+    try:
+        with closing(sqlite3.connect(path)) as connection:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            mode = connection.execute("PRAGMA journal_mode=DELETE").fetchone()
+            connection.commit()
+    except sqlite3.Error as error:
+        raise BackupError("SQLite snapshot normalization failed") from error
+    if mode is None or str(mode[0]).lower() != "delete":
+        raise BackupError("SQLite snapshot could not leave WAL mode")
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(str(path) + suffix)
+        if sidecar.exists():
+            try:
+                sidecar.unlink()
+            except OSError as error:
+                raise BackupError("SQLite snapshot retained transient sidecar state") from error
+    return _sha256_file(path), path.stat().st_size
+
+
 def _entry(path: str, digest: str, size: int, kind: str) -> dict[str, Any]:
     return {
         "path": path,
@@ -243,16 +265,8 @@ def create_backup(
     try:
         journal_source = state / "journal.sqlite3"
         journal_target = stage / "state" / "journal.sqlite3"
-        journal_digest, journal_size, journal_schema = _backup_sqlite(
+        _, _, journal_schema = _backup_sqlite(
             journal_source, journal_target
-        )
-        entries.append(
-            _entry(
-                "state/journal.sqlite3",
-                journal_digest,
-                journal_size,
-                "sqlite-journal",
-            )
         )
 
         for source in [
@@ -292,6 +306,19 @@ def create_backup(
                 raise BackupIntegrityError(
                     "Runtime state, journal and evidence are not one consistent snapshot"
                 ) from error
+
+        # Diagnostic reconstruction opens the copied journal through JournalStore,
+        # whose runtime policy is WAL. Fold that transient representation back
+        # into one stable database before recording immutable backup evidence.
+        journal_digest, journal_size = _normalize_sqlite_snapshot(journal_target)
+        entries.append(
+            _entry(
+                "state/journal.sqlite3",
+                journal_digest,
+                journal_size,
+                "sqlite-journal",
+            )
+        )
 
         manifest = {
             "schema_version": BACKUP_SCHEMA_VERSION,

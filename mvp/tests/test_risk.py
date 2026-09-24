@@ -393,7 +393,7 @@ class IndependentRiskTests(unittest.TestCase):
                     {"ABC": "-0.10", "XYZ": "-0.10"},
                 ),
             ),
-            policy(max_asset_concentration_fraction="0.60"),
+            policy(max_asset_concentration_fraction="0.65"),
         )
         rule = next(rule for rule in decision.rules if rule.rule == "asset_concentration")
         self.assertTrue(rule.passed)

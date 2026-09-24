@@ -153,6 +153,30 @@ class ModelGatewayTests(unittest.TestCase):
         self.assertEqual(RouteStatus.REJECTED, decision.status)
         self.assertEqual("deadline_expired", decision.reason)
 
+    def test_binary_float_costs_and_boolean_latency_fail_closed(self):
+        with self.assertRaises(TypeError):
+            ModelDescriptor(
+                model_id="float-cost",
+                provider_id="provider",
+                revision="r1",
+                remote=False,
+                estimated_cost=0.1,
+                latency_ms=10,
+                quality_score=Decimal("0.5"),
+            )
+        with self.assertRaises(ValueError):
+            ModelDescriptor(
+                model_id="bool-latency",
+                provider_id="provider",
+                revision="r1",
+                remote=False,
+                estimated_cost=Decimal("0.1"),
+                latency_ms=True,
+                quality_score=Decimal("0.5"),
+            )
+        with self.assertRaises(TypeError):
+            RoutingPolicy(RoutingMode.ZERO, maximum_cost=0.1)
+
     def test_duplicate_descriptor_is_rejected(self):
         with self.assertRaises(ValueError):
             route_model(
@@ -175,6 +199,29 @@ if __name__ == "__main__":
 
 
 class BudgetLedgerTests(unittest.TestCase):
+    def test_budget_ledger_rejects_binary_float_money(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+        with self.assertRaises(TypeError):
+            BudgetLedger(1.0)
+
+        ledger = BudgetLedger(Decimal("2"))
+        with self.assertRaises(TypeError):
+            ledger.reserve("float-reserve", 0.1)
+        ledger.reserve("req", Decimal("1"))
+        with self.assertRaises(TypeError):
+            ledger.settle("req", incurred=0.1)
+        self.assertEqual(Decimal("1"), ledger.snapshot().reserved)
+
+    def test_request_budget_rejects_binary_float(self):
+        with self.assertRaises(TypeError):
+            ModelRequest(
+                request_id="req-float",
+                allowed_model_ids=("local",),
+                privacy_remote_allowed=False,
+                budget_remaining=0.1,
+                deadline_utc=NOW + timedelta(minutes=1),
+            )
+
     def test_reservation_is_idempotent(self):
         from mvp.autotrade_mvp.model_gateway import BudgetLedger
         ledger = BudgetLedger(Decimal("2"))

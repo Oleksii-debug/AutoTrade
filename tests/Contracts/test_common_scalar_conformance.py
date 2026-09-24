@@ -1,3 +1,4 @@
+from hashlib import sha256
 import json
 from pathlib import Path
 import unittest
@@ -29,8 +30,27 @@ class CommonScalarConformanceTests(unittest.TestCase):
             self.corpus["contract_version"],
             self.manifest["contract_version"],
         )
-        self.assertEqual(self.corpus["corpus_version"], "1.1.0")
+        self.assertEqual(self.corpus["corpus_version"], "1.2.0")
         self.assertEqual(self.corpus["source_schema_id"], self.common["$id"])
+        canonical_schema = json.dumps(
+            self.common,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        self.assertEqual(
+            self.corpus["source_schema_sha256"],
+            "sha256:" + sha256(canonical_schema).hexdigest(),
+        )
+        base = self.manifest["schema_base_uri"].rstrip("/") + "/"
+        self.assertEqual(
+            self.common["$id"],
+            base + "common.schema.json",
+        )
+        self.assertEqual(
+            base.rstrip("/").split("/")[-1],
+            self.manifest["contract_version"],
+        )
         self.assertEqual(self.corpus["scope"], "common-scalar-subset")
 
     def test_python_binding_and_json_schema_accept_identical_corpus(self):

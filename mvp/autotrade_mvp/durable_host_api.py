@@ -214,30 +214,75 @@ class JournalBackedHostCommandStore:
         operations: dict[str, OperationResult] = {}
         for event in self._events():
             payload = event["payload"]
+            if not isinstance(payload, Mapping):
+                raise ValueError("Host journal event payload must be an object")
             if event["event_type"] == "COMMAND_ACCEPTED":
-                operation_id = str(payload["operation_id"])
+                operation_id = self._required_text(payload, "operation_id")
+                if operation_id in operations:
+                    raise ValueError(
+                        "Host journal contains duplicate COMMAND_ACCEPTED operation identity"
+                    )
+                phase = str(payload.get("phase", "QUEUED"))
+                if phase != "QUEUED":
+                    raise ValueError(
+                        "COMMAND_ACCEPTED must create a QUEUED operation"
+                    )
+                uncertainty = tuple(
+                    str(x)
+                    for x in payload.get(
+                        "remaining_uncertainty",
+                        ["financial_outcome_not_completed"],
+                    )
+                )
+                if not uncertainty or any(not item.strip() for item in uncertainty):
+                    raise ValueError(
+                        "Queued operation must preserve financial uncertainty"
+                    )
                 operations[operation_id] = OperationResult(
                     operation_id=operation_id,
-                    phase=str(payload.get("phase", "QUEUED")),
+                    phase=phase,
                     state_version=str(event["aggregate_version"]),
-                    remaining_uncertainty=tuple(
-                        str(x)
-                        for x in payload.get(
-                            "remaining_uncertainty",
-                            ["financial_outcome_not_completed"],
-                        )
-                    ),
+                    remaining_uncertainty=uncertainty,
                 )
             elif event["event_type"] == "OPERATION_UPDATED":
-                operation_id = str(payload["operation_id"])
+                operation_id = self._required_text(payload, "operation_id")
+                current = operations.get(operation_id)
+                if current is None:
+                    raise ValueError(
+                        "OPERATION_UPDATED cannot precede COMMAND_ACCEPTED"
+                    )
+                phase = self._required_text(payload, "phase")
+                if phase not in self.UPDATE_PHASES:
+                    raise ValueError("Host journal contains unsupported operation phase")
+                uncertainty = tuple(
+                    str(x)
+                    for x in payload.get("remaining_uncertainty", ())
+                )
+                if any(not item.strip() for item in uncertainty):
+                    raise ValueError(
+                        "Host journal contains empty uncertainty evidence"
+                    )
+                if current.phase in self.TERMINAL_PHASES:
+                    raise ValueError(
+                        "Host journal rewrites a terminal operation"
+                    )
+                if current.phase == "UNKNOWN" and phase not in self.TERMINAL_PHASES:
+                    raise ValueError(
+                        "UNKNOWN journal operation can only resolve terminally"
+                    )
+                if phase == "UNKNOWN" and not uncertainty:
+                    raise ValueError(
+                        "UNKNOWN journal operation must preserve uncertainty"
+                    )
+                if phase in self.TERMINAL_PHASES and uncertainty:
+                    raise ValueError(
+                        "Terminal journal operation cannot retain uncertainty"
+                    )
                 operations[operation_id] = OperationResult(
                     operation_id=operation_id,
-                    phase=str(payload["phase"]),
+                    phase=phase,
                     state_version=str(event["aggregate_version"]),
-                    remaining_uncertainty=tuple(
-                        str(x)
-                        for x in payload.get("remaining_uncertainty", ())
-                    ),
+                    remaining_uncertainty=uncertainty,
                 )
         return operations
 

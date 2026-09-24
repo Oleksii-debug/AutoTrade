@@ -11,6 +11,7 @@ def policy(**overrides):
         instruments={"ABC"},
         actions={"ORDER.SUBMIT", "ORDER.CANCEL"},
         max_notional="1000",
+        valid_from="2026-09-24T00:00:00Z",
         expires_at="2026-09-25T00:00:00Z",
         autonomous=False,
         protection_only=False,
@@ -112,6 +113,42 @@ class AuthorityTests(unittest.TestCase):
                 action="ORDER.SUBMIT",
                 notional="-1",
                 expires_at="2026-09-24T23:00:00Z",
+            )
+
+    def test_future_policy_is_rejected_until_valid_from(self):
+        service = AuthorityService()
+        service.register_policy(policy(
+            autonomous=True,
+            valid_from="2026-09-24T19:00:00Z",
+            expires_at="2026-09-24T20:00:00Z",
+        ))
+        early = service.admit(
+            admission_id="future-early", policy_id="p1", intent_hash="h1",
+            account_id="paper-1", environment="PAPER", instrument="ABC",
+            action="ORDER.SUBMIT", notional="100", state_version=1,
+            risk_admitted=True, now="2026-09-24T18:59:59Z",
+        )
+        self.assertEqual(early.outcome, "REJECTED")
+        self.assertEqual(early.reason, "policy_not_yet_active")
+
+        active = service.admit(
+            admission_id="future-active", policy_id="p1", intent_hash="h2",
+            account_id="paper-1", environment="PAPER", instrument="ABC",
+            action="ORDER.SUBMIT", notional="100", state_version=1,
+            risk_admitted=True, now="2026-09-24T19:00:00Z",
+        )
+        self.assertEqual(active.outcome, "ADMITTED")
+
+    def test_policy_requires_nonempty_validity_window(self):
+        with self.assertRaisesRegex(ValueError, "valid_from must precede expires_at"):
+            policy(
+                valid_from="2026-09-25T00:00:00Z",
+                expires_at="2026-09-25T00:00:00Z",
+            )
+        with self.assertRaisesRegex(ValueError, "valid_from must precede expires_at"):
+            policy(
+                valid_from="2026-09-25T00:00:01Z",
+                expires_at="2026-09-25T00:00:00Z",
             )
 
     def test_policy_expiry_and_revocation_fail_dispatch_barrier(self):

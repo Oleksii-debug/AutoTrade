@@ -241,6 +241,36 @@ class SimulatedProviderContractHarnessTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             event.payload["levels"][0]["price"] = "1"
 
+    def test_stream_payload_rejects_binary_float_and_unknown_mutable_objects(self):
+        harness = SimulatedProviderContractHarness()
+        with self.assertRaisesRegex(TypeError, "binary float"):
+            harness.emit_stream_event(
+                sequence=1,
+                observed_at="2026-09-24T18:00:00Z",
+                payload={"price": 100.1},
+            )
+        with self.assertRaisesRegex(TypeError, "immutable JSON scalars"):
+            harness.emit_stream_event(
+                sequence=1,
+                observed_at="2026-09-24T18:00:00Z",
+                payload={"levels": {"mutable", "set"}},
+            )
+
+    def test_stream_payload_preserves_exact_decimal_as_immutable_value(self):
+        harness = SimulatedProviderContractHarness()
+        event = harness.emit_stream_event(
+            sequence=1,
+            observed_at="2026-09-24T18:00:00Z",
+            payload={
+                "price": Decimal("100.10"),
+                "nested": [{"size": Decimal("2.5")}],
+                "trading": False,
+            },
+        )
+        self.assertEqual(event.payload["price"], Decimal("100.10"))
+        self.assertEqual(event.payload["nested"][0]["size"], Decimal("2.5"))
+        self.assertIs(event.payload["trading"], False)
+
     def test_stream_gap_is_explicit_even_when_first_event_is_contiguous(self):
         harness = SimulatedProviderContractHarness()
         harness.emit_stream_event(

@@ -1,14 +1,39 @@
+from hashlib import sha256
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.host_api import HostCommandStore
 from mvp.autotrade_mvp.security import SecurityBoundary
+from mvp.autotrade_mvp.windows_secrets import ProtectedCredentialVault
+
+
+class DeterministicProtector:
+    PREFIX = b"security-boundary-test-v1:"
+
+    def protect(self, plaintext: bytes, *, entropy: bytes) -> bytes:
+        return self.PREFIX + sha256(entropy).digest() + plaintext[::-1]
+
+    def unprotect(self, ciphertext: bytes, *, entropy: bytes) -> bytes:
+        expected = self.PREFIX + sha256(entropy).digest()
+        if not ciphertext.startswith(expected):
+            raise OSError("scope entropy mismatch")
+        return ciphertext[len(expected):][::-1]
 
 
 class SecurityBoundaryTests(unittest.TestCase):
     def setUp(self):
+        self.directory = TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.vault_path = Path(self.directory.name) / "credentials.json"
+        self.vault = ProtectedCredentialVault(
+            self.vault_path,
+            protector=DeterministicProtector(),
+        )
         self.clock = [1000.0]
         self.boundary = SecurityBoundary(
             allowed_origins={"https://local.autotrade.invalid"},
+            credential_vault=self.vault,
             now=lambda: self.clock[0],
         )
         self.owner = self.boundary.create_session(
@@ -197,6 +222,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 )
         bad = SecurityBoundary(
             allowed_origins={"https://local.autotrade.invalid"},
+            credential_vault=self.vault,
             now=lambda: float("nan"),
         )
         with self.assertRaisesRegex(RuntimeError, "clock"):
@@ -236,9 +262,15 @@ class SecurityBoundaryTests(unittest.TestCase):
 
     def test_origin_validation_requires_https_or_loopback_http(self):
         with self.assertRaises(ValueError):
-            SecurityBoundary(allowed_origins={"http://remote.example"})
+            SecurityBoundary(
+                allowed_origins={"http://remote.example"},
+                credential_vault=self.vault,
+            )
         with self.assertRaises(ValueError):
-            SecurityBoundary(allowed_origins={"https://local.autotrade.invalid/path"})
+            SecurityBoundary(
+                allowed_origins={"https://local.autotrade.invalid/path"},
+                credential_vault=self.vault,
+            )
         with self.assertRaises(ValueError):
             self.boundary.pair_origin(
                 self.owner.token,
@@ -246,7 +278,10 @@ class SecurityBoundaryTests(unittest.TestCase):
                 new_origin="https://user:pass@paired.autotrade.invalid",
             )
 
-        loopback = SecurityBoundary(allowed_origins={"http://127.0.0.1:8765/"})
+        loopback = SecurityBoundary(
+            allowed_origins={"http://127.0.0.1:8765/"},
+            credential_vault=self.vault,
+        )
         session = loopback.create_session(
             subject="owner",
             role="OWNER",
@@ -357,7 +392,8 @@ class SecurityBoundaryTests(unittest.TestCase):
             {
                 "message": "provider returned top-secret in an unexpected field",
                 "nested": ["top-secret", {"safe": "prefix top-secret suffix"}],
-            }
+            },
+            sensitive_values=("top-secret",),
         )
         self.assertNotIn("top-secret", repr(redacted))
         self.assertIn("[REDACTED]", repr(redacted))
@@ -378,12 +414,32 @@ class SecurityBoundaryTests(unittest.TestCase):
             owner_identity="windows-user-1",
         )
         redacted = self.boundary.redact_for_diagnostics(
-            {"message": "old=top-secret new=new-secret"}
+            {"message": "old=top-secret new=new-secret"},
+            sensitive_values=("top-secret", "new-secret"),
         )
         rendered = repr(redacted)
         self.assertNotIn("top-secret", rendered)
         self.assertNotIn("new-secret", rendered)
         self.assertIn("[REDACTED]", rendered)
+
+    def test_boundary_uses_vault_as_only_credential_authority(self):
+        handle = self._credential()
+        self.assertFalse(hasattr(self.boundary, "_records"))
+        self.assertFalse(hasattr(self.boundary, "_secret_redactions"))
+        raw = self.vault_path.read_text(encoding="utf-8")
+        self.assertNotIn("top-secret", raw)
+        self.assertEqual(
+            self.boundary.resolve_for_execution(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle=handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                purpose="TRADE",
+            ),
+            "top-secret",
+        )
 
     def test_stale_origin_session_is_invalid_even_without_origin_argument(self):
         paired = self.boundary.pair_origin(

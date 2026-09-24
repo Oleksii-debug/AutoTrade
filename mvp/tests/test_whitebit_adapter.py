@@ -29,6 +29,7 @@ from mvp.autotrade_mvp.whitebit import (
     parse_execution_history,
     parse_collateral_balances,
     parse_hedge_mode,
+    parse_spot_balances,
     parse_open_position,
     parse_open_positions,
     parse_order_snapshot,
@@ -36,8 +37,10 @@ from mvp.autotrade_mvp.whitebit import (
     redact_whitebit_debug,
     provider_collateral_borrow,
     provider_collateral_cash,
+    provider_spot_cash,
     sign_private_request,
     signed_position_quantities,
+    spot_balance_request,
     validate_client_order_id,
     validate_intent_market_rules,
 )
@@ -691,6 +694,45 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertTrue(parse_hedge_mode({"hedgeMode": True}))
         with self.assertRaisesRegex(WhiteBitAdapterError, "hedgeMode"):
             parse_hedge_mode({"hedgeMode": "true"})
+
+    def test_spot_balance_cash_includes_frozen_owned_funds(self):
+        observations = parse_spot_balances(
+            {
+                "BTC": {"available": "0.123", "freeze": "0.01"},
+                "USDT": {"available": "1000.50", "freeze": "100.00"},
+            }
+        )
+        cash = provider_spot_cash(observations)
+        self.assertEqual(cash["BTC"], Decimal("0.133"))
+        self.assertEqual(cash["USDT"], Decimal("1100.50"))
+        self.assertEqual(observations[0].available, Decimal("0.123"))
+        self.assertEqual(observations[0].frozen, Decimal("0.01"))
+
+    def test_spot_balance_request_is_filterable_and_network_free(self):
+        all_assets = spot_balance_request()
+        one_asset = spot_balance_request(asset="btc")
+        self.assertEqual(
+            all_assets.endpoint,
+            "/api/v4/trade-account/balance",
+        )
+        self.assertEqual(dict(all_assets.body), {})
+        self.assertEqual(dict(one_asset.body), {"ticker": "BTC"})
+
+    def test_spot_balance_schema_and_negative_values_fail_closed(self):
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "available and freeze",
+        ):
+            parse_spot_balances(
+                {"BTC": {"available": "1", "freeze": "0", "extra": "x"}}
+            )
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "cannot be negative",
+        ):
+            parse_spot_balances(
+                {"BTC": {"available": "-0.1", "freeze": "0"}}
+            )
 
     def test_collateral_balance_keeps_borrow_capacity_out_of_cash_truth(self):
         observations = parse_collateral_balances(

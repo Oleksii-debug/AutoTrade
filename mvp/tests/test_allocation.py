@@ -70,6 +70,17 @@ class AllocationTests(unittest.TestCase):
         self.assertLess(result.scale, Decimal("1"))
         self.assertLessEqual(result.worst_stress_loss, Decimal("100"))
 
+    def test_incomplete_stress_scenario_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "missing explicit shocks"):
+            allocate_targets(
+                [
+                    self.candidate("AAA", desired="500", price="10"),
+                    self.candidate("BBB", desired="500", price="10"),
+                ],
+                self.policy(cash_available="2000", max_gross_notional="2000"),
+                stress_scenarios={"partial": {"AAA": "-0.20"}},
+            )
+
     def test_minimum_lot_can_force_cash_fallback(self):
         result = allocate_targets(
             [self.candidate(desired="100", price="100", lot="1")],

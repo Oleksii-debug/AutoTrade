@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from fractions import Fraction
 import unittest
 
@@ -62,6 +62,19 @@ class PerpetualLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(currency, "USDT")
         self.assertEqual(amount, Decimal("-0.200000"))
+
+    def test_market_deviation_gate_is_independent_of_decimal_context_precision(self):
+        market = MarketSnapshot(
+            mark_price=Decimal("4"),
+            index_price=Decimal("3"),
+            observed_at=NOW,
+            max_age=timedelta(seconds=5),
+            max_mark_index_deviation=Decimal("0.32"),
+        )
+        with localcontext() as context:
+            context.prec = 1
+            with self.assertRaisesRegex(PerpetualError, "deviation"):
+                market.require_valid(NOW)
 
     def test_stale_or_future_market_state_fails_closed(self):
         with self.assertRaises(PerpetualError):
@@ -218,6 +231,38 @@ class PerpetualLifecycleTests(unittest.TestCase):
                 minimum_headroom_fraction="0.08",
                 at=NOW + timedelta(seconds=6),
             )
+
+    def test_liquidation_gate_is_independent_of_decimal_context_precision(self):
+        liquidation = LiquidationSnapshot(
+            side="LONG",
+            liquidation_price="2",
+            tier_id="precision-tier",
+            evidence_ref="provider-margin-tier:precision",
+            observed_at=NOW,
+            max_age=timedelta(seconds=5),
+        )
+        market = MarketSnapshot(
+            mark_price="3",
+            index_price="3",
+            observed_at=NOW,
+            max_age=timedelta(seconds=5),
+            max_mark_index_deviation="0.01",
+        )
+        with localcontext() as context:
+            context.prec = 1
+            require_liquidation_headroom(
+                liquidation=liquidation,
+                market=market,
+                minimum_headroom_fraction="0.32",
+                at=NOW,
+            )
+            with self.assertRaisesRegex(PerpetualError, "headroom"):
+                require_liquidation_headroom(
+                    liquidation=liquidation,
+                    market=market,
+                    minimum_headroom_fraction="0.34",
+                    at=NOW,
+                )
 
     def test_short_liquidation_boundary_has_opposite_direction(self):
         liquidation = LiquidationSnapshot(

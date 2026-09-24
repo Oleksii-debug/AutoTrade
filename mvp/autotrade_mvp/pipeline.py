@@ -314,20 +314,7 @@ def run_vertical_slice(
         raise ValueError("Cash, order quantity and risk limits must be positive")
     if not rate.is_finite() or rate < 0 or rate >= 1:
         raise ValueError("Fee rate must be finite and between zero and one")
-    normalized: list[Decimal] = []
-    for value in prices:
-        try:
-            numeric = Decimal(str(value))
-        except (ValueError, ArithmeticError) as error:
-            raise ValueError("Prices must be finite and positive") from error
-        if not numeric.is_finite() or numeric <= 0:
-            raise ValueError("Prices must be finite and positive")
-        normalized_price = _money(numeric)
-        if normalized_price <= 0:
-            raise ValueError("Price is smaller than supported precision")
-        normalized.append(normalized_price)
-    if not normalized:
-        raise ValueError("At least one price is required")
+    normalized = handle_market_data(prices)
 
     root = Path(state_dir)
     checkpoint_path = root / "checkpoint.json"
@@ -346,7 +333,6 @@ def run_vertical_slice(
     }
     provider = SimulatedProvider(restored_fills)
     _reconcile(provider, ledger)
-    normalized = handle_market_data(prices)
     decision = handle_strategy(normalized, quantity)
     intent = None
     fill = None

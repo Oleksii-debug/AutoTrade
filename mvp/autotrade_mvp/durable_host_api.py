@@ -60,16 +60,17 @@ class JournalBackedHostCommandStore:
 
     @staticmethod
     def _command_result(value: Mapping[str, object]) -> CommandResult:
+        field_errors = value.get("field_errors", ())
+        if not isinstance(field_errors, (list, tuple)) or any(
+            not isinstance(item, Mapping) for item in field_errors
+        ):
+            raise ValueError("Stored command field_errors must be an array of objects")
         return CommandResult(
             command_id=str(value["command_id"]),
             status=str(value["status"]),
             state_version=str(value["state_version"]),
             reason_codes=tuple(str(x) for x in value.get("reason_codes", ())),
-            field_errors=tuple(
-                dict(x)
-                for x in value.get("field_errors", ())
-                if isinstance(x, Mapping)
-            ),
+            field_errors=tuple(dict(x) for x in field_errors),
             operation_id=(
                 None
                 if value.get("operation_id") is None
@@ -272,16 +273,16 @@ class JournalBackedHostCommandStore:
                     )
                 started_at = str(payload.get("started_at") or event["committed_at"])
                 updated_at = str(payload.get("updated_at") or started_at)
+                affected_values = payload.get("affected_refs", ())
+                if not isinstance(affected_values, (list, tuple)):
+                    raise ValueError("Host journal affected_refs must be an array")
                 affected_refs = self._normalize_refs(
-                    tuple(str(x) for x in payload.get("affected_refs", ()))
+                    tuple(str(x) for x in affected_values)
                 )
-                evidence = self._normalize_evidence(
-                    tuple(
-                        x
-                        for x in payload.get("evidence", ())
-                        if isinstance(x, Mapping)
-                    )
-                )
+                evidence_values = payload.get("evidence", ())
+                if not isinstance(evidence_values, (list, tuple)):
+                    raise ValueError("Host journal operation evidence must be an array")
+                evidence = self._normalize_evidence(tuple(evidence_values))
                 operations[operation_id] = OperationResult(
                     operation_id=operation_id,
                     phase=phase,
@@ -325,11 +326,14 @@ class JournalBackedHostCommandStore:
                     raise ValueError(
                         "Terminal journal operation cannot retain uncertainty"
                     )
+                affected_values = payload.get(
+                    "affected_refs",
+                    current.affected_refs,
+                )
+                if not isinstance(affected_values, (list, tuple)):
+                    raise ValueError("Host journal affected_refs must be an array")
                 affected_refs = self._normalize_refs(
-                    tuple(
-                        str(x)
-                        for x in payload.get("affected_refs", current.affected_refs)
-                    )
+                    tuple(str(x) for x in affected_values)
                 )
                 evidence_values = payload.get("evidence", current.evidence)
                 if not isinstance(evidence_values, (list, tuple)):

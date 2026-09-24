@@ -142,6 +142,7 @@ class ModelRequest:
     privacy_remote_allowed: bool
     budget_remaining: Decimal
     deadline_utc: datetime
+    cancelled: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "request_id", _identifier(self.request_id, "request_id"))
@@ -152,6 +153,8 @@ class ModelRequest:
         )
         if type(self.privacy_remote_allowed) is not bool:
             raise TypeError("privacy_remote_allowed must be boolean")
+        if type(self.cancelled) is not bool:
+            raise TypeError("cancelled must be boolean")
         if not isinstance(self.deadline_utc, datetime) or self.deadline_utc.tzinfo is None:
             raise ValueError("deadline must be timezone-aware")
         object.__setattr__(
@@ -198,6 +201,8 @@ def route_model(
     now = now_utc or _now_utc()
     if now.tzinfo is None:
         raise ValueError("now_utc must be timezone-aware")
+    if request.cancelled:
+        return RouteDecision(RouteStatus.REJECTED, None, None, None, Decimal("0"), "request_cancelled")
     if now >= request.deadline_utc:
         return RouteDecision(RouteStatus.REJECTED, None, None, None, Decimal("0"), "deadline_expired")
     if policy.mode is RoutingMode.ZERO:

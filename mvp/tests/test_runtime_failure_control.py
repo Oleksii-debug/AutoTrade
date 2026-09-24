@@ -61,12 +61,20 @@ class RuntimeRecoveryTests(unittest.TestCase):
         attempt.mark_send_started("journal:send-started")
         controller.note_unknown_send(attempt)
 
-        attempt.observe_execution("exec-7", "provider:execution:exec-7")
+        self.assertTrue(
+            attempt.observe_execution("exec-7", "provider:execution:exec-7")
+        )
+        self.assertTrue(
+            attempt.observe_execution("exec-8", "provider:execution:exec-8")
+        )
+        self.assertFalse(
+            attempt.observe_execution("exec-8", "provider:execution:exec-8-duplicate")
+        )
         controller.resolve_attempt(attempt)
         controller.record_reconciliation(consistent=True)
 
         self.assertEqual(attempt.phase, SendPhase.EXECUTION_OBSERVED)
-        self.assertEqual(attempt.provider_execution_id, "exec-7")
+        self.assertEqual(attempt.provider_execution_ids, ["exec-7", "exec-8"])
         self.assertEqual(attempt.retry_disposition, "NEVER")
         self.assertEqual(controller.state, HostState.READY)
 

@@ -52,6 +52,14 @@ class ModelDescriptor:
     def __post_init__(self) -> None:
         if not self.model_id or not self.provider_id:
             raise ValueError("model and provider identifiers are required")
+        if type(self.remote) is not bool:
+            raise TypeError("remote must be boolean")
+        if (
+            not isinstance(self.latency_ms, int)
+            or isinstance(self.latency_ms, bool)
+            or self.latency_ms < 0
+        ):
+            raise ValueError("latency must be a non-negative integer")
         object.__setattr__(
             self,
             "estimated_cost",
@@ -64,8 +72,6 @@ class ModelDescriptor:
         )
         if self.estimated_cost < 0:
             raise ValueError("estimated cost cannot be negative")
-        if self.latency_ms < 0:
-            raise ValueError("latency cannot be negative")
         if not (Decimal("0") <= self.quality_score <= Decimal("1")):
             raise ValueError("quality score must be within [0, 1]")
 
@@ -80,6 +86,10 @@ class RoutingPolicy:
     maximum_latency_ms: int | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.mode, RoutingMode):
+            raise TypeError("mode must be a RoutingMode")
+        if type(self.allow_remote) is not bool:
+            raise TypeError("allow_remote must be boolean")
         object.__setattr__(
             self,
             "maximum_cost",
@@ -87,8 +97,12 @@ class RoutingPolicy:
         )
         if self.maximum_cost < 0:
             raise ValueError("maximum cost cannot be negative")
-        if self.maximum_latency_ms is not None and self.maximum_latency_ms < 0:
-            raise ValueError("maximum latency cannot be negative")
+        if self.maximum_latency_ms is not None and (
+            not isinstance(self.maximum_latency_ms, int)
+            or isinstance(self.maximum_latency_ms, bool)
+            or self.maximum_latency_ms < 0
+        ):
+            raise ValueError("maximum latency must be a non-negative integer")
         if self.mode is RoutingMode.FIXED and not self.fixed_model_id:
             raise ValueError("fixed mode requires fixed_model_id")
 
@@ -104,6 +118,10 @@ class ModelRequest:
     def __post_init__(self) -> None:
         if not self.request_id:
             raise ValueError("request_id is required")
+        if type(self.privacy_remote_allowed) is not bool:
+            raise TypeError("privacy_remote_allowed must be boolean")
+        if not isinstance(self.deadline_utc, datetime) or self.deadline_utc.tzinfo is None:
+            raise ValueError("deadline must be timezone-aware")
         object.__setattr__(
             self,
             "budget_remaining",
@@ -111,8 +129,6 @@ class ModelRequest:
         )
         if self.budget_remaining < 0:
             raise ValueError("budget remaining cannot be negative")
-        if self.deadline_utc.tzinfo is None:
-            raise ValueError("deadline must be timezone-aware")
 
 
 @dataclass(frozen=True, slots=True)

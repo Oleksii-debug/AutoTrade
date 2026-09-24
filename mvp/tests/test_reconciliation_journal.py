@@ -5,6 +5,7 @@ import unittest
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reconciliation import (
+    ProviderActivityEvidence,
     ProviderFillEvidence,
     SnapshotConsistencyEvidence,
     UnknownSubmission,
@@ -15,6 +16,7 @@ from mvp.autotrade_mvp.reconciliation_journal import (
     record_reconciliation_checkpoint,
     unknown_submissions_from_dispatch,
     unresolved_attempt_ids_from_checkpoint,
+    unresolved_provider_activity_ids_from_checkpoint,
 )
 
 
@@ -184,6 +186,104 @@ class ReconciliationJournalTests(unittest.TestCase):
                 unresolved_attempt_ids_from_checkpoint(checkpoint),
                 ("attempt-unknown",),
             )
+
+    def test_activity_gap_checkpoint_survives_restart(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            result = reconciliation(
+                provider_activities=[
+                    ProviderActivityEvidence.create(
+                        activity_id="manual-cash-1",
+                        activity_type="CASH_ADJUSTMENT",
+                        origin="MANUAL",
+                        occurred_at="2026-09-24T18:15:00Z",
+                        currency="USD",
+                    )
+                ],
+            )
+            self.assertFalse(result.complete)
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="acct-activity",
+                result=result,
+                observed_at="2026-09-24T19:00:00Z",
+            )
+            self.assertEqual(
+                checkpoint["payload"]["unexpected_provider_activity_ids"],
+                ["manual-cash-1"],
+            )
+            self.assertEqual(
+                checkpoint["payload"]["manual_or_external_activity_ids"],
+                ["manual-cash-1"],
+            )
+            self.assertEqual(
+                unresolved_provider_activity_ids_from_checkpoint(checkpoint),
+                ("manual-cash-1",),
+            )
+
+            reopened = JournalStore(path)
+            latest = load_latest_reconciliation_checkpoint(
+                reopened,
+                reconciliation_id="acct-activity",
+            )
+            self.assertEqual(
+                unresolved_provider_activity_ids_from_checkpoint(latest),
+                ("manual-cash-1",),
+            )
+            self.assertIn(
+                "CASH:USD",
+                latest["payload"]["blocking_resources"],
+            )
+
+    def test_missing_expected_activity_is_recoverable_from_checkpoint(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            result = reconciliation(
+                local_provider_activity_ids=["expected-activity"],
+            )
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="acct-missing-activity",
+                result=result,
+                observed_at="2026-09-24T19:00:00Z",
+            )
+            self.assertEqual(
+                unresolved_provider_activity_ids_from_checkpoint(checkpoint),
+                ("expected-activity",),
+            )
+
+    def test_activity_gap_recovery_validates_checkpoint_shape(self):
+        with self.assertRaisesRegex(ValueError, "must be a list"):
+            unresolved_provider_activity_ids_from_checkpoint(
+                {
+                    "payload": {
+                        "unexpected_provider_activity_ids": "not-a-list",
+                        "missing_local_provider_activity_ids": [],
+                    }
+                }
+            )
+
+
+    def test_corrupt_null_identities_fail_closed_in_checkpoint_recovery(self):
+        malformed_submission = {
+            "payload": {
+                "submission_resolutions": [
+                    {"attempt_id": None, "outcome": "UNKNOWN"}
+                ]
+            }
+        }
+        with self.assertRaises(ValueError):
+            unresolved_attempt_ids_from_checkpoint(malformed_submission)
+
+        malformed_activity = {
+            "payload": {
+                "unexpected_provider_activity_ids": [None],
+                "missing_local_provider_activity_ids": [],
+            }
+        }
+        with self.assertRaises(ValueError):
+            unresolved_provider_activity_ids_from_checkpoint(malformed_activity)
 
 
 if __name__ == "__main__":

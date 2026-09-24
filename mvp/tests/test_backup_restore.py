@@ -158,6 +158,31 @@ class BackupRestoreTests(unittest.TestCase):
                 create_backup(state, artifacts, root / "backup")
             self.assertFalse((root / "backup").exists())
 
+    def test_backup_destination_cannot_be_inside_state_or_artifacts(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            artifacts = root / "artifacts"
+            state.mkdir()
+            artifacts.mkdir()
+            JournalStore(state / "journal.sqlite3")
+            with self.assertRaisesRegex(BackupError, "outside source"):
+                create_backup(state, artifacts, state / "order-intents" / "backup")
+            with self.assertRaisesRegex(BackupError, "outside source"):
+                create_backup(state, artifacts, artifacts / "nested-backup")
+
+    def test_restore_destination_cannot_be_inside_backup_bundle(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            artifacts = root / "artifacts"
+            state.mkdir()
+            artifacts.mkdir()
+            JournalStore(state / "journal.sqlite3")
+            backup = create_backup(state, artifacts, root / "backup")
+            with self.assertRaisesRegex(BackupError, "outside the backup"):
+                restore_backup(backup, backup / "restored")
+
     def test_missing_or_corrupt_restore_marker_fails_closed(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

@@ -9,6 +9,7 @@ env = os.environ.copy()
 env["PYTHONPATH"] = str(ROOT / "research") + os.pathsep + str(ROOT)
 commands = [
     [sys.executable, "tools/baseline.py", "check"],
+    [sys.executable, "tools/build_provenance_manifest.py", "--check"],
     *[[sys.executable, "-m", "unittest", "discover", "-s", folder, "-v"] for folder in ("tests/Contracts", "tests/Control", "tests/Provenance", "research/tests", "mvp/tests")],
 ]
 for command in commands:

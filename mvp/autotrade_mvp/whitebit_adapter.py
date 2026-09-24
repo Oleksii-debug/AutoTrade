@@ -15,7 +15,7 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 from .provider_core import ProviderCoreError, WriteOutcome, classify_write_outcome
-from .reconciliation import ProviderFillEvidence, ProviderWorkingOrderEvidence
+from .reconciliation import ProviderFillEvidence
 
 
 _CLIENT_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -750,9 +750,17 @@ def build_open_order_page_request(
     )
 
 
+@dataclass(frozen=True)
+class WhiteBitWorkingOrderObservation:
+    provider_order_id: str
+    client_order_id: str | None
+    instrument: str
+    remaining_quantity: Decimal
+
+
 def normalize_working_order(
     response: Mapping[str, Any],
-) -> ProviderWorkingOrderEvidence:
+) -> WhiteBitWorkingOrderObservation:
     """Convert one active-order record to reconciliation truth."""
 
     if not isinstance(response, Mapping):
@@ -783,7 +791,7 @@ def normalize_working_order(
         "REJECTED",
     }:
         raise ProviderCoreError("terminal provider order cannot be normalized as working")
-    return ProviderWorkingOrderEvidence.create(
+    return WhiteBitWorkingOrderObservation(
         provider_order_id=_text(str(provider_order_id), name="orderId"),
         client_order_id=client_id,
         instrument=_text(str(market), name="market"),
@@ -793,10 +801,10 @@ def normalize_working_order(
 
 def normalize_working_orders(
     records: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
-) -> tuple[ProviderWorkingOrderEvidence, ...]:
+) -> tuple[WhiteBitWorkingOrderObservation, ...]:
     if not isinstance(records, (list, tuple)):
         raise TypeError("records must be a list or tuple")
-    by_provider_id: dict[str, ProviderWorkingOrderEvidence] = {}
+    by_provider_id: dict[str, WhiteBitWorkingOrderObservation] = {}
     for record in records:
         order = normalize_working_order(record)
         existing = by_provider_id.get(order.provider_order_id)

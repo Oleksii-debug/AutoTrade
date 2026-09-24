@@ -21,8 +21,8 @@ class JournalBackedHostCommandStore:
 
     AGGREGATE_TYPE = "HOST_CONTROL"
     AGGREGATE_ID = "host"
-    TERMINAL_PHASES = {"SUCCEEDED", "FAILED", "UNKNOWN", "CANCELLED"}
-    UPDATE_PHASES = {"RUNNING", "WAITING_EXTERNAL", *TERMINAL_PHASES}
+    TERMINAL_PHASES = {"SUCCEEDED", "FAILED", "CANCELLED"}
+    UPDATE_PHASES = {"RUNNING", "WAITING_EXTERNAL", "UNKNOWN", *TERMINAL_PHASES}
 
     def __init__(
         self,
@@ -265,6 +265,12 @@ class JournalBackedHostCommandStore:
             return current
         if current.phase in self.TERMINAL_PHASES:
             raise ValueError("Terminal operation cannot transition again")
+        if current.phase == "UNKNOWN" and phase not in self.TERMINAL_PHASES:
+            raise ValueError("UNKNOWN operation can only resolve to a terminal outcome")
+        if phase == "UNKNOWN" and not normalized_uncertainty:
+            raise ValueError("UNKNOWN operation must preserve remaining uncertainty")
+        if phase in self.TERMINAL_PHASES and normalized_uncertainty:
+            raise ValueError("Terminal operation cannot retain unresolved uncertainty")
 
         next_version = self.state_version + 1
         payload = {

@@ -70,6 +70,61 @@ def observations(**overrides):
 
 
 class BoundedRealQualificationTests(unittest.TestCase):
+    def test_direct_construction_cannot_bypass_bounded_real_safety(self):
+        base = envelope()
+        with self.assertRaises(ValueError):
+            BoundedRealEnvelope(
+                envelope_id=base.envelope_id,
+                source_sha=base.source_sha,
+                account_id=base.account_id,
+                provider_id=base.provider_id,
+                policy_id=base.policy_id,
+                allowed_actions=frozenset({"ORDER.SUBMIT", "WITHDRAW"}),
+                max_capital=base.max_capital,
+                max_single_notional=base.max_single_notional,
+                max_gross_leverage=base.max_gross_leverage,
+            )
+        with self.assertRaises(TypeError):
+            BoundedRealEnvelope(
+                envelope_id=base.envelope_id,
+                source_sha=base.source_sha,
+                account_id=base.account_id,
+                provider_id=base.provider_id,
+                policy_id=base.policy_id,
+                allowed_actions=frozenset({"ORDER.SUBMIT"}),
+                max_capital=1000.0,
+                max_single_notional=base.max_single_notional,
+                max_gross_leverage=base.max_gross_leverage,
+            )
+
+        good_evidence = evidence("RECOVERY")
+        with self.assertRaises(TypeError):
+            QualificationEvidence(
+                evidence_id=good_evidence.evidence_id,
+                evidence_kind=good_evidence.evidence_kind,
+                source_sha=good_evidence.source_sha,
+                envelope_id=good_evidence.envelope_id,
+                passed=1,
+                unresolved_blockers=(),
+            )
+
+        good_observations = observations()
+        with self.assertRaises(TypeError):
+            BoundedRealObservations(
+                source_sha=good_observations.source_sha,
+                envelope_id=good_observations.envelope_id,
+                provider_id=good_observations.provider_id,
+                account_id=good_observations.account_id,
+                observed_fill_count=good_observations.observed_fill_count,
+                observed_partial_fill="true",
+                all_fills_reconciled=good_observations.all_fills_reconciled,
+                fees_reconciled=good_observations.fees_reconciled,
+                revocation_verified=good_observations.revocation_verified,
+                protection_verified=good_observations.protection_verified,
+                unauthorized_action_count=0,
+                unresolved_unknown_count=0,
+            )
+
     def test_complete_bundle_is_evidence_complete_but_never_authority(self):
         result = assess_bounded_real_qualification(
             envelope=envelope(),

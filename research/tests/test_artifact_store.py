@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -174,6 +175,76 @@ class ArtifactStoreTests(unittest.TestCase):
                     rights={"storage": False, "export": False},
                 )
             self.assertEqual(store.audit().objects, 0)
+
+
+    def test_publish_and_export_sync_parent_directory_after_replace(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            with patch(
+                "autotrade_research.artifacts.store.sync_parent_directory"
+            ) as sync:
+                store.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=b"durable",
+                    media_type="text/plain",
+                    rights={"storage": True, "export": True},
+                )
+                digest = hashlib.sha256(b"durable").hexdigest()
+                sync.assert_any_call(store._object_path(digest))
+
+                target = Path(directory) / "out" / "durable.txt"
+                store.export(artifact_id, target)
+                sync.assert_any_call(target)
+                self.assertEqual(target.read_bytes(), b"durable")
+
+
+    def test_recovery_reports_malformed_or_misplaced_objects_without_crashing(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+
+            malformed_name = "g" * 64
+            malformed = store.objects / "gg" / malformed_name
+            malformed.parent.mkdir(parents=True, exist_ok=True)
+            malformed.write_bytes(b"malformed")
+
+            misplaced_data = b"misplaced"
+            misplaced_digest = hashlib.sha256(misplaced_data).hexdigest()
+            wrong_prefix = "00" if misplaced_digest[:2] != "00" else "ff"
+            misplaced = store.objects / wrong_prefix / misplaced_digest
+            misplaced.parent.mkdir(parents=True, exist_ok=True)
+            misplaced.write_bytes(misplaced_data)
+
+            orphan_data = b"valid-orphan"
+            orphan_digest = hashlib.sha256(orphan_data).hexdigest()
+            orphan = store._object_path(orphan_digest)
+            orphan.parent.mkdir(parents=True, exist_ok=True)
+            orphan.write_bytes(orphan_data)
+
+            before = store.audit()
+            self.assertIn(orphan_digest, before.unreferenced_objects)
+            self.assertIn(
+                "object:" + malformed.relative_to(store.root).as_posix(),
+                before.corrupt_objects,
+            )
+            self.assertIn(
+                "object:" + misplaced.relative_to(store.root).as_posix(),
+                before.corrupt_objects,
+            )
+
+            after = store.recover_orphans()
+            self.assertFalse(orphan.exists())
+            self.assertTrue(malformed.exists())
+            self.assertTrue(misplaced.exists())
+            self.assertEqual(after.unreferenced_objects, ())
+            self.assertIn(
+                "object:" + malformed.relative_to(store.root).as_posix(),
+                after.corrupt_objects,
+            )
+            self.assertIn(
+                "object:" + misplaced.relative_to(store.root).as_posix(),
+                after.corrupt_objects,
+            )
 
 
 if __name__ == "__main__":

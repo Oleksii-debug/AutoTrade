@@ -70,13 +70,14 @@ class SemanticWebClientContractTests(unittest.TestCase):
 
     def test_snapshot_counters_cannot_silently_regress(self):
         js = APP.read_text(encoding="utf-8")
-        self.assertIn("const nextVersion = exactCounter(", js)
-        self.assertIn("const nextCursor = exactCounter(", js)
+        self.assertIn("const parsed = parseCanonicalSnapshot(snapshot)", js)
         self.assertIn(
-            "if (nextVersion < state.version || nextCursor < state.cursor)",
+            "if (parsed.version < state.version || parsed.cursor < state.cursor)",
             js,
         )
         self.assertIn('throw new Error("host snapshot counters regressed")', js)
+        self.assertIn("state.version = parsed.version", js)
+        self.assertIn("state.cursor = parsed.cursor", js)
 
     def test_confirmed_command_response_survives_snapshot_refresh_failure(self):
         js = APP.read_text(encoding="utf-8")

@@ -36,6 +36,7 @@ class OptionLifecycleTests(unittest.TestCase):
             exercise_style="EUROPEAN",
             exercise_cutoff=at(19),
             expiry=at(20),
+            exercise_opens_at=at(18),
         )
 
     def _physical(self, right="CALL"):
@@ -163,19 +164,51 @@ class OptionLifecycleTests(unittest.TestCase):
 
     def test_exercise_cutoff_and_expiry_are_hard_gates(self):
         european = self._cash_call()
-        self.assertEqual(
-            exercise_gate(european, at(18)),
-            "PROVIDER_EXERCISE_WINDOW_REQUIRED",
-        )
+        self.assertEqual(exercise_gate(european, at(17)), "EXERCISE_NOT_YET_OPEN")
+        self.assertEqual(exercise_gate(european, at(18)), "OPEN")
         self.assertEqual(exercise_gate(european, at(19)), "EXERCISE_WINDOW_CLOSED")
         self.assertEqual(exercise_gate(european, at(20)), "EXPIRED")
-        with self.assertRaisesRegex(OptionError, "PROVIDER_EXERCISE_WINDOW_REQUIRED"):
-            require_holder_exercise_open(european, at(18))
+        with self.assertRaises(OptionError):
+            require_holder_exercise_open(european, at(19))
 
         american = self._physical("CALL")
-        self.assertEqual(exercise_gate(american, at(18)), "OPEN")
-        with self.assertRaises(OptionError):
-            require_holder_exercise_open(american, at(19))
+        self.assertEqual(
+            exercise_gate(american, at(18)),
+            "PROVIDER_EXERCISE_WINDOW_REQUIRED",
+        )
+        with self.assertRaisesRegex(OptionError, "PROVIDER_EXERCISE_WINDOW_REQUIRED"):
+            require_holder_exercise_open(american, at(18))
+
+    def test_american_window_must_be_explicit_before_holder_exercise(self):
+        known = OptionContract(
+            instrument="OPT:AMERICAN:KNOWN",
+            right="CALL",
+            strike=Decimal("50"),
+            multiplier=Decimal("100"),
+            settlement_currency="USD",
+            settlement_method="CASH",
+            exercise_style="AMERICAN",
+            exercise_opens_at=at(8),
+            exercise_cutoff=at(19),
+            expiry=at(20),
+        )
+        self.assertEqual(exercise_gate(known, at(7)), "EXERCISE_NOT_YET_OPEN")
+        self.assertEqual(exercise_gate(known, at(8)), "OPEN")
+
+    def test_exercise_open_cannot_follow_cutoff(self):
+        with self.assertRaisesRegex(OptionError, "exercise_opens_at"):
+            OptionContract(
+                instrument="OPT:BAD:WINDOW",
+                right="CALL",
+                strike=Decimal("50"),
+                multiplier=Decimal("100"),
+                settlement_currency="USD",
+                settlement_method="CASH",
+                exercise_style="AMERICAN",
+                exercise_opens_at=at(20),
+                exercise_cutoff=at(19),
+                expiry=at(20),
+            )
 
     def test_unknown_exercise_style_is_rejected(self):
         with self.assertRaisesRegex(OptionError, "AMERICAN or EUROPEAN"):

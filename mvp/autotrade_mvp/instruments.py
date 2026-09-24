@@ -229,12 +229,15 @@ class InstrumentVersion:
     minimum_notional_amount: Decimal | None = None
     minimum_notional_currency: str | None = None
     maximum_quantity: Decimal | None = None
+    price_band_low: Decimal | None = None
+    price_band_high: Decimal | None = None
     payoff: str | None = None
     underlying_id: str | None = None
     expiry: datetime | None = None
     last_trade_at: datetime | None = None
     delivery_cutoff: datetime | None = None
     settlement_method: str | None = None
+    funding_schedule: Mapping[str, object] | None = None
     strike: Decimal | None = None
     option_right: str | None = None
     exercise_style: str | None = None
@@ -303,6 +306,16 @@ class InstrumentVersion:
                     "minimum_notional_amount is required with minimum_notional_currency"
                 )
 
+        if (self.price_band_low is None) != (self.price_band_high is None):
+            raise InstrumentRegistryError("price bands require both low and high")
+        if self.price_band_low is not None:
+            low = _decimal(self.price_band_low, "price_band_low", positive=True)
+            high = _decimal(self.price_band_high, "price_band_high", positive=True)
+            if low >= high:
+                raise InstrumentRegistryError("price_band_low must be below price_band_high")
+            object.__setattr__(self, "price_band_low", low)
+            object.__setattr__(self, "price_band_high", high)
+
         start = _utc(self.effective_from, "effective_from")
         object.__setattr__(self, "effective_from", start)
         for field in ("effective_to", "expiry", "last_trade_at", "delivery_cutoff"):
@@ -322,15 +335,53 @@ class InstrumentVersion:
                 raise InstrumentRegistryError("derivative payoff is required")
             if self.underlying_id is None:
                 raise InstrumentRegistryError("derivative underlying_id is required")
+            if self.settlement_method is None:
+                raise InstrumentRegistryError("derivative settlement_method is required")
+            if self.margin_model_id is None:
+                raise InstrumentRegistryError("derivative margin_model_id is required")
             object.__setattr__(self, "underlying_id", _text(self.underlying_id, "underlying_id"))
+            object.__setattr__(
+                self, "settlement_method", _text(self.settlement_method, "settlement_method")
+            )
+            object.__setattr__(
+                self, "margin_model_id", _text(self.margin_model_id, "margin_model_id")
+            )
         elif any(
             value is not None
-            for value in (self.payoff, self.underlying_id, self.expiry, self.strike, self.option_right)
-        ):
+            for value in (
+                self.payoff,
+                self.underlying_id,
+                self.expiry,
+                self.last_trade_at,
+                self.delivery_cutoff,
+                self.settlement_method,
+                self.funding_schedule,
+                self.strike,
+                self.option_right,
+                self.exercise_style,
+                self.margin_model_id,
+            )
+        ) or self.deliverable:
             raise InstrumentRegistryError("derivative fields are not valid for this asset class")
 
         if self.asset_class in {"FUTURE", "OPTION"} and self.expiry is None:
             raise InstrumentRegistryError("dated derivative requires expiry")
+
+        if self.asset_class == "PERPETUAL":
+            if self.expiry is not None:
+                raise InstrumentRegistryError("perpetual must not invent an expiry")
+            if self.funding_schedule is None:
+                raise InstrumentRegistryError("perpetual funding_schedule is required")
+            if not isinstance(self.funding_schedule, Mapping) or not self.funding_schedule:
+                raise InstrumentRegistryError("funding_schedule must be a non-empty object")
+            object.__setattr__(
+                self, "funding_schedule", MappingProxyType(dict(self.funding_schedule))
+            )
+            if self.payoff == "OPTION":
+                raise InstrumentRegistryError("perpetual payoff cannot be OPTION")
+        elif self.funding_schedule is not None:
+            raise InstrumentRegistryError("funding_schedule is only valid for perpetuals")
+
         if self.asset_class == "OPTION":
             if self.payoff != "OPTION":
                 raise InstrumentRegistryError("option payoff must be OPTION")
@@ -360,6 +411,10 @@ class InstrumentVersion:
         value = _decimal(price, "price", positive=True)
         if value % self.price_tick != 0:
             raise InstrumentRegistryError("price is not aligned to price_tick")
+        if self.price_band_low is not None and value < self.price_band_low:
+            raise InstrumentRegistryError("price is below price_band_low")
+        if self.price_band_high is not None and value > self.price_band_high:
+            raise InstrumentRegistryError("price is above price_band_high")
         return value
 
     def validate_quantity(self, quantity: Decimal | str | int) -> Decimal:
@@ -405,6 +460,9 @@ class InstrumentVersion:
             "last_trade_at": _utc_text(self.last_trade_at) if self.last_trade_at else None,
             "delivery_cutoff": _utc_text(self.delivery_cutoff) if self.delivery_cutoff else None,
             "settlement_method": self.settlement_method,
+            "funding_schedule": (
+                dict(self.funding_schedule) if self.funding_schedule is not None else None
+            ),
             "strike": _decimal_text(self.strike) if self.strike is not None else None,
             "option_right": self.option_right,
             "exercise_style": self.exercise_style,
@@ -415,6 +473,11 @@ class InstrumentVersion:
             payload["minimum_notional"] = {
                 "amount": _decimal_text(self.minimum_notional_amount),
                 "currency": self.minimum_notional_currency,
+            }
+        if self.price_band_low is not None:
+            payload["price_bands"] = {
+                "low": _decimal_text(self.price_band_low),
+                "high": _decimal_text(self.price_band_high),
             }
         if self.deliverable:
             payload["deliverable"] = [

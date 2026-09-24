@@ -246,7 +246,7 @@ class SimulatedOrder:
             raise ExecutionRealismError(
                 "STOP_LIMIT order requires stop_price and limit_price"
             )
-        _instant(submitted_at, name="submitted_at")
+        submitted = _instant(submitted_at, name="submitted_at")
         normalized_quantity = _positive(quantity, name="quantity")
         normalized_lot_size = _positive(lot_size, name="lot_size")
         if normalized_quantity % normalized_lot_size != 0:
@@ -260,7 +260,7 @@ class SimulatedOrder:
             side=normalized_side,
             order_type=normalized_type,
             quantity=normalized_quantity,
-            submitted_at=submitted_at,
+            submitted_at=_utc(submitted),
             lot_size=normalized_lot_size,
             limit_price=limit,
             stop_price=stop,
@@ -317,8 +317,8 @@ class LiquidityObservation:
         if high is not None and low is not None and high < low:
             raise ExecutionRealismError("bar_high cannot be below bar_low")
         return cls(
-            market_time=market_time,
-            available_at=available_at,
+            market_time=_utc(market),
+            available_at=_utc(available),
             available_volume=_non_negative(
                 available_volume,
                 name="available_volume",
@@ -344,6 +344,7 @@ class SimulatedExecution:
     fee: Decimal
     arrival_at: str
     trade_time: str | None
+    evidence_available_at: str
     triggered: bool
     model_fingerprint: str
     scenario: str
@@ -492,6 +493,7 @@ def simulate_execution(
             fee=Decimal("0"),
             arrival_at=arrival_text,
             trade_time=None,
+            evidence_available_at=observation.available_at,
             triggered=order.already_triggered,
             model_fingerprint=model.fingerprint,
             scenario=model.scenario,
@@ -514,6 +516,7 @@ def simulate_execution(
             fee=Decimal("0"),
             arrival_at=arrival_text,
             trade_time=None,
+            evidence_available_at=observation.available_at,
             triggered=order.already_triggered,
             model_fingerprint=model.fingerprint,
             scenario=model.scenario,
@@ -625,6 +628,7 @@ def simulate_execution(
         fee=fee,
         arrival_at=arrival_text,
         trade_time=observation.market_time,
+        evidence_available_at=observation.available_at,
         triggered=triggered,
         model_fingerprint=model.fingerprint,
         scenario=model.scenario,

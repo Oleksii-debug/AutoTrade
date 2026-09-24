@@ -12,34 +12,38 @@ The implementation follows the execution-simulation requirements in
 `06_REPLAY_SCIENTIFIC_VALIDATION_ARCHITECTURE.md` and the economic constraints
 in `04_PORTFOLIO_RISK_ECONOMIC_ARCHITECTURE.md`:
 
-1. An order cannot fill from liquidity whose market timestamp is at or before
+1. Every liquidity observation carries the exact canonical `instrument_version`;
+   simulation fails closed unless it exactly matches the admitted order. A symbol
+   or otherwise compatible price stream can never substitute for versioned identity.
+3. An order cannot fill from liquidity whose market timestamp is at or before
    its latency-adjusted venue arrival time. This prevents same-event and earlier
    liquidity from being reused after a decision.
-2. `BAR`, `TOP_OF_BOOK` and `BOOK` fidelity are explicit. BAR mode reports
+3. `BAR`, `TOP_OF_BOOK` and `BOOK` fidelity are explicit. BAR mode reports
    that intrabar ordering/queue priority is unknown; top-of-book reports that
    queue priority is unknown.
-3. BAR stop-limit execution fails conservatively when both trigger and limit
+4. BAR stop-limit execution fails conservatively when both trigger and limit
    are touched in the same candle and chronology cannot be proved. Trigger
    state can then carry into a later observation.
-4. Fill quantity is bounded by observed volume, a registered participation
+5. Fill quantity is bounded by observed volume, a registered participation
    ceiling and lot-size rounding. No partial is rounded upward.
-5. Market fills use the adverse executable side of the observation and add
+6. Market fills use the adverse executable side of the observation and add
    registered slippage/impact assumptions. BAR mode may additionally include a
    conservative spread allowance.
-6. Limit fills do not assume price improvement; the registered limit price is
+7. Limit fills do not assume price improvement; the registered limit price is
    used when executable.
-7. Fees and minimum charges are exact Decimal calculations. Binary float
+8. Fees and minimum charges are exact Decimal calculations. Binary float
    financial inputs are rejected.
-8. Every model carries an immutable model version and calibration SHA-256.
+9. Every model carries an immutable model version and calibration SHA-256.
    The complete assumption set has a deterministic fingerprint so experiments
    can freeze the exact cost/fill model.
-9. BASE/ADVERSE/OPTIMISTIC scenarios are explicit. OPTIMISTIC results are
+10. BASE/ADVERSE/OPTIMISTIC scenarios are explicit. OPTIMISTIC results are
    marked as insufficient promotion evidence.
-10. ADVERSE scenario multipliers cannot be below 1.
+11. ADVERSE scenario multipliers cannot be below 1.
 
 ## Focused evidence
 
 The test bank covers:
+- exact instrument-version binding and cross-instrument rejection;
 - impossible same/earlier-event fills;
 - latency exclusion;
 - partial fills and lot rounding;

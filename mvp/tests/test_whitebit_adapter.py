@@ -187,6 +187,53 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertEqual(snapshot.provider_amount, Decimal("0.3"))
         self.assertIs(snapshot.reduce_only, True)
 
+    def test_external_order_without_client_id_remains_provider_truth(self):
+        snapshot = parse_order_snapshot(
+            {
+                "orderId": "external-45",
+                "clientOrderId": "",
+                "market": "BTC_USDT",
+                "status": "NEW",
+                "amount": "0.2",
+                "dealStock": "0",
+                "left": "0.2",
+            }
+        )
+        self.assertIsNone(snapshot.client_order_id)
+        self.assertEqual(snapshot.normalized_status, "WORKING")
+
+    def test_additional_provider_terminal_statuses_preserve_partial_fill(self):
+        liquidation = parse_order_snapshot(
+            {
+                "orderId": "46",
+                "clientOrderId": "",
+                "market": "BTC_USDT",
+                "status": "AUTO_CANCELED_LIQUIDATION",
+                "amount": "1",
+                "dealStock": "0.25",
+                "dealMoney": "25",
+                "left": "0.75",
+            }
+        )
+        self.assertEqual(
+            liquidation.normalized_status,
+            "PARTIALLY_FILLED_CANCELLED",
+        )
+        self.assertTrue(liquidation.terminal_remainder_cancelled)
+
+        stp = parse_order_snapshot(
+            {
+                "orderId": "47",
+                "clientOrderId": "at-stp-47",
+                "market": "BTC_USDT",
+                "status": "CANCELED_STP",
+                "amount": "1",
+                "dealStock": "0",
+                "left": "1",
+            }
+        )
+        self.assertEqual(stp.normalized_status, "CANCELLED")
+
     def test_unknown_provider_status_fails_closed(self):
         with self.assertRaisesRegex(WhiteBitAdapterError, "unsupported provider"):
             parse_order_snapshot(

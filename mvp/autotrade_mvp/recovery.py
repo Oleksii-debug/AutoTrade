@@ -216,6 +216,8 @@ class RecoveryController:
         return self.owner
 
     def record_reconciliation(self, *, consistent: bool, uncertainty: Iterable[str] = ()) -> None:
+        if type(consistent) is not bool:
+            raise TypeError("consistent must be boolean")
         if self.owner is None:
             raise RuntimeError("No active owner")
         self._require_current_durable_owner()
@@ -230,6 +232,8 @@ class RecoveryController:
         self._recompute_state()
 
     def set_storage_writable(self, writable: bool) -> None:
+        if type(writable) is not bool:
+            raise TypeError("writable must be boolean")
         self.storage_writable = writable
         if writable:
             self.reason_codes.discard("durable_journal_unavailable")
@@ -238,6 +242,8 @@ class RecoveryController:
         self._recompute_state()
 
     def set_clock_trusted(self, trusted: bool) -> None:
+        if type(trusted) is not bool:
+            raise TypeError("trusted must be boolean")
         self.clock_trusted = trusted
         if trusted:
             self.reason_codes.discard("clock_untrusted")
@@ -279,6 +285,10 @@ class RecoveryController:
         normalized_owner = new_owner_id.strip()
         if normalized_owner == self.owner.owner_id:
             raise ValueError("New owner must differ from current owner")
+        if type(old_sender_fenced) is not bool:
+            raise TypeError("old_sender_fenced must be boolean")
+        if type(reconciled) is not bool:
+            raise TypeError("reconciled must be boolean")
         if not old_sender_fenced:
             raise PermissionError("Old sender must be externally fenced")
         if not reconciled or self.unresolved_attempts:
@@ -294,6 +304,8 @@ class RecoveryController:
         return self.owner
 
     def validate_sender(self, owner_id: str, owner_epoch: int) -> None:
+        if not isinstance(owner_epoch, int) or isinstance(owner_epoch, bool) or owner_epoch < 1:
+            raise ValueError("owner_epoch must be a positive integer")
         if self.owner is None:
             raise PermissionError("No active sender")
         self._require_current_durable_owner()
@@ -303,6 +315,8 @@ class RecoveryController:
             raise PermissionError("Host is not ready for new sends")
 
     def validate_admission(self, owner_epoch: int) -> None:
+        if not isinstance(owner_epoch, int) or isinstance(owner_epoch, bool) or owner_epoch < 1:
+            raise ValueError("owner_epoch must be a positive integer")
         if self.owner is not None:
             self._require_current_durable_owner()
         if self.owner is None or owner_epoch != self.owner.epoch:

@@ -213,6 +213,87 @@ class InstrumentRegistryTests(unittest.TestCase):
         self.assertEqual(old.version, 1)
         self.assertEqual(adjusted.version, 2)
 
+    def test_perpetual_rejects_invented_expiry_and_option_payoff(self):
+        with self.assertRaisesRegex(InstrumentRegistryError, "must not define expiry"):
+            InstrumentVersion(
+                instrument_id=A,
+                version=1,
+                provider_id="simulated",
+                venue_id="perpetuals",
+                provider_symbol="ABC-PERP",
+                asset_class="PERPETUAL",
+                base_currency="ABC",
+                quote_currency="USD",
+                settlement_currency="USD",
+                quantity_unit="contract",
+                contract_multiplier="1",
+                price_tick="0.01",
+                quantity_step="1",
+                minimum_quantity="1",
+                calendar_id="CONTINUOUS_24_7",
+                timezone_id="UTC",
+                effective_from=when(1),
+                payoff="LINEAR",
+                underlying_id="ABC",
+                expiry=when(12),
+            )
+
+        for asset_class in ("FUTURE", "PERPETUAL"):
+            with self.subTest(asset_class=asset_class):
+                kwargs = dict(
+                    instrument_id=A,
+                    version=1,
+                    provider_id="simulated",
+                    venue_id="derivatives",
+                    provider_symbol=f"ABC-{asset_class}",
+                    asset_class=asset_class,
+                    base_currency="ABC",
+                    quote_currency="USD",
+                    settlement_currency="USD",
+                    quantity_unit="contract",
+                    contract_multiplier="1",
+                    price_tick="0.01",
+                    quantity_step="1",
+                    minimum_quantity="1",
+                    calendar_id="CONTINUOUS_24_7",
+                    timezone_id="UTC",
+                    effective_from=when(1),
+                    payoff="OPTION",
+                    underlying_id="ABC",
+                )
+                if asset_class == "FUTURE":
+                    kwargs["expiry"] = when(12)
+                with self.assertRaisesRegex(
+                    InstrumentRegistryError,
+                    "payoff must be LINEAR or INVERSE",
+                ):
+                    InstrumentVersion(**kwargs)
+
+    def test_perpetual_without_expiry_accepts_linear_payoff(self):
+        instrument = InstrumentVersion(
+            instrument_id=A,
+            version=1,
+            provider_id="simulated",
+            venue_id="perpetuals",
+            provider_symbol="ABC-PERP",
+            asset_class="PERPETUAL",
+            base_currency="ABC",
+            quote_currency="USD",
+            settlement_currency="USD",
+            quantity_unit="contract",
+            contract_multiplier="1",
+            price_tick="0.01",
+            quantity_step="1",
+            minimum_quantity="1",
+            calendar_id="CONTINUOUS_24_7",
+            timezone_id="UTC",
+            effective_from=when(1),
+            payoff="LINEAR",
+            underlying_id="ABC",
+        )
+        self.assertIsNone(instrument.expiry)
+        self.assertEqual(instrument.payoff, "LINEAR")
+
     def test_contract_projection_uses_schema_safe_string_numbers_and_utc(self):
         instrument = InstrumentVersion(
             instrument_id=A,

@@ -1,26 +1,29 @@
-"""Fail-closed credential/session boundary for the simulated AutoTrade host.
+"""Fail-closed session/authorization boundary for the AutoTrade host.
 
-This foundation deliberately does not implement provider networking or a production
-secret vault. It enforces the architectural boundary: UI/research/model callers
-receive opaque credential handles, while raw secret material can be resolved only
-for an explicitly authorized execution identity, account scope and purpose.
+Credential persistence and decryption are delegated to the canonical protected
+credential vault. This module owns roles, paired origins and short-lived sessions;
+it deliberately does not keep a second plaintext credential store.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
 import re
 import secrets
 import time
-from typing import Callable, Mapping
+from dataclasses import dataclass
+from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
+
+from .windows_secrets import PersistentCredentialHandle, ProtectedCredentialVault
 
 
 _REDACT_RE = re.compile(
     r"(api[_-]?key|secret|password|passphrase|authorization|access[_-]?token|refresh[_-]?token|signature)",
     re.IGNORECASE,
 )
+
+CredentialHandle = PersistentCredentialHandle
 
 
 def _required_text(value: object, *, name: str) -> str:
@@ -46,15 +49,6 @@ def _authenticated_origin(value: object) -> str:
 
 
 @dataclass(frozen=True)
-class CredentialHandle:
-    handle_id: str
-    account_id: str
-    provider: str
-    purpose: str
-    generation: int
-
-
-@dataclass(frozen=True)
 class Session:
     token: str
     subject: str
@@ -63,21 +57,8 @@ class Session:
     expires_at: float
 
 
-@dataclass
-class _SecretRecord:
-    handle: CredentialHandle
-    owner_identity: str
-    value: str
-    active: bool = True
-
-
 class SecurityBoundary:
-    """In-memory boundary used to qualify authorization invariants.
-
-    Production persistence must be backed by an identity-protected host secret
-    store. This class intentionally provides no withdrawal/external-transfer
-    capability.
-    """
+    """Authorization facade over one protected credential-vault authority."""
 
     _ROLES = {"OWNER", "OPERATOR", "RESEARCHER", "OBSERVER"}
     _EXECUTION_ROLES = {"OWNER", "OPERATOR"}
@@ -87,18 +68,17 @@ class SecurityBoundary:
         self,
         *,
         allowed_origins: set[str],
+        credential_vault: ProtectedCredentialVault,
         now: Callable[[], float] | None = None,
     ) -> None:
         if not allowed_origins:
             raise ValueError("At least one authenticated origin is required")
-        normalized_origins = {_authenticated_origin(value) for value in allowed_origins}
-        self._paired_origins = set(normalized_origins)
+        if not isinstance(credential_vault, ProtectedCredentialVault):
+            raise TypeError("credential_vault must be a ProtectedCredentialVault")
+        self._paired_origins = {_authenticated_origin(value) for value in allowed_origins}
+        self._credential_vault = credential_vault
         self._now = now or time.time
         self._sessions: dict[str, Session] = {}
-        self._records: dict[str, _SecretRecord] = {}
-        # Redaction history is deliberately separate from credential usability:
-        # rotated/revoked values remain scrubbed from future diagnostics.
-        self._secret_redactions: set[str] = set()
 
     def _now_value(self) -> float:
         value = self._now()
@@ -168,11 +148,9 @@ class SecurityBoundary:
         return session
 
     def validate_host_session(self, token: str, actor: str) -> bool:
-        """Fail-closed adapter for HostCommandStore session identity checks.
+        """Validate bearer-session identity for the host command layer.
 
         Action authorization remains a separate server-side policy concern.
-        This method proves only that the bearer session is current and belongs
-        to the exact actor named by the command.
         """
         try:
             normalized_actor = _required_text(actor, name="actor")
@@ -228,29 +206,28 @@ class SecurityBoundary:
         secret_value: str,
     ) -> CredentialHandle:
         self.validate_session(token, required_roles={"OWNER"}, origin=origin)
-        normalized_owner = _required_text(owner_identity, name="owner_identity")
-        normalized_account = _required_text(account_id, name="account_id")
-        normalized_provider = _required_text(provider, name="provider")
         normalized_purpose = _required_text(purpose, name="purpose").upper()
         if normalized_purpose not in self._CREDENTIAL_PURPOSES:
             raise PermissionError("Credential purpose is unsupported")
-        if not isinstance(secret_value, str) or not secret_value:
-            raise ValueError("Secret value must not be empty")
-        handle_id = "cred_" + secrets.token_hex(16)
-        handle = CredentialHandle(
-            handle_id=handle_id,
-            account_id=normalized_account,
-            provider=normalized_provider,
+        return self._credential_vault.register(
+            owner_identity=_required_text(owner_identity, name="owner_identity"),
+            account_id=_required_text(account_id, name="account_id"),
+            provider=_required_text(provider, name="provider"),
             purpose=normalized_purpose,
-            generation=1,
+            secret_value=secret_value,
         )
-        self._records[handle_id] = _SecretRecord(
-            handle=handle,
-            owner_identity=normalized_owner,
-            value=secret_value,
+
+    def _current_handle(self, handle_id: str) -> CredentialHandle:
+        metadata = self._credential_vault.describe(
+            _required_text(handle_id, name="handle_id")
         )
-        self._secret_redactions.add(secret_value)
-        return handle
+        return CredentialHandle(
+            handle_id=str(metadata["handle_id"]),
+            account_id=str(metadata["account_id"]),
+            provider=str(metadata["provider"]),
+            purpose=str(metadata["purpose"]),
+            generation=int(metadata["generation"]),
+        )
 
     def rotate_secret(
         self,
@@ -262,23 +239,12 @@ class SecurityBoundary:
         new_secret_value: str,
     ) -> CredentialHandle:
         self.validate_session(token, required_roles={"OWNER"}, origin=origin)
-        record = self._require_active_record(handle_id)
-        normalized_owner = _required_text(owner_identity, name="owner_identity")
-        if record.owner_identity != normalized_owner:
-            raise PermissionError("Secret identity mismatch")
-        if not isinstance(new_secret_value, str) or not new_secret_value:
-            raise ValueError("Secret value must not be empty")
-        new_handle = CredentialHandle(
-            handle_id=record.handle.handle_id,
-            account_id=record.handle.account_id,
-            provider=record.handle.provider,
-            purpose=record.handle.purpose,
-            generation=record.handle.generation + 1,
+        current = self._current_handle(handle_id)
+        return self._credential_vault.rotate(
+            current,
+            execution_identity=_required_text(owner_identity, name="owner_identity"),
+            new_secret_value=new_secret_value,
         )
-        record.handle = new_handle
-        record.value = new_secret_value
-        self._secret_redactions.add(new_secret_value)
-        return new_handle
 
     def revoke_secret(
         self,
@@ -289,11 +255,11 @@ class SecurityBoundary:
         owner_identity: str,
     ) -> None:
         self.validate_session(token, required_roles={"OWNER"}, origin=origin)
-        record = self._require_active_record(handle_id)
-        normalized_owner = _required_text(owner_identity, name="owner_identity")
-        if record.owner_identity != normalized_owner:
-            raise PermissionError("Secret identity mismatch")
-        record.active = False
+        current = self._current_handle(handle_id)
+        self._credential_vault.revoke(
+            current,
+            execution_identity=_required_text(owner_identity, name="owner_identity"),
+        )
 
     def resolve_for_execution(
         self,
@@ -309,37 +275,28 @@ class SecurityBoundary:
         self.validate_session(token, required_roles=self._EXECUTION_ROLES, origin=origin)
         if not isinstance(handle, CredentialHandle):
             raise PermissionError("Credential handle is invalid")
-        record = self._require_active_record(handle.handle_id)
-        current = record.handle
-        if handle != current:
-            raise PermissionError("Credential handle generation is stale")
-        if _required_text(execution_identity, name="execution_identity") != record.owner_identity:
-            raise PermissionError("Execution identity cannot decrypt this credential")
-        if (
-            _required_text(account_id, name="account_id") != current.account_id
-            or _required_text(provider, name="provider") != current.provider
-        ):
-            raise PermissionError("Credential scope mismatch")
-        if _required_text(purpose, name="purpose").upper() != current.purpose:
-            raise PermissionError("Credential purpose mismatch")
-        return record.value
+        return self._credential_vault.resolve(
+            handle,
+            execution_identity=_required_text(
+                execution_identity, name="execution_identity"
+            ),
+            account_id=_required_text(account_id, name="account_id"),
+            provider=_required_text(provider, name="provider"),
+            purpose=_required_text(purpose, name="purpose").upper(),
+        )
 
     def describe_handle(self, handle_id: str) -> Mapping[str, object]:
-        record = self._require_active_record(handle_id)
-        h = record.handle
-        return {
-            "handle_id": h.handle_id,
-            "account_id": h.account_id,
-            "provider": h.provider,
-            "purpose": h.purpose,
-            "generation": h.generation,
-        }
+        return self._credential_vault.describe(
+            _required_text(handle_id, name="handle_id")
+        )
 
     @staticmethod
     def redact(value: object) -> object:
         if isinstance(value, dict):
             return {
-                key: "[REDACTED]" if _REDACT_RE.search(str(key)) else SecurityBoundary.redact(item)
+                key: "[REDACTED]"
+                if _REDACT_RE.search(str(key))
+                else SecurityBoundary.redact(item)
                 for key, item in value.items()
             }
         if isinstance(value, list):
@@ -348,10 +305,25 @@ class SecurityBoundary:
             return tuple(SecurityBoundary.redact(item) for item in value)
         return value
 
-    def redact_for_diagnostics(self, value: object) -> object:
-        """Redact sensitive keys plus any currently known raw secret material."""
-        keyed = self.redact(value)
-        known = tuple(sorted(self._secret_redactions, key=len, reverse=True))
+    @staticmethod
+    def redact_for_diagnostics(
+        value: object,
+        *,
+        sensitive_values: Iterable[str] = (),
+    ) -> object:
+        """Scrub sensitive keys and caller-owned ephemeral secret values.
+
+        The boundary intentionally does not retain plaintext values just to support
+        later redaction. Callers that still hold a plaintext transient may supply it
+        for this single redaction operation.
+        """
+        keyed = SecurityBoundary.redact(value)
+        known: list[str] = []
+        for candidate in sensitive_values:
+            if not isinstance(candidate, str) or not candidate:
+                raise ValueError("sensitive_values must contain non-empty strings")
+            known.append(candidate)
+        known.sort(key=len, reverse=True)
 
         def scrub(item: object) -> object:
             if isinstance(item, dict):
@@ -369,10 +341,3 @@ class SecurityBoundary:
             return item
 
         return scrub(keyed)
-
-    def _require_active_record(self, handle_id: str) -> _SecretRecord:
-        normalized_handle = _required_text(handle_id, name="handle_id")
-        record = self._records.get(normalized_handle)
-        if record is None or not record.active:
-            raise PermissionError("Credential is unavailable")
-        return record

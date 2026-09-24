@@ -148,6 +148,12 @@ class OrderProjection:
             active=True,
             provider_revision=revision,
         )
+        if candidate in self._history:
+            # Providers may redeliver an older immutable observation after a
+            # later correction/bust. Exact historical duplicates are harmless
+            # and must never roll the current projection backward.
+            return False
+
         existing = self._fills.get(fid)
         if existing is not None:
             if existing == candidate:

@@ -191,6 +191,29 @@ class CausalFeederTests(unittest.TestCase):
         self.assertEqual([item.event_id for item in feeder.view().events], ["past"])
         self.assertEqual(feeder.published_count, 1)
 
+    def test_dataset_identity_rejects_noncanonical_uppercase_digest(self):
+        with self.assertRaisesRegex(CausalReplayError, "lowercase"):
+            CausalDataset.create(
+                manifest_sha256="sha256:" + ("A" * 64),
+                events=[],
+            )
+
+        valid = CausalDataset.create(
+            manifest_sha256=MANIFEST,
+            events=[],
+        )
+        record = CausalFeeder(
+            valid,
+            start_time="2026-01-01T10:00:00Z",
+        ).checkpoint().to_record()
+        with self.assertRaisesRegex(CausalReplayError, "lowercase"):
+            FeederCheckpoint.from_record(
+                {
+                    **record,
+                    "dataset_sha256": record["dataset_sha256"].upper(),
+                }
+            )
+
     def test_direct_dataset_construction_cannot_forge_identity_or_order(self):
         a = event("a", priority=10, sequence=1)
         b = event("b", priority=10, sequence=2)

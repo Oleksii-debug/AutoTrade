@@ -89,6 +89,7 @@ var submitted = callbacks.Observe(new OrderEvent
 Require(submitted.Status == "Submitted", "Acknowledgement status was not preserved.");
 Require(!submitted.HasEconomicFill, "Acknowledgement must not be characterized as a fill.");
 Require(!submitted.DuplicateIdentity, "First callback identity was marked duplicate.");
+Require(!submitted.IdentityConflict, "First callback identity cannot conflict.");
 Require(!submitted.TimeRegressed, "First callback cannot regress time.");
 
 var partial = callbacks.Observe(new OrderEvent
@@ -118,6 +119,24 @@ var duplicate = callbacks.Observe(new OrderEvent
     FillPrice = 451.125m
 });
 Require(duplicate.DuplicateIdentity, "Duplicate callback identity was not surfaced.");
+Require(!duplicate.IdentityConflict, "Identical duplicate callback was marked conflicting.");
+
+var conflictingDuplicate = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 2,
+    Symbol = symbol,
+    UtcTime = instant.AddMilliseconds(1),
+    Status = OrderStatus.PartiallyFilled,
+    FillQuantity = 0.25m,
+    FillPrice = 451.500m
+});
+Require(
+    conflictingDuplicate.DuplicateIdentity,
+    "Conflicting repeated callback identity was not surfaced as duplicate.");
+Require(
+    conflictingDuplicate.IdentityConflict,
+    "Same callback identity with different economics was not surfaced as conflict.");
 
 var regressed = callbacks.Observe(new OrderEvent
 {

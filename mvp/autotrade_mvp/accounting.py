@@ -78,6 +78,7 @@ class EconomicBook:
     def __init__(self, transactions: Iterable[JournalTransaction] = ()):
         self._transactions: list[JournalTransaction] = []
         self._by_id: dict[str, JournalTransaction] = {}
+        self._by_cause_event_id: dict[str, JournalTransaction] = {}
         self._reversed_transaction_ids: set[str] = set()
         for transaction in transactions:
             self.append(transaction)
@@ -88,15 +89,27 @@ class EconomicBook:
 
     def append(self, transaction: JournalTransaction) -> bool:
         validate_transaction(transaction)
-        existing = self._by_id.get(transaction.transaction_id)
+        transaction_id = _name(transaction.transaction_id, field="transaction_id")
+        cause_event_id = _name(transaction.cause_event_id, field="cause_event_id")
+        existing = self._by_id.get(transaction_id)
         if existing is not None:
             if existing != transaction:
                 raise AccountingConflict(
                     "transaction_id was already committed with different economic content"
                 )
             return False
+
+        cause_existing = self._by_cause_event_id.get(cause_event_id)
+        if cause_existing is not None:
+            raise AccountingConflict(
+                "cause_event_id was already booked by a different transaction"
+            )
+
         if transaction.reverses_transaction_id is not None:
-            original_id = transaction.reverses_transaction_id
+            original_id = _name(
+                transaction.reverses_transaction_id,
+                field="reverses_transaction_id",
+            )
             original = self._by_id.get(original_id)
             if original is None:
                 raise AccountingConflict("Cannot reverse an unknown transaction")
@@ -108,7 +121,8 @@ class EconomicBook:
             )
             if transaction.postings != expected:
                 raise AccountingConflict("A reversal must exactly negate the original postings")
-        self._by_id[transaction.transaction_id] = transaction
+        self._by_id[transaction_id] = transaction
+        self._by_cause_event_id[cause_event_id] = transaction
         self._transactions.append(transaction)
         if transaction.reverses_transaction_id is not None:
             self._reversed_transaction_ids.add(transaction.reverses_transaction_id)

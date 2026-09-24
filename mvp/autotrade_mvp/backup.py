@@ -112,9 +112,16 @@ def _sqlite_schema_version(path: Path) -> int:
     uri = path.resolve().as_uri() + "?mode=ro"
     try:
         with sqlite3.connect(uri, uri=True) as connection:
-            return int(connection.execute("PRAGMA user_version").fetchone()[0])
+            rows = connection.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            ).fetchall()
     except sqlite3.Error as error:
-        raise BackupIntegrityError("Durable journal cannot be opened") from error
+        raise BackupIntegrityError(
+            "Durable journal schema evidence cannot be read"
+        ) from error
+    if not rows:
+        raise BackupCompatibilityError("Durable journal has no schema migration record")
+    return max(int(row[0]) for row in rows)
 
 
 def _backup_sqlite(source: Path, destination: Path) -> tuple[str, int, int]:

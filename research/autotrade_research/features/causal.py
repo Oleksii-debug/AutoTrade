@@ -77,6 +77,32 @@ class FeaturePoint:
     source_revisions: tuple[str, ...]
     feature_name: str
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbol", _text(self.symbol, name="symbol"))
+        object.__setattr__(
+            self,
+            "decision_time",
+            _time(self.decision_time, name="decision_time"),
+        )
+        object.__setattr__(self, "value", _decimal(self.value, name="value"))
+        input_ids = tuple(_text(value, name="input_id") for value in self.input_ids)
+        revisions = tuple(
+            _text(value, name="source_revision") for value in self.source_revisions
+        )
+        if not input_ids:
+            raise ValueError("FeaturePoint requires at least one input_id")
+        if len(input_ids) != len(revisions):
+            raise ValueError("input_ids and source_revisions must have equal length")
+        if len(input_ids) != len(set(input_ids)):
+            raise ValueError("FeaturePoint input_ids must be unique")
+        object.__setattr__(self, "input_ids", input_ids)
+        object.__setattr__(self, "source_revisions", revisions)
+        object.__setattr__(
+            self,
+            "feature_name",
+            _text(self.feature_name, name="feature_name"),
+        )
+
 
 @dataclass(frozen=True)
 class LabelPoint:
@@ -85,6 +111,21 @@ class LabelPoint:
     label_available_at: datetime
     value: Decimal
     source_revision: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbol", _text(self.symbol, name="symbol"))
+        anchor = _time(self.anchor_time, name="anchor_time")
+        available = _time(self.label_available_at, name="label_available_at")
+        if available <= anchor:
+            raise ValueError("label_available_at must be after anchor_time")
+        object.__setattr__(self, "anchor_time", anchor)
+        object.__setattr__(self, "label_available_at", available)
+        object.__setattr__(self, "value", _decimal(self.value, name="value"))
+        object.__setattr__(
+            self,
+            "source_revision",
+            _text(self.source_revision, name="source_revision"),
+        )
 
 
 @dataclass(frozen=True)
@@ -225,6 +266,8 @@ def training_row(
     cutoff = _time(training_cutoff, name="training_cutoff")
     if feature.symbol != label.symbol:
         raise ValueError("feature and label symbols differ")
+    if feature.decision_time != label.anchor_time:
+        raise ValueError("feature decision_time must equal label anchor_time")
     if feature.decision_time > cutoff:
         raise ValueError("feature is not available by training cutoff")
     if label.label_available_at > cutoff:

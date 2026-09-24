@@ -13,7 +13,9 @@ import json
 from pathlib import Path
 import sqlite3
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
+
+from .artifacts.store import ArtifactStore
 
 
 FINAL_STATES = {"SUCCEEDED", "FAILED", "CANCELLED"}
@@ -439,6 +441,69 @@ class ResearchJobStore:
             )
             connection.commit()
         return True
+
+
+    def publish_result_bytes(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        generation: int,
+        artifact_store: ArtifactStore,
+        data: bytes,
+        media_type: str,
+        rights: dict[str, Any],
+        slot: str = "primary",
+        now: datetime | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Publish one deterministic result artifact and accept it exactly once.
+
+        Artifact publication happens before the job compare-and-swap. A crash
+        between those steps can leave immutable evidence, but it cannot create
+        an accepted result. Retrying the same generation and bytes is
+        idempotent; different bytes conflict on the deterministic artifact ID.
+        """
+
+        identifier = str(UUID(_require_text(job_id, "job_id")))
+        worker = _require_text(worker_id, "worker_id")
+        result_slot = _require_text(slot, "slot")
+        if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+            raise ValueError("generation must be a positive integer")
+        if not isinstance(data, bytes):
+            raise TypeError("data must be bytes")
+        current = _utc(now or datetime.now(timezone.utc))
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (identifier,)).fetchone()
+            self._require_live_lease(row, worker, generation, current)
+            source_refs = json.loads(row["input_hashes_json"])
+            kind = row["kind"]
+            connection.commit()
+
+        artifact_id = str(uuid5(UUID(identifier), f"generation:{generation}:slot:{result_slot}"))
+        manifest = artifact_store.publish_bytes(
+            artifact_id=artifact_id,
+            data=data,
+            media_type=media_type,
+            rights=rights,
+            source_refs=source_refs,
+            metadata={
+                "job_id": identifier,
+                "job_generation": generation,
+                "job_kind": kind,
+                "slot": result_slot,
+            },
+        )
+        output_ref = f"artifact:{artifact_id}@{manifest['sha256']}"
+        accepted = self.succeed(
+            identifier,
+            worker_id=worker,
+            generation=generation,
+            output_refs=[output_ref],
+            now=now,
+        )
+        return manifest, accepted
 
     def fail(
         self,

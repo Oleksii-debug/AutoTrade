@@ -30,6 +30,8 @@ class AllocationTests(unittest.TestCase):
         lot="1",
         cost="0",
         capital_requirement="1",
+        min_notional="0",
+        fee_floor="0",
     ):
         return AllocationCandidate.create(
             symbol=symbol,
@@ -38,6 +40,8 @@ class AllocationTests(unittest.TestCase):
             lot_size=lot,
             cost_rate=cost,
             capital_requirement_rate=capital_requirement,
+            min_notional=min_notional,
+            fee_floor=fee_floor,
         )
 
     def test_funded_request_is_accepted_without_scaling(self):
@@ -174,6 +178,53 @@ class AllocationTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "ALLOCATED")
         self.assertLessEqual(result.estimated_cost, Decimal("20"))
+
+    def test_minimum_notional_never_proposes_an_unexecutable_small_trade(self):
+        result = allocate_targets(
+            [self.candidate(desired="40", price="10", lot="1", min_notional="50")],
+            self.policy(
+                cash_available="1000",
+                max_gross_notional="1000",
+                max_net_notional="1000",
+                max_symbol_notional="1000",
+            ),
+        )
+        self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.targets[0].quantity, Decimal("0"))
+        self.assertEqual(result.targets[0].notional, Decimal("0"))
+
+    def test_fee_floor_is_charged_once_for_each_nonzero_target(self):
+        result = allocate_targets(
+            [self.candidate(desired="100", price="10", lot="1", cost="0.001", fee_floor="5")],
+            self.policy(
+                cash_available="1000",
+                max_gross_notional="1000",
+                max_net_notional="1000",
+                max_total_cost="10",
+            ),
+        )
+        self.assertEqual(result.status, "ALLOCATED")
+        self.assertEqual(result.estimated_cost, Decimal("5"))
+        self.assertEqual(result.cash_required, Decimal("105"))
+
+    def test_fee_floor_can_force_cash_fallback_when_no_trade_is_affordable(self):
+        result = allocate_targets(
+            [self.candidate(desired="1000", price="10", lot="1", fee_floor="25")],
+            self.policy(
+                cash_available="2000",
+                max_gross_notional="2000",
+                max_net_notional="2000",
+                max_total_cost="20",
+            ),
+        )
+        self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.estimated_cost, Decimal("0"))
+
+    def test_minimum_trade_inputs_reject_binary_float(self):
+        with self.assertRaises(TypeError):
+            self.candidate(min_notional=10.0)
+        with self.assertRaises(TypeError):
+            self.candidate(fee_floor=1.0)
 
     def test_bounded_search_fails_closed_when_one_iteration_cannot_reach_positive_lot(self):
         result = allocate_targets(

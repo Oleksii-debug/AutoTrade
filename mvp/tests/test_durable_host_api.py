@@ -62,8 +62,12 @@ class JournalBackedHostApiTests(unittest.TestCase):
             accepted.operation_id,
             "RUNNING",
             remaining_uncertainty=("provider_response_pending",),
+            affected_refs=("order:provider-123",),
         )
-        self.assertEqual(running.state_version, "2")
+        self.assertEqual(restarted.snapshot()["state_version"], "2")
+        self.assertEqual(running.started_at, "2026-09-24T18:00:00Z")
+        self.assertEqual(running.updated_at, "2026-09-24T18:00:00Z")
+        self.assertEqual(running.affected_refs, ("order:provider-123",))
 
         again = self.store()
         projected = again.get_operation(accepted.operation_id)
@@ -72,6 +76,36 @@ class JournalBackedHostApiTests(unittest.TestCase):
             projected.remaining_uncertainty,
             ("provider_response_pending",),
         )
+        self.assertEqual(projected.affected_refs, ("order:provider-123",))
+        self.assertEqual(projected.started_at, running.started_at)
+        self.assertEqual(projected.updated_at, running.updated_at)
+
+    def test_malformed_operation_contract_arrays_fail_closed_on_restart(self):
+        store = self.store()
+        accepted = store.submit(self.command())
+        journal = JournalStore(self.path)
+        payload = {
+            "operation_id": accepted.operation_id,
+            "phase": "RUNNING",
+            "updated_at": "2026-09-24T18:00:01Z",
+            "affected_refs": "not-an-array",
+            "evidence": [],
+            "remaining_uncertainty": ["provider_response_pending"],
+        }
+        journal.append_event(
+            {
+                "event_id": "malformed-contract-update",
+                "event_type": "OPERATION_UPDATED",
+                "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
+                "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                "aggregate_version": 2,
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+                "committed_at": "2026-09-24T18:00:01Z",
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "affected_refs must be an array"):
+            self.store().snapshot()
 
     def test_exact_retry_after_restart_returns_original_result_without_new_event(self):
         first = self.store()

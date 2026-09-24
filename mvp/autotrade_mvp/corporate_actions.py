@@ -51,6 +51,7 @@ class EquityState:
     recalled_quantity: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
+        quantity = _decimal(self.quantity, name="quantity")
         borrowed = _positive(
             self.borrowed_quantity,
             name="borrowed_quantity",
@@ -63,8 +64,16 @@ class EquityState:
         )
         if recalled > borrowed:
             raise ValueError("recalled_quantity cannot exceed borrowed_quantity")
+        if quantity < 0 and borrowed != -quantity:
+            raise ValueError(
+                "cash-equity short quantity must be fully matched by borrowed_quantity"
+            )
+        if quantity >= 0 and borrowed != 0:
+            raise ValueError(
+                "borrowed_quantity is valid only for an open cash-equity short"
+            )
         object.__setattr__(self, "symbol", _text(self.symbol, name="symbol"))
-        object.__setattr__(self, "quantity", _decimal(self.quantity, name="quantity"))
+        object.__setattr__(self, "quantity", quantity)
         object.__setattr__(
             self,
             "total_basis",
@@ -346,6 +355,10 @@ def record_unsettled_purchase(
 ) -> EquityState:
     qty = _positive(quantity, name="quantity")
     unit_price = _positive(price, name="price")
+    if state.quantity < 0 or state.borrowed_quantity != 0:
+        raise ValueError(
+            "long purchase helper cannot implicitly cover an existing cash-equity short"
+        )
     cost = qty * unit_price
     if cost > state.settled_cash:
         raise ValueError("purchase cannot spend unfunded settled cash")

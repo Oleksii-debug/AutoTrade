@@ -223,6 +223,7 @@ class SubmissionResolution:
     client_order_id: str
     outcome: str
     evidence_reason: str
+    provider_order_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -449,9 +450,17 @@ def reconcile_account(
         submission_time = _instant(
             submission.started_at, name="unknown_submission.started_at"
         )
+        provider_working = provider_working_by_client_id.get(
+            submission.client_order_id
+        )
+        provider_order_ids: tuple[str, ...] = ()
         if submission.client_order_id in provider_client_ids:
             outcome = "OBSERVED_EXECUTION"
             reason = "provider_activity_contains_client_order_id"
+        elif provider_working is not None:
+            outcome = "OBSERVED_WORKING_ORDER"
+            reason = "provider_working_orders_contains_client_order_id"
+            provider_order_ids = (provider_working.provider_order_id,)
         elif (
             pagination_complete
             and submission.client_order_id in searched
@@ -479,6 +488,7 @@ def reconcile_account(
                 client_order_id=submission.client_order_id,
                 outcome=outcome,
                 evidence_reason=reason,
+                provider_order_ids=provider_order_ids,
             )
         )
 
@@ -530,6 +540,8 @@ def reconcile_account(
         reasons.append("one or more submission attempts remain UNKNOWN")
     if any(item.outcome == "OBSERVED_EXECUTION" for item in resolutions):
         reasons.append("previously UNKNOWN submission has provider execution evidence")
+    if any(item.outcome == "OBSERVED_WORKING_ORDER" for item in resolutions):
+        reasons.append("previously UNKNOWN submission has provider working-order evidence")
 
     complete = (
         snapshot_is_consistent

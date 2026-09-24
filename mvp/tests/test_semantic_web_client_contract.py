@@ -180,6 +180,16 @@ class SemanticWebClientContractTests(unittest.TestCase):
         )
         self.assertNotIn("innerHTML", js)
 
+    def test_snapshot_refresh_is_local_get_not_invented_host_command(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        self.assertNotIn('value="REFRESH_STATE"', html)
+        self.assertIn('id="refresh-state" type="button"', html)
+        self.assertIn("async function refreshStateFromUser()", js)
+        self.assertIn('byId("refresh-state").addEventListener("click", refreshStateFromUser)', js)
+        self.assertIn("await refreshSnapshot();", js)
+        self.assertNotIn('action: "REFRESH_STATE"', js)
+
     def test_keyboard_and_high_contrast_rules_are_explicit(self):
         css = CSS.read_text(encoding="utf-8")
         self.assertIn(".skip-link:focus", css)

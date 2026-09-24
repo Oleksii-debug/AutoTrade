@@ -68,6 +68,31 @@ class FuturesLifecycleTests(unittest.TestCase):
             Decimal("0.00090909"),
         )
 
+    def test_settlement_quantum_rounding_uses_actual_step_not_only_decimal_places(self):
+        value = Fraction(13, 100)
+        self.assertEqual(
+            settle_fraction(value, quantum=Decimal("0.05"), rounding="HALF_EVEN"),
+            Decimal("0.15"),
+        )
+        self.assertEqual(
+            settle_fraction(value, quantum=Decimal("0.05"), rounding="DOWN"),
+            Decimal("0.10"),
+        )
+        self.assertEqual(
+            settle_fraction(-value, quantum=Decimal("0.05"), rounding="DOWN"),
+            Decimal("-0.10"),
+        )
+
+    def test_half_even_quantum_tie_uses_even_multiple(self):
+        self.assertEqual(
+            settle_fraction(Fraction(1, 8), quantum=Decimal("0.05"), rounding="HALF_EVEN"),
+            Decimal("0.10"),
+        )
+        self.assertEqual(
+            settle_fraction(Fraction(7, 40), quantum=Decimal("0.05"), rounding="HALF_EVEN"),
+            Decimal("0.20"),
+        )
+
     def test_variation_margin_is_not_counted_again_as_unrealized(self):
         state = VariationMarginState(
             contract=self._linear_contract(),

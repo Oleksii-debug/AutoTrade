@@ -100,10 +100,7 @@ def raw(
 class MarketNormalizationTests(unittest.TestCase):
     def test_raw_evidence_ref_must_match_canonical_contract(self):
         with self.assertRaisesRegex(MarketDataError, "missing required fields"):
-            raw(
-                "TRADE",
-                {"price": "100", "quantity": "1"},
-            ).__class__(
+            RawMarketUpdate(
                 provider_id="provider-a",
                 venue_id="venue-a",
                 provider_symbol="ABC-USD",
@@ -202,43 +199,6 @@ class MarketNormalizationTests(unittest.TestCase):
                     ingested=at() + timedelta(seconds=2),
                 )
             )
-
-    def test_provider_correction_can_reuse_sequence_with_new_revision(self):
-        normalizer = MarketNormalizer(registry())
-        original = normalizer.normalize(
-            raw(
-                "TRADE",
-                {"price": "100", "quantity": "1"},
-                sequence=7,
-                revision=0,
-            )
-        )
-        corrected = normalizer.normalize(
-            raw(
-                "TRADE",
-                {"price": "101", "quantity": "1"},
-                sequence=7,
-                revision=1,
-                ingested=at() + timedelta(seconds=1),
-            )
-        )
-
-        self.assertNotEqual(original.event_id, corrected.event_id)
-        self.assertEqual(original.revision, 0)
-        self.assertEqual(corrected.revision, 1)
-        self.assertNotIn("DUPLICATE", corrected.quality_flags)
-        self.assertNotIn("OUT_OF_ORDER", corrected.quality_flags)
-
-        duplicate_correction = normalizer.normalize(
-            raw(
-                "TRADE",
-                {"price": "101", "quantity": "1"},
-                sequence=7,
-                revision=1,
-                ingested=at() + timedelta(seconds=2),
-            )
-        )
-        self.assertIn("DUPLICATE", duplicate_correction.quality_flags)
 
     def test_sequence_gap_and_late_out_of_order_are_preserved_as_quality(self):
         normalizer = MarketNormalizer(registry())

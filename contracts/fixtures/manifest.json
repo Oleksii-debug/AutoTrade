@@ -14,6 +14,12 @@
       "expected": "valid"
     },
     {
+      "path": "instrument-version.valid.json",
+      "schema": "market.schema.json",
+      "definition": "InstrumentVersion",
+      "expected": "valid"
+    },
+    {
       "path": "model-request.valid.json",
       "schema": "model.schema.json",
       "definition": "ModelRequest",

@@ -361,12 +361,15 @@ class ModelBudgetLedger:
 
     def mark_unbilled(self, reservation_id: str, *, estimated_cost=None) -> None:
         key = _text(reservation_id, name="reservation_id")
-        reserved = self._reservations.pop(key, None)
+        reserved = self._reservations.get(key)
         if reserved is None:
             raise ModelBudgetConflict("unknown active reservation")
         estimate = reserved if estimated_cost is None else _decimal(
             estimated_cost, name="estimated_unbilled_cost"
         )
+        # Validate the replacement amount before mutating the active reservation.
+        # A malformed post-call estimate must never make committed cost disappear.
+        self._reservations.pop(key)
         self._unbilled[key] = estimate
 
     def record_billing(self, reservation_id: str, *, billed_cost) -> None:

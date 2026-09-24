@@ -172,3 +172,53 @@ class ModelGatewayTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BudgetLedgerTests(unittest.TestCase):
+    def test_reservation_is_idempotent(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+        ledger = BudgetLedger(Decimal("2"))
+        ledger.reserve("req", Decimal("1"))
+        ledger.reserve("req", Decimal("1"))
+        self.assertEqual(Decimal("1"), ledger.snapshot().reserved)
+
+    def test_reservation_conflict_is_rejected(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+        ledger = BudgetLedger(Decimal("2"))
+        ledger.reserve("req", Decimal("1"))
+        with self.assertRaises(ValueError):
+            ledger.reserve("req", Decimal("1.1"))
+
+    def test_budget_exhaustion_is_rejected(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+        ledger = BudgetLedger(Decimal("1"))
+        with self.assertRaises(ValueError):
+            ledger.reserve("req", Decimal("1.01"))
+
+    def test_settlement_separates_incurred_and_unbilled(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+        ledger = BudgetLedger(Decimal("2"))
+        ledger.reserve("req", Decimal("1"))
+        ledger.settle("req", incurred=Decimal("0.4"), estimated_unbilled=Decimal("0.3"))
+        snap = ledger.snapshot()
+        self.assertEqual(Decimal("0.4"), snap.incurred)
+        self.assertEqual(Decimal("0.3"), snap.estimated_unbilled)
+        self.assertEqual(Decimal("1.3"), snap.available)
+
+    def test_settlement_cannot_exceed_reservation(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+        ledger = BudgetLedger(Decimal("2"))
+        ledger.reserve("req", Decimal("1"))
+        with self.assertRaises(ValueError):
+            ledger.settle("req", incurred=Decimal("1.01"))
+        self.assertEqual(Decimal("1"), ledger.snapshot().reserved)
+
+    def test_unbilled_reconciliation_moves_cost_to_incurred(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+        ledger = BudgetLedger(Decimal("2"))
+        ledger.reserve("req", Decimal("1"))
+        ledger.settle("req", incurred=Decimal("0.2"), estimated_unbilled=Decimal("0.5"))
+        ledger.reconcile_unbilled(billed=Decimal("0.3"))
+        snap = ledger.snapshot()
+        self.assertEqual(Decimal("0.5"), snap.incurred)
+        self.assertEqual(Decimal("0.2"), snap.estimated_unbilled)

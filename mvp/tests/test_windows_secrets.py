@@ -28,6 +28,13 @@ class DeterministicProtector:
         return ciphertext[len(expected):][::-1]
 
 
+class CannotDecryptProtector(DeterministicProtector):
+    """Simulates the same metadata label under a different OS identity."""
+
+    def unprotect(self, ciphertext: bytes, *, entropy: bytes) -> bytes:
+        raise OSError("different OS identity")
+
+
 class ProtectedCredentialVaultTests(unittest.TestCase):
     def setUp(self):
         self.directory = TemporaryDirectory()
@@ -136,6 +143,33 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
             "rotated-value",
         )
         self.assertNotIn("rotated-value", self.path.read_text(encoding="utf-8"))
+
+    def test_rotation_requires_actual_decryption_under_current_identity(self):
+        old = self.register(secret="original-secret")
+        before = self.path.read_bytes()
+        foreign = ProtectedCredentialVault(
+            self.path,
+            protector=CannotDecryptProtector(),
+        )
+
+        with self.assertRaisesRegex(PermissionError, "cannot be decrypted"):
+            foreign.rotate(
+                old,
+                execution_identity="windows-user-1",
+                new_secret_value="attacker-rebound-secret",
+            )
+
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(
+            self.vault.resolve(
+                old,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                purpose="TRADE",
+            ),
+            "original-secret",
+        )
 
     def test_revocation_erases_ciphertext_and_fails_closed_after_restart(self):
         handle = self.register()

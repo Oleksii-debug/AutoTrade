@@ -7,7 +7,9 @@ treats simulated or expected returns as evidence of profitability.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from types import MappingProxyType
 from typing import Mapping, Sequence
 
 
@@ -34,6 +36,81 @@ def _text(value: str, *, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
+
+
+def _instant(value: str, *, name: str) -> datetime:
+    text = _text(value, name=name)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{name} must be an ISO timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{name} must include timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+@dataclass(frozen=True)
+class StressScenarioEvidence:
+    """Immutable decision-time stress evidence with explicit validity."""
+
+    name: str
+    shocks: Mapping[str, Decimal]
+    observed_at: str
+    valid_until: str
+    source_ref: str
+
+    def __post_init__(self) -> None:
+        name = _text(self.name, name="stress evidence name")
+        source = _text(self.source_ref, name="stress evidence source_ref")
+        observed = _instant(self.observed_at, name="stress evidence observed_at")
+        valid_until = _instant(self.valid_until, name="stress evidence valid_until")
+        if valid_until < observed:
+            raise ValueError("stress evidence valid_until must not precede observed_at")
+        if not isinstance(self.shocks, Mapping) or not self.shocks:
+            raise ValueError("stress evidence shocks must be a non-empty mapping")
+        normalized: dict[str, Decimal] = {}
+        for symbol, shock in self.shocks.items():
+            key = _text(symbol, name="stress evidence symbol")
+            if key in normalized:
+                raise ValueError("stress evidence symbols must be unique")
+            normalized[key] = _decimal(shock, name=f"stress evidence shock {key}")
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "source_ref", source)
+        object.__setattr__(
+            self,
+            "observed_at",
+            observed.isoformat().replace("+00:00", "Z"),
+        )
+        object.__setattr__(
+            self,
+            "valid_until",
+            valid_until.isoformat().replace("+00:00", "Z"),
+        )
+        object.__setattr__(self, "shocks", MappingProxyType(normalized))
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        name: str,
+        shocks: Mapping[str, object],
+        observed_at: str,
+        valid_until: str,
+        source_ref: str,
+    ) -> "StressScenarioEvidence":
+        return cls(
+            name=name,
+            shocks=shocks,
+            observed_at=observed_at,
+            valid_until=valid_until,
+            source_ref=source_ref,
+        )
+
+    def valid_at(self, decision_time: str) -> bool:
+        point = _instant(decision_time, name="decision_time")
+        observed = _instant(self.observed_at, name="stress evidence observed_at")
+        valid_until = _instant(self.valid_until, name="stress evidence valid_until")
+        return observed <= point <= valid_until
 
 
 @dataclass(frozen=True)
@@ -218,6 +295,7 @@ class AllocationPolicy:
     max_iterations: int = 64
     min_scale_tolerance: Decimal = Decimal("0.000001")
     require_adverse_stress_evidence: bool = True
+    require_fresh_stress_evidence: bool = True
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -246,6 +324,8 @@ class AllocationPolicy:
             raise ValueError("max_iterations must be a positive integer")
         if not isinstance(self.require_adverse_stress_evidence, bool):
             raise TypeError("require_adverse_stress_evidence must be a boolean")
+        if not isinstance(self.require_fresh_stress_evidence, bool):
+            raise TypeError("require_fresh_stress_evidence must be a boolean")
         object.__setattr__(
             self,
             "min_scale_tolerance",
@@ -269,11 +349,14 @@ class AllocationPolicy:
         max_iterations: int = 64,
         min_scale_tolerance="0.000001",
         require_adverse_stress_evidence: bool = True,
+        require_fresh_stress_evidence: bool = True,
     ) -> "AllocationPolicy":
         if not isinstance(max_iterations, int) or isinstance(max_iterations, bool) or max_iterations < 1:
             raise ValueError("max_iterations must be a positive integer")
         if not isinstance(require_adverse_stress_evidence, bool):
             raise TypeError("require_adverse_stress_evidence must be a boolean")
+        if not isinstance(require_fresh_stress_evidence, bool):
+            raise TypeError("require_fresh_stress_evidence must be a boolean")
         return cls(
             cash_available=_positive(cash_available, name="cash_available", allow_zero=True),
             max_gross_notional=_positive(max_gross_notional, name="max_gross_notional", allow_zero=True),
@@ -289,6 +372,7 @@ class AllocationPolicy:
             max_iterations=max_iterations,
             min_scale_tolerance=_positive(min_scale_tolerance, name="min_scale_tolerance"),
             require_adverse_stress_evidence=require_adverse_stress_evidence,
+            require_fresh_stress_evidence=require_fresh_stress_evidence,
         )
 
 
@@ -371,6 +455,37 @@ def _normalize_stress_scenarios(
                 f"{', '.join(missing)}"
             )
     return normalized
+
+
+def _normalize_stress_evidence(
+    candidates: Sequence[AllocationCandidate],
+    evidence: Sequence[StressScenarioEvidence],
+    *,
+    decision_time: str | None,
+) -> tuple[dict[str, dict[str, Decimal]], str | None]:
+    if decision_time is None:
+        return {}, "fresh stress evidence requires an explicit decision_time"
+    point = _instant(decision_time, name="decision_time")
+    materialized = tuple(evidence)
+    if not materialized:
+        return {}, "fresh stress evidence is required before increasing exposure"
+    if any(not isinstance(item, StressScenarioEvidence) for item in materialized):
+        raise TypeError("stress_evidence must contain StressScenarioEvidence values")
+    names = [item.name for item in materialized]
+    if len(names) != len(set(names)):
+        raise ValueError("stress evidence names must be unique")
+    for item in materialized:
+        observed = _instant(item.observed_at, name="stress evidence observed_at")
+        valid_until = _instant(item.valid_until, name="stress evidence valid_until")
+        if observed > point:
+            return {}, f"stress evidence {item.name} was not observable at decision_time"
+        if point > valid_until:
+            return {}, f"stress evidence {item.name} expired before decision_time"
+    normalized = _normalize_stress_scenarios(
+        candidates,
+        {item.name: dict(item.shocks) for item in materialized},
+    )
+    return normalized, None
 
 
 def _evaluate(
@@ -496,6 +611,8 @@ def allocate_targets(
     policy: AllocationPolicy,
     *,
     stress_scenarios: Mapping[str, Mapping[str, object]] | None = None,
+    stress_evidence: Sequence[StressScenarioEvidence] = (),
+    decision_time: str | None = None,
 ) -> AllocationResult:
     """Return the largest uniformly scaled feasible target set.
 
@@ -507,6 +624,14 @@ def allocate_targets(
         return _cash_fallback(candidates, reason="no allocation candidates")
 
     normalized_stress = _normalize_stress_scenarios(candidates, stress_scenarios)
+    if policy.require_adverse_stress_evidence and policy.require_fresh_stress_evidence:
+        normalized_stress, evidence_problem = _normalize_stress_evidence(
+            candidates,
+            stress_evidence,
+            decision_time=decision_time,
+        )
+        if evidence_problem is not None:
+            return _cash_fallback(candidates, reason=evidence_problem)
 
     if policy.minimum_cash_reserve > policy.cash_available:
         return _cash_fallback(
@@ -621,6 +746,8 @@ def allocate_objective_targets(
     policy: AllocationPolicy,
     *,
     stress_scenarios: Mapping[str, Mapping[str, object]] | None = None,
+    stress_evidence: Sequence[StressScenarioEvidence] = (),
+    decision_time: str | None = None,
     max_candidate_sets: int = 64,
 ) -> ObjectiveAllocationResult:
     """Select a deterministic feasible candidate prefix by expected net utility.
@@ -659,6 +786,23 @@ def allocate_objective_targets(
         allocation_candidates,
         stress_scenarios,
     )
+    normalized_evidence: tuple[StressScenarioEvidence, ...] = ()
+    if policy.require_adverse_stress_evidence and policy.require_fresh_stress_evidence:
+        normalized_stress, evidence_problem = _normalize_stress_evidence(
+            allocation_candidates,
+            stress_evidence,
+            decision_time=decision_time,
+        )
+        if evidence_problem is not None:
+            fallback = _cash_fallback(allocation_candidates, reason=evidence_problem)
+            return ObjectiveAllocationResult(
+                allocation=fallback,
+                selected_symbols=(),
+                expected_net_utility=Decimal("0"),
+                objective_version="deterministic-net-utility-v1",
+                reason=evidence_problem,
+            )
+        normalized_evidence = tuple(stress_evidence)
 
     if len(candidates) > max_candidate_sets:
         fallback = _cash_fallback(
@@ -713,10 +857,22 @@ def allocate_objective_targets(
             }
             for scenario_name, scenario in normalized_stress.items()
         }
+        projected_evidence = tuple(
+            StressScenarioEvidence.create(
+                name=item.name,
+                shocks={symbol: item.shocks[symbol] for symbol in prefix_symbols},
+                observed_at=item.observed_at,
+                valid_until=item.valid_until,
+                source_ref=item.source_ref,
+            )
+            for item in normalized_evidence
+        )
         result = allocate_targets(
             [item.candidate for item in prefix],
             policy,
             stress_scenarios=projected_stress,
+            stress_evidence=projected_evidence,
+            decision_time=decision_time,
         )
         if result.status != "ALLOCATED":
             continue

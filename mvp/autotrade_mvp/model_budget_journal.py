@@ -128,6 +128,7 @@ class DurableModelBudget:
         if event_type == "ModelUnbilledReconciled":
             ledger.reconcile_unbilled(
                 billing_id=payload["billing_id"],
+                request_id=payload["request_id"],
                 billed=payload["billed"],
             )
             return
@@ -293,15 +294,30 @@ class DurableModelBudget:
             validate=validate,
         )
 
-    def reconcile_unbilled(self, *, billing_id: str, billed) -> bool:
+    def reconcile_unbilled(
+        self,
+        *,
+        billing_id: str,
+        request_id: str,
+        billed,
+    ) -> bool:
         billing_id = _text(billing_id, name="billing_id")
+        request_id = _text(request_id, name="request_id")
         # The ceiling parser enforces the same exact, finite, non-negative
         # Decimal boundary as the canonical ledger.
         normalized = BudgetLedger(billed).snapshot().ceiling
-        request = {"billing_id": billing_id, "billed": str(normalized)}
+        request = {
+            "billing_id": billing_id,
+            "request_id": request_id,
+            "billed": str(normalized),
+        }
 
         def validate(ledger: BudgetLedger) -> None:
-            ledger.reconcile_unbilled(billing_id=billing_id, billed=normalized)
+            ledger.reconcile_unbilled(
+                billing_id=billing_id,
+                request_id=request_id,
+                billed=normalized,
+            )
 
         return self._commit(
             action="billing",

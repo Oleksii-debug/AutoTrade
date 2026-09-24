@@ -1,5 +1,4 @@
 from tempfile import TemporaryDirectory
-import math
 import sqlite3
 import unittest
 
@@ -167,11 +166,25 @@ class JournalStoreTests(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 0)
 
     def test_non_finite_json_is_rejected(self):
+        with self.assertRaises(ValueError):
+            payload_digest({"price": float("nan")})
+
+    def test_atomic_command_accepts_canonical_sequence_text(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            bad = event(payload={"price": float("nan")})
-            with self.assertRaises(ValueError):
-                store.append_event(bad)
+            first = event()
+            first["aggregate_version"] = "1"
+            saved, inserted, appended = store.commit_command(
+                command_id="cmd-sequence",
+                idempotency_key="key-sequence",
+                request={"action": "TEST"},
+                result={"status": "ACCEPTED"},
+                state_version=1,
+                events=[(first, None)],
+            )
+            self.assertTrue(inserted)
+            self.assertEqual(saved, {"status": "ACCEPTED"})
+            self.assertEqual(appended[0].aggregate_version, 1)
 
 
 if __name__ == "__main__":

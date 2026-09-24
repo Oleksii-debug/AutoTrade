@@ -21,9 +21,9 @@ def model(model_id, *, remote, cost, latency=50, quality="0.5"):
         provider_id="provider-" + model_id,
         revision="r1",
         remote=remote,
-        estimated_cost=Decimal(cost),
+        estimated_cost=cost,
         latency_ms=latency,
-        quality_score=Decimal(quality),
+        quality_score=quality,
     )
 
 
@@ -32,7 +32,7 @@ def request(*ids, budget="10", remote=True, deadline=None):
         request_id="req-1",
         allowed_model_ids=tuple(ids),
         privacy_remote_allowed=remote,
-        budget_remaining=Decimal(budget),
+        budget_remaining=budget,
         deadline_utc=deadline or NOW + timedelta(minutes=1),
     )
 

@@ -77,6 +77,62 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertTrue((restored / "state" / "journal.sqlite3").is_file())
             self.assertTrue((restored / "artifacts" / "objects" / "sha256").is_dir())
 
+    def test_exact_source_sha_is_recorded_and_enforced_on_restore(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            source_sha = "a" * 40
+            backup = create_backup(
+                state,
+                artifacts,
+                root / "backup",
+                source_sha=source_sha,
+            )
+            manifest = verify_backup(backup, expected_source_sha=source_sha)
+            self.assertEqual(manifest["source_sha"], source_sha)
+            self.assertTrue(manifest["source_sha_bound"])
+            self.assertNotIn("SOURCE_SHA_UNBOUND", manifest["unresolved_limits"])
+
+            with self.assertRaisesRegex(BackupCompatibilityError, "source SHA"):
+                restore_backup(
+                    backup,
+                    root / "wrong-build",
+                    expected_source_sha="b" * 40,
+                )
+            self.assertFalse((root / "wrong-build").exists())
+
+            restored = restore_backup(
+                backup,
+                root / "matched-build",
+                expected_source_sha=source_sha,
+            )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_unbound_backup_is_truthfully_marked_non_exact(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            manifest = verify_backup(backup)
+            self.assertIsNone(manifest["source_sha"])
+            self.assertFalse(manifest["source_sha_bound"])
+            self.assertIn("SOURCE_SHA_UNBOUND", manifest["unresolved_limits"])
+            with self.assertRaisesRegex(BackupCompatibilityError, "source SHA"):
+                verify_backup(backup, expected_source_sha="a" * 40)
+
+    def test_malformed_source_sha_is_rejected_before_backup_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            with self.assertRaisesRegex(BackupCompatibilityError, "source_sha"):
+                create_backup(
+                    state,
+                    artifacts,
+                    root / "backup",
+                    source_sha="not-a-sha",
+                )
+            self.assertFalse((root / "backup").exists())
+
     def test_logically_inconsistent_runtime_snapshot_is_rejected(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

@@ -1,5 +1,6 @@
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.durable_host_api import JournalBackedHostCommandStore
 from mvp.autotrade_mvp.host_api import EventGap
@@ -256,6 +257,42 @@ class JournalBackedHostApiTests(unittest.TestCase):
             store.events_after(0)
         recent = store.events_after(1)
         self.assertEqual([event.cursor for event in recent], [2, 3])
+
+    def test_true_concurrent_commit_fence_returns_state_conflict(self):
+        first = self.store()
+        original_commit = first._journal.commit_command
+        raced = False
+
+        def race_then_commit(*args, **kwargs):
+            nonlocal raced
+            if not raced:
+                raced = True
+                competing = self.store()
+                winner = competing.submit(
+                    self.command(
+                        command_id="44444444-4444-4444-4444-444444444444",
+                        key="key-race-winner",
+                        version="0",
+                        actor="bob",
+                        session="session-b",
+                    )
+                )
+                self.assertEqual(winner.status, "ACCEPTED")
+            return original_commit(*args, **kwargs)
+
+        with patch.object(
+            first._journal,
+            "commit_command",
+            side_effect=race_then_commit,
+        ):
+            loser = first.submit(self.command())
+
+        self.assertEqual(loser.status, "CONFLICT")
+        self.assertEqual(loser.reason_codes, ("stale_state_version",))
+        self.assertEqual(loser.state_version, "1")
+        restarted = self.store()
+        self.assertEqual(restarted.state_version, 1)
+        self.assertEqual(len(restarted.events_after(0)), 1)
 
     def test_two_sessions_cannot_commit_against_same_stale_state(self):
         store = self.store()

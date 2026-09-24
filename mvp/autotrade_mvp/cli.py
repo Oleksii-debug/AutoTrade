@@ -3,6 +3,7 @@
 from dataclasses import asdict
 import argparse
 import json
+from pathlib import Path
 
 from .pipeline import run_vertical_slice, run_multi_episode
 
@@ -27,8 +28,6 @@ def main() -> int:
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
 def get_status(state_dir: str) -> dict:
     """Get the current status of the AutoTrade MVP."""
     root = Path(state_dir)
@@ -49,3 +48,7 @@ def get_status(state_dir: str) -> dict:
         }
     except (OSError, json.JSONDecodeError):
         return {"status": "corrupt"}
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

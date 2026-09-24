@@ -296,6 +296,44 @@ class AccountingFoundationTests(unittest.TestCase):
             book.append(second)
         self.assertEqual(book.cash("USD"), Decimal("100"))
 
+    def test_raw_journal_objects_are_canonicalized_before_projection(self):
+        transaction = JournalTransaction(
+            transaction_id=" tx-canonical ",
+            cause_event_id=" cause-canonical ",
+            postings=(
+                Posting(" CASH:USD ", " USD ", Decimal("100")),
+                Posting(" EXTERNAL_EQUITY:USD ", " USD ", Decimal("-100")),
+            ),
+        )
+        book = EconomicBook([transaction])
+        self.assertEqual(transaction.transaction_id, "tx-canonical")
+        self.assertEqual(transaction.cause_event_id, "cause-canonical")
+        self.assertEqual(transaction.postings[0].ledger_account, "CASH:USD")
+        self.assertEqual(transaction.postings[0].asset_or_currency, "USD")
+        self.assertEqual(book.cash("USD"), Decimal("100"))
+
+    def test_logically_identical_whitespace_retry_is_idempotent(self):
+        first = JournalTransaction(
+            transaction_id=" tx-retry ",
+            cause_event_id=" cause-retry ",
+            postings=(
+                Posting(" CASH:USD ", " USD ", Decimal("100")),
+                Posting(" EXTERNAL_EQUITY:USD ", " USD ", Decimal("-100")),
+            ),
+        )
+        retry = JournalTransaction(
+            transaction_id="tx-retry",
+            cause_event_id="cause-retry",
+            postings=(
+                Posting("CASH:USD", "USD", Decimal("100")),
+                Posting("EXTERNAL_EQUITY:USD", "USD", Decimal("-100")),
+            ),
+        )
+        book = EconomicBook()
+        self.assertTrue(book.append(first))
+        self.assertFalse(book.append(retry))
+        self.assertEqual(book.cash("USD"), Decimal("100"))
+
     def test_canonical_transaction_identity_cannot_be_split_with_whitespace(self):
         book = EconomicBook()
         first = JournalTransaction(

@@ -223,7 +223,40 @@ class CapabilityFoundationTests(unittest.TestCase):
                 snapshot_id=SNAPSHOT_2,
                 claims=(claim("API"), claim("API")),
                 observed_at=NOW,
-                required_sources=frozenset({"API"}),
+            )
+
+    def test_future_dated_evidence_is_conflicted_not_expired(self):
+        claims = list(complete_claims())
+        claims[-1] = claim(
+            "INSTRUMENT",
+            observed_at=NOW + timedelta(seconds=1),
+            expires_at=NOW + timedelta(minutes=10),
+        )
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=claims,
+            observed_at=NOW,
+        )
+        self.assertEqual(snapshot.status, "CONFLICTED")
+
+    def test_evidence_reference_is_strict_and_immutable(self):
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(),
+            observed_at=NOW,
+        )
+        with self.assertRaises(TypeError):
+            snapshot.evidence[0]["sha256"] = "sha256:" + "b" * 64
+        with self.assertRaisesRegex(CapabilityError, "sha256"):
+            CapabilityClaim(
+                **{
+                    **claim("API").__dict__,
+                    "evidence_ref": {
+                        "artifact_id": "33333333-3333-4333-8333-333333333333",
+                        "sha256": "bad",
+                        "observed_at": "2026-09-24T15:59:00Z",
+                    },
+                }
             )
 
     def test_contract_projection_contains_current_fail_closed_status(self):

@@ -443,7 +443,13 @@ def reconcile_account(
     for client_order_id in sorted(candidate_matched_working):
         local_detail = local_working_by_client_id.get(client_order_id)
         provider_detail = provider_working_by_client_id[client_order_id]
-        if local_detail is not None and (
+        if local_detail is None:
+            # Identity proves that an ambiguous send reached the provider, so it
+            # prevents blind resend, but it is not enough to prove current open
+            # exposure.  Exact instrument and remaining quantity are required
+            # before the account can become READY.
+            mismatched_working.append(client_order_id)
+        elif (
             local_detail.instrument != provider_detail.instrument
             or local_detail.remaining_quantity != provider_detail.remaining_quantity
         ):
@@ -592,12 +598,15 @@ def reconcile_account(
         )
     if mismatched_working_ids:
         for client_order_id in mismatched_working_ids:
-            local_order = local_working_by_client_id[client_order_id]
+            local_order = local_working_by_client_id.get(client_order_id)
             provider_order = provider_working_by_client_id[client_order_id]
-            blocking.add(f"INSTRUMENT:{local_order.instrument}")
+            if local_order is None:
+                blocking.add("ACCOUNT")
+            else:
+                blocking.add(f"INSTRUMENT:{local_order.instrument}")
             blocking.add(f"INSTRUMENT:{provider_order.instrument}")
         reasons.append(
-            "working-order instrument or remaining quantity differs from local truth"
+            "working-order instrument or remaining quantity is unverified or differs from local truth"
         )
     for currency in cash_differences:
         blocking.add(f"CASH:{currency}")

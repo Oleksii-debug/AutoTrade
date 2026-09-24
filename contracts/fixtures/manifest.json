@@ -37,5 +37,16 @@
       "definition": "UiCommand",
       "expected": "valid"
     }
+  ],
+  "conformance_corpora": [
+    {
+      "path": "common-scalars.corpus.json",
+      "scope": "common-scalar-subset",
+      "languages": [
+        "python",
+        "csharp",
+        "typescript"
+      ]
+    }
   ]
 }

@@ -10,6 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+import base64
+import hashlib
+import hmac
+import json
 import re
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -816,3 +820,107 @@ def normalize_working_orders(
             continue
         by_provider_id[order.provider_order_id] = order
     return tuple(by_provider_id[key] for key in sorted(by_provider_id))
+
+
+def _reject_binary_floats(value: Any, *, path: str = "payload") -> None:
+    if isinstance(value, float):
+        raise ProviderCoreError(f"{path} must not contain binary float")
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            _reject_binary_floats(item, path=f"{path}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _reject_binary_floats(item, path=f"{path}[{index}]")
+
+
+@dataclass(frozen=True)
+class WhiteBitSignedRequest:
+    endpoint: str
+    body: bytes
+    headers: Mapping[str, str]
+    nonce: int
+
+    def safe_debug(self) -> Mapping[str, Any]:
+        return MappingProxyType(
+            {
+                "endpoint": self.endpoint,
+                "nonce": self.nonce,
+                "headers": redact_whitebit_debug(self.headers),
+                "body_length": len(self.body),
+            }
+        )
+
+
+def sign_private_request(
+    *,
+    endpoint: str,
+    parameters: Mapping[str, Any],
+    nonce: int,
+    api_key: str,
+    api_secret: str | bytes,
+    nonce_window: bool = False,
+) -> WhiteBitSignedRequest:
+    """Sign exact request bytes using a caller-owned monotonic nonce.
+
+    This function intentionally does not allocate a nonce, choose credentials,
+    send HTTP, retry, or persist secrets.  Those are separate authorities.
+    """
+
+    path = _text(endpoint, name="endpoint")
+    if not path.startswith("/api/v4/"):
+        raise ProviderCoreError("endpoint must be an absolute WhiteBIT v4 path")
+    if not isinstance(parameters, Mapping):
+        raise TypeError("parameters must be a mapping")
+    if not isinstance(nonce, int) or isinstance(nonce, bool) or nonce <= 0:
+        raise ProviderCoreError("nonce must be a positive integer")
+    key = _text(api_key, name="api_key")
+    if isinstance(api_secret, str):
+        secret_bytes = _text(api_secret, name="api_secret").encode("utf-8")
+    elif isinstance(api_secret, bytes) and api_secret:
+        secret_bytes = api_secret
+    else:
+        raise ProviderCoreError("api_secret is required")
+    if type(nonce_window) is not bool:
+        raise ProviderCoreError("nonce_window must be boolean")
+
+    copied = dict(parameters)
+    if "request" in copied and copied["request"] != path:
+        raise ProviderCoreError("request field conflicts with endpoint")
+    if "nonce" in copied and copied["nonce"] != nonce:
+        raise ProviderCoreError("nonce field conflicts with allocated nonce")
+    if "nonceWindow" in copied and copied["nonceWindow"] != nonce_window:
+        raise ProviderCoreError("nonceWindow conflicts with requested mode")
+    copied["request"] = path
+    copied["nonce"] = nonce
+    if nonce_window:
+        copied["nonceWindow"] = True
+    else:
+        copied.pop("nonceWindow", None)
+
+    _reject_binary_floats(copied)
+    try:
+        body = json.dumps(
+            copied,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise ProviderCoreError("parameters are not JSON serializable") from error
+    payload = base64.b64encode(body)
+    signature = hmac.new(secret_bytes, payload, hashlib.sha512).hexdigest()
+    headers = MappingProxyType(
+        {
+            "Content-Type": "application/json",
+            "X-TXC-APIKEY": key,
+            "X-TXC-PAYLOAD": payload.decode("ascii"),
+            "X-TXC-SIGNATURE": signature,
+        }
+    )
+    return WhiteBitSignedRequest(
+        endpoint=path,
+        body=body,
+        headers=headers,
+        nonce=nonce,
+    )

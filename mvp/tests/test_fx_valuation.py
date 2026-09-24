@@ -151,6 +151,19 @@ class FxValuationTests(unittest.TestCase):
         self.assertEqual(result.total, Decimal("1110.0"))
         self.assertTrue(result.allocatable)
 
+    def test_duplicate_normalized_currency_codes_cannot_double_count_capital(self):
+        with self.assertRaisesRegex(
+            FxValuationError,
+            "duplicate normalized currency codes",
+        ):
+            value_cash_balances(
+                {"USD": "1000", "usd": "1000"},
+                reporting_currency="USD",
+                quotes={},
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+            )
+
     def test_same_currency_and_zero_foreign_balance_need_no_rate(self):
         local = value_amount(
             "25",

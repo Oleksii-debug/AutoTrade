@@ -1,6 +1,8 @@
 import unittest
+from tempfile import TemporaryDirectory
 
 from mvp.autotrade_mvp.authority import AuthorityPolicy, AuthorityService
+from mvp.autotrade_mvp.persistence import JournalStore
 
 
 def policy(**overrides):
@@ -327,6 +329,90 @@ class AuthorityTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "admission_id"):
             service.admit(**{**base, "notional": "101"})
 
+
+    def test_durable_admission_and_confirmation_consumption_survive_restart(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            service = AuthorityService(store)
+            service.register_policy(policy())
+            service.add_confirmation(
+                confirmation_id="c1",
+                policy_id="p1",
+                intent_hash="h1",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument="ABC",
+                action="ORDER.SUBMIT",
+                notional="100",
+                expires_at="2026-09-24T23:00:00Z",
+            )
+            first = service.admit(
+                admission_id="a1", policy_id="p1", intent_hash="h1",
+                account_id="paper-1", environment="PAPER", instrument="ABC",
+                action="ORDER.SUBMIT", notional="100", state_version=1,
+                risk_admitted=True, now="2026-09-24T18:00:00Z",
+                confirmation_id="c1",
+            )
+            self.assertEqual(first.outcome, "ADMITTED")
+
+            restarted = AuthorityService(store)
+            self.assertEqual(
+                restarted.dispatch_allowed(
+                    "a1", intent_hash="h1", account_id="paper-1",
+                    environment="PAPER", instrument="ABC",
+                    action="ORDER.SUBMIT", now="2026-09-24T18:01:00Z",
+                ),
+                (True, "allowed"),
+            )
+            reused = restarted.admit(
+                admission_id="a2", policy_id="p1", intent_hash="h1",
+                account_id="paper-1", environment="PAPER", instrument="ABC",
+                action="ORDER.SUBMIT", notional="100", state_version=2,
+                risk_admitted=True, now="2026-09-24T18:02:00Z",
+                confirmation_id="c1",
+            )
+            self.assertEqual(reused.reason, "confirmation_already_used")
+
+    def test_durable_revocation_survives_restart_and_blocks_dispatch(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            service = AuthorityService(store)
+            service.register_policy(policy(autonomous=True))
+            service.admit(
+                admission_id="a1", policy_id="p1", intent_hash="h1",
+                account_id="paper-1", environment="PAPER", instrument="ABC",
+                action="ORDER.SUBMIT", notional="100", state_version=1,
+                risk_admitted=True, now="2026-09-24T18:00:00Z",
+            )
+            service.revoke_policy(
+                "p1", reason="operator revoke", revoked_at="2026-09-24T18:02:00Z"
+            )
+
+            restarted = AuthorityService(store)
+            self.assertEqual(
+                restarted.dispatch_allowed(
+                    "a1", intent_hash="h1", account_id="paper-1",
+                    environment="PAPER", instrument="ABC",
+                    action="ORDER.SUBMIT", now="2026-09-24T18:03:00Z",
+                ),
+                (False, "policy_revoked"),
+            )
+
+    def test_durable_retry_does_not_duplicate_authority_events(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            first = AuthorityService(store)
+            item = policy(autonomous=True)
+            self.assertTrue(first.register_policy(item))
+            self.assertFalse(first.register_policy(item))
+
+            restarted = AuthorityService(store)
+            self.assertFalse(restarted.register_policy(item))
+            events = store.load_events("authority_state", "canonical")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["AuthorityPolicyRegistered"],
+            )
 
 
 if __name__ == "__main__":

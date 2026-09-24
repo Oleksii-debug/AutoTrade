@@ -56,6 +56,25 @@ def _normalize_text_mapping(values, *, name: str) -> dict[str, str]:
     return normalized
 
 
+def _normalize_nested_mapping(values, *, name: str) -> dict[str, dict[str, Decimal]]:
+    if not isinstance(values, Mapping):
+        raise TypeError(f"{name} must be a mapping")
+    normalized: dict[str, dict[str, Decimal]] = {}
+    for raw_key, raw_value in values.items():
+        key = _identity_key(raw_key, name=name)
+        if key in normalized:
+            raise ValueError(f"{name} keys must be unique after normalization")
+        normalized[key] = _normalize_mapping(
+            raw_value,
+            name=f"{name}[{key}]",
+            parser=lambda value, factor: _decimal(
+                value,
+                name=f"{name}[{key}][{factor}]",
+            ),
+        )
+    return normalized
+
+
 @dataclass(frozen=True)
 class RiskIntent:
     symbol: str
@@ -110,6 +129,7 @@ class RiskPolicy:
     max_asset_concentration_fraction: Decimal | None = None
     max_venue_concentration_fraction: Decimal | None = None
     max_order_participation_fraction: Decimal | None = None
+    max_abs_factor_exposure: Decimal | None = None
 
     @classmethod
     def create(
@@ -128,6 +148,7 @@ class RiskPolicy:
         max_asset_concentration_fraction=None,
         max_venue_concentration_fraction=None,
         max_order_participation_fraction=None,
+        max_abs_factor_exposure=None,
     ) -> "RiskPolicy":
         values = {
             "max_abs_position": _positive(max_abs_position, name="max_abs_position"),
@@ -157,7 +178,21 @@ class RiskPolicy:
             if fraction > 1:
                 raise ValueError(f"{name} cannot exceed 1")
             optional_limits[name] = fraction
-        return cls(**values, **optional_limits)
+
+        factor_limit = (
+            None
+            if max_abs_factor_exposure is None
+            else _positive(
+                max_abs_factor_exposure,
+                name="max_abs_factor_exposure",
+                allow_zero=True,
+            )
+        )
+        return cls(
+            **values,
+            **optional_limits,
+            max_abs_factor_exposure=factor_limit,
+        )
 
 
 @dataclass(frozen=True)
@@ -178,6 +213,7 @@ class RiskContext:
     asset_buckets: Mapping[str, str] | None = None
     venues: Mapping[str, str] | None = None
     liquidity_capacity: Mapping[str, Decimal] | None = None
+    factor_loadings: Mapping[str, Mapping[str, Decimal]] | None = None
 
     @classmethod
     def create(
@@ -199,6 +235,7 @@ class RiskContext:
         asset_buckets: Mapping[str, str] | None = None,
         venues: Mapping[str, str] | None = None,
         liquidity_capacity: Mapping[str, object] | None = None,
+        factor_loadings: Mapping[str, Mapping[str, object]] | None = None,
     ) -> "RiskContext":
         if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
@@ -246,6 +283,10 @@ class RiskContext:
                 allow_zero=True,
             ),
         )
+        normalized_factor_loadings = _normalize_nested_mapping(
+            factor_loadings or {},
+            name="factor_loadings",
+        )
         if not isinstance(stress_scenarios, Sequence) or isinstance(
             stress_scenarios,
             (str, bytes),
@@ -290,6 +331,7 @@ class RiskContext:
             asset_buckets=normalized_asset_buckets,
             venues=normalized_venues,
             liquidity_capacity=normalized_liquidity,
+            factor_loadings=normalized_factor_loadings,
         )
 
 
@@ -392,6 +434,44 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
             participation_evidenced = False
         else:
             participation = intent.quantity / capacity
+
+    factor_exposure = Decimal("0")
+    base_factor_exposure = Decimal("0")
+    factor_exposure_complete = True
+    missing_factor_loadings: set[str] = set()
+    if policy.max_abs_factor_exposure is not None:
+        loading_map = context.factor_loadings or {}
+        projected_factors: dict[str, Decimal] = {}
+        base_factors: dict[str, Decimal] = {}
+        for symbol, notional in notionals.items():
+            symbol_loadings = loading_map.get(symbol)
+            if not symbol_loadings:
+                missing_factor_loadings.add(symbol)
+                continue
+            for factor, loading in symbol_loadings.items():
+                projected_factors[factor] = (
+                    projected_factors.get(factor, Decimal("0"))
+                    + notional * loading
+                )
+        factor_exposure_complete = not missing_factor_loadings
+        if factor_exposure_complete:
+            factor_exposure = max(
+                (abs(value) for value in projected_factors.values()),
+                default=Decimal("0"),
+            )
+        for symbol, notional in base_notionals.items():
+            symbol_loadings = loading_map.get(symbol)
+            if not symbol_loadings:
+                continue
+            for factor, loading in symbol_loadings.items():
+                base_factors[factor] = (
+                    base_factors.get(factor, Decimal("0"))
+                    + notional * loading
+                )
+        base_factor_exposure = max(
+            (abs(value) for value in base_factors.values()),
+            default=Decimal("0"),
+        )
 
     stress_symbols = set(notionals)
     stress_coverage_complete = bool(context.stress_scenarios) or not stress_symbols
@@ -530,6 +610,25 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
             participation if participation_evidenced else "UNKNOWN",
             policy.max_order_participation_fraction,
             "order quantity must stay within evidenced liquidity participation policy",
+        )
+    if policy.max_abs_factor_exposure is not None:
+        add(
+            "factor_exposure",
+            factor_exposure_complete
+            and (
+                factor_exposure <= policy.max_abs_factor_exposure
+                or (
+                    protective_reduction
+                    and factor_exposure < base_factor_exposure
+                )
+            ),
+            (
+                factor_exposure
+                if factor_exposure_complete
+                else "MISSING:" + ",".join(sorted(missing_factor_loadings))
+            ),
+            policy.max_abs_factor_exposure,
+            "correlated factor exposure must stay within the independent policy bound",
         )
     daily_loss = max(-context.daily_pnl, Decimal("0"))
     add(

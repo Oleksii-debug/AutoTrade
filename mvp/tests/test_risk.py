@@ -19,6 +19,7 @@ def policy(**overrides):
         max_asset_concentration_fraction=None,
         max_venue_concentration_fraction=None,
         max_order_participation_fraction=None,
+        max_abs_factor_exposure=None,
     )
     values.update(overrides)
     return RiskPolicy.create(**values)
@@ -473,6 +474,68 @@ class IndependentRiskTests(unittest.TestCase):
             policy(max_asset_concentration_fraction="1.01")
         with self.assertRaises(ValueError):
             policy(max_venue_concentration_fraction="1.01")
+
+    def test_factor_exposure_aggregates_correlated_positions(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(
+                positions={"ABC": "2", "XYZ": "4"},
+                factor_loadings={
+                    "ABC": {"EQUITY": "1"},
+                    "XYZ": {"EQUITY": "0.8"},
+                },
+                stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.10"},),
+            ),
+            policy(max_abs_factor_exposure="450"),
+        )
+        rule = next(item for item in decision.rules if item.rule == "factor_exposure")
+        self.assertFalse(rule.passed)
+        self.assertEqual(rule.observed, "460.0")
+        self.assertFalse(decision.admitted)
+
+    def test_factor_exposure_recognizes_signed_hedge(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(
+                positions={"ABC": "1", "XYZ": "-4"},
+                factor_loadings={
+                    "ABC": {"EQUITY": "1"},
+                    "XYZ": {"EQUITY": "1"},
+                },
+                stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.10"},),
+            ),
+            policy(max_abs_factor_exposure="50"),
+        )
+        rule = next(item for item in decision.rules if item.rule == "factor_exposure")
+        self.assertTrue(rule.passed)
+        self.assertEqual(rule.observed, "0")
+
+    def test_factor_exposure_fails_closed_on_missing_loading(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(
+                positions={"ABC": "1", "XYZ": "1"},
+                factor_loadings={"ABC": {"EQUITY": "1"}},
+                stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.10"},),
+            ),
+            policy(max_abs_factor_exposure="1000"),
+        )
+        rule = next(item for item in decision.rules if item.rule == "factor_exposure")
+        self.assertFalse(rule.passed)
+        self.assertEqual(rule.observed, "MISSING:XYZ")
+
+    def test_factor_loading_rejects_binary_float(self):
+        with self.assertRaises(TypeError):
+            context(factor_loadings={"ABC": {"EQUITY": 1.0}})
 
 
 if __name__ == "__main__":

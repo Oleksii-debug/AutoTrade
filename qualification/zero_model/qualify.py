@@ -9,7 +9,6 @@ and economically reportable.  It does not claim economic edge or live authority.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
@@ -18,7 +17,6 @@ import tempfile
 
 from mvp.autotrade_mvp.economics import build_economic_report
 from mvp.autotrade_mvp.model_gateway import (
-    ModelDescriptor,
     ModelRequest,
     RouteStatus,
     RoutingMode,
@@ -30,6 +28,17 @@ from mvp.autotrade_mvp.pipeline import run_vertical_slice, verify_replay
 
 FIXED_NOW = datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc)
 PRICES = ("100", "101", "102", "103")
+
+
+class UnavailableModelInventory:
+    """Sentinel iterable that fails if ZERO mode tries to inspect model inventory."""
+
+    def __init__(self) -> None:
+        self.touched = False
+
+    def __iter__(self):
+        self.touched = True
+        raise RuntimeError("ZERO mode must not inspect unavailable model inventory")
 
 
 def _require_source_sha(value: str) -> str:
@@ -49,35 +58,16 @@ def qualify(source_sha: str) -> dict[str, object]:
         budget_remaining=Decimal("0"),
         deadline_utc=FIXED_NOW + timedelta(minutes=5),
     )
-    descriptors = (
-        ModelDescriptor(
-            model_id="unavailable-local",
-            provider_id="unavailable",
-            revision=None,
-            remote=False,
-            estimated_cost=Decimal("0"),
-            latency_ms=0,
-            quality_score=Decimal("0"),
-        ),
-        ModelDescriptor(
-            model_id="unavailable-remote",
-            provider_id="unavailable",
-            revision=None,
-            remote=True,
-            estimated_cost=Decimal("1"),
-            latency_ms=1,
-            quality_score=Decimal("1"),
-        ),
-    )
+    inventory = UnavailableModelInventory()
     route = route_model(
         RoutingPolicy(
             mode=RoutingMode.ZERO,
-            allowed_model_ids=tuple(item.model_id for item in descriptors),
+            allowed_model_ids=request.allowed_model_ids,
             allow_remote=False,
             maximum_cost=Decimal("0"),
         ),
         request,
-        descriptors,
+        inventory,
         now_utc=FIXED_NOW,
     )
     if route.status is not RouteStatus.NO_MODEL:
@@ -86,6 +76,8 @@ def qualify(source_sha: str) -> dict[str, object]:
         raise RuntimeError("ZERO routing returned model/provider identity")
     if route.reserved_cost != Decimal("0"):
         raise RuntimeError("ZERO routing reserved model cost")
+    if inventory.touched:
+        raise RuntimeError("ZERO routing inspected unavailable model inventory")
 
     with tempfile.TemporaryDirectory(prefix="autotrade-zero-model-") as directory:
         first = run_vertical_slice(PRICES, directory)
@@ -105,6 +97,27 @@ def qualify(source_sha: str) -> dict[str, object]:
         if report.evidence_count != 1:
             raise RuntimeError("replay duplicated immutable learning evidence")
 
+        with tempfile.TemporaryDirectory(prefix="autotrade-small-capital-") as small_directory:
+            small_first = run_vertical_slice(
+                PRICES,
+                small_directory,
+                initial_cash=Decimal("1"),
+            )
+            small_second = run_vertical_slice(
+                PRICES,
+                small_directory,
+                initial_cash=Decimal("1"),
+            )
+            if small_first.status != "risk_rejected" or small_second.status != "risk_rejected":
+                raise RuntimeError("small-capital slice must fail closed at the risk gate")
+            if small_first.order_id is not None or small_first.fill_id is not None:
+                raise RuntimeError("small-capital rejection created financial execution identity")
+            if not small_second.resumed or not verify_replay(small_directory):
+                raise RuntimeError("small-capital rejection did not remain replayable")
+            small_report = build_economic_report(small_directory)
+            if small_report.trade_count != 0 or small_report.net_pnl != Decimal("0"):
+                raise RuntimeError("small-capital rejection changed economic state")
+
         return {
             "qualification": "WP-62_ZERO_MODEL_FOUNDATION",
             "qualification_schema_version": "1.0.0",
@@ -115,6 +128,7 @@ def qualify(source_sha: str) -> dict[str, object]:
                 "provider_id": route.provider_id,
                 "reserved_cost": str(route.reserved_cost),
                 "reason": route.reason,
+                "model_inventory_touched": inventory.touched,
             },
             "deterministic_financial_slice": {
                 "first_status": first.status,
@@ -126,6 +140,15 @@ def qualify(source_sha: str) -> dict[str, object]:
                 "replay_verified": True,
             },
             "economics": report.as_jsonable(),
+            "small_capital": {
+                "status": small_second.status,
+                "resumed": small_second.resumed,
+                "order_id": small_second.order_id,
+                "fill_id": small_second.fill_id,
+                "reconciled": small_second.reconciled,
+                "replay_verified": True,
+                "economics": small_report.as_jsonable(),
+            },
             "claims": {
                 "live_trading_qualified": False,
                 "economic_edge_proven": False,

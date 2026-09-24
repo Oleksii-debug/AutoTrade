@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
 from typing import FrozenSet
+from uuid import UUID
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -28,6 +29,25 @@ def _text(value: str, *, name: str) -> str:
     return value.strip()
 
 
+def _instrument_version_ref(value: str, *, name: str = "instrument_version") -> str:
+    """Return the canonical immutable instrument-version reference used by market data."""
+
+    text = _text(value, name=name)
+    instrument_id, separator, version_text = text.rpartition(":")
+    if not separator or not instrument_id or not version_text:
+        raise ValueError(f"{name} must be '<instrument UUID>:<positive version>'")
+    try:
+        canonical_id = str(UUID(instrument_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise ValueError(f"{name} must contain a valid instrument UUID") from error
+    if not version_text.isdigit():
+        raise ValueError(f"{name} version must be a positive integer")
+    version = int(version_text)
+    if version < 1 or str(version) != version_text:
+        raise ValueError(f"{name} version must be canonical and positive")
+    return f"{canonical_id}:{version}"
+
+
 def _instant(value: str, *, name: str) -> datetime:
     text = _text(value, name=name)
     try:
@@ -44,7 +64,7 @@ class AuthorityPolicy:
     policy_id: str
     account_id: str
     environments: FrozenSet[str]
-    instruments: FrozenSet[str]
+    instrument_versions: FrozenSet[str]
     actions: FrozenSet[str]
     max_notional: Decimal
     expires_at: str
@@ -58,7 +78,7 @@ class AuthorityPolicy:
         policy_id: str,
         account_id: str,
         environments,
-        instruments,
+        instrument_versions,
         actions,
         max_notional,
         expires_at: str,
@@ -70,14 +90,14 @@ class AuthorityPolicy:
         )
         if not normalized_environments or not normalized_environments <= {"SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("environments must contain supported values")
-        normalized_instruments = frozenset(
-            _text(item, name="instrument") for item in instruments
+        normalized_instrument_versions = frozenset(
+            _instrument_version_ref(item) for item in instrument_versions
         )
         normalized_actions = frozenset(
             _text(item, name="action").upper() for item in actions
         )
-        if not normalized_instruments or not normalized_actions:
-            raise ValueError("instruments and actions must be non-empty")
+        if not normalized_instrument_versions or not normalized_actions:
+            raise ValueError("instrument_versions and actions must be non-empty")
         notional = _decimal(max_notional, name="max_notional")
         if notional <= 0:
             raise ValueError("max_notional must be positive")
@@ -88,7 +108,7 @@ class AuthorityPolicy:
             policy_id=_text(policy_id, name="policy_id"),
             account_id=_text(account_id, name="account_id"),
             environments=normalized_environments,
-            instruments=normalized_instruments,
+            instrument_versions=normalized_instrument_versions,
             actions=normalized_actions,
             max_notional=notional,
             expires_at=expires_at,
@@ -104,7 +124,7 @@ class Confirmation:
     intent_hash: str
     account_id: str
     environment: str
-    instrument: str
+    instrument_version: str
     action: str
     notional: Decimal
     expires_at: str
@@ -117,7 +137,7 @@ class AdmissionRecord:
     intent_hash: str
     account_id: str
     environment: str
-    instrument: str
+    instrument_version: str
     action: str
     notional: Decimal
     risk_reducing: bool
@@ -180,7 +200,7 @@ class AuthorityService:
         intent_hash: str,
         account_id: str,
         environment: str,
-        instrument: str,
+        instrument_version: str,
         action: str,
         notional,
         expires_at: str,
@@ -198,7 +218,7 @@ class AuthorityService:
             intent_hash=_text(intent_hash, name="intent_hash"),
             account_id=_text(account_id, name="account_id"),
             environment=_text(environment, name="environment").upper(),
-            instrument=_text(instrument, name="instrument"),
+            instrument_version=_instrument_version_ref(instrument_version),
             action=_text(action, name="action").upper(),
             notional=confirmation_notional,
             expires_at=expires_at,
@@ -231,7 +251,7 @@ class AuthorityService:
         intent_hash: str,
         account_id: str,
         environment: str,
-        instrument: str,
+        instrument_version: str,
         action: str,
         notional,
         state_version: int,
@@ -245,7 +265,7 @@ class AuthorityService:
         ihash = _text(intent_hash, name="intent_hash")
         account = _text(account_id, name="account_id")
         env = _text(environment, name="environment").upper()
-        symbol = _text(instrument, name="instrument")
+        version_ref = _instrument_version_ref(instrument_version)
         normalized_action = _text(action, name="action").upper()
         if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
@@ -262,7 +282,7 @@ class AuthorityService:
             "intent_hash": ihash,
             "account_id": account,
             "environment": env,
-            "instrument": symbol,
+            "instrument_version": version_ref,
             "action": normalized_action,
             "notional": str(amount),
             "state_version": state_version,
@@ -285,7 +305,7 @@ class AuthorityService:
             (risk_admitted, "risk_rejected"),
             (account == policy.account_id, "account_out_of_scope"),
             (env in policy.environments, "environment_out_of_scope"),
-            (symbol in policy.instruments, "instrument_out_of_scope"),
+            (version_ref in policy.instrument_versions, "instrument_version_out_of_scope"),
             (normalized_action in policy.actions, "action_out_of_scope"),
             (amount <= policy.max_notional, "notional_out_of_scope"),
             (not policy.protection_only or risk_reducing, "protection_policy_requires_risk_reduction"),
@@ -315,7 +335,7 @@ class AuthorityService:
                 elif (
                     confirmation.account_id != account
                     or confirmation.environment != env
-                    or confirmation.instrument != symbol
+                    or confirmation.instrument_version != version_ref
                     or confirmation.action != normalized_action
                     or confirmation.notional != amount
                 ):
@@ -331,7 +351,7 @@ class AuthorityService:
             intent_hash=ihash,
             account_id=account,
             environment=env,
-            instrument=symbol,
+            instrument_version=version_ref,
             action=normalized_action,
             notional=amount,
             risk_reducing=risk_reducing,
@@ -355,7 +375,7 @@ class AuthorityService:
         intent_hash: str,
         account_id: str,
         environment: str,
-        instrument: str,
+        instrument_version: str,
         action: str,
         now: str,
     ) -> tuple[bool, str]:
@@ -369,13 +389,13 @@ class AuthorityService:
         scope = (
             _text(account_id, name="account_id"),
             _text(environment, name="environment").upper(),
-            _text(instrument, name="instrument"),
+            _instrument_version_ref(instrument_version),
             _text(action, name="action").upper(),
         )
         recorded_scope = (
             record.account_id,
             record.environment,
-            record.instrument,
+            record.instrument_version,
             record.action,
         )
         if scope != recorded_scope:

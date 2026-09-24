@@ -22,6 +22,40 @@ def obs(i, price, *, available=None):
 
 
 class DeterministicStrategyTests(unittest.TestCase):
+    def test_direct_observation_cannot_bypass_exact_causal_invariants(self):
+        with self.assertRaises(TypeError):
+            CausalObservation(
+                event_id="direct-float",
+                symbol="AAA",
+                available_at=BASE,
+                price=100.1,
+            )
+        with self.assertRaises(ValueError):
+            CausalObservation(
+                event_id="direct-naive",
+                symbol="AAA",
+                available_at=datetime(2026, 1, 1),
+                price=Decimal("100"),
+            )
+        with self.assertRaises(ValueError):
+            CausalObservation(
+                event_id="direct-zero",
+                symbol="AAA",
+                available_at=BASE,
+                price=Decimal("0"),
+            )
+
+        normalized = CausalObservation(
+            event_id=" event-direct ",
+            symbol=" AAA ",
+            available_at=BASE.astimezone(timezone(timedelta(hours=2))),
+            price="100.00",
+        )
+        self.assertEqual(normalized.event_id, "event-direct")
+        self.assertEqual(normalized.symbol, "AAA")
+        self.assertEqual(normalized.available_at, BASE)
+        self.assertEqual(normalized.price, Decimal("100.00"))
+
     def test_future_observation_is_rejected(self):
         strategy = ReturnThresholdBaseline(lookback=2, threshold="0.01", proposal_quantity="1")
         with self.assertRaises(ValueError):

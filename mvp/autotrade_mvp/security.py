@@ -152,6 +152,20 @@ class SecurityBoundary:
                 raise PermissionError("Role is not authorized")
         return session
 
+    def validate_host_session(self, token: str, actor: str) -> bool:
+        """Fail-closed adapter for HostCommandStore session identity checks.
+
+        Action authorization remains a separate server-side policy concern.
+        This method proves only that the bearer session is current and belongs
+        to the exact actor named by the command.
+        """
+        try:
+            normalized_actor = _required_text(actor, name="actor")
+            session = self.validate_session(token)
+        except (ValueError, PermissionError, RuntimeError):
+            return False
+        return secrets.compare_digest(session.subject, normalized_actor)
+
     def revoke_session(self, token: str) -> None:
         normalized_token = _required_text(token, name="session token")
         if self._sessions.pop(normalized_token, None) is None:

@@ -101,6 +101,40 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result.scale, Decimal("1"))
         self.assertEqual(result.cash_required, Decimal("200"))
 
+    def test_direct_candidate_construction_cannot_create_free_capital(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "capital_requirement_rate must be positive",
+        ):
+            AllocationCandidate(
+                symbol="SHORT",
+                desired_notional=Decimal("-1000"),
+                price=Decimal("10"),
+                lot_size=Decimal("1"),
+                capital_requirement_rate=Decimal("0"),
+            )
+
+    def test_direct_policy_construction_cannot_bypass_financial_bounds(self):
+        with self.assertRaisesRegex(ValueError, "cash_available must be non-negative"):
+            AllocationPolicy(
+                cash_available=Decimal("-1"),
+                max_gross_notional=Decimal("1000"),
+                max_net_notional=Decimal("1000"),
+                max_symbol_notional=Decimal("1000"),
+                max_total_cost=Decimal("100"),
+                max_stress_loss=Decimal("100"),
+            )
+        with self.assertRaisesRegex(ValueError, "max_iterations must be a positive integer"):
+            AllocationPolicy(
+                cash_available=Decimal("1000"),
+                max_gross_notional=Decimal("1000"),
+                max_net_notional=Decimal("1000"),
+                max_symbol_notional=Decimal("1000"),
+                max_total_cost=Decimal("100"),
+                max_stress_loss=Decimal("100"),
+                max_iterations=0,
+            )
+
     def test_capital_requirement_rejects_binary_float_input(self):
         with self.assertRaises(TypeError):
             self.candidate(capital_requirement=0.2)

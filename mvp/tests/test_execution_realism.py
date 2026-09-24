@@ -168,6 +168,39 @@ class ExecutionRealismTests(unittest.TestCase):
         self.assertTrue(result.triggered)
         self.assertEqual(result.filled_quantity, Decimal("0"))
 
+    def test_top_of_book_stop_limit_cannot_reuse_trigger_event_as_fill(self):
+        first = simulate_execution(
+            order(
+                order_type="STOP_LIMIT",
+                stop_price="100",
+                limit_price="102",
+            ),
+            top(bid="100", ask="101"),
+            model(data_fidelity="TOP_OF_BOOK", latency_ms=0),
+        )
+        self.assertEqual(first.status, "NO_FILL")
+        self.assertTrue(first.triggered)
+        self.assertEqual(first.filled_quantity, Decimal("0"))
+        self.assertIn("wait for later liquidity", first.reason)
+
+        later = simulate_execution(
+            order(
+                order_type="STOP_LIMIT",
+                stop_price="100",
+                limit_price="102",
+                already_triggered=True,
+            ),
+            top(
+                market_time="2026-09-24T10:00:00.300000Z",
+                available_at="2026-09-24T10:00:00.350000Z",
+                bid="100",
+                ask="101",
+            ),
+            model(data_fidelity="TOP_OF_BOOK", latency_ms=0),
+        )
+        self.assertEqual(later.status, "FILLED")
+        self.assertEqual(later.fill_price, Decimal("102"))
+
     def test_already_triggered_stop_limit_can_fill_only_on_later_bar(self):
         result = simulate_execution(
             order(

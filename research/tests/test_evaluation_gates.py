@@ -14,6 +14,11 @@ def profile():
         max_drawdown="0.10",
         max_adverse_cost_loss="0.03",
         min_power="0.80",
+        primary_baseline_id="champion",
+        baseline_ids=("cash", "passive", "champion"),
+        selection_correction="holm-v1",
+        max_trials=20,
+        required_regimes=("normal", "stress"),
     )
 
 
@@ -31,6 +36,14 @@ def evidence(**overrides):
         drawdown="0.05",
         adverse_cost_loss="0.01",
         retention_passed=True,
+        baseline_advantages={
+            "cash": "0.04",
+            "passive": "0.035",
+            "champion": "0.03",
+        },
+        selection_correction_applied="holm-v1",
+        trials_attempted=12,
+        regime_coverage=frozenset({"normal", "stress"}),
     )
     values.update(overrides)
     return EvaluationEvidence.create(**values)
@@ -67,6 +80,11 @@ class EvaluationGateTests(unittest.TestCase):
                 max_drawdown="0.10",
                 max_adverse_cost_loss="-0.03",
                 min_power="0.80",
+                primary_baseline_id="champion",
+                baseline_ids=("cash", "passive", "champion"),
+                selection_correction="holm-v1",
+                max_trials=20,
+                required_regimes=("normal", "stress"),
             )
 
     def test_profile_changed_after_result_fails(self):
@@ -83,6 +101,88 @@ class EvaluationGateTests(unittest.TestCase):
             evaluate_gates(profile(), evidence(causal_audit_passed=None)).status,
             "INCONCLUSIVE",
         )
+
+
+    def test_selection_correction_mismatch_fails(self):
+        decision = evaluate_gates(
+            profile(),
+            evidence(selection_correction_applied="none"),
+        )
+        self.assertEqual(decision.status, "FAIL")
+        self.assertEqual(decision.checks["selection_correction"], "FAIL")
+
+    def test_trial_budget_exhaustion_fails_and_missing_count_is_inconclusive(self):
+        self.assertEqual(
+            evaluate_gates(profile(), evidence(trials_attempted=21)).status,
+            "FAIL",
+        )
+        self.assertEqual(
+            evaluate_gates(profile(), evidence(trials_attempted=None)).status,
+            "INCONCLUSIVE",
+        )
+
+    def test_missing_registered_regime_fails(self):
+        decision = evaluate_gates(
+            profile(),
+            evidence(regime_coverage=frozenset({"normal"})),
+        )
+        self.assertEqual(decision.status, "FAIL")
+        self.assertEqual(decision.checks["regime_coverage"], "FAIL")
+
+    def test_baseline_set_must_match_registration(self):
+        decision = evaluate_gates(
+            profile(),
+            evidence(
+                baseline_advantages={
+                    "cash": "0.04",
+                    "champion": "0.03",
+                }
+            ),
+        )
+        self.assertEqual(decision.status, "FAIL")
+        self.assertEqual(decision.checks["baselines"], "FAIL")
+
+    def test_primary_baseline_advantage_is_bound_to_net_advantage(self):
+        decision = evaluate_gates(
+            profile(),
+            evidence(
+                baseline_advantages={
+                    "cash": "0.04",
+                    "passive": "0.035",
+                    "champion": "0.031",
+                }
+            ),
+        )
+        self.assertEqual(decision.status, "FAIL")
+        self.assertEqual(decision.checks["primary_baseline"], "FAIL")
+
+    def test_empty_selection_controls_are_invalid_protocol(self):
+        with self.assertRaises(ValueError):
+            GateProfile.create(
+                profile_id="bad",
+                minimum_net_advantage="0.01",
+                max_drawdown="0.1",
+                max_adverse_cost_loss="0.03",
+                min_power="0.8",
+                primary_baseline_id="champion",
+                baseline_ids=(),
+                selection_correction="holm-v1",
+                max_trials=10,
+                required_regimes=("normal",),
+            )
+        with self.assertRaises(ValueError):
+            GateProfile.create(
+                profile_id="bad",
+                minimum_net_advantage="0.01",
+                max_drawdown="0.1",
+                max_adverse_cost_loss="0.03",
+                min_power="0.8",
+                primary_baseline_id="champion",
+                baseline_ids=("champion",),
+                selection_correction="",
+                max_trials=10,
+                required_regimes=("normal",),
+            )
 
 
 if __name__ == "__main__":

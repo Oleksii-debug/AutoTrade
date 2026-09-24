@@ -1,0 +1,118 @@
+<Window x:Class="AutoTrade.Desktop.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="AutoTrade"
+        Width="760"
+        Height="620"
+        MinWidth="560"
+        MinHeight="460"
+        WindowStartupLocation="CenterScreen"
+        AutomationProperties.Name="AutoTrade desktop control">
+  <DockPanel LastChildFill="True">
+    <StatusBar DockPanel.Dock="Bottom"
+               AutomationProperties.Name="Connection status">
+      <StatusBarItem>
+        <TextBlock x:Name="ConnectionStatus"
+                   Text="Host unavailable"
+                   AutomationProperties.Name="Host connection status"
+                   AutomationProperties.LiveSetting="Polite" />
+      </StatusBarItem>
+    </StatusBar>
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                  HorizontalScrollBarVisibility="Disabled"
+                  Focusable="False">
+      <StackPanel Margin="24">
+        <TextBlock Text="AutoTrade"
+                   FontSize="28"
+                   FontWeight="Bold"
+                   AutomationProperties.Name="AutoTrade" />
+        <TextBlock Margin="0,8,0,20"
+                   TextWrapping="Wrap"
+                   Text="Native safety and status surface. Financial state remains authoritative in the host, not in this window." />
+
+        <GroupBox Header="Active connection"
+                  Margin="0,0,0,16"
+                  AutomationProperties.Name="Active connection">
+          <Grid Margin="12">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto" />
+              <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <Label Grid.Row="0" Grid.Column="0"
+                   Target="{Binding ElementName=HostValue}"
+                   Content="_Host:" />
+            <TextBox x:Name="HostValue"
+                     Grid.Row="0" Grid.Column="1"
+                     Margin="12,2,0,6"
+                     Text="Unavailable"
+                     IsReadOnly="True"
+                     AutomationProperties.Name="Active host" />
+
+            <Label Grid.Row="1" Grid.Column="0"
+                   Target="{Binding ElementName=AccountValue}"
+                   Content="_Account:" />
+            <TextBox x:Name="AccountValue"
+                     Grid.Row="1" Grid.Column="1"
+                     Margin="12,2,0,6"
+                     Text="Unavailable"
+                     IsReadOnly="True"
+                     AutomationProperties.Name="Active account" />
+
+            <Label Grid.Row="2" Grid.Column="0"
+                   Target="{Binding ElementName=EnvironmentValue}"
+                   Content="_Environment:" />
+            <TextBox x:Name="EnvironmentValue"
+                     Grid.Row="2" Grid.Column="1"
+                     Margin="12,2,0,2"
+                     Text="Unavailable"
+                     IsReadOnly="True"
+                     AutomationProperties.Name="Active environment" />
+          </Grid>
+        </GroupBox>
+
+        <GroupBox Header="Emergency controls"
+                  Margin="0,0,0,16"
+                  AutomationProperties.Name="Emergency controls">
+          <StackPanel Margin="12">
+            <TextBlock TextWrapping="Wrap"
+                       Margin="0,0,0,10"
+                       Text="Requesting a block does not mean existing provider orders are cancelled or positions are flat. The host must durably accept the command and report remaining in-flight uncertainty." />
+            <Button x:Name="BlockNewExposureButton"
+                    Width="220"
+                    HorizontalAlignment="Left"
+                    Padding="10,6"
+                    Content="_Block new exposure"
+                    Click="BlockNewExposure_Click"
+                    AutomationProperties.Name="Block new exposure"
+                    AutomationProperties.HelpText="Request a durable host-side block on new exposure. This does not cancel or flatten existing exposure." />
+            <TextBlock x:Name="EmergencyResult"
+                       Margin="0,12,0,0"
+                       TextWrapping="Wrap"
+                       Focusable="True"
+                       Text="No emergency command has been requested."
+                       AutomationProperties.Name="Emergency command result"
+                       AutomationProperties.LiveSetting="Assertive" />
+          </StackPanel>
+        </GroupBox>
+
+        <GroupBox Header="Web experience"
+                  AutomationProperties.Name="Web experience">
+          <StackPanel Margin="12">
+            <TextBlock TextWrapping="Wrap"
+                       Text="The embedded web experience is not connected in this foundation build. This native surface remains truthful and keyboard-operable if the web layer is unavailable." />
+            <TextBlock Margin="0,8,0,0"
+                       TextWrapping="Wrap"
+                       Text="Use the host status above before relying on any command." />
+          </StackPanel>
+        </GroupBox>
+      </StackPanel>
+    </ScrollViewer>
+  </DockPanel>
+</Window>

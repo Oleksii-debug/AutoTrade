@@ -51,7 +51,11 @@ def evidence(comp=None, model_rights=None, **overrides):
         sbom_hash=H,
         provenance_hash=H,
         dependency_lock_hash=H,
+        sbom_reviewed_for_release_sha=R,
+        provenance_reviewed_for_release_sha=R,
+        dependency_lock_reviewed_for_release_sha=R,
         distributed_component_ids=(comp.component_id,),
+        sbom_component_ids=(comp.component_id,),
         components=(comp,),
         model_data_rights=(rights(),) if model_rights is None else tuple(model_rights),
     )
@@ -101,6 +105,20 @@ class SupplyChainQualificationTests(unittest.TestCase):
         self.assertEqual(result.status, "FAIL")
         self.assertIn("SUPPLY_CHAIN.SBOM_INVENTORY_MISMATCH", result.reason_codes)
 
+    def test_parsed_sbom_inventory_is_required_not_just_component_evidence(self):
+        result = qualify_supply_chain(
+            evidence(sbom_component_ids=("pkg:pypi/other@1.0",))
+        )
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn("SUPPLY_CHAIN.SBOM_INVENTORY_MISMATCH", result.reason_codes)
+
+    def test_top_level_supply_chain_evidence_is_bound_to_exact_release(self):
+        result = qualify_supply_chain(
+            evidence(sbom_reviewed_for_release_sha="2" * 40)
+        )
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn("SUPPLY_CHAIN.STALE_SBOM_REVIEW", result.reason_codes)
+
     def test_missing_or_unknown_model_data_rights_cannot_pass(self):
         missing = qualify_supply_chain(evidence(model_rights=()))
         unknown = qualify_supply_chain(evidence(model_rights=(rights(rights_status="UNKNOWN"),)))
@@ -127,7 +145,11 @@ class SupplyChainQualificationTests(unittest.TestCase):
                 sbom_hash=H,
                 provenance_hash=H,
                 dependency_lock_hash=H,
+                sbom_reviewed_for_release_sha=R,
+                provenance_reviewed_for_release_sha=R,
+                dependency_lock_reviewed_for_release_sha=R,
                 distributed_component_ids=["pkg:pypi/example@1.0"],
+                sbom_component_ids=("pkg:pypi/example@1.0",),
                 components=(component(),),
                 model_data_rights=(rights(),),
             )

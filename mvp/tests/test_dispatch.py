@@ -373,6 +373,98 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(result.reason, "authority_check_invalid_reason")
             self.assertEqual(outbound, 0)
 
+    def test_initial_authority_exception_is_durable_block(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            outbound = 0
+
+            def authority(_hash, _now):
+                raise RuntimeError("authority unavailable")
+
+            def transport(*_args):
+                nonlocal outbound
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            result = GuardedDispatcher(
+                store,
+                owner_token="owner",
+            ).dispatch(
+                attempt_id="authority-error-initial-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "authority_check_error:RuntimeError")
+            self.assertEqual(outbound, 0)
+            events = store.load_events(
+                "submission_attempt",
+                "authority-error-initial-a1",
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "authority_check_error:RuntimeError",
+            )
+
+    def test_final_authority_exception_is_durable_block_before_outbound(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            calls = 0
+            outbound = 0
+
+            def authority(_hash, _now):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return True, "allowed"
+                raise ConnectionError("authority provider failed")
+
+            def transport(_client_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            result = GuardedDispatcher(
+                store,
+                owner_token="owner",
+            ).dispatch(
+                attempt_id="authority-error-final-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "authority_check_error:ConnectionError")
+            self.assertEqual(outbound, 0)
+            events = store.load_events(
+                "submission_attempt",
+                "authority-error-final-a1",
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "authority_check_error:ConnectionError",
+            )
+
     def test_authority_result_shape_must_be_exact_pair(self):
         with TemporaryDirectory() as directory:
             result = GuardedDispatcher(

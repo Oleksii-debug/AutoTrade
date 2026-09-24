@@ -53,7 +53,7 @@ class OrderProjectionTests(unittest.TestCase):
         order.record_fill(fill_id="f1", quantity="1", price="10")
         order.cancel()
         self.assertEqual(order.state, "PARTIALLY_FILLED_CANCELLED")
-        self.assertIsNone(order.economic_terminal_outcome)
+        self.assertEqual(order.economic_terminal_outcome, "CANCELLED")
 
     def test_duplicate_fill_is_idempotent_but_conflict_fails(self):
         order = OrderProjection(client_order_id="c1", requested_quantity="2")
@@ -86,6 +86,15 @@ class OrderProjectionTests(unittest.TestCase):
         self.assertEqual(order.filled_quantity, Decimal("1.5"))
         self.assertEqual(order.average_fill_price, Decimal("12"))
         self.assertEqual(order.snapshot().fill_count, 1)
+
+    def test_partial_fill_after_reject_releases_only_unfilled_remainder(self):
+        order = OrderProjection(client_order_id="c-reject-partial", requested_quantity="2")
+        order.acknowledge(provider_order_id="p1", status="REJECTED")
+        order.record_fill(fill_id="f1", quantity="1", price="10")
+        self.assertEqual(order.state, "PARTIALLY_FILLED_AFTER_REJECT")
+        self.assertEqual(order.economic_terminal_outcome, "REJECTED")
+        self.assertEqual(order.filled_quantity, Decimal("1"))
+        self.assertEqual(order.open_quantity, Decimal("1"))
 
     def test_reject_cannot_erase_late_provider_fill(self):
         order = OrderProjection(client_order_id="c1", requested_quantity="1")

@@ -576,9 +576,12 @@ class MarketNormalizer:
                     new_sequence = True
                     last = self._last_sequence.get(stream_key)
                     if update.kind == "BOOK_SNAPSHOT":
-                        # A verified snapshot is the recovery boundary and
-                        # establishes a new sequence baseline.
-                        self._last_sequence[stream_key] = update.source_sequence
+                        # A verified snapshot may establish a new baseline only
+                        # when it does not move the stream sequence backward.
+                        if last is not None and update.source_sequence < last:
+                            flags.add("OUT_OF_ORDER")
+                        else:
+                            self._last_sequence[stream_key] = update.source_sequence
                     else:
                         if last is not None:
                             if update.source_sequence > last + 1:
@@ -601,9 +604,14 @@ class MarketNormalizer:
                 flags.add("BOOK_UNUSABLE")
                 self._book_state[stream_key] = "UNVERIFIED"
             elif update.kind == "BOOK_SNAPSHOT":
-                if new_sequence:
+                current = self._book_state.get(stream_key, "UNINITIALIZED")
+                if new_sequence and "OUT_OF_ORDER" not in flags:
                     self._book_state[stream_key] = "READY"
-                elif self._book_state.get(stream_key) != "READY":
+                elif "OUT_OF_ORDER" in flags:
+                    # A stale snapshot is unusable as a new baseline. Preserve
+                    # the newer current state rather than rolling sequence truth back.
+                    flags.add("BOOK_UNUSABLE")
+                elif current != "READY":
                     # Replaying an old duplicate snapshot after a later gap cannot
                     # silently re-authorize the book.
                     flags.add("BOOK_UNUSABLE")

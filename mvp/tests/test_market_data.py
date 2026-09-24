@@ -265,6 +265,84 @@ class MarketNormalizationTests(unittest.TestCase):
         )
         self.assertEqual(delta.payload["bids"][0]["quantity"], "0")
 
+    def test_stale_snapshot_cannot_roll_back_book_sequence_or_recover_gap(self):
+        normalizer = MarketNormalizer(registry())
+        normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=10,
+                stream="book",
+            )
+        )
+        normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [["99.98", "1"]], "asks": []},
+                sequence=11,
+                stream="book",
+            )
+        )
+
+        stale = normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.90", "1"]], "asks": [["100.10", "1"]]},
+                sequence=5,
+                stream="book",
+            )
+        )
+        self.assertIn("OUT_OF_ORDER", stale.quality_flags)
+        self.assertIn("BOOK_UNUSABLE", stale.quality_flags)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "READY",
+        )
+
+        gap = normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [["99.97", "1"]], "asks": []},
+                sequence=13,
+                stream="book",
+            )
+        )
+        self.assertIn("SEQUENCE_GAP", gap.quality_flags)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "GAPPED",
+        )
+
+        stale_after_gap = normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.80", "1"]], "asks": [["100.20", "1"]]},
+                sequence=6,
+                stream="book",
+            )
+        )
+        self.assertIn("OUT_OF_ORDER", stale_after_gap.quality_flags)
+        self.assertIn("BOOK_UNUSABLE", stale_after_gap.quality_flags)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "GAPPED",
+        )
+
     def test_book_gap_blocks_new_risk_until_new_snapshot(self):
         normalizer = MarketNormalizer(registry())
         normalizer.normalize(

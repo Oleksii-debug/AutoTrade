@@ -453,6 +453,8 @@ def assess_forward_paper(
 
     if not evidence.costs_complete:
         incomplete.append("actual_costs_incomplete")
+    elif prediction_by_id and not evidence.costs_by_currency:
+        incomplete.append("actual_cost_ledger_empty")
     if not evidence.account_reconciliation_complete:
         incomplete.append("account_reconciliation_incomplete")
 

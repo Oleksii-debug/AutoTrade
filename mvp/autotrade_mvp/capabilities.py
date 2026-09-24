@@ -179,10 +179,16 @@ def artifact_store_evidence_verifier(
             read_bytes = getattr(store, "read_bytes")
             manifest = load_manifest(artifact_id)
             payload = read_bytes(artifact_id)
+        except FileNotFoundError:
+            return EvidenceVerification(
+                valid=False,
+                reason="evidence artifact is missing",
+            )
         except Exception:
             return EvidenceVerification(
                 valid=False,
-                reason="evidence artifact is missing, unreadable, or corrupt",
+                conflicted=True,
+                reason="evidence artifact exists but is unreadable or corrupt",
             )
 
         if type(manifest) is not dict or not isinstance(payload, bytes):

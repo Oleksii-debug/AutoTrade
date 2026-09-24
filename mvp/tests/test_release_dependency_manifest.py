@@ -108,9 +108,26 @@ class ReleaseDependencyManifestTests(unittest.TestCase):
                 }],
                 [{
                     "artifact_id": "qualification-1",
+                    "sha256": "sha256:" + "B" * 64,
+                    "observed_at": "2026-09-24T20:00:00Z",
+                }],
+                [{
+                    "artifact_id": "qualification-1",
                     "sha256": "sha256:" + "b" * 64,
                     "observed_at": "2026-09-24T20:00:00+02:00",
                 }],
+                [
+                    {
+                        "artifact_id": "qualification-1",
+                        "sha256": "sha256:" + "b" * 64,
+                        "observed_at": "2026-09-24T20:00:00Z",
+                    },
+                    {
+                        "artifact_id": " qualification-1 ",
+                        "sha256": "sha256:" + "b" * 64,
+                        "observed_at": "2026-09-24T20:00:01Z",
+                    },
+                ],
             )
             for refs in invalid_refs:
                 with self.subTest(refs=refs):

@@ -84,6 +84,8 @@ def option(
         payoff="OPTION",
         underlying_id="ABC",
         expiry=when(12, 18, 21),
+        settlement_method="PHYSICAL",
+        margin_model_id="option-margin-v1",
         strike=Decimal("100"),
         option_right="CALL",
         exercise_style="AMERICAN",
@@ -234,6 +236,87 @@ class InstrumentRegistryTests(unittest.TestCase):
         self.assertEqual(projected["minimum_notional"], {"amount": "10", "currency": "USD"})
         self.assertEqual(projected["effective_from"], "2026-01-01T00:00:00Z")
 
+    def test_perpetual_requires_funding_and_cannot_invent_expiry(self):
+        with self.assertRaisesRegex(InstrumentRegistryError, "funding_schedule"):
+            InstrumentVersion(
+                instrument_id=A,
+                version=1,
+                provider_id="simulated",
+                venue_id="perpetuals",
+                provider_symbol="ABC-PERP",
+                asset_class="PERPETUAL",
+                base_currency="ABC",
+                quote_currency="USD",
+                settlement_currency="USD",
+                quantity_unit="contract",
+                contract_multiplier="1",
+                price_tick="0.01",
+                quantity_step="1",
+                minimum_quantity="1",
+                calendar_id="CONTINUOUS_24_7",
+                timezone_id="UTC",
+                effective_from=when(1),
+                payoff="LINEAR",
+                underlying_id="ABC",
+                settlement_method="CASH",
+                margin_model_id="perp-margin-v1",
+            )
+
+        with self.assertRaisesRegex(InstrumentRegistryError, "must not invent an expiry"):
+            InstrumentVersion(
+                instrument_id=A,
+                version=1,
+                provider_id="simulated",
+                venue_id="perpetuals",
+                provider_symbol="ABC-PERP",
+                asset_class="PERPETUAL",
+                base_currency="ABC",
+                quote_currency="USD",
+                settlement_currency="USD",
+                quantity_unit="contract",
+                contract_multiplier="1",
+                price_tick="0.01",
+                quantity_step="1",
+                minimum_quantity="1",
+                calendar_id="CONTINUOUS_24_7",
+                timezone_id="UTC",
+                effective_from=when(1),
+                payoff="LINEAR",
+                underlying_id="ABC",
+                settlement_method="CASH",
+                funding_schedule="8h",
+                margin_model_id="perp-margin-v1",
+                expiry=when(12),
+            )
+
+    def test_price_bands_are_exact_and_enforced(self):
+        instrument = InstrumentVersion(
+            **{
+                **spot().__dict__,
+                "price_band_low": Decimal("90"),
+                "price_band_high": Decimal("110"),
+            }
+        )
+        self.assertEqual(instrument.validate_price("90"), Decimal("90"))
+        self.assertEqual(instrument.validate_price("110"), Decimal("110"))
+        with self.assertRaisesRegex(InstrumentRegistryError, "below price_band_low"):
+            instrument.validate_price("89.99")
+        with self.assertRaisesRegex(InstrumentRegistryError, "above price_band_high"):
+            instrument.validate_price("110.01")
+        self.assertEqual(
+            instrument.to_contract_dict()["price_bands"],
+            {"low": "90", "high": "110"},
+        )
+
+    def test_non_derivative_rejects_derivative_only_fields(self):
+        with self.assertRaisesRegex(InstrumentRegistryError, "derivative fields"):
+            InstrumentVersion(
+                **{
+                    **spot().__dict__,
+                    "settlement_method": "CASH",
+                }
+            )
+
     def test_invalid_version_calendar_and_derivative_shape_fail_closed(self):
         registry = InstrumentRegistry()
         with self.assertRaisesRegex(InstrumentConflict, "first instrument version"):
@@ -261,6 +344,8 @@ class InstrumentRegistryTests(unittest.TestCase):
                 effective_from=when(1),
                 payoff="LINEAR",
                 underlying_id="ABC",
+                settlement_method="CASH",
+                margin_model_id="future-margin-v1",
             )
 
 

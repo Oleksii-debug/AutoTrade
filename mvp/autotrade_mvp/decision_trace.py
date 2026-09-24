@@ -158,15 +158,18 @@ class DecisionTraceStore:
         prepared = _redact(trace)
         self._validate_input(prepared)
         records = self._load()
+        # Integrity verification must precede idempotency handling.  Otherwise
+        # an identical retry could silently succeed against a tampered chain
+        # merely because its trace_id and semantic payload still match.
+        if records and not self.verify():
+            raise ValueError("Existing decision trace chain is corrupt")
+
         trace_id = prepared["trace_id"]
         for existing in records:
             if existing.get("trace_id") == trace_id:
                 if _semantic_payload(existing) != prepared:
                     raise ValueError("trace_id already exists with different decision content")
                 return False
-
-        if records and not self.verify():
-            raise ValueError("Existing decision trace chain is corrupt")
 
         previous_hash = records[-1]["record_hash"] if records else GENESIS_HASH
         record = dict(prepared)

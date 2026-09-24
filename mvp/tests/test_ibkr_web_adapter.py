@@ -11,7 +11,10 @@ from mvp.autotrade_mvp.ibkr_web import (
     IbkrExecutionEvidence,
     IbkrWebAdapterError,
     IbkrWebOrderIntent,
+    execution_to_reconciliation_fill,
+    parse_order_submission_response,
     prepare_normalized_order,
+    prepare_reply_confirmation,
 )
 
 
@@ -213,6 +216,87 @@ class IbkrWebAdapterTests(unittest.TestCase):
             order_found=False,
         )
         self.assertEqual(evidence.verdict(), "PROVEN_ABSENT")
+
+
+    def test_acknowledgement_is_not_fill_or_retry_permission(self):
+        outcome = parse_order_submission_response(
+            [
+                {
+                    "order_id": "1234567890",
+                    "order_status": "Submitted",
+                    "encrypt_message": "1",
+                }
+            ]
+        )
+        self.assertEqual(outcome.status, "ACKNOWLEDGED")
+        self.assertEqual(outcome.provider_order_id, "1234567890")
+        self.assertFalse(outcome.proves_fill)
+        self.assertFalse(outcome.retry_same_economic_action)
+
+    def test_reply_message_requires_separate_explicit_guarded_authorization(self):
+        outcome = parse_order_submission_response(
+            [
+                {
+                    "id": "07a13a5a-4a48-44a5-bb25-5ab37b79186c",
+                    "message": ["Order exceeds configured price constraint."],
+                    "isSuppressed": False,
+                    "messageIds": ["o163"],
+                }
+            ]
+        )
+        self.assertEqual(outcome.status, "REPLY_REQUIRED")
+        self.assertFalse(outcome.proves_fill)
+        with self.assertRaisesRegex(IbkrWebAdapterError, "explicit authorization"):
+            prepare_reply_confirmation(outcome, explicit_authorization=False)
+        request = prepare_reply_confirmation(outcome, explicit_authorization=True)
+        self.assertEqual(
+            request.endpoint,
+            "/iserver/reply/07a13a5a-4a48-44a5-bb25-5ab37b79186c",
+        )
+        self.assertEqual(dict(request.body), {"confirmed": True})
+
+    def test_ambiguous_ack_and_reply_shape_fails_closed(self):
+        with self.assertRaisesRegex(IbkrWebAdapterError, "ambiguous"):
+            parse_order_submission_response(
+                [
+                    {
+                        "order_id": "123",
+                        "order_status": "Submitted",
+                        "id": "reply-1",
+                        "message": ["Confirm"],
+                    }
+                ]
+            )
+
+    def test_explicit_provider_error_is_rejected_but_not_retryable(self):
+        outcome = parse_order_submission_response([{"error": "order rejected"}])
+        self.assertEqual(outcome.status, "REJECTED")
+        self.assertEqual(outcome.rejection_reason, "order rejected")
+        self.assertFalse(outcome.retry_same_economic_action)
+
+    def test_unique_execution_maps_to_canonical_reconciliation_fill(self):
+        execution = IbkrExecutionEvidence.create(
+            execution_id="0001.123.01",
+            permanent_order_id=778899,
+            account_id="U1234567",
+            quantity="0.5",
+            price="220.10",
+        )
+        fill = execution_to_reconciliation_fill(
+            execution,
+            client_order_id="at-ibkr-1",
+            instrument="AAPL-CONID-265598:v1",
+            fee_amount="-0.35",
+            fee_currency="USD",
+            trade_time="2026-09-24T20:00:01Z",
+        )
+        self.assertEqual(fill.provider_execution_id, "0001.123.01")
+        self.assertEqual(fill.client_order_id, "at-ibkr-1")
+        self.assertEqual(fill.quantity, Decimal("0.5"))
+        self.assertEqual(fill.price, Decimal("220.10"))
+        self.assertEqual(fill.fee_amount, Decimal("-0.35"))
+        self.assertEqual(fill.fee_currency, "USD")
+
 
 
 if __name__ == "__main__":

@@ -254,6 +254,30 @@ class AlpacaAdapterTests(unittest.TestCase):
                 }
             )
 
+    def test_positive_filled_quantity_requires_average_price(self):
+        with self.assertRaisesRegex(AlpacaAdapterError, "filled_avg_price is required"):
+            parse_order_observation(
+                {
+                    "id": "order-1",
+                    "client_order_id": "at-order-1",
+                    "symbol": "AAPL",
+                    "status": "partially_filled",
+                    "filled_qty": "0.5",
+                    "filled_avg_price": None,
+                }
+            )
+        with self.assertRaisesRegex(AlpacaAdapterError, "filled_avg_price is required"):
+            parse_order_observation(
+                {
+                    "id": "order-1",
+                    "client_order_id": "at-order-1",
+                    "symbol": "AAPL",
+                    "status": "filled",
+                    "filled_qty": "1",
+                    "filled_avg_price": "",
+                }
+            )
+
     def test_missing_filled_quantity_is_not_silently_zero(self):
         with self.assertRaisesRegex(AlpacaAdapterError, "filled_qty is required"):
             parse_order_observation(

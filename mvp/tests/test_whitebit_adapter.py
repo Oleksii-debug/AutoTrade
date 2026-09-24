@@ -7,13 +7,17 @@ from mvp.autotrade_mvp.whitebit_adapter import (
     WhiteBitHistoryCoverage,
     WhiteBitHistoryPageEvidence,
     WhiteBitMarketRules,
+    WhiteBitOpenOrderCoverage,
     build_order_write_plan,
     build_exact_client_order_lookup,
     build_history_page_request,
+    build_open_order_page_request,
     classify_whitebit_write,
     normalize_execution_deal,
     normalize_execution_history,
     normalize_order_observation,
+    normalize_working_order,
+    normalize_working_orders,
     parse_market_rules,
     redact_whitebit_debug,
 )
@@ -468,6 +472,90 @@ class WhiteBitAdapterTests(unittest.TestCase):
                     "minAmount": "0.0001",
                     "minTotal": "5",
                 }
+            )
+
+    def test_active_order_snapshot_maps_to_reconciliation_evidence(self):
+        order = normalize_working_order(
+            {
+                "orderId": 4180284841,
+                "clientOrderId": "",
+                "market": "BTC_USDT",
+                "left": "0.003",
+                "status": "PARTIALLY_FILLED",
+            }
+        )
+        self.assertEqual(order.provider_order_id, "4180284841")
+        self.assertIsNone(order.client_order_id)
+        self.assertEqual(order.instrument, "BTC_USDT")
+        self.assertEqual(order.remaining_quantity, Decimal("0.003"))
+
+    def test_terminal_order_cannot_enter_working_snapshot(self):
+        with self.assertRaisesRegex(ProviderCoreError, "terminal provider order"):
+            normalize_working_order(
+                {
+                    "orderId": 4180284841,
+                    "clientOrderId": "at-old",
+                    "market": "BTC_USDT",
+                    "left": "0.001",
+                    "status": "CANCELED_TAKER_BAND",
+                }
+            )
+
+    def test_working_order_duplicates_are_idempotent_but_conflicts_fail(self):
+        first = {
+            "orderId": 7,
+            "clientOrderId": "at-live",
+            "market": "BTC_USDT",
+            "left": "0.01",
+            "status": "PARTIALLY_FILLED",
+        }
+        self.assertEqual(len(normalize_working_orders([first, dict(first)])), 1)
+        conflict = dict(first)
+        conflict["left"] = "0.02"
+        with self.assertRaisesRegex(ProviderCoreError, "conflicting observations"):
+            normalize_working_orders([first, conflict])
+
+    def test_active_order_pagination_has_100_record_provider_cap(self):
+        request = build_open_order_page_request(offset=0, limit=100)
+        self.assertTrue(request["all_markets"])
+        self.assertEqual(request["payload"], {"offset": 0, "limit": 100})
+        with self.assertRaisesRegex(ProviderCoreError, "between 1 and 100"):
+            build_open_order_page_request(offset=0, limit=101)
+
+        coverage = WhiteBitOpenOrderCoverage()
+        coverage.add_page(
+            WhiteBitHistoryPageEvidence(
+                offset=0,
+                limit=100,
+                record_count=100,
+            )
+        )
+        self.assertFalse(coverage.complete)
+        coverage.add_page(
+            WhiteBitHistoryPageEvidence(
+                offset=100,
+                limit=100,
+                record_count=2,
+            )
+        )
+        self.assertTrue(coverage.complete)
+
+    def test_active_order_pagination_gap_blocks_full_snapshot(self):
+        coverage = WhiteBitOpenOrderCoverage()
+        coverage.add_page(
+            WhiteBitHistoryPageEvidence(
+                offset=0,
+                limit=50,
+                record_count=50,
+            )
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "pagination gap"):
+            coverage.add_page(
+                WhiteBitHistoryPageEvidence(
+                    offset=100,
+                    limit=50,
+                    record_count=0,
+                )
             )
 
     def test_debug_redaction_covers_nested_auth_material(self):

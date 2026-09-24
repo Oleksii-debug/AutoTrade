@@ -18,6 +18,9 @@ class JournalBackedHostApiTests(unittest.TestCase):
         return JournalBackedHostCommandStore(
             JournalStore(self.path),
             session_validator=lambda session, actor: (session, actor) in self.sessions,
+            action_authorizer=lambda session, actor, action, payload: (
+                (session, actor) in self.sessions
+            ),
             max_events=max_events,
             now=lambda: "2026-09-24T18:00:00Z",
         )
@@ -160,6 +163,34 @@ class JournalBackedHostApiTests(unittest.TestCase):
         retried = restarted.submit(stale_command)
         self.assertEqual(retried, stale)
         self.assertEqual(restarted.cursor, 1)
+
+    def test_action_denial_survives_restart_without_financial_event(self):
+        restricted = JournalBackedHostCommandStore(
+            JournalStore(self.path),
+            session_validator=lambda session, actor: (session, actor) in self.sessions,
+            action_authorizer=lambda session, actor, action, payload: (
+                actor == "alice"
+                and action == "BLOCK_NEW_EXPOSURE"
+                and payload.get("scope") == "paper"
+            ),
+            now=lambda: "2026-09-24T18:00:00Z",
+        )
+        command = self.command(payload={"scope": "live"})
+        denied = restricted.submit(command)
+        self.assertEqual(denied.status, "REJECTED")
+        self.assertEqual(denied.reason_codes, ("action_not_authorized",))
+        self.assertEqual(restricted.state_version, 0)
+        self.assertEqual(restricted.cursor, 0)
+
+        restarted = JournalBackedHostCommandStore(
+            JournalStore(self.path),
+            session_validator=lambda session, actor: (session, actor) in self.sessions,
+            action_authorizer=lambda session, actor, action, payload: False,
+            now=lambda: "2026-09-24T18:00:00Z",
+        )
+        self.assertEqual(restarted.submit(command), denied)
+        self.assertEqual(restarted.state_version, 0)
+        self.assertEqual(restarted.cursor, 0)
 
     def test_unsupported_action_rejection_survives_restart_without_event(self):
         first = self.store()

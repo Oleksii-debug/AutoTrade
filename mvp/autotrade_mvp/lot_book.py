@@ -7,6 +7,8 @@ from decimal import Decimal, InvalidOperation
 
 
 def _decimal(value: Decimal | str | int | float) -> Decimal:
+    if isinstance(value, bool) or isinstance(value, float):
+        raise TypeError("Financial values must use Decimal, string or integer input")
     try:
         amount = Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError) as error:

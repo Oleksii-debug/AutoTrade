@@ -6,6 +6,7 @@ from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
     CapabilityError,
     CapabilityRegistry,
+    CapabilitySnapshot,
     derive_capability_snapshot,
 )
 
@@ -90,6 +91,37 @@ class CapabilityFoundationTests(unittest.TestCase):
                 permission_scope="ORDER.WRITE",
             )
         )
+
+    def test_verified_snapshot_cannot_be_forged_by_direct_construction(self):
+        canonical = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(),
+            observed_at=NOW,
+        )
+        with self.assertRaisesRegex(
+            CapabilityError,
+            "only be created by derive_capability_snapshot",
+        ):
+            CapabilitySnapshot(
+                snapshot_id=SNAPSHOT_2,
+                provider_id=canonical.provider_id,
+                account_id=canonical.account_id,
+                entity_id=canonical.entity_id,
+                environment=canonical.environment,
+                instrument_version=canonical.instrument_version,
+                observed_at=canonical.observed_at,
+                expires_at=canonical.expires_at,
+                supported_order_types=frozenset({"MARKET", "LIMIT", "STOP"}),
+                time_in_force=canonical.time_in_force,
+                permission_scopes=frozenset({"ORDER.WRITE"}),
+                position_mode=canonical.position_mode,
+                native_protection=canonical.native_protection,
+                rate_limit_policy_id=canonical.rate_limit_policy_id,
+                data_entitlements=canonical.data_entitlements,
+                evidence=canonical.evidence,
+                status="VERIFIED",
+                sources=canonical.sources,
+            )
 
     def test_missing_required_source_is_unknown(self):
         snapshot = derive_capability_snapshot(

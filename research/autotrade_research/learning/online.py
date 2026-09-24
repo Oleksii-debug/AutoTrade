@@ -264,6 +264,20 @@ def evaluate_online_update(
         {
             "envelope_id": envelope.envelope_id,
             "champion_artifact_hash": envelope.champion_artifact_hash,
+            "parameter_rules": [
+                {
+                    "name": rule.name,
+                    "minimum": str(rule.minimum),
+                    "maximum": str(rule.maximum),
+                    "max_absolute_step": str(rule.max_absolute_step),
+                }
+                for rule in sorted(envelope.parameter_rules, key=lambda item: item.name)
+            ],
+            "eligible_label_versions": sorted(envelope.eligible_label_versions),
+            "min_seconds_between_updates": envelope.min_seconds_between_updates,
+            "max_updates_per_window": envelope.max_updates_per_window,
+            "max_compute_units_per_update": str(envelope.max_compute_units_per_update),
+            "max_drift_score": str(envelope.max_drift_score),
             "label_version": update.label_version,
             "observed_at": update.observed_at.isoformat(),
             "last_update_at": None if update.last_update_at is None else update.last_update_at.isoformat(),

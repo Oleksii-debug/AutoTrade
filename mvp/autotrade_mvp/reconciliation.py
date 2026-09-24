@@ -82,6 +82,76 @@ class CoverageSurfaceEvidence:
 
 
 @dataclass(frozen=True)
+class SnapshotConsistencyEvidence:
+    """Evidence that a multi-surface provider snapshot has one coherent cut."""
+
+    mode: str
+    query_started_at: str
+    query_completed_at: str
+    buffered_stream_events: bool = False
+    replay_complete: bool = False
+    sequence_gap_detected: bool = False
+
+    def __post_init__(self) -> None:
+        normalized = _text(self.mode, name="mode").upper()
+        if normalized not in {"ATOMIC", "COMPOSED"}:
+            raise ValueError("mode must be ATOMIC or COMPOSED")
+        object.__setattr__(self, "mode", normalized)
+        started = _instant(self.query_started_at, name="query_started_at")
+        completed = _instant(self.query_completed_at, name="query_completed_at")
+        if completed < started:
+            raise ValueError("query_completed_at must not precede query_started_at")
+        for field in (
+            "buffered_stream_events",
+            "replay_complete",
+            "sequence_gap_detected",
+        ):
+            if type(getattr(self, field)) is not bool:
+                raise TypeError(f"{field} must be boolean")
+
+    @property
+    def consistent(self) -> bool:
+        if self.mode == "ATOMIC":
+            return True
+        return (
+            self.buffered_stream_events
+            and self.replay_complete
+            and not self.sequence_gap_detected
+        )
+
+
+@dataclass(frozen=True)
+class ProviderWorkingOrderEvidence:
+    provider_order_id: str
+    client_order_id: str | None
+    instrument: str
+    remaining_quantity: Decimal
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        provider_order_id: str,
+        client_order_id: str | None,
+        instrument: str,
+        remaining_quantity,
+    ) -> "ProviderWorkingOrderEvidence":
+        remaining = _decimal(remaining_quantity, name="remaining_quantity")
+        if remaining <= 0:
+            raise ValueError("remaining_quantity must be positive")
+        return cls(
+            provider_order_id=_text(provider_order_id, name="provider_order_id"),
+            client_order_id=(
+                _text(client_order_id, name="client_order_id")
+                if client_order_id is not None
+                else None
+            ),
+            instrument=_text(instrument, name="instrument"),
+            remaining_quantity=remaining,
+        )
+
+
+@dataclass(frozen=True)
 class ProviderFillEvidence:
     provider_execution_id: str
     client_order_id: str | None
@@ -154,6 +224,7 @@ class SubmissionResolution:
     outcome: str
     evidence_reason: str
     provider_execution_ids: tuple[str, ...] = ()
+    provider_order_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -162,6 +233,10 @@ class ReconciliationResult:
     matched_execution_ids: tuple[str, ...]
     unexpected_execution_ids: tuple[str, ...]
     missing_local_execution_ids: tuple[str, ...]
+    matched_working_client_order_ids: tuple[str, ...]
+    unexpected_working_provider_order_ids: tuple[str, ...]
+    missing_local_working_client_order_ids: tuple[str, ...]
+    snapshot_consistent: bool
     cash_differences: Mapping[str, Decimal]
     position_differences: Mapping[str, Decimal]
     submission_resolutions: tuple[SubmissionResolution, ...]
@@ -222,6 +297,9 @@ def reconcile_account(
     provider_positions: Mapping[str, object],
     local_execution_ids: Sequence[str],
     provider_fills: Sequence[ProviderFillEvidence],
+    local_working_client_order_ids: Sequence[str] = (),
+    provider_working_orders: Sequence[ProviderWorkingOrderEvidence] = (),
+    snapshot_consistency: SnapshotConsistencyEvidence | None = None,
     unknown_submissions: Sequence[UnknownSubmission] = (),
     searched_client_order_ids: Sequence[str] = (),
     coverage_start: str,
@@ -290,6 +368,59 @@ def reconcile_account(
     unexpected = tuple(sorted(provider_ids - local_id_set))
     missing = tuple(sorted(local_id_set - provider_ids))
 
+    local_working_ids = tuple(
+        _text(value, name="local_working_client_order_id")
+        for value in local_working_client_order_ids
+    )
+    if len(local_working_ids) != len(set(local_working_ids)):
+        raise ValueError("local_working_client_order_ids must be unique")
+
+    provider_working_by_id: dict[str, ProviderWorkingOrderEvidence] = {}
+    provider_working_by_client_id: dict[str, ProviderWorkingOrderEvidence] = {}
+    for order in provider_working_orders:
+        if not isinstance(order, ProviderWorkingOrderEvidence):
+            raise TypeError(
+                "provider_working_orders must contain ProviderWorkingOrderEvidence"
+            )
+        existing_provider = provider_working_by_id.get(order.provider_order_id)
+        if existing_provider is not None:
+            if existing_provider != order:
+                raise ValueError("provider working order id has conflicting observations")
+            continue
+        provider_working_by_id[order.provider_order_id] = order
+        if order.client_order_id is not None:
+            existing_client = provider_working_by_client_id.get(order.client_order_id)
+            if existing_client is not None and existing_client != order:
+                raise ValueError(
+                    "client order id maps to multiple provider working orders"
+                )
+            provider_working_by_client_id[order.client_order_id] = order
+
+    local_working_set = set(local_working_ids)
+    provider_working_client_ids = set(provider_working_by_client_id)
+    matched_working = tuple(sorted(local_working_set & provider_working_client_ids))
+    missing_local_working = tuple(
+        sorted(local_working_set - provider_working_client_ids)
+    )
+    unexpected_working = tuple(
+        sorted(
+            order.provider_order_id
+            for order in provider_working_by_id.values()
+            if order.client_order_id is None
+            or order.client_order_id not in local_working_set
+        )
+    )
+
+    if snapshot_consistency is not None and not isinstance(
+        snapshot_consistency, SnapshotConsistencyEvidence
+    ):
+        raise TypeError(
+            "snapshot_consistency must be SnapshotConsistencyEvidence"
+        )
+    snapshot_is_consistent = bool(
+        snapshot_consistency is not None and snapshot_consistency.consistent
+    )
+
     cash_differences: dict[str, Decimal] = {}
     for currency in sorted(set(local_cash_map) | set(provider_cash_map)):
         difference = provider_cash_map.get(currency, Decimal("0")) - local_cash_map.get(
@@ -325,9 +456,17 @@ def reconcile_account(
         matched_provider_execution_ids = tuple(
             sorted(provider_execution_ids_by_client.get(submission.client_order_id, set()))
         )
+        matched_provider_order = provider_working_by_client_id.get(
+            submission.client_order_id
+        )
+        matched_provider_order_ids: tuple[str, ...] = ()
         if matched_provider_execution_ids:
             outcome = "OBSERVED_EXECUTION"
             reason = "provider_activity_contains_client_order_id"
+        elif matched_provider_order is not None:
+            outcome = "OBSERVED_WORKING_ORDER"
+            reason = "provider_working_orders_contains_client_order_id"
+            matched_provider_order_ids = (matched_provider_order.provider_order_id,)
         elif (
             pagination_complete
             and submission.client_order_id in searched
@@ -356,11 +495,22 @@ def reconcile_account(
                 outcome=outcome,
                 evidence_reason=reason,
                 provider_execution_ids=matched_provider_execution_ids,
+                provider_order_ids=matched_provider_order_ids,
             )
         )
 
     blocking: set[str] = set()
     reasons: list[str] = []
+    if not snapshot_is_consistent:
+        blocking.add("ACCOUNT")
+        if snapshot_consistency is None:
+            reasons.append("provider snapshot consistency is not evidenced")
+        elif snapshot_consistency.sequence_gap_detected:
+            reasons.append("provider snapshot stream contains a sequence gap")
+        else:
+            reasons.append(
+                "provider composed snapshot did not complete buffered stream replay"
+            )
     if not pagination_complete:
         blocking.add("ACCOUNT")
         reasons.append("provider activity pagination is incomplete")
@@ -372,6 +522,18 @@ def reconcile_account(
     if missing:
         blocking.add("ACCOUNT")
         reasons.append("local fills are absent from provider evidence window")
+    if unexpected_working:
+        for provider_order_id in unexpected_working:
+            order = provider_working_by_id[provider_order_id]
+            blocking.add(f"INSTRUMENT:{order.instrument}")
+        reasons.append(
+            "provider contains working orders absent from local order truth"
+        )
+    if missing_local_working:
+        blocking.add("ACCOUNT")
+        reasons.append(
+            "local working orders are absent from provider working-order snapshot"
+        )
     for currency in cash_differences:
         blocking.add(f"CASH:{currency}")
     if cash_differences:
@@ -385,11 +547,16 @@ def reconcile_account(
         reasons.append("one or more submission attempts remain UNKNOWN")
     if any(item.outcome == "OBSERVED_EXECUTION" for item in resolutions):
         reasons.append("previously UNKNOWN submission has provider execution evidence")
+    if any(item.outcome == "OBSERVED_WORKING_ORDER" for item in resolutions):
+        reasons.append("previously UNKNOWN submission has provider working-order evidence")
 
     complete = (
-        pagination_complete
+        snapshot_is_consistent
+        and pagination_complete
         and not unexpected
         and not missing
+        and not unexpected_working
+        and not missing_local_working
         and not cash_differences
         and not position_differences
         and all(item.outcome != "UNKNOWN" for item in resolutions)
@@ -399,6 +566,10 @@ def reconcile_account(
         matched_execution_ids=matched,
         unexpected_execution_ids=unexpected,
         missing_local_execution_ids=missing,
+        matched_working_client_order_ids=matched_working,
+        unexpected_working_provider_order_ids=unexpected_working,
+        missing_local_working_client_order_ids=missing_local_working,
+        snapshot_consistent=snapshot_is_consistent,
         cash_differences=MappingProxyType(cash_differences),
         position_differences=MappingProxyType(position_differences),
         submission_resolutions=tuple(resolutions),

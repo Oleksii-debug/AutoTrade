@@ -115,6 +115,30 @@ class IndependentRiskTests(unittest.TestCase):
         failed = {rule.rule for rule in decision.rules if not rule.passed}
         self.assertIn("single_notional", failed)
 
+    def test_reduce_only_exit_can_shrink_oversized_position(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="SELL", quantity="8", price="100",
+                expected_state_version=7, reduce_only=True,
+            ),
+            context(positions={"ABC": "10"}),
+            policy(max_single_notional="500"),
+        )
+        self.assertTrue(decision.admitted)
+        self.assertEqual(decision.resulting_position, Decimal("2"))
+
+    def test_unmarked_reduction_does_not_receive_reduce_only_exception(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="SELL", quantity="8", price="100",
+                expected_state_version=7,
+            ),
+            context(positions={"ABC": "10"}),
+            policy(max_single_notional="500"),
+        )
+        self.assertFalse(decision.admitted)
+        self.assertIn("single_notional", {r.rule for r in decision.rules if not r.passed})
+
     def test_risk_boolean_inputs_fail_closed(self):
         with self.assertRaises(TypeError):
             RiskIntent.create(

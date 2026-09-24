@@ -725,66 +725,132 @@ def _read_restore_marker(destination_root: str | Path) -> dict[str, Any]:
 
 
 def _normalize_fencing_evidence(
-    values: Sequence[Mapping[str, object]],
-) -> tuple[dict[str, str], ...]:
+    root: Path,
+    values: Sequence[str],
+    marker: Mapping[str, object],
+    *,
+    completed_at: datetime,
+) -> tuple[dict[str, object], ...]:
+    """Load and verify immutable typed evidence for one sender-fence transition."""
+
     if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
-        raise TypeError("fencing_evidence must be a sequence of canonical EvidenceRef objects")
-    allowed = {"artifact_id", "sha256", "source_uri", "observed_at", "rights_id"}
-    required = {"artifact_id", "sha256", "observed_at"}
-    normalized: list[dict[str, str]] = []
-    artifact_ids: set[str] = set()
-    digests: set[str] = set()
-    for index, value in enumerate(values):
-        if not isinstance(value, Mapping):
-            raise BackupError("fencing evidence must use canonical EvidenceRef objects")
-        keys = set(value)
-        if not required <= keys or not keys <= allowed:
-            raise BackupError("fencing evidence does not match canonical EvidenceRef")
-        try:
-            artifact_id = str(UUID(str(value["artifact_id"])))
-        except (ValueError, TypeError, AttributeError) as error:
-            raise BackupError("fencing evidence artifact_id must be a UUID") from error
-        digest = value["sha256"]
-        if (
-            not isinstance(digest, str)
-            or not digest.startswith("sha256:")
-            or len(digest) != 71
-            or any(ch not in "0123456789abcdef" for ch in digest[7:])
-        ):
-            raise BackupError("fencing evidence sha256 must be canonical")
-        observed = value["observed_at"]
-        if not isinstance(observed, str) or not observed.endswith("Z"):
-            raise BackupError("fencing evidence observed_at must be UTC with Z")
-        try:
-            parsed = datetime.fromisoformat(observed.replace("Z", "+00:00"))
-        except ValueError as error:
-            raise BackupError("fencing evidence observed_at must be an ISO timestamp") from error
-        if parsed.tzinfo is None:
-            raise BackupError("fencing evidence observed_at must include timezone")
-        item: dict[str, str] = {
-            "artifact_id": artifact_id,
-            "sha256": digest,
-            "observed_at": parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        raise TypeError("fencing_evidence must be a sequence of artifact SHA-256 refs")
+    if not values:
+        raise BackupError("immutable old-sender fencing evidence is required")
+
+    source_sha = marker.get("source_sha")
+    old_owner_id = marker.get("source_owner_id")
+    old_owner_epoch = marker.get("source_owner_epoch")
+    backup_manifest_sha256 = marker.get("backup_manifest_sha256")
+    if source_sha is None or marker.get("build_identity_sha256") is None:
+        raise BackupError("Restore completion requires an exact immutable build identity")
+    source_sha = _exact_git_sha(source_sha, name="restore source_sha")
+    if (
+        not isinstance(old_owner_id, str)
+        or not old_owner_id.strip()
+        or isinstance(old_owner_epoch, bool)
+        or not isinstance(old_owner_epoch, int)
+        or old_owner_epoch < 1
+    ):
+        raise BackupError("Restore completion requires a durable source owner fence")
+    backup_manifest_sha256 = _canonical_sha256_ref(
+        backup_manifest_sha256,
+        name="backup_manifest_sha256",
+    )
+
+    restored_at = marker.get("restored_at")
+    if not isinstance(restored_at, str) or not restored_at.endswith("Z"):
+        raise BackupIntegrityError("Restore marker restored_at is invalid")
+    try:
+        restored = datetime.fromisoformat(restored_at.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise BackupIntegrityError("Restore marker restored_at is invalid") from error
+    if restored.tzinfo is None:
+        raise BackupIntegrityError("Restore marker restored_at is invalid")
+    restored = restored.astimezone(timezone.utc)
+
+    normalized: list[dict[str, object]] = []
+    seen_digests: set[str] = set()
+    transition: tuple[str, int] | None = None
+    allowed_mechanisms = {
+        "PROVIDER_SESSION_REVOKED",
+        "EXTERNAL_SENDER_FENCE_CONFIRMED",
+    }
+    for raw_digest in values:
+        digest = _canonical_sha256_ref(raw_digest, name="fencing evidence sha256")
+        if digest in seen_digests:
+            raise BackupError("fencing evidence artifact digest must be unique")
+        seen_digests.add(digest)
+        payload = _load_typed_artifact(
+            root / "artifacts",
+            digest,
+            expected_kind="AUTOTRADE_FENCING_ATTESTATION",
+        )
+        required = {
+            "schema_version",
+            "kind",
+            "backup_manifest_sha256",
+            "source_sha",
+            "old_owner_id",
+            "old_owner_epoch",
+            "new_owner_id",
+            "new_owner_epoch",
+            "mechanism",
+            "observed_at",
         }
-        for optional in ("source_uri", "rights_id"):
-            if optional in value:
-                optional_value = value[optional]
-                if not isinstance(optional_value, str) or not optional_value.strip():
-                    raise BackupError(f"fencing evidence {optional} must be non-empty")
-                item[optional] = optional_value.strip()
-        if artifact_id in artifact_ids:
-            raise BackupError(
-                "fencing evidence artifact_id cannot identify conflicting evidence"
-            )
-        if digest in digests:
-            raise BackupError(
-                "unique old-sender fencing evidence bytes are required"
-            )
-        artifact_ids.add(artifact_id)
-        digests.add(digest)
-        normalized.append(item)
-    if not normalized:
-        raise BackupError("unique old-sender fencing evidence is required")
+        if set(payload) != required:
+            raise BackupError("fencing attestation structure is invalid")
+        if payload["backup_manifest_sha256"] != backup_manifest_sha256:
+            raise BackupError("fencing attestation belongs to another backup")
+        if payload["source_sha"] != source_sha:
+            raise BackupError("fencing attestation belongs to another source build")
+        if payload["old_owner_id"] != old_owner_id or payload["old_owner_epoch"] != old_owner_epoch:
+            raise BackupError("fencing attestation old owner/epoch does not match backup")
+        new_owner_id = _text(payload["new_owner_id"], name="new_owner_id")
+        new_owner_epoch = payload["new_owner_epoch"]
+        if (
+            isinstance(new_owner_epoch, bool)
+            or not isinstance(new_owner_epoch, int)
+            or new_owner_epoch != old_owner_epoch + 1
+        ):
+            raise BackupError("fencing attestation new owner epoch must advance exactly once")
+        if new_owner_id == old_owner_id:
+            raise BackupError("fencing attestation must transfer to a different owner")
+        mechanism = _text(payload["mechanism"], name="fencing mechanism").upper()
+        if mechanism not in allowed_mechanisms:
+            raise BackupError("fencing attestation mechanism is unsupported")
+        observed_at = payload["observed_at"]
+        if not isinstance(observed_at, str) or not observed_at.endswith("Z"):
+            raise BackupError("fencing attestation observed_at must be UTC with Z")
+        try:
+            observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise BackupError("fencing attestation observed_at is invalid") from error
+        if observed.tzinfo is None:
+            raise BackupError("fencing attestation observed_at must include timezone")
+        observed = observed.astimezone(timezone.utc)
+        if observed < restored:
+            raise BackupError("fencing attestation cannot predate the restored runtime")
+        if observed > completed_at:
+            raise BackupError("fencing attestation cannot postdate restore completion")
+        candidate = (new_owner_id, new_owner_epoch)
+        if transition is None:
+            transition = candidate
+        elif transition != candidate:
+            raise BackupError("fencing attestations disagree on the new owner transition")
+        normalized.append(
+            {
+                "sha256": digest,
+                "backup_manifest_sha256": backup_manifest_sha256,
+                "source_sha": source_sha,
+                "old_owner_id": old_owner_id,
+                "old_owner_epoch": old_owner_epoch,
+                "new_owner_id": new_owner_id,
+                "new_owner_epoch": new_owner_epoch,
+                "mechanism": mechanism,
+                "observed_at": observed.isoformat().replace("+00:00", "Z"),
+            }
+        )
     return tuple(normalized)
 
 
@@ -793,16 +859,10 @@ def complete_restore_reconciliation(
     *,
     controller: RecoveryController,
     reconciliation: ReconciliationResult,
-    fencing_evidence: Sequence[Mapping[str, object]],
+    fencing_evidence: Sequence[str],
     completed_at: str,
 ) -> dict[str, Any]:
-    """Durably clear the restore gate only after reconciliation and sender fencing.
-
-    This does not grant live trading authority. It proves only that restored
-    local state has completed the generic recovery gate. Provider qualification,
-    risk admission, policy authority and final dispatch fencing remain separate
-    mandatory controls.
-    """
+    """Clear restore fencing only from exact build, owner and immutable evidence."""
 
     root = Path(destination_root)
     marker = _read_restore_marker(root)
@@ -817,27 +877,6 @@ def complete_restore_reconciliation(
         raise TypeError("controller must be RecoveryController")
     if not isinstance(reconciliation, ReconciliationResult):
         raise TypeError("reconciliation must be ReconciliationResult")
-    refs = _normalize_fencing_evidence(fencing_evidence)
-    if not any(item.get("rights_id") == "recovery:fencing" for item in refs):
-        raise BackupError(
-            "fencing evidence must include an explicit recovery:fencing proof"
-        )
-    restored_at = marker.get("restored_at")
-    if not isinstance(restored_at, str) or not restored_at.endswith("Z"):
-        raise BackupIntegrityError("Restore marker restored_at is invalid")
-    try:
-        restored = datetime.fromisoformat(restored_at.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise BackupIntegrityError("Restore marker restored_at is invalid") from error
-    if restored.tzinfo is None:
-        raise BackupIntegrityError("Restore marker restored_at is invalid")
-    restored_utc = restored.astimezone(timezone.utc)
-    if any(
-        datetime.fromisoformat(item["observed_at"].replace("Z", "+00:00"))
-        < restored_utc
-        for item in refs
-    ):
-        raise BackupError("fencing evidence cannot predate the restored runtime")
     if not isinstance(completed_at, str) or not completed_at.strip():
         raise BackupError("completed_at is required")
     try:
@@ -847,25 +886,29 @@ def complete_restore_reconciliation(
     if completed.tzinfo is None:
         raise BackupError("completed_at must include a timezone")
     completed_utc = completed.astimezone(timezone.utc)
-    if any(
-        datetime.fromisoformat(item["observed_at"].replace("Z", "+00:00")) > completed_utc
-        for item in refs
-    ):
-        raise BackupError("fencing evidence cannot postdate restore completion")
+
+    refs = _normalize_fencing_evidence(
+        root,
+        fencing_evidence,
+        marker,
+        completed_at=completed_utc,
+    )
+    source_owner = OwnerFence(
+        owner_id=marker["source_owner_id"],
+        epoch=marker["source_owner_epoch"],
+    )
+    if controller.owner != source_owner:
+        raise BackupError(
+            "Recovery controller must restore the exact source owner fence before transfer"
+        )
 
     unresolved = tuple(
         item.attempt_id
         for item in reconciliation.submission_resolutions
         if item.outcome == "UNKNOWN"
     )
-    if (
-        not reconciliation.complete
-        or reconciliation.blocks_new_risk
-        or unresolved
-    ):
+    if not reconciliation.complete or reconciliation.blocks_new_risk or unresolved:
         raise BackupError("Restore cannot complete while reconciliation is incomplete")
-    if controller.owner is None:
-        raise BackupError("Restore recovery requires an active fenced owner")
 
     controller.record_reconciliation(consistent=True, uncertainty=unresolved)
     if (
@@ -875,7 +918,7 @@ def complete_restore_reconciliation(
         or not controller.storage_writable
         or not controller.clock_trusted
     ):
-        raise BackupError("Recovery controller is not READY after reconciliation")
+        raise BackupError("Recovery controller is not READY before ownership transfer")
 
     resolution_proof: list[dict[str, Any]] = []
     allowed_resolution_outcomes = {
@@ -917,12 +960,29 @@ def complete_restore_reconciliation(
             }
         )
 
+    new_owner_id = refs[0]["new_owner_id"]
+    expected_new_epoch = refs[0]["new_owner_epoch"]
+    transferred = controller.transfer_owner(
+        new_owner_id=new_owner_id,
+        old_sender_fenced=True,
+        reconciled=True,
+    )
+    if transferred.epoch != expected_new_epoch:
+        raise BackupError("Recovery owner epoch does not match fencing attestation")
+    controller.record_reconciliation(consistent=True, uncertainty=unresolved)
+    if controller.state is not HostState.READY or not controller.provider_reconciled:
+        raise BackupError("Recovery controller is not READY after ownership transfer")
+
     proof = {
-        "schema_version": 1,
+        "schema_version": 2,
         "backup_manifest_sha256": marker["backup_manifest_sha256"],
+        "source_sha": marker["source_sha"],
+        "build_identity_sha256": marker["build_identity_sha256"],
         "completed_at": completed_utc.isoformat().replace("+00:00", "Z"),
-        "owner_id": controller.owner.owner_id,
-        "owner_epoch": controller.owner.epoch,
+        "source_owner_id": source_owner.owner_id,
+        "source_owner_epoch": source_owner.epoch,
+        "owner_id": transferred.owner_id,
+        "owner_epoch": transferred.epoch,
         "fencing_evidence": [dict(item) for item in refs],
         "matched_execution_ids": list(reconciliation.matched_execution_ids),
         "submission_resolutions": resolution_proof,
@@ -977,30 +1037,43 @@ def restore_requires_reconciliation(destination_root: str | Path) -> bool:
         or proof["owner_epoch"] < 1
     ):
         return True
-    if not isinstance(proof.get("fencing_evidence"), list) or not proof["fencing_evidence"]:
+    if (
+        proof.get("source_sha") != marker.get("source_sha")
+        or proof.get("build_identity_sha256") != marker.get("build_identity_sha256")
+        or proof.get("source_owner_id") != marker.get("source_owner_id")
+        or proof.get("source_owner_epoch") != marker.get("source_owner_epoch")
+    ):
+        return True
+    stored_evidence = proof.get("fencing_evidence")
+    if not isinstance(stored_evidence, list) or not stored_evidence:
         return True
     try:
-        evidence = _normalize_fencing_evidence(proof["fencing_evidence"])
         completed_at = proof.get("completed_at")
         if not isinstance(completed_at, str) or not completed_at.endswith("Z"):
             return True
         completed = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
-        restored_at = marker.get("restored_at")
-        if not isinstance(restored_at, str) or not restored_at.endswith("Z"):
+        if completed.tzinfo is None:
             return True
-        restored = datetime.fromisoformat(restored_at.replace("Z", "+00:00"))
-        if any(
-            datetime.fromisoformat(item["observed_at"].replace("Z", "+00:00")) > completed
-            or datetime.fromisoformat(item["observed_at"].replace("Z", "+00:00")) < restored
-            for item in evidence
-        ):
+        digest_refs = [
+            item["sha256"]
+            for item in stored_evidence
+            if isinstance(item, dict) and isinstance(item.get("sha256"), str)
+        ]
+        if len(digest_refs) != len(stored_evidence):
             return True
-        if not any(
-            item.get("rights_id") == "recovery:fencing"
-            for item in evidence
-        ):
+        evidence = _normalize_fencing_evidence(
+            root,
+            digest_refs,
+            marker,
+            completed_at=completed.astimezone(timezone.utc),
+        )
+        if [dict(item) for item in evidence] != stored_evidence:
             return True
-    except (BackupError, TypeError, ValueError):
+        if proof["owner_id"] != evidence[0]["new_owner_id"]:
+            return True
+        if proof["owner_epoch"] != evidence[0]["new_owner_epoch"]:
+            return True
+    except (BackupError, BackupIntegrityError, TypeError, ValueError, KeyError):
         return True
     if proof.get("blocking_resources") != []:
         return True

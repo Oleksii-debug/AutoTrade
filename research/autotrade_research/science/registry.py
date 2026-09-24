@@ -50,7 +50,19 @@ class ProtocolViolation(ValueError):
     pass
 
 
+def _reject_binary_float(payload: Any, path: str = "$") -> None:
+    if isinstance(payload, float):
+        raise ProtocolViolation(f"binary float is not permitted in frozen scientific evidence: {path}")
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            _reject_binary_float(value, f"{path}.{key}")
+    elif isinstance(payload, (list, tuple)):
+        for index, value in enumerate(payload):
+            _reject_binary_float(value, f"{path}[{index}]")
+
+
 def _canonical(payload: Any) -> str:
+    _reject_binary_float(payload)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 
@@ -136,6 +148,39 @@ class ScientificRegistry:
                     untouched INTEGER NOT NULL,
                     created_at TEXT NOT NULL
                 );
+
+                CREATE TRIGGER IF NOT EXISTS protocols_no_update
+                BEFORE UPDATE ON protocols BEGIN
+                    SELECT RAISE(ABORT, 'protocols are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS protocols_no_delete
+                BEFORE DELETE ON protocols BEGIN
+                    SELECT RAISE(ABORT, 'protocols are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS trials_no_update
+                BEFORE UPDATE ON trials BEGIN
+                    SELECT RAISE(ABORT, 'trials are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS trials_no_delete
+                BEFORE DELETE ON trials BEGIN
+                    SELECT RAISE(ABORT, 'trials are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS holdout_access_no_update
+                BEFORE UPDATE ON holdout_access BEGIN
+                    SELECT RAISE(ABORT, 'holdout access is append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS holdout_access_no_delete
+                BEFORE DELETE ON holdout_access BEGIN
+                    SELECT RAISE(ABORT, 'holdout access is append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS evaluations_no_update
+                BEFORE UPDATE ON evaluations BEGIN
+                    SELECT RAISE(ABORT, 'evaluations are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS evaluations_no_delete
+                BEFORE DELETE ON evaluations BEGIN
+                    SELECT RAISE(ABORT, 'evaluations are append-only');
+                END;
                 """
             )
 

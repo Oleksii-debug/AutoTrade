@@ -87,6 +87,44 @@ class IbkrWebAdapterTests(unittest.TestCase):
         with self.assertRaises(IbkrWebAdapterError):
             IbkrContractIdentity(conid=265598, conidex="265598@SMART")
 
+    def test_direct_intent_cannot_bypass_exact_or_regulatory_invariants(self):
+        contract = IbkrContractIdentity(conid=265598)
+        with self.assertRaisesRegex(IbkrWebAdapterError, "exact decimal"):
+            IbkrWebOrderIntent(
+                instrument_version="AAPL-CONID-265598:v1",
+                account_id="U1234567",
+                contract=contract,
+                side="BUY",
+                order_type="MARKET",
+                time_in_force="DAY",
+                quantity=1.0,
+            )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "manual_indicator is required"):
+            IbkrWebOrderIntent(
+                instrument_version="AAPL-CONID-265598:v1",
+                account_id="U1234567",
+                contract=contract,
+                side="BUY",
+                order_type="MARKET",
+                time_in_force="DAY",
+                quantity=Decimal("1"),
+                regulatory_manual_indicator_required=True,
+            )
+        normalized = IbkrWebOrderIntent(
+            instrument_version=" AAPL-CONID-265598:v1 ",
+            account_id=" U1234567 ",
+            contract=contract,
+            side="buy",
+            order_type="limit",
+            time_in_force="day",
+            quantity="1.25",
+            limit_price="220.10",
+        )
+        self.assertEqual(normalized.side, "BUY")
+        self.assertEqual(normalized.order_type, "LIMIT")
+        self.assertEqual(normalized.quantity, Decimal("1.25"))
+        self.assertEqual(normalized.limit_price, Decimal("220.10"))
+
     def test_normalized_limit_order_preserves_exact_decimal_outside_provider_double(self):
         intent = IbkrWebOrderIntent.create(
             instrument_version="AAPL-CONID-265598:v1",

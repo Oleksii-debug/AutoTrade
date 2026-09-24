@@ -206,6 +206,8 @@ class AuthorityService:
         return self._epoch
 
     def register_policy(self, policy: AuthorityPolicy) -> bool:
+        if not isinstance(policy, AuthorityPolicy):
+            raise TypeError("policy must be AuthorityPolicy")
         existing = self._policies.get(policy.policy_id)
         if existing is not None:
             if existing != policy:

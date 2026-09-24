@@ -21,6 +21,14 @@ def policy(**overrides):
 
 
 class AuthorityTests(unittest.TestCase):
+    def test_registration_rejects_unvalidated_policy_objects(self):
+        class MutablePolicy:
+            policy_id = "unsafe"
+
+        service = AuthorityService()
+        with self.assertRaisesRegex(TypeError, "AuthorityPolicy"):
+            service.register_policy(MutablePolicy())
+
     def test_confirmation_is_bound_to_exact_intent_and_single_use(self):
         service = AuthorityService()
         service.register_policy(policy())

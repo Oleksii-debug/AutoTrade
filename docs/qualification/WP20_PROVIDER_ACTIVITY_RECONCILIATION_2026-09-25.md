@@ -50,3 +50,24 @@ WP-20 is not DONE. Product completion still requires:
 - whole-flow recovery and release qualification on delivered Windows artifacts.
 
 This change grants no live trading authority and is not evidence of economic edge.
+
+
+## Atomic external cash activity accounting increment
+
+This lineage now also connects confirmed provider-normalized external cash activity to the existing canonical accounting book without creating another ledger authority.
+
+Implemented on the same branch:
+- only MANUAL/EXTERNAL `DEPOSIT` and `WITHDRAWAL` activity can be mapped to external equity cash flow;
+- provider/account/activity identity is durable and account-scoped;
+- provider evidence and `EconomicTransactionBooked` are committed in one `JournalStore.commit_command` transaction;
+- exact retry after restart is a no-op;
+- changed amount under the same immutable activity identity fails closed through command idempotency;
+- amounts reject binary float and preserve exact Decimal text;
+- withdrawal/deposit sign semantics are explicit;
+- observed evidence cannot predate provider occurrence;
+- restart rebuilds the existing `EconomicBook` from durable events;
+- unsupported durable economic event types fail closed.
+
+Deliberately not mapped here: generic cash adjustments, fees, rebates, dividends, funding, interest, corporate actions, assignments, corrections or UNKNOWN-origin activity. Those require qualified provider-specific normalization and their own canonical accounting mappings; until then they remain reconciliation blockers rather than being guessed into `EXTERNAL_EQUITY`.
+
+Exact-head verification is required before merge. This increment still does not complete WP-20: full provider activity taxonomies, real provider/account fixtures, atomic import of all qualified lifecycle economics, statement-level reconciliation and crash qualification across the complete live recovery flow remain open.

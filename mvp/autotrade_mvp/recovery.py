@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Iterable
 
+from .reconciliation import ReconciliationResult
+
 
 class HostState(str, Enum):
     STOPPED = "STOPPED"
@@ -92,33 +94,41 @@ class OutboundAttempt:
         self.phase = SendPhase.REJECTED
         self.evidence.append(evidence_ref)
 
-    def prove_absent(self, evidence_refs: Iterable[str]) -> None:
+    def prove_absent(self, reconciliation: ReconciliationResult) -> None:
+        """Resolve SENT_UNKNOWN only from the canonical reconciliation authority."""
+
         if self.phase is not SendPhase.SENT_UNKNOWN:
             raise ValueError("Absence proof requires an uncertain sent attempt")
-        refs = [item.strip() for item in evidence_refs if isinstance(item, str) and item.strip()]
-        if len(refs) != len(set(refs)):
-            raise ValueError("Absence proof evidence must be unique")
-        required_prefixes = {
-            "client-order-lookup:",
-            "open-orders:",
-            "order-history:",
-            "executions:",
-            "activities:",
-        }
-        observed = {
-            prefix
-            for prefix in required_prefixes
-            if any(item.lower().startswith(prefix) for item in refs)
-        }
-        missing = sorted(required_prefixes - observed)
-        if missing:
+        if not isinstance(reconciliation, ReconciliationResult):
+            raise TypeError("Absence proof requires a canonical ReconciliationResult")
+        if not reconciliation.complete or reconciliation.blocks_new_risk:
+            raise ValueError("Absence proof requires complete unblocked reconciliation")
+        matches = [
+            item
+            for item in reconciliation.submission_resolutions
+            if item.attempt_id == self.attempt_id
+        ]
+        if len(matches) != 1:
             raise ValueError(
-                "Absence proof requires explicit client-order lookup plus complete "
-                "open-order, order-history, execution and activity evidence; missing: "
-                + ", ".join(missing)
+                "Absence proof requires exactly one reconciliation resolution "
+                "for this attempt"
+            )
+        resolution = matches[0]
+        if resolution.outcome != "PROVEN_ABSENT":
+            raise ValueError(
+                "Reconciliation did not prove this submission attempt absent"
+            )
+        if resolution.provider_execution_ids or resolution.provider_order_ids:
+            raise ValueError(
+                "PROVEN_ABSENT cannot carry provider order or execution identities"
             )
         self.phase = SendPhase.PROVEN_ABSENT
-        self.evidence.extend(refs)
+        self.evidence.append(
+            "reconciliation:"
+            + resolution.outcome
+            + ":"
+            + resolution.evidence_reason
+        )
 
     @property
     def retry_disposition(self) -> str:

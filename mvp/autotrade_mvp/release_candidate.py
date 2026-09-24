@@ -31,6 +31,7 @@ _REQUIRED_ROLES = frozenset(
         "DEPENDENCY_RIGHTS",
         "ACCESSIBILITY",
         "API_COMPATIBILITY",
+        "CLEAN_INSTALL",
         "LICENSE_NOTICES",
     }
 )

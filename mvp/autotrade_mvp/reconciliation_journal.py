@@ -68,6 +68,7 @@ def reconciliation_payload(
                 "client_order_id": item.client_order_id,
                 "outcome": item.outcome,
                 "evidence_reason": item.evidence_reason,
+                "provider_order_ids": list(item.provider_order_ids),
             }
             for item in result.submission_resolutions
         ],

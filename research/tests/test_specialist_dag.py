@@ -39,6 +39,10 @@ def run(role, score, *, confidence="1", cost="1", late=False, critique=()):
     )
 
 
+def full_plan(specs, *, inputs=(), budget="100"):
+    return plan_specialists(specs, available_inputs=inputs, total_budget=budget)
+
+
 class SpecialistDagTests(unittest.TestCase):
     def test_plan_runs_only_positive_value_roles_inside_budget(self):
         plan = plan_specialists(
@@ -87,6 +91,7 @@ class SpecialistDagTests(unittest.TestCase):
         result = aggregate_specialists(
             specs,
             [run("clone1", "1"), run("clone2", "1"), run("independent", "-1")],
+            plan=full_plan(specs),
             decision_deadline=NOW,
         )
         self.assertEqual(result.score, Decimal("0"))
@@ -102,6 +107,7 @@ class SpecialistDagTests(unittest.TestCase):
                 run("costly", "1", cost="2"),
                 run("ok", "-0.5"),
             ],
+            plan=full_plan(specs),
             decision_deadline=NOW,
         )
         self.assertEqual(result.direction, "SHORT")
@@ -116,11 +122,51 @@ class SpecialistDagTests(unittest.TestCase):
                 run("a", "1", critique=("Future leakage detected",)),
                 run("b", "-0.4"),
             ],
+            plan=full_plan(specs),
             decision_deadline=NOW,
             blocking_critique_terms=("future leakage",),
         )
         self.assertEqual(result.direction, "SHORT")
         self.assertIn(("a", "blocking_critique"), result.rejected_roles)
+
+    def test_unscheduled_known_role_cannot_influence_aggregation(self):
+        specs = [
+            spec("admitted", "independent", cost="1", value="1"),
+            spec("rejected", "other", cost="1", value="-1"),
+        ]
+        plan = full_plan(specs)
+        self.assertEqual(plan.scheduled_roles, ("admitted",))
+        result = aggregate_specialists(
+            specs,
+            [run("admitted", "-0.2"), run("rejected", "1")],
+            plan=plan,
+            decision_deadline=NOW,
+        )
+        self.assertEqual(result.direction, "SHORT")
+        self.assertEqual(result.accepted_roles, ("admitted",))
+        self.assertIn(("rejected", "not_scheduled"), result.rejected_roles)
+
+    def test_missing_planned_result_is_explicit_evidence(self):
+        specs = [spec("a", "g1"), spec("b", "g2")]
+        result = aggregate_specialists(
+            specs,
+            [run("a", "0.4")],
+            plan=full_plan(specs),
+            decision_deadline=NOW,
+        )
+        self.assertIn(("b", "missing_result"), result.rejected_roles)
+
+    def test_tampered_plan_cost_is_rejected(self):
+        specs = [spec("a", "g1", cost="2")]
+        plan = full_plan(specs)
+        tampered = type(plan)(plan.scheduled_roles, plan.skipped_roles, Decimal("0"))
+        with self.assertRaisesRegex(SpecialistDagError, "reserved cost"):
+            aggregate_specialists(
+                specs,
+                [run("a", "1")],
+                plan=tampered,
+                decision_deadline=NOW,
+            )
 
     def test_output_requires_evidence_and_rejects_binary_floats(self):
         with self.assertRaises(SpecialistDagError):

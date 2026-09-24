@@ -172,9 +172,7 @@ class ProtectedCredentialVault:
     """Atomic metadata+ciphertext vault using an injected OS protector."""
 
     FORMAT_VERSION = 1
-    FORBIDDEN_PURPOSES = frozenset(
-        {"WITHDRAWAL", "TRANSFER", "EXTERNAL_TRANSFER"}
-    )
+    ALLOWED_PURPOSES = frozenset({"READ", "TRADE"})
 
     def __init__(self, path: str | Path, *, protector: SecretProtector) -> None:
         self.path = Path(path)
@@ -263,9 +261,9 @@ class ProtectedCredentialVault:
         account = _text(account_id, name="account_id")
         normalized_provider = _text(provider, name="provider").upper()
         normalized_purpose = _text(purpose, name="purpose").upper()
-        if normalized_purpose in ProtectedCredentialVault.FORBIDDEN_PURPOSES:
+        if normalized_purpose not in ProtectedCredentialVault.ALLOWED_PURPOSES:
             raise PermissionError(
-                "Withdrawal and external-transfer credentials are unsupported"
+                "Credential purpose is not an allowed read/trade scope"
             )
         return owner, account, normalized_provider, normalized_purpose
 

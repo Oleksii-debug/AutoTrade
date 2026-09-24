@@ -84,6 +84,19 @@ class ReconciliationTests(unittest.TestCase):
             "UNKNOWN",
         )
 
+    def test_unknown_send_observed_fill_exposes_exact_execution_identity(self):
+        unknown = UnknownSubmission.create(
+            attempt_id="a-observed",
+            client_order_id="c1",
+            started_at="2026-09-24T18:00:00Z",
+        )
+        result = self.base(unknown_submissions=[unknown])
+        resolution = result.submission_resolutions[0]
+        self.assertEqual(resolution.outcome, "OBSERVED_EXECUTION")
+        self.assertEqual(resolution.provider_execution_ids, ("e1",))
+        self.assertFalse(result.complete)
+        self.assertIn("e1", result.matched_execution_ids)
+
     def test_complete_window_plus_explicit_lookup_can_prove_absence(self):
         unknown = UnknownSubmission.create(
             attempt_id="a1",

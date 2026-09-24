@@ -39,6 +39,40 @@ class InformationClaimTests(unittest.TestCase):
         self.assertEqual(accepted.claim_id, first.claim_id)
         self.assertEqual(len(store.claims), 1)
 
+    def test_syndication_uses_earliest_causal_availability_independent_of_ingest_order(self):
+        store = ClaimStore()
+        later_visible = store.build_claim(
+            doc("late-source", "r1", "same passage", available=3),
+            subject="X",
+            predicate="state",
+            value="up",
+        )
+        earlier_visible = store.build_claim(
+            doc("early-source", "r1", "same passage", available=1),
+            subject="X",
+            predicate="state",
+            value="up",
+        )
+        store.add(later_visible)
+        representative, inserted = store.add(earlier_visible)
+
+        self.assertFalse(inserted)
+        self.assertEqual(representative.claim_id, earlier_visible.claim_id)
+        self.assertEqual(store.claims, (earlier_visible,))
+        self.assertEqual(
+            store.available_at(BASE + timedelta(hours=2)),
+            (earlier_visible,),
+        )
+
+        reverse = ClaimStore()
+        reverse.add(earlier_visible)
+        reverse.add(later_visible)
+        self.assertEqual(reverse.claims, (earlier_visible,))
+        self.assertEqual(
+            reverse.snapshot_at(BASE + timedelta(hours=2)).digest(),
+            store.snapshot_at(BASE + timedelta(hours=2)).digest(),
+        )
+
     def test_conflicting_claims_are_preserved_not_overwritten(self):
         store = ClaimStore()
         up = store.build_claim(doc("a", "r1", "source says up"), subject="X", predicate="state", value="up")

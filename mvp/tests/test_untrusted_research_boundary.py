@@ -149,6 +149,34 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
                     )
                 )
 
+    def test_nested_privileged_model_fields_are_rejected(self):
+        for proposal in (
+            {"analysis": {"token": "injected"}},
+            {"steps": [{"authority_grant": "TRADE_ALLOWED"}]},
+            {"wrapper": {"deeper": {"secret": "must-not-pass"}}},
+        ):
+            with self.subTest(proposal=proposal), self.assertRaisesRegex(
+                PermissionError,
+                "privileged fields",
+            ):
+                validate_model_result(
+                    ResearchModelResult(
+                        result_id="nested-privileged",
+                        proposal=proposal,
+                        evidence_refs=("evidence:1",),
+                    )
+                )
+
+    def test_model_proposal_rejects_non_string_nested_keys(self):
+        with self.assertRaisesRegex(ResearchBoundaryError, "keys must be strings"):
+            validate_model_result(
+                ResearchModelResult(
+                    result_id="non-string-key",
+                    proposal={"nested": {1: "value"}},
+                    evidence_refs=("evidence:1",),
+                )
+            )
+
     def test_evidence_cannot_be_constructed_as_trusted_or_permission_granting(self):
         base = {
             "evidence_id": "e2",

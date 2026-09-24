@@ -201,6 +201,45 @@ class OrderProjectionTests(unittest.TestCase):
             {"exec-1"},
         )
 
+    def test_old_fill_redelivery_after_correction_is_idempotent_and_does_not_rollback(self):
+        item = order()
+        original = dict(
+            fill_id="f1",
+            provider_execution_id="exec-1",
+            quantity="1",
+            price="10",
+            provider_revision="r1",
+        )
+        item.record_fill(**original)
+        item.correct_fill(
+            fill_id="f1",
+            quantity="1.5",
+            price="12",
+            provider_revision="r2",
+        )
+        self.assertFalse(item.record_fill(**original))
+        self.assertEqual(item.filled_quantity, Decimal("1.5"))
+        self.assertEqual(item.average_fill_price, Decimal("12"))
+        self.assertEqual(
+            [record.provider_revision for record in item.fill_history],
+            ["r1", "r2"],
+        )
+
+    def test_old_fill_redelivery_after_bust_does_not_reactivate_execution(self):
+        item = order(requested_quantity="1")
+        original = dict(
+            fill_id="f1",
+            provider_execution_id="exec-1",
+            quantity="1",
+            price="10",
+        )
+        item.record_fill(**original)
+        item.bust_fill("f1", provider_revision="r2-bust")
+        self.assertFalse(item.record_fill(**original))
+        self.assertEqual(item.filled_quantity, Decimal("0"))
+        self.assertEqual(item.open_quantity, Decimal("1"))
+        self.assertEqual(len(item.fill_history), 2)
+
     def test_repeated_revision_is_idempotent_but_conflict_fails(self):
         item = order()
         item.record_fill(

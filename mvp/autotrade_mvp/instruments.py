@@ -63,6 +63,62 @@ def _decimal_text(value: Decimal) -> str:
     return text
 
 
+def _instrument_version_ref(value: str, field: str = "instrument_version") -> str:
+    reference = _text(value, field)
+    parts = reference.split("@")
+    if len(parts) != 2:
+        raise InstrumentRegistryError(
+            f"{field} must be canonical instrument_id@version"
+        )
+    instrument_id, version_text = parts
+    try:
+        canonical_id = str(UUID(instrument_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise InstrumentRegistryError(
+            f"{field} must be canonical instrument_id@version"
+        ) from error
+    if (
+        not version_text.isdigit()
+        or version_text == "0"
+        or version_text != str(int(version_text))
+    ):
+        raise InstrumentRegistryError(
+            f"{field} must be canonical instrument_id@version"
+        )
+    return f"{canonical_id}@{version_text}"
+
+
+def _split_instrument_version_ref(value: str, field: str = "instrument_version") -> tuple[str, int]:
+    canonical = _instrument_version_ref(value, field)
+    instrument_id, version_text = canonical.split("@", 1)
+    return instrument_id, int(version_text)
+
+
+def _freeze_jsonish(value: object, field: str) -> object:
+    if isinstance(value, Mapping):
+        frozen: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or not key:
+                raise InstrumentRegistryError(f"{field} object keys must be non-empty strings")
+            frozen[key] = _freeze_jsonish(item, field)
+        return MappingProxyType(frozen)
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_jsonish(item, field) for item in value)
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    raise InstrumentRegistryError(
+        f"{field} must contain only JSON-safe string, integer, boolean, null, object or array values"
+    )
+
+
+def _thaw_jsonish(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _thaw_jsonish(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_jsonish(item) for item in value]
+    return value
+
+
 _EVIDENCE_REQUIRED = {"artifact_id", "sha256", "observed_at"}
 _EVIDENCE_ALLOWED = _EVIDENCE_REQUIRED | {"source_uri", "rights_id"}
 
@@ -339,7 +395,11 @@ class InstrumentVersion:
                 raise InstrumentRegistryError("derivative settlement_method is required")
             if self.margin_model_id is None:
                 raise InstrumentRegistryError("derivative margin_model_id is required")
-            object.__setattr__(self, "underlying_id", _text(self.underlying_id, "underlying_id"))
+            object.__setattr__(
+                self,
+                "underlying_id",
+                _instrument_version_ref(self.underlying_id, "underlying_id"),
+            )
             object.__setattr__(
                 self, "settlement_method", _text(self.settlement_method, "settlement_method")
             )
@@ -375,7 +435,9 @@ class InstrumentVersion:
             if not isinstance(self.funding_schedule, Mapping) or not self.funding_schedule:
                 raise InstrumentRegistryError("funding_schedule must be a non-empty object")
             object.__setattr__(
-                self, "funding_schedule", MappingProxyType(dict(self.funding_schedule))
+                self,
+                "funding_schedule",
+                _freeze_jsonish(self.funding_schedule, "funding_schedule"),
             )
             if self.payoff == "OPTION":
                 raise InstrumentRegistryError("perpetual payoff cannot be OPTION")
@@ -461,7 +523,9 @@ class InstrumentVersion:
             "delivery_cutoff": _utc_text(self.delivery_cutoff) if self.delivery_cutoff else None,
             "settlement_method": self.settlement_method,
             "funding_schedule": (
-                dict(self.funding_schedule) if self.funding_schedule is not None else None
+                _thaw_jsonish(self.funding_schedule)
+                if self.funding_schedule is not None
+                else None
             ),
             "strike": _decimal_text(self.strike) if self.strike is not None else None,
             "option_right": self.option_right,
@@ -576,6 +640,15 @@ class InstrumentRegistry:
 
     def versions(self, instrument_id: str) -> tuple[InstrumentVersion, ...]:
         return tuple(self._versions.get(instrument_id, ()))
+
+    def exact(self, instrument_version: str) -> InstrumentVersion:
+        instrument_id, version_number = _split_instrument_version_ref(
+            instrument_version, "instrument_version"
+        )
+        for version in self._versions.get(instrument_id, ()):
+            if version.version == version_number:
+                return version
+        raise InstrumentNotFound("instrument_version is unknown")
 
     def at(self, instrument_id: str, instant: datetime) -> InstrumentVersion:
         versions = self._versions.get(instrument_id)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import re
 from types import MappingProxyType
@@ -18,6 +18,7 @@ class CapabilityError(ValueError):
 SOURCES = frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"})
 ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 STATUSES = frozenset({"VERIFIED", "UNKNOWN", "CONFLICTED", "EXPIRED"})
+_CAPABILITY_SNAPSHOT_AUTHORITY = object()
 
 
 def _text(value: str, field: str) -> str:
@@ -164,8 +165,17 @@ class CapabilitySnapshot:
     evidence: tuple[Mapping[str, object], ...]
     status: str
     sources: frozenset[str]
+    _authority_marker: object = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
+        if self._authority_marker is not _CAPABILITY_SNAPSHOT_AUTHORITY:
+            raise CapabilityError(
+                "CapabilitySnapshot can only be created by derive_capability_snapshot"
+            )
         try:
             UUID(self.snapshot_id)
         except (ValueError, TypeError, AttributeError) as error:
@@ -323,6 +333,7 @@ def derive_capability_snapshot(
         evidence=tuple(claim.evidence_ref for claim in records),
         status=status,
         sources=live_sources,
+        _authority_marker=_CAPABILITY_SNAPSHOT_AUTHORITY,
     )
 
 

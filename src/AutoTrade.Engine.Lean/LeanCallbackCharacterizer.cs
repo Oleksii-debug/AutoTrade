@@ -10,7 +10,7 @@ namespace AutoTrade.Engine.Lean;
 /// </summary>
 public sealed class LeanCallbackCharacterizer
 {
-    private readonly HashSet<(int OrderId, int EventId)> _seen = new();
+    private readonly Dictionary<(int OrderId, int EventId), CallbackFingerprint> _seen = new();
     private DateTime? _lastArrivalUtc;
 
     public LeanCallbackObservation Observe(OrderEvent orderEvent)
@@ -25,7 +25,19 @@ public sealed class LeanCallbackCharacterizer
         }
 
         var identity = (orderEvent.OrderId, orderEvent.Id);
-        var duplicateIdentity = !_seen.Add(identity);
+        var fingerprint = new CallbackFingerprint(
+            orderEvent.Status,
+            orderEvent.Symbol?.Value ?? string.Empty,
+            orderEvent.FillQuantity,
+            orderEvent.FillPrice,
+            orderEvent.UtcTime);
+        var duplicateIdentity = _seen.TryGetValue(identity, out var existing);
+        var identityConflict = duplicateIdentity && existing != fingerprint;
+        if (!duplicateIdentity)
+        {
+            _seen.Add(identity, fingerprint);
+        }
+
         var timeRegressed =
             _lastArrivalUtc.HasValue && orderEvent.UtcTime < _lastArrivalUtc.Value;
         _lastArrivalUtc = orderEvent.UtcTime;
@@ -39,10 +51,18 @@ public sealed class LeanCallbackCharacterizer
             orderEvent.FillPrice.ToString(CultureInfo.InvariantCulture),
             orderEvent.FillQuantity != decimal.Zero,
             duplicateIdentity,
+            identityConflict,
             timeRegressed,
             orderEvent.UtcTime);
     }
 }
+
+internal readonly record struct CallbackFingerprint(
+    OrderStatus Status,
+    string Symbol,
+    decimal FillQuantity,
+    decimal FillPrice,
+    DateTime UtcTime);
 
 public readonly record struct LeanCallbackObservation(
     int OrderId,
@@ -53,5 +73,6 @@ public readonly record struct LeanCallbackObservation(
     string FillPrice,
     bool HasEconomicFill,
     bool DuplicateIdentity,
+    bool IdentityConflict,
     bool TimeRegressed,
     DateTime UtcTime);

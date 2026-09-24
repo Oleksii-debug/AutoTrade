@@ -83,6 +83,21 @@ class HostEvent:
 class HostCommandStore:
     """Small in-memory analogue for canonical host/API command semantics."""
 
+    SUPPORTED_ACTIONS = frozenset({
+        "CONNECT_READ",
+        "ENABLE_TRADING",
+        "SET_AUTHORITY",
+        "CONFIRM_INTENT",
+        "REVOKE_AUTHORITY",
+        "BLOCK_NEW_EXPOSURE",
+        "CANCEL_SELECTION",
+        "FLATTEN_SELECTION",
+        "START_RESEARCH",
+        "PAUSE_RESEARCH",
+        "CANCEL_RESEARCH",
+        "PROMOTE_APPROVED_CANDIDATE",
+        "EXPORT",
+    })
     TERMINAL_PHASES = {"SUCCEEDED", "FAILED", "CANCELLED"}
     UPDATE_PHASES = {"RUNNING", "WAITING_EXTERNAL", "UNKNOWN", *TERMINAL_PHASES}
 
@@ -187,6 +202,17 @@ class HostCommandStore:
                 state_version=str(self.state_version),
                 reason_codes=("command_id_conflict",),
             )
+
+        if action not in self.SUPPORTED_ACTIONS:
+            result = CommandResult(
+                command_id=command_id,
+                status="REJECTED",
+                state_version=str(self.state_version),
+                reason_codes=("unsupported_action",),
+            )
+            self._idempotency[idempotency_key] = (digest, result)
+            self._commands[command_id] = digest
+            return result
 
         expected = int(expected_raw)
         if expected != self.state_version:

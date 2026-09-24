@@ -196,6 +196,18 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertEqual(execution.permanent_order_id, "778899")
         self.assertEqual(execution.quantity, Decimal("0.5"))
 
+    def test_execution_permanent_order_id_must_be_positive_integer(self):
+        for invalid in (None, True, 0, -1, "778899"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(IbkrWebAdapterError):
+                    IbkrExecutionEvidence.create(
+                        execution_id="0001.123.01",
+                        permanent_order_id=invalid,
+                        account_id="U1234567",
+                        quantity="0.5",
+                        price="220.10",
+                    )
+
     def test_incomplete_execution_surfaces_do_not_prove_absence(self):
         evidence = IbkrAbsenceEvidence(
             exact_client_order_lookup_complete=True,
@@ -352,6 +364,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
         fill = execution_to_reconciliation_fill(
             execution,
             client_order_id="at-ibkr-1",
+            expected_account_id="U1234567",
             instrument="AAPL-CONID-265598:v1",
             fee_amount="-0.35",
             fee_currency="USD",
@@ -365,6 +378,25 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertEqual(fill.fee_currency, "USD")
 
 
+
+    def test_execution_cannot_cross_account_boundary_during_reconciliation(self):
+        execution = IbkrExecutionEvidence.create(
+            execution_id="0001.999.01",
+            permanent_order_id=778899,
+            account_id="U1234567",
+            quantity="1",
+            price="100",
+        )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "account"):
+            execution_to_reconciliation_fill(
+                execution,
+                client_order_id="at-ibkr-account",
+                expected_account_id="OTHER",
+                instrument="AAPL-CONID-265598:v1",
+                fee_amount="0",
+                fee_currency="USD",
+                trade_time="2026-09-24T20:00:01Z",
+            )
 
     def test_regulated_instrument_requires_manual_indicator_evidence(self):
         with self.assertRaisesRegex(IbkrWebAdapterError, "manual_indicator is required"):

@@ -10,7 +10,10 @@ on:
       - ".editorconfig"
       - "src/**/*.cs"
       - "src/**/*.csproj"
+      - "src/AutoTrade.Engine.Lean/**"
+      - "tests/Integration/LeanAdoption/**"
       - "contracts/**"
+      - "tools/write_ci_evidence.py"
       - ".github/workflows/dotnet-foundation.yml"
   pull_request:
     paths:
@@ -19,7 +22,10 @@ on:
       - ".editorconfig"
       - "src/**/*.cs"
       - "src/**/*.csproj"
+      - "src/AutoTrade.Engine.Lean/**"
+      - "tests/Integration/LeanAdoption/**"
       - "contracts/**"
+      - "tools/write_ci_evidence.py"
       - ".github/workflows/dotnet-foundation.yml"
 
 concurrency:
@@ -36,13 +42,35 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: "10.0.x"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - run: dotnet --info
-      # Bootstrap has no NuGet package references yet. WP-03 must add committed
-      # package locks and locked-mode before introducing release dependencies.
+      # Bootstrap projects intentionally have no new external package reference.
+      # WP-03 must approve exact LEAN composition/notices and committed package
+      # locks before upstream engine bytes are introduced.
       - run: dotnet restore src/AutoTrade.Contracts/AutoTrade.Contracts.csproj
       - run: dotnet build src/AutoTrade.Contracts/AutoTrade.Contracts.csproj --configuration Release --no-restore
+      - run: dotnet restore src/AutoTrade.Engine.Lean/AutoTrade.Engine.Lean.csproj
+      - run: dotnet build src/AutoTrade.Engine.Lean/AutoTrade.Engine.Lean.csproj --configuration Release --no-restore
+      - run: dotnet restore tests/Integration/LeanAdoption/AutoTrade.Engine.Lean.AdoptionTests.csproj
+      - run: dotnet build tests/Integration/LeanAdoption/AutoTrade.Engine.Lean.AdoptionTests.csproj --configuration Release --no-restore
+      - run: dotnet run --project tests/Integration/LeanAdoption/AutoTrade.Engine.Lean.AdoptionTests.csproj --configuration Release --no-build --no-restore
+      - name: Write exact-head .NET foundation evidence
+        run: python tools/write_ci_evidence.py --suite dotnet-foundation --command "dotnet contracts + WP02 adoption gate build/harness" --output "artifacts/dotnet-foundation-${{ runner.os }}.json"
+      - name: Upload exact-head .NET foundation evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-foundation-evidence-${{ runner.os }}
+          path: artifacts/dotnet-foundation-${{ runner.os }}.json
+          if-no-files-found: error

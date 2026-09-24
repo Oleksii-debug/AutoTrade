@@ -1,0 +1,79 @@
+name: lean-adoption
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/AutoTrade.Engine.Lean/**"
+      - "tests/Integration/LeanAdoption/**"
+      - "provenance/components.json"
+      - "global.json"
+      - "Directory.Build.props"
+      - ".github/workflows/lean-adoption.yml"
+  pull_request:
+    paths:
+      - "src/AutoTrade.Engine.Lean/**"
+      - "tests/Integration/LeanAdoption/**"
+      - "provenance/components.json"
+      - "global.json"
+      - "Directory.Build.props"
+      - ".github/workflows/lean-adoption.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  LEAN_REVISION: 985ef30ad3ac774218c5ac516b4cb0aa2655730f
+
+jobs:
+  exact-revision-probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout exact AutoTrade source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: autotrade
+
+      - name: Checkout approved LEAN revision
+        uses: actions/checkout@v7
+        with:
+          repository: QuantConnect/Lean
+          ref: ${{ env.LEAN_REVISION }}
+          path: lean
+          fetch-depth: 1
+
+      - name: Verify LEAN revision
+        shell: pwsh
+        run: |
+          $actual = (git -C lean rev-parse HEAD).Trim()
+          if ($actual -ne $env:LEAN_REVISION) {
+            throw "LEAN checkout mismatch: expected $env:LEAN_REVISION, got $actual"
+          }
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Build and run non-sending adoption probe
+        shell: pwsh
+        working-directory: autotrade
+        env:
+          LEAN_ROOT: ${{ github.workspace }}/lean
+        run: |
+          dotnet run `
+            --project tests/Integration/LeanAdoption/LeanAdoptionProbe.csproj `
+            --configuration Release `
+            "-p:LeanRoot=$env:LEAN_ROOT"

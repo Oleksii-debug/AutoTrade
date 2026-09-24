@@ -164,6 +164,35 @@ class JournalBackedHostApiTests(unittest.TestCase):
         self.assertEqual(retried, stale)
         self.assertEqual(restarted.cursor, 1)
 
+    def test_revocation_after_acceptance_cannot_create_second_event_after_restart(self):
+        first = self.store()
+        command = self.command()
+        accepted = first.submit(command)
+        self.assertEqual(accepted.status, "ACCEPTED")
+        self.assertEqual(first.cursor, 1)
+
+        revoked = JournalBackedHostCommandStore(
+            JournalStore(self.path),
+            session_validator=lambda session, actor: (session, actor) in self.sessions,
+            action_authorizer=lambda session, actor, action, payload: False,
+            now=lambda: "2026-09-24T18:00:00Z",
+        )
+        self.assertEqual(revoked.submit(command), accepted)
+        self.assertEqual(revoked.state_version, 1)
+        self.assertEqual(revoked.cursor, 1)
+
+        denied = revoked.submit(
+            self.command(
+                command_id="77777777-7777-7777-7777-777777777777",
+                key="key-after-revocation",
+                version="1",
+            )
+        )
+        self.assertEqual(denied.status, "REJECTED")
+        self.assertEqual(denied.reason_codes, ("action_not_authorized",))
+        self.assertEqual(revoked.state_version, 1)
+        self.assertEqual(revoked.cursor, 1)
+
     def test_action_denial_survives_restart_without_financial_event(self):
         restricted = JournalBackedHostCommandStore(
             JournalStore(self.path),

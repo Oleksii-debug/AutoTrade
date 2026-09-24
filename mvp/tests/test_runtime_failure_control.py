@@ -87,6 +87,8 @@ class RuntimeRecoveryTests(unittest.TestCase):
         controller.on_lease_expired()
         self.assertEqual(controller.owner, owner)
         self.assertEqual(controller.state, HostState.DEGRADED)
+        controller.record_reconciliation(consistent=True)
+        self.assertEqual(controller.state, HostState.DEGRADED)
         with self.assertRaises(PermissionError):
             controller.validate_sender(owner.owner_id, owner.epoch)
 

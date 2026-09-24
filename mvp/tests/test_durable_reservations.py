@@ -41,6 +41,26 @@ class DurableReservationBookTests(unittest.TestCase):
             available={"CASH:USD": "100"},
         )
 
+    def test_journal_event_uses_canonical_sequence_string(self):
+        book = self.book()
+        original_commit = self.store.commit_command
+        captured = {}
+
+        def capture_then_commit(*args, **kwargs):
+            captured["aggregate_version"] = kwargs["events"][0][0]["aggregate_version"]
+            return original_commit(*args, **kwargs)
+
+        with patch.object(
+            self.store,
+            "commit_command",
+            side_effect=capture_then_commit,
+        ):
+            self.reserve(book)
+
+        self.assertEqual(captured["aggregate_version"], "1")
+        self.assertIsInstance(captured["aggregate_version"], str)
+        self.assertEqual(book.version, 1)
+
     def test_restart_reconstructs_active_reservation_from_journal(self):
         first = self.book()
         self.reserve(first)

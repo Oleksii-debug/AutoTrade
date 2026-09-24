@@ -59,6 +59,8 @@ class RuntimeSafetySignals:
     old_sender_fenced: bool
     provider_native_protection_present: bool
     emergency_execution_path_qualified: bool
+    protection_required_for_new_exposure: bool
+    new_exposure_protection_path_qualified: bool
     unknown_send_count: int
     reconciliation_lag_seconds: Decimal
     maximum_reconciliation_lag_seconds: Decimal
@@ -79,6 +81,8 @@ class RuntimeSafetySignals:
             "old_sender_fenced",
             "provider_native_protection_present",
             "emergency_execution_path_qualified",
+            "protection_required_for_new_exposure",
+            "new_exposure_protection_path_qualified",
             "unresolved_external_uncertainty",
             "recovery_in_progress",
         ):
@@ -157,10 +161,10 @@ def evaluate_readiness(signals: RuntimeSafetySignals) -> RuntimeReadiness:
     if signals.recovery_in_progress:
         blockers.append("recovery_in_progress")
     if (
-        not signals.provider_native_protection_present
-        and not signals.emergency_execution_path_qualified
+        signals.protection_required_for_new_exposure
+        and not signals.new_exposure_protection_path_qualified
     ):
-        blockers.append("no_qualified_protection_path")
+        blockers.append("new_exposure_protection_path_unqualified")
 
     protection_only = (
         signals.provider_authenticated
@@ -191,6 +195,11 @@ def evaluate_readiness(signals: RuntimeSafetySignals) -> RuntimeReadiness:
         warnings.append("provider_native_protection_absent")
     if not signals.emergency_execution_path_qualified:
         warnings.append("emergency_execution_path_unqualified")
+    if (
+        signals.protection_required_for_new_exposure
+        and not signals.new_exposure_protection_path_qualified
+    ):
+        warnings.append("new_exposure_protection_path_unqualified")
 
     return RuntimeReadiness(
         live=True,

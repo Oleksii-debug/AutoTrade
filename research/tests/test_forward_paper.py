@@ -237,6 +237,10 @@ class ForwardPaperQualificationTests(unittest.TestCase):
         self.assertEqual(result.evidence_status, "INVALID")
         self.assertIn("duplicate_outcome_for_prediction", result.reasons)
 
+    def test_non_string_cost_currency_is_rejected(self):
+        with self.assertRaisesRegex(TypeError, "currency keys must be strings"):
+            self.evidence(costs_by_currency={840: "12.34"})
+
     def test_float_cost_is_rejected(self):
         with self.assertRaisesRegex(ForwardPaperError, "exact decimal"):
             self.evidence(costs_by_currency={"USD": 12.34})

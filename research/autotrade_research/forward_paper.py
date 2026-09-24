@@ -302,7 +302,9 @@ class ForwardPaperEvidence:
             raise TypeError("costs_by_currency must be a mapping")
         costs: dict[str, Decimal] = {}
         for currency, value in costs_by_currency.items():
-            code = _text(str(currency), name="cost currency").upper()
+            if not isinstance(currency, str):
+                raise TypeError("cost currency keys must be strings")
+            code = _text(currency, name="cost currency").upper()
             if code in costs:
                 raise ForwardPaperError("duplicate cost currency")
             costs[code] = _decimal(value, name=f"cost[{code}]", nonnegative=True)

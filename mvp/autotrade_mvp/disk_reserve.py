@@ -18,6 +18,9 @@ class DiskReserveError(ValueError):
     pass
 
 
+_RESERVE_MAGIC = b"AUTOTRADE_EMERGENCY_DISK_RESERVE_V1\n"
+
+
 class ReserveReleaseReason(StrEnum):
     JOURNAL_WRITE_FAILURE = "JOURNAL_WRITE_FAILURE"
     RECOVERY_CRITICAL = "RECOVERY_CRITICAL"
@@ -39,9 +42,11 @@ class EmergencyDiskReserve:
         if (
             not isinstance(reserve_bytes, int)
             or isinstance(reserve_bytes, bool)
-            or reserve_bytes <= 0
+            or reserve_bytes < len(_RESERVE_MAGIC)
         ):
-            raise DiskReserveError("reserve_bytes must be a positive integer")
+            raise DiskReserveError(
+                "reserve_bytes must be an integer large enough for the reserve header"
+            )
         self.path = Path(path)
         self.reserve_bytes = reserve_bytes
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -66,12 +71,19 @@ class EmergencyDiskReserve:
                 available_for_emergency=False,
             )
         exact = self.path.is_file() and stat.st_size == self.reserve_bytes
+        signature_matches = False
+        if exact:
+            try:
+                with self.path.open("rb") as stream:
+                    signature_matches = stream.read(len(_RESERVE_MAGIC)) == _RESERVE_MAGIC
+            except OSError:
+                signature_matches = False
         return DiskReserveStatus(
             path=str(self.path),
             expected_bytes=self.reserve_bytes,
             present=True,
             exact_size=exact,
-            available_for_emergency=exact,
+            available_for_emergency=exact and signature_matches,
         )
 
     def provision(self) -> DiskReserveStatus:
@@ -97,8 +109,11 @@ class EmergencyDiskReserve:
         complete = False
         try:
             with os.fdopen(fd, "wb", buffering=0) as stream:
-                chunk = b"\\0" * min(1024 * 1024, self.reserve_bytes)
-                remaining = self.reserve_bytes
+                written = stream.write(_RESERVE_MAGIC)
+                if written != len(_RESERVE_MAGIC):
+                    raise OSError("short write while provisioning disk reserve header")
+                remaining = self.reserve_bytes - len(_RESERVE_MAGIC)
+                chunk = b"\0" * min(1024 * 1024, max(1, remaining))
                 while remaining:
                     piece = chunk if remaining >= len(chunk) else chunk[:remaining]
                     written = stream.write(piece)

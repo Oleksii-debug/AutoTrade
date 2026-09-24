@@ -35,7 +35,7 @@ _REQUIRED_ROLES = frozenset(
         "LICENSE_NOTICES",
     }
 )
-_SIGNED_BINARY_ROLES = frozenset({"HOST", "WEB", "DESKTOP"})
+_SIGNED_BINARY_ROLES = frozenset({"HOST", "WEB", "DESKTOP", "WINDOWS_PACKAGE"})
 _SIGNATURE_STATUSES = frozenset(
     {"VERIFIED", "NOT_APPLICABLE", "MISSING", "INVALID"}
 )

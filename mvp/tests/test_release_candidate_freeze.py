@@ -38,7 +38,7 @@ def artifact(
     if signature_status is None:
         signature_status = (
             "VERIFIED"
-            if role in {"HOST", "WEB", "DESKTOP"}
+            if role in {"HOST", "WEB", "DESKTOP", "WINDOWS_PACKAGE"}
             else "NOT_APPLICABLE"
         )
     return ReleaseArtifactEvidence.create(
@@ -100,7 +100,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         self.assertIn("source_sha_mismatch:HOST", decision.reasons)
 
     def test_unsigned_host_web_or_desktop_blocks_freeze(self):
-        for role in ("HOST", "WEB", "DESKTOP"):
+        for role in ("HOST", "WEB", "DESKTOP", "WINDOWS_PACKAGE"):
             with self.subTest(role=role):
                 artifacts = [
                     (
@@ -118,6 +118,10 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                     f"signature_not_verified:{role}",
                     decision.reasons,
                 )
+
+    def test_windows_package_cannot_claim_signature_not_applicable(self):
+        with self.assertRaisesRegex(ReleaseCandidateError, "NOT_APPLICABLE"):
+            artifact("WINDOWS_PACKAGE", signature_status="NOT_APPLICABLE")
 
     def test_failed_accessibility_is_a_blocker(self):
         artifacts = [

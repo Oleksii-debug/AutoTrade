@@ -299,8 +299,14 @@ def value_cash_balances(
     reporting = _currency(reporting_currency, "reporting_currency")
 
     components: list[FxValuation] = []
+    seen_currencies: set[str] = set()
     for raw_currency in sorted(balances):
         currency = _currency(raw_currency, "balance currency")
+        if currency in seen_currencies:
+            raise FxValuationError(
+                "balances contain duplicate normalized currency codes"
+            )
+        seen_currencies.add(currency)
         amount = _decimal(balances[raw_currency], f"balance[{currency}]")
         quote = None if currency == reporting else quotes.get(currency)
         component = value_amount(

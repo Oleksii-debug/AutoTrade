@@ -261,6 +261,7 @@ class WhiteBitAdapterTests(unittest.TestCase):
             collateral,
             client_order_id="at-reduce-1",
             capability=capability(),
+            market_rules=market_rules(market_type="futures"),
             at=NOW,
         )
         self.assertEqual(request.endpoint, "/api/v4/order/collateral/market")

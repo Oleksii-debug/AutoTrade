@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -82,6 +83,57 @@ class ArtifactStoreTests(unittest.TestCase):
                 rights={"storage": True, "export": True},
             )
             target = store.export(allowed, Path(directory) / "out" / "allowed.txt")
+            self.assertEqual(target.read_bytes(), b"public")
+
+    def test_tampered_manifest_cannot_escalate_export_rights(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"private",
+                media_type="text/plain",
+                rights={"storage": True, "export": False},
+            )
+            path = store._manifest_path(artifact_id)
+            tampered = json.loads(path.read_text(encoding="utf-8"))
+            tampered["rights"]["export"] = True
+            path.write_text(json.dumps(tampered), encoding="utf-8")
+
+            with self.assertRaisesRegex(ArtifactIntegrityError, "integrity mismatch"):
+                store.export(artifact_id, Path(directory) / "out.txt")
+            self.assertEqual(manifest["rights"]["export"], False)
+
+    def test_legacy_manifest_must_be_rebound_before_export(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"public",
+                media_type="text/plain",
+                rights={"storage": True, "export": True},
+                source_refs=["source:fixture"],
+                metadata={"kind": "legacy-upgrade"},
+            )
+            path = store._manifest_path(artifact_id)
+            legacy = dict(manifest)
+            legacy.pop("manifest_hash")
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+
+            with self.assertRaisesRegex(ArtifactIntegrityError, "lacks integrity binding"):
+                store.export(artifact_id, Path(directory) / "before.txt")
+
+            upgraded = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"public",
+                media_type="text/plain",
+                rights={"storage": True, "export": True},
+                source_refs=["source:fixture"],
+                metadata={"kind": "legacy-upgrade"},
+            )
+            self.assertIn("manifest_hash", upgraded)
+            target = store.export(artifact_id, Path(directory) / "after.txt")
             self.assertEqual(target.read_bytes(), b"public")
 
     def test_recovery_removes_only_unreferenced_objects(self):

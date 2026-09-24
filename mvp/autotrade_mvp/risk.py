@@ -132,6 +132,7 @@ class RiskPolicy:
     max_abs_factor_exposure: Decimal | None = None
     max_spread_fraction: Decimal | None = None
     max_slippage_fraction: Decimal | None = None
+    max_clock_age_seconds: Decimal | None = None
 
     @classmethod
     def create(
@@ -153,6 +154,7 @@ class RiskPolicy:
         max_abs_factor_exposure=None,
         max_spread_fraction=None,
         max_slippage_fraction=None,
+        max_clock_age_seconds=None,
     ) -> "RiskPolicy":
         values = {
             "max_abs_position": _positive(max_abs_position, name="max_abs_position"),
@@ -194,10 +196,20 @@ class RiskPolicy:
                 allow_zero=True,
             )
         )
+        clock_limit = (
+            None
+            if max_clock_age_seconds is None
+            else _positive(
+                max_clock_age_seconds,
+                name="max_clock_age_seconds",
+                allow_zero=True,
+            )
+        )
         return cls(
             **values,
             **optional_limits,
             max_abs_factor_exposure=factor_limit,
+            max_clock_age_seconds=clock_limit,
         )
 
 
@@ -222,6 +234,7 @@ class RiskContext:
     factor_loadings: Mapping[str, Mapping[str, Decimal]] | None = None
     spread_fraction: Mapping[str, Decimal] | None = None
     slippage_fraction: Mapping[str, Decimal] | None = None
+    clock_age_seconds: Decimal | None = None
 
     @classmethod
     def create(
@@ -246,6 +259,7 @@ class RiskContext:
         factor_loadings: Mapping[str, Mapping[str, object]] | None = None,
         spread_fraction: Mapping[str, object] | None = None,
         slippage_fraction: Mapping[str, object] | None = None,
+        clock_age_seconds=None,
     ) -> "RiskContext":
         if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
@@ -315,6 +329,15 @@ class RiskContext:
                 allow_zero=True,
             ),
         )
+        normalized_clock_age = (
+            None
+            if clock_age_seconds is None
+            else _positive(
+                clock_age_seconds,
+                name="clock_age_seconds",
+                allow_zero=True,
+            )
+        )
         if not isinstance(stress_scenarios, Sequence) or isinstance(
             stress_scenarios,
             (str, bytes),
@@ -362,6 +385,7 @@ class RiskContext:
             factor_loadings=normalized_factor_loadings,
             spread_fraction=normalized_spread,
             slippage_fraction=normalized_slippage,
+            clock_age_seconds=normalized_clock_age,
         )
 
 
@@ -573,6 +597,15 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         policy.max_data_age_seconds,
         "market data must be fresh enough for admission",
     )
+    if policy.max_clock_age_seconds is not None:
+        add(
+            "clock_freshness",
+            context.clock_age_seconds is not None
+            and context.clock_age_seconds <= policy.max_clock_age_seconds,
+            context.clock_age_seconds if context.clock_age_seconds is not None else "UNKNOWN",
+            policy.max_clock_age_seconds,
+            "clock synchronization evidence must be fresh enough for admission",
+        )
     stale_fx = max(context.fx_age_seconds.values(), default=Decimal("0"))
     add(
         "fx_freshness",

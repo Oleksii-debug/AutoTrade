@@ -22,6 +22,7 @@ def policy(**overrides):
         max_abs_factor_exposure=None,
         max_spread_fraction=None,
         max_slippage_fraction=None,
+        max_clock_age_seconds=None,
     )
     values.update(overrides)
     return RiskPolicy.create(**values)
@@ -575,6 +576,41 @@ class IndependentRiskTests(unittest.TestCase):
             context(spread_fraction={"ABC": 0.01})
         with self.assertRaises(TypeError):
             context(slippage_fraction={"ABC": 0.01})
+
+    def test_clock_freshness_fails_closed_when_required_evidence_missing(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(clock_age_seconds=None),
+            policy(max_clock_age_seconds="2"),
+        )
+        rule = next(item for item in decision.rules if item.rule == "clock_freshness")
+        self.assertFalse(rule.passed)
+        self.assertEqual(rule.observed, "UNKNOWN")
+
+    def test_clock_freshness_boundary_is_exact(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        exact = evaluate_risk(
+            intent,
+            context(clock_age_seconds="2"),
+            policy(max_clock_age_seconds="2"),
+        )
+        stale = evaluate_risk(
+            intent,
+            context(clock_age_seconds="2.0001"),
+            policy(max_clock_age_seconds="2"),
+        )
+        self.assertTrue(next(x for x in exact.rules if x.rule == "clock_freshness").passed)
+        self.assertFalse(next(x for x in stale.rules if x.rule == "clock_freshness").passed)
+
+    def test_clock_age_rejects_binary_float(self):
+        with self.assertRaises(TypeError):
+            context(clock_age_seconds=0.1)
 
 
 if __name__ == "__main__":

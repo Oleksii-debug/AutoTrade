@@ -91,6 +91,40 @@ class ReleaseDependencyManifestTests(unittest.TestCase):
             self.assertIsNone(reason)
 
 
+    def test_release_evidence_cannot_be_reused_for_another_candidate_sha(self):
+        with TemporaryDirectory() as directory:
+            evidence = Path(directory) / "evidence.json"
+            evidence.write_text(
+                json.dumps(
+                    {
+                        "qualified": True,
+                        "schema_version": "1.0.0",
+                        "source_sha": "a" * 40,
+                        "evidence_refs": [{
+                            "artifact_id": "qualification-1",
+                            "sha256": "sha256:" + "b" * 64,
+                            "observed_at": "2026-09-24T20:00:00Z",
+                        }],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            qualified, reason = release_evidence_document(
+                evidence,
+                label="candidate evidence",
+                expected_source_sha="c" * 40,
+            )
+            self.assertFalse(qualified)
+            self.assertEqual(reason, "source_sha_mismatch")
+
+            qualified, reason = release_evidence_document(
+                evidence,
+                label="candidate evidence",
+                expected_source_sha="a" * 40,
+            )
+            self.assertTrue(qualified)
+            self.assertIsNone(reason)
+
     def test_opaque_or_mutable_evidence_refs_cannot_qualify_release(self):
         with TemporaryDirectory() as directory:
             evidence = Path(directory) / "evidence.json"
@@ -175,9 +209,18 @@ class ReleaseDependencyManifestTests(unittest.TestCase):
             qualified, reason = dependency_advisory_evidence_document(
                 evidence,
                 expected_dependency_graph=expected_graph,
+                expected_source_sha="a" * 40,
             )
             self.assertTrue(qualified)
             self.assertIsNone(reason)
+
+            qualified, reason = dependency_advisory_evidence_document(
+                evidence,
+                expected_dependency_graph=expected_graph,
+                expected_source_sha="b" * 40,
+            )
+            self.assertFalse(qualified)
+            self.assertEqual(reason, "source_sha_mismatch")
 
     def test_dependency_manifest_never_upgrades_candidate_to_release_approval(self):
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))

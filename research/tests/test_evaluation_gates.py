@@ -87,6 +87,49 @@ class EvaluationGateTests(unittest.TestCase):
                 required_regimes=("normal", "stress"),
             )
 
+    def test_negative_minimum_net_advantage_is_invalid_protocol(self):
+        with self.assertRaisesRegex(ValueError, "minimum_net_advantage"):
+            GateProfile.create(
+                profile_id="negative-edge",
+                minimum_net_advantage="-0.01",
+                max_drawdown="0.10",
+                max_adverse_cost_loss="0.03",
+                min_power="0.80",
+                primary_baseline_id="champion",
+                baseline_ids=("cash", "champion"),
+                selection_correction="holm-v1",
+                max_trials=20,
+                required_regimes=("normal",),
+            )
+
+    def test_protocol_identity_collections_reject_non_text_values(self):
+        with self.assertRaises(TypeError):
+            GateProfile.create(
+                profile_id="bad-baseline-type",
+                minimum_net_advantage="0.01",
+                max_drawdown="0.10",
+                max_adverse_cost_loss="0.03",
+                min_power="0.80",
+                primary_baseline_id="champion",
+                baseline_ids=("champion", None),
+                selection_correction="holm-v1",
+                max_trials=20,
+                required_regimes=("normal",),
+            )
+        with self.assertRaises(TypeError):
+            GateProfile.create(
+                profile_id="bad-regime-type",
+                minimum_net_advantage="0.01",
+                max_drawdown="0.10",
+                max_adverse_cost_loss="0.03",
+                min_power="0.80",
+                primary_baseline_id="champion",
+                baseline_ids=("champion",),
+                selection_correction="holm-v1",
+                max_trials=20,
+                required_regimes=("normal", None),
+            )
+
     def test_profile_changed_after_result_fails(self):
         self.assertEqual(
             evaluate_gates(profile(), evidence(profile_unchanged_after_results=False)).status,

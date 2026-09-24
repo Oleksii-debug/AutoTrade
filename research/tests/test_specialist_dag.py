@@ -19,8 +19,8 @@ def spec(role, group, cost="1", value="1", inputs=(), dependencies=()):
     return SpecialistSpec(
         role_id=role,
         correlation_group=group,
-        max_cost=Decimal(cost),
-        expected_incremental_value=Decimal(value),
+        max_cost=cost,
+        expected_incremental_value=value,
         required_inputs=tuple(inputs),
         dependencies=tuple(dependencies),
     )

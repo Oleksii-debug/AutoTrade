@@ -19,7 +19,7 @@ from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .capabilities import CapabilitySnapshot
-from .provider_core import ProviderCoreError, classify_write_outcome
+from .provider_core import ProviderCoreError
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
@@ -349,41 +349,6 @@ def parse_order_ack(
         "provider_received_at": when,
         "evidence": [_response_evidence(response, observed_at=when)],
         "retry_disposition": "NEVER",
-    }
-
-
-def classify_transport_result(
-    *,
-    attempt_id: str,
-    client_order_id: str,
-    transport_started: bool,
-    provider_acknowledged: bool,
-    provider_rejected: bool,
-) -> dict[str, str]:
-    """Project the provider-neutral write classifier into SubmissionResult fields.
-
-    This function contains no retry loop. Any possibly-sent request with no
-    definitive provider result becomes UNKNOWN and requires reconciliation.
-    """
-
-    aid = _uuid(attempt_id, name="attempt_id")
-    cid = validate_client_order_id(client_order_id)
-    outcome = classify_write_outcome(
-        transport_started=transport_started,
-        provider_acknowledged=provider_acknowledged,
-        provider_rejected=provider_rejected,
-    )
-    if outcome.status == "UNKNOWN":
-        retry = "RECONCILE_FIRST"
-    elif outcome.status == "NOT_SENT":
-        retry = "NEW_ADMISSION_REQUIRED"
-    else:
-        retry = "NEVER"
-    return {
-        "attempt_id": aid,
-        "client_order_id": cid,
-        "outcome": outcome.status,
-        "retry_disposition": retry,
     }
 
 

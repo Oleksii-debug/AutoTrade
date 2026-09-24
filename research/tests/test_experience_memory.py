@@ -48,6 +48,40 @@ class ExperienceMemoryTests(unittest.TestCase):
             self.assertFalse(inserted_again)
             self.assertEqual(first, second)
 
+    def test_episode_identity_uses_canonical_text_fields(self):
+        with TemporaryDirectory() as directory:
+            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            identifier = "00000000-0000-0000-0000-000000000077"
+            first, inserted = store.append_episode(
+                episode_id=identifier,
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task=" research ",
+                regime=" calm ",
+                instrument_family=" equity ",
+                permission_class=" research ",
+                payload=payload("flat"),
+            )
+            second, inserted_again = store.append_episode(
+                episode_id=identifier,
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("flat"),
+            )
+            self.assertEqual(first, second)
+            self.assertTrue(inserted)
+            self.assertFalse(inserted_again)
+            retrieved = store.retrieve(
+                information_cutoff=BASE,
+                granted_permissions={"research"},
+            )
+            self.assertEqual(retrieved[0]["task"], "research")
+            self.assertEqual(retrieved[0]["regime"], "calm")
+
     def test_episode_identity_cannot_be_destructively_upserted(self):
         with TemporaryDirectory() as directory:
             store = ExperienceMemory(Path(directory) / "memory.sqlite3")

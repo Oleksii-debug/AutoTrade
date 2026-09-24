@@ -131,7 +131,15 @@ class CapabilityClaim:
             "rate_limit_policy_id",
             _text(self.rate_limit_policy_id, "rate_limit_policy_id"),
         )
-        object.__setattr__(self, "evidence_ref", _freeze_evidence(self.evidence_ref))
+        evidence = _freeze_evidence(self.evidence_ref)
+        evidence_observed = datetime.fromisoformat(
+            str(evidence["observed_at"])[:-1] + "+00:00"
+        ).astimezone(timezone.utc)
+        if evidence_observed != observed:
+            raise CapabilityError(
+                "evidence observed_at must match claim observed_at"
+            )
+        object.__setattr__(self, "evidence_ref", evidence)
 
 
 @dataclass(frozen=True)

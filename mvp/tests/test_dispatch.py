@@ -232,5 +232,75 @@ class DispatchTests(unittest.TestCase):
 
 
 
+    def test_backward_final_clock_is_persistently_blocked(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(store, owner_token="owner")
+            outbound = 0
+
+            def authority(intent_hash, current_time):
+                return True, "allowed"
+
+            def transport(client_id, request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            result = dispatcher.dispatch(
+                attempt_id="clock-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+                final_barrier_clock=lambda: "2026-09-24T17:59:59Z",
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "final_barrier_clock_moved_backwards")
+            self.assertEqual(outbound, 0)
+            events = store.load_events("submission_attempt", "clock-a1")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+
+    def test_unserializable_provider_response_after_send_becomes_unknown(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(store, owner_token="owner")
+            outbound = 0
+
+            def authority(intent_hash, current_time):
+                return True, "allowed"
+
+            def transport(client_id, request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"not_json": object()}
+
+            result = dispatcher.dispatch(
+                attempt_id="response-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(outbound, 1)
+            events = store.load_events("submission_attempt", "response-a1")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+
+
+
 if __name__ == "__main__":
     unittest.main()

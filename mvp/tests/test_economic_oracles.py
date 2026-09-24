@@ -73,6 +73,21 @@ class EconomicOracleTests(unittest.TestCase):
             Decimal("-2"),
         )
 
+    def test_binary_float_is_rejected_by_independent_economic_oracles(self):
+        with self.assertRaises(TypeError):
+            linear_futures_mark_pnl("1", "1", 100.1, "101")
+        with self.assertRaises(TypeError):
+            cash_round_trip(
+                start_cash="1000",
+                buy_quantity="1",
+                buy_price=100.1,
+                buy_fee="0",
+                sell_quantity="1",
+                sell_price="101",
+                sell_fee="0",
+                mark_price="101",
+            )
+
     def test_invalid_values_fail_closed(self):
         with self.assertRaises(ValueError):
             cash_round_trip(

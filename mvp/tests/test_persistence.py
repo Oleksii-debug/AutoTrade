@@ -45,6 +45,15 @@ class JournalStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must be 2"):
                 store.append_event(event("evt-3", 3))
 
+    def test_aggregate_version_rejects_coercible_non_integer_values(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            for invalid in (True, 1.0, "1", "01"):
+                item = event()
+                item["aggregate_version"] = invalid
+                with self.assertRaisesRegex(ValueError, "positive integer"):
+                    store.append_event(item)
+
     def test_event_id_conflict_is_rejected(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
@@ -82,6 +91,33 @@ class JournalStoreTests(unittest.TestCase):
                     request={"action": "AUTHORITY.REVOKE", "payload": {"policy_id": "p2"}},
                     result=result,
                     state_version=8,
+                )
+
+    def test_command_state_version_rejects_boolean(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(ValueError, "non-negative integer"):
+                store.record_command(
+                    command_id="cmd-bool",
+                    idempotency_key="key-bool",
+                    request={"action": "A"},
+                    result={"status": "ACCEPTED"},
+                    state_version=True,
+                )
+
+    def test_atomic_command_rejects_coercible_event_version(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            item = event()
+            item["aggregate_version"] = "1"
+            with self.assertRaisesRegex(ValueError, "positive integer"):
+                store.commit_command(
+                    command_id="cmd-version",
+                    idempotency_key="key-version",
+                    request={"action": "A"},
+                    result={"status": "ACCEPTED"},
+                    state_version=1,
+                    events=[(item, "events")],
                 )
 
     def test_non_finite_payload_is_rejected(self):

@@ -18,6 +18,7 @@ from mvp.autotrade_mvp.whitebit import (
     decode_whitebit_json,
     execution_history_coverage,
     open_order_coverage,
+    open_positions_request,
     order_history_coverage,
     order_lookup_requests,
     paged_execution_history_request,
@@ -25,10 +26,14 @@ from mvp.autotrade_mvp.whitebit import (
     paged_order_history_request,
     parse_execution_deal,
     parse_execution_history,
+    parse_hedge_mode,
+    parse_open_position,
+    parse_open_positions,
     parse_order_snapshot,
     prepare_order_request,
     redact_whitebit_debug,
     sign_private_request,
+    signed_position_quantities,
     validate_client_order_id,
     validate_intent_market_rules,
 )
@@ -596,6 +601,92 @@ class WhiteBitAdapterTests(unittest.TestCase):
                 end_unix=1_700_000_000 + 31 * 24 * 60 * 60 + 1,
                 offset=0,
             )
+
+    def test_open_position_preserves_exact_provider_economics(self):
+        payload = decode_whitebit_json(
+            '{"positionId":527,"market":"BTC_USDT",'
+            '"openDate":1651568067.789679,"modifyDate":1651568068.123456,'
+            '"amount":"0.1","basePrice":"45658.349",'
+            '"liquidationPrice":null,"liquidationState":"margin_call",'
+            '"pnl":"-168.42","margin":"8316.74","freeMargin":"619385.67",'
+            '"funding":"-0.5","unrealizedFunding":"0.0019142920201966",'
+            '"unrealizedPnl":"12.34","positionSide":"LONG"}'
+        )
+        position = parse_open_position(payload)
+        self.assertEqual(position.position_id, "527")
+        self.assertEqual(position.amount, Decimal("0.1"))
+        self.assertEqual(position.realized_pnl, Decimal("-168.42"))
+        self.assertEqual(
+            position.unrealized_funding,
+            Decimal("0.0019142920201966"),
+        )
+        self.assertEqual(
+            position.opened_at,
+            "2022-05-03T08:54:27.789679Z",
+        )
+        self.assertEqual(position.liquidation_state, "margin_call")
+
+    def test_hedge_positions_project_to_signed_quantities_only_with_mode_evidence(self):
+        long_payload = decode_whitebit_json(
+            '{"positionId":1,"market":"BTC_USDT","openDate":1651568067,'
+            '"modifyDate":1651568068,"amount":"0.2","basePrice":"40000",'
+            '"pnl":"0","margin":"10","freeMargin":"100","funding":"0",'
+            '"unrealizedFunding":"0","positionSide":"LONG"}'
+        )
+        short_payload = decode_whitebit_json(
+            '{"positionId":2,"market":"BTC_USDT","openDate":1651568067,'
+            '"modifyDate":1651568068,"amount":"0.05","basePrice":"41000",'
+            '"pnl":"0","margin":"10","freeMargin":"100","funding":"0",'
+            '"unrealizedFunding":"0","positionSide":"SHORT"}'
+        )
+        positions = parse_open_positions([long_payload, short_payload])
+        projected = signed_position_quantities(
+            positions,
+            hedge_mode=True,
+        )
+        self.assertEqual(projected["BTC_USDT"], Decimal("0.15"))
+
+    def test_one_way_both_position_is_not_guessed_into_signed_quantity(self):
+        payload = decode_whitebit_json(
+            '{"positionId":3,"market":"BTC_USDT","openDate":1651568067,'
+            '"modifyDate":1651568068,"amount":"0.2","basePrice":"40000",'
+            '"pnl":"0","margin":"10","freeMargin":"100","funding":"0",'
+            '"unrealizedFunding":"0","positionSide":"BOTH"}'
+        )
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "not qualified",
+        ):
+            signed_position_quantities(
+                [parse_open_position(payload)],
+                hedge_mode=False,
+            )
+
+    def test_position_identity_conflicts_fail_closed(self):
+        row = decode_whitebit_json(
+            '{"positionId":4,"market":"BTC_USDT","openDate":1651568067,'
+            '"modifyDate":1651568068,"amount":"0.2","basePrice":"40000",'
+            '"pnl":"0","margin":"10","freeMargin":"100","funding":"0",'
+            '"unrealizedFunding":"0","positionSide":"LONG"}'
+        )
+        conflict = dict(row)
+        conflict["amount"] = "0.3"
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "conflicting observations",
+        ):
+            parse_open_positions([row, conflict])
+
+    def test_position_and_hedge_mode_lookup_shapes_are_network_free(self):
+        request = open_positions_request()
+        self.assertEqual(
+            request.endpoint,
+            "/api/v4/collateral-account/positions/open",
+        )
+        self.assertEqual(dict(request.body), {})
+        self.assertTrue(parse_hedge_mode({"hedgeMode": True}))
+        with self.assertRaisesRegex(WhiteBitAdapterError, "hedgeMode"):
+            parse_hedge_mode({"hedgeMode": "true"})
 
     def test_private_signer_uses_exact_body_and_caller_owned_nonce(self):
         nonce = 1_790_280_000_123

@@ -198,6 +198,7 @@ class GuardedDispatcher:
         authority_check: AuthorityCheck,
         transport_send: TransportSend,
         client_id_max_length: int = 32,
+        final_barrier_clock: Callable[[], str] | None = None,
     ) -> DispatchOutcome:
         for value, name in (
             (attempt_id, "attempt_id"),
@@ -271,20 +272,37 @@ class GuardedDispatcher:
             return DispatchOutcome("BLOCKED", client_order_id, None, reason)
 
         guard_called = False
+        barrier_now = now
 
         def final_guard() -> None:
-            nonlocal guard_called
+            nonlocal guard_called, barrier_now
             if guard_called:
                 raise RuntimeError("final send guard may be consumed only once")
             guard_called = True
-            allowed_now, barrier_reason = authority_check(intent_hash, now)
+            if final_barrier_clock is not None:
+                barrier_now = final_barrier_clock()
+                _instant(barrier_now)
+                if _instant(barrier_now) < _instant(now):
+                    barrier_now = now
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionBlocked",
+                        version=2,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": "final_barrier_clock_moved_backwards",
+                        },
+                        now=barrier_now,
+                    )
+                    raise DispatchBlocked("final_barrier_clock_moved_backwards")
+            allowed_now, barrier_reason = authority_check(intent_hash, barrier_now)
             if not allowed_now:
                 self._append(
                     attempt_id=attempt_id,
                     event_type="SubmissionBlocked",
                     version=2,
                     payload={"client_order_id": client_order_id, "reason": barrier_reason},
-                    now=now,
+                    now=barrier_now,
                 )
                 raise DispatchBlocked(barrier_reason)
             self._append(
@@ -296,7 +314,7 @@ class GuardedDispatcher:
                     "owner_token": self.owner_token,
                     "reason": "final_send_barrier_passed",
                 },
-                now=now,
+                now=barrier_now,
             )
 
         try:
@@ -315,7 +333,7 @@ class GuardedDispatcher:
                         "client_order_id": client_order_id,
                         "reason": f"transport_exception_after_send_barrier:{type(error).__name__}",
                     },
-                    now=now,
+                    now=barrier_now,
                 )
                 return DispatchOutcome("UNKNOWN", client_order_id, None, "transport_result_ambiguous")
             if not guard_called:
@@ -345,11 +363,40 @@ class GuardedDispatcher:
             )
             return DispatchOutcome("UNKNOWN", client_order_id, None, "provider_guard_contract_violation")
 
-        self._append(
-            attempt_id=attempt_id,
-            event_type="SubmissionSent",
-            version=3,
-            payload={"client_order_id": client_order_id, "response": response},
-            now=now,
-        )
+        try:
+            self._append(
+                attempt_id=attempt_id,
+                event_type="SubmissionSent",
+                version=3,
+                payload={"client_order_id": client_order_id, "response": response},
+                now=barrier_now,
+            )
+        except Exception as persistence_error:
+            # The outbound request has already crossed the final barrier.
+            # Never make this state safe to retry merely because the provider
+            # response could not be journaled.
+            try:
+                self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionUnknown",
+                    version=3,
+                    payload={
+                        "client_order_id": client_order_id,
+                        "reason": (
+                            "sent_response_persistence_failed:"
+                            + type(persistence_error).__name__
+                        ),
+                    },
+                    now=barrier_now,
+                )
+            except Exception:
+                # A durable SubmissionSending row already exists. Recovery will
+                # convert that state to UNKNOWN without another outbound send.
+                raise persistence_error
+            return DispatchOutcome(
+                "UNKNOWN",
+                client_order_id,
+                None,
+                "sent_response_persistence_failed",
+            )
         return DispatchOutcome("SENT", client_order_id, response, "sent_confirmed")

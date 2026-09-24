@@ -31,6 +31,19 @@ class AccessibleStatusTests(unittest.TestCase):
         self.assertIn("Action required: recovery or reconciliation is needed", text)
         self.assertNotIn("completed", text.lower())
 
+    def test_missing_replay_evidence_is_unavailable_not_failed(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "evidence_count": 0,
+                "fills": {},
+            }
+        )
+        self.assertIn("Replay verification: unavailable", text)
+        self.assertNotIn("Replay verification: failed", text)
+
     def test_economic_fields_are_copyable_text(self):
         text = format_accessible_status(
             {

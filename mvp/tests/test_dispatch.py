@@ -5,6 +5,10 @@ from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id
 from mvp.autotrade_mvp.persistence import JournalStore
 
 
+class SimulatedProcessDeath(BaseException):
+    """Model abrupt process termination that normal error recovery cannot catch."""
+
+
 class DispatchTests(unittest.TestCase):
     def store(self, directory):
         return JournalStore(f"{directory}/journal.sqlite3")
@@ -108,7 +112,7 @@ class DispatchTests(unittest.TestCase):
 
             def crashing_append(envelope, *, outbox_topic=None):
                 if envelope["event_type"] == "SubmissionSent":
-                    raise RuntimeError("simulated process death before terminal journal")
+                    raise SimulatedProcessDeath("simulated process death before terminal journal")
                 return real_append(envelope, outbox_topic=outbox_topic)
 
             store.append_event = crashing_append
@@ -122,7 +126,7 @@ class DispatchTests(unittest.TestCase):
                 outbound += 1
                 return {"provider_order_id": "p1"}
 
-            with self.assertRaisesRegex(RuntimeError, "simulated process death"):
+            with self.assertRaisesRegex(SimulatedProcessDeath, "simulated process death"):
                 dispatcher.dispatch(
                     attempt_id="a1", intent_id="i1", intent_hash="h1",
                     provider="sim", request={}, now="2026-09-24T18:00:00Z",
@@ -179,6 +183,127 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertNotEqual(first, other)
         self.assertLessEqual(len(first), 20)
+
+
+    def test_final_barrier_uses_fresh_time_and_blocks_expired_authority(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(store, owner_token="owner")
+            outbound = 0
+            observed_times = []
+
+            def authority(intent_hash, current_time):
+                observed_times.append(current_time)
+                return (
+                    (True, "allowed")
+                    if current_time < "2026-09-24T18:01:00Z"
+                    else (False, "policy_expired")
+                )
+
+            def transport(client_id, request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            result = dispatcher.dispatch(
+                attempt_id="expiry-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+                final_barrier_clock=lambda: "2026-09-24T18:02:00Z",
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "policy_expired")
+            self.assertEqual(outbound, 0)
+            self.assertEqual(
+                observed_times,
+                ["2026-09-24T18:00:00Z", "2026-09-24T18:02:00Z"],
+            )
+            events = store.load_events("submission_attempt", "expiry-a1")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+            self.assertEqual(
+                events[-1]["committed_at"],
+                "2026-09-24T18:02:00Z",
+            )
+
+
+
+    def test_backward_final_clock_is_persistently_blocked(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(store, owner_token="owner")
+            outbound = 0
+
+            def authority(intent_hash, current_time):
+                return True, "allowed"
+
+            def transport(client_id, request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            result = dispatcher.dispatch(
+                attempt_id="clock-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+                final_barrier_clock=lambda: "2026-09-24T17:59:59Z",
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "final_barrier_clock_moved_backwards")
+            self.assertEqual(outbound, 0)
+            events = store.load_events("submission_attempt", "clock-a1")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+
+    def test_unserializable_provider_response_after_send_becomes_unknown(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(store, owner_token="owner")
+            outbound = 0
+
+            def authority(intent_hash, current_time):
+                return True, "allowed"
+
+            def transport(client_id, request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"not_json": object()}
+
+            result = dispatcher.dispatch(
+                attempt_id="response-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(outbound, 1)
+            events = store.load_events("submission_attempt", "response-a1")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+
 
 
 if __name__ == "__main__":

@@ -166,16 +166,20 @@ class RuntimeReadinessTests(unittest.TestCase):
         self.assertIn("provider_native_protection_absent", result.warnings)
         self.assertIn("emergency_execution_path_unqualified", result.warnings)
 
-    def test_no_protection_path_yields_degraded_not_protection_only(self):
+    def test_no_protection_path_blocks_new_exposure_even_if_everything_else_is_green(self):
         result = evaluate_readiness(
             healthy(
-                market_data_fresh=False,
                 provider_native_protection_present=False,
                 emergency_execution_path_qualified=False,
             )
         )
         self.assertEqual(result.mode, RuntimeMode.DEGRADED)
+        self.assertFalse(result.ready)
+        self.assertFalse(result.ready_for_new_exposure)
         self.assertFalse(result.protection_only_available)
+        self.assertIn("no_qualified_protection_path", result.blockers)
+        self.assertIn("provider_native_protection_absent", result.warnings)
+        self.assertIn("emergency_execution_path_unqualified", result.warnings)
 
     def test_boolean_and_count_fields_fail_closed_on_truthy_values(self):
         with self.assertRaisesRegex(ReadinessError, "boolean"):

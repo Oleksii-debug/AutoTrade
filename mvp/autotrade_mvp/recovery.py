@@ -141,29 +141,31 @@ class RecoveryController:
         )
         if not events:
             return None
-        latest = events[-1]
-        if latest["event_type"] != self._OWNER_EVENT_TYPE:
-            raise RuntimeError("Recovery owner journal contains unsupported event type")
-        payload = latest["payload"]
-        if not isinstance(payload, dict):
-            raise RuntimeError("Recovery owner journal payload must be an object")
-        if payload_digest(payload) != latest["payload_hash"]:
-            raise RuntimeError("Recovery owner journal payload hash mismatch")
-        owner_id = payload.get("owner_id")
-        epoch_raw = payload.get("owner_epoch")
-        if not isinstance(owner_id, str) or not owner_id.strip():
-            raise RuntimeError("Recovery owner journal contains invalid owner identity")
-        if (
-            not isinstance(epoch_raw, str)
-            or not epoch_raw.isdigit()
-            or epoch_raw == "0"
-            or (len(epoch_raw) > 1 and epoch_raw.startswith("0"))
-        ):
-            raise RuntimeError("Recovery owner journal contains invalid owner epoch")
-        epoch = int(epoch_raw)
-        if int(latest["aggregate_version"]) != epoch:
-            raise RuntimeError("Recovery owner journal epoch/version mismatch")
-        return OwnerFence(owner_id=owner_id.strip(), epoch=epoch)
+        latest_owner: OwnerFence | None = None
+        for expected_epoch, event in enumerate(events, start=1):
+            if event["event_type"] != self._OWNER_EVENT_TYPE:
+                raise RuntimeError("Recovery owner journal contains unsupported event type")
+            payload = event["payload"]
+            if not isinstance(payload, dict):
+                raise RuntimeError("Recovery owner journal payload must be an object")
+            if payload_digest(payload) != event["payload_hash"]:
+                raise RuntimeError("Recovery owner journal payload hash mismatch")
+            owner_id = payload.get("owner_id")
+            epoch_raw = payload.get("owner_epoch")
+            if not isinstance(owner_id, str) or not owner_id.strip():
+                raise RuntimeError("Recovery owner journal contains invalid owner identity")
+            if (
+                not isinstance(epoch_raw, str)
+                or not epoch_raw.isdigit()
+                or epoch_raw == "0"
+                or (len(epoch_raw) > 1 and epoch_raw.startswith("0"))
+            ):
+                raise RuntimeError("Recovery owner journal contains invalid owner epoch")
+            epoch = int(epoch_raw)
+            if int(event["aggregate_version"]) != expected_epoch or epoch != expected_epoch:
+                raise RuntimeError("Recovery owner journal epoch/version chain is invalid")
+            latest_owner = OwnerFence(owner_id=owner_id.strip(), epoch=epoch)
+        return latest_owner
 
     def _append_durable_owner(self, owner: OwnerFence) -> None:
         if self._owner_store is None:

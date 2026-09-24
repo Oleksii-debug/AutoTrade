@@ -1,6 +1,6 @@
 """Authenticated, versioned host command state for the AutoTrade simulation surface.
 
-The UI is never a financial source of truth.  Command acceptance is distinct
+The UI is never a financial source of truth. Command acceptance is distinct
 from operation completion, retries are idempotent, state versions prevent lost
 updates, and event cursors are resumable with explicit gap detection.
 """
@@ -8,6 +8,7 @@ updates, and event cursors are resumable with explicit gap detection.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from typing import Callable, Mapping
@@ -24,15 +25,51 @@ class CommandResult:
     status: str
     state_version: str
     reason_codes: tuple[str, ...] = ()
+    field_errors: tuple[Mapping[str, object], ...] = ()
     operation_id: str | None = None
+    current_value_ref: str | None = None
 
 
 @dataclass(frozen=True)
 class OperationResult:
     operation_id: str
     phase: str
-    state_version: str
+    started_at: str
+    updated_at: str
+    affected_refs: tuple[str, ...] = ()
+    evidence: tuple[Mapping[str, object], ...] = ()
     remaining_uncertainty: tuple[str, ...] = ()
+
+
+def command_result_payload(result: CommandResult) -> dict[str, object]:
+    """Serialize exactly the canonical CommandResult contract."""
+
+    payload: dict[str, object] = {
+        "command_id": result.command_id,
+        "status": result.status,
+        "state_version": result.state_version,
+        "reason_codes": list(result.reason_codes),
+        "field_errors": [dict(item) for item in result.field_errors],
+    }
+    if result.operation_id is not None:
+        payload["operation_id"] = result.operation_id
+    if result.current_value_ref is not None:
+        payload["current_value_ref"] = result.current_value_ref
+    return payload
+
+
+def operation_result_payload(result: OperationResult) -> dict[str, object]:
+    """Serialize exactly the canonical OperationResult contract."""
+
+    return {
+        "operation_id": result.operation_id,
+        "phase": result.phase,
+        "started_at": result.started_at,
+        "updated_at": result.updated_at,
+        "affected_refs": list(result.affected_refs),
+        "evidence": [dict(item) for item in result.evidence],
+        "remaining_uncertainty": list(result.remaining_uncertainty),
+    }
 
 
 @dataclass(frozen=True)
@@ -44,7 +81,7 @@ class HostEvent:
 
 
 class HostCommandStore:
-    """Small durable-state analogue for host/API command semantics."""
+    """Small in-memory analogue for canonical host/API command semantics."""
 
     TERMINAL_PHASES = {"SUCCEEDED", "FAILED", "CANCELLED"}
     UPDATE_PHASES = {"RUNNING", "WAITING_EXTERNAL", "UNKNOWN", *TERMINAL_PHASES}
@@ -54,11 +91,15 @@ class HostCommandStore:
         *,
         session_validator: Callable[[str, str], bool],
         max_events: int = 100,
+        now: Callable[[], str] | None = None,
     ) -> None:
         if max_events < 1:
             raise ValueError("max_events must be positive")
         self._session_validator = session_validator
         self._max_events = max_events
+        self._now = now or (
+            lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
         self.state_version = 0
         self.cursor = 0
         self._events: list[HostEvent] = []
@@ -82,6 +123,21 @@ class HostCommandStore:
         if not isinstance(value, str) or not value:
             raise ValueError(f"{field} must be a non-empty string")
         return value
+
+    @staticmethod
+    def _normalize_refs(values: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(str(item) for item in values)
+        if any(not item.strip() for item in normalized):
+            raise ValueError("affected_refs cannot contain empty values")
+        return normalized
+
+    @staticmethod
+    def _normalize_evidence(
+        values: tuple[Mapping[str, object], ...],
+    ) -> tuple[Mapping[str, object], ...]:
+        if any(not isinstance(item, Mapping) for item in values):
+            raise ValueError("operation evidence must contain objects")
+        return tuple(dict(item) for item in values)
 
     def _emit(self, kind: str, payload: Mapping[str, object]) -> HostEvent:
         self.cursor += 1
@@ -148,10 +204,12 @@ class HostCommandStore:
             uuid5(NAMESPACE_URL, f"https://operations.autotrade.local/{command_id}")
         )
         self.state_version += 1
+        now = self._now()
         operation = OperationResult(
             operation_id=operation_id,
             phase="QUEUED",
-            state_version=str(self.state_version),
+            started_at=now,
+            updated_at=now,
             remaining_uncertainty=("financial_outcome_not_completed",),
         )
         self._operations[operation_id] = operation
@@ -162,6 +220,7 @@ class HostCommandStore:
                 "operation_id": operation_id,
                 "action": action,
                 "actor": actor,
+                **operation_result_payload(operation),
             },
         )
         result = CommandResult(
@@ -180,6 +239,8 @@ class HostCommandStore:
         phase: str,
         *,
         remaining_uncertainty: tuple[str, ...] = (),
+        affected_refs: tuple[str, ...] | None = None,
+        evidence: tuple[Mapping[str, object], ...] | None = None,
     ) -> OperationResult:
         current = self._operations.get(operation_id)
         if current is None:
@@ -187,6 +248,16 @@ class HostCommandStore:
         if phase not in self.UPDATE_PHASES:
             raise ValueError("Unsupported operation phase")
         normalized_uncertainty = tuple(str(x) for x in remaining_uncertainty)
+        normalized_refs = (
+            current.affected_refs
+            if affected_refs is None
+            else self._normalize_refs(affected_refs)
+        )
+        normalized_evidence = (
+            current.evidence
+            if evidence is None
+            else self._normalize_evidence(evidence)
+        )
         if current.phase in self.TERMINAL_PHASES:
             raise ValueError("Terminal operation cannot transition again")
         if current.phase == "UNKNOWN" and phase not in self.TERMINAL_PHASES:
@@ -199,17 +270,16 @@ class HostCommandStore:
         updated = OperationResult(
             operation_id=operation_id,
             phase=phase,
-            state_version=str(self.state_version),
+            started_at=current.started_at,
+            updated_at=self._now(),
+            affected_refs=normalized_refs,
+            evidence=normalized_evidence,
             remaining_uncertainty=normalized_uncertainty,
         )
         self._operations[operation_id] = updated
         self._emit(
             "OPERATION_UPDATED",
-            {
-                "operation_id": operation_id,
-                "phase": phase,
-                "remaining_uncertainty": list(normalized_uncertainty),
-            },
+            operation_result_payload(updated),
         )
         return updated
 

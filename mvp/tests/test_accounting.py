@@ -273,6 +273,52 @@ class AccountingFoundationTests(unittest.TestCase):
         with self.assertRaisesRegex(AccountingConflict, "cause_event_id"):
             EconomicBook([first, second])
 
+    def test_canonical_cause_identity_cannot_be_bypassed_with_whitespace(self):
+        book = EconomicBook()
+        first = JournalTransaction(
+            transaction_id="raw-1",
+            cause_event_id=" provider-execution-abc ",
+            postings=(
+                posting("CASH:USD", "USD", "100"),
+                posting("EXTERNAL_EQUITY:USD", "USD", "-100"),
+            ),
+        )
+        second = JournalTransaction(
+            transaction_id="raw-2",
+            cause_event_id="provider-execution-abc",
+            postings=(
+                posting("CASH:USD", "USD", "100"),
+                posting("EXTERNAL_EQUITY:USD", "USD", "-100"),
+            ),
+        )
+        self.assertTrue(book.append(first))
+        with self.assertRaisesRegex(AccountingConflict, "cause_event_id"):
+            book.append(second)
+        self.assertEqual(book.cash("USD"), Decimal("100"))
+
+    def test_canonical_transaction_identity_cannot_be_split_with_whitespace(self):
+        book = EconomicBook()
+        first = JournalTransaction(
+            transaction_id=" tx-1 ",
+            cause_event_id="cause-a",
+            postings=(
+                posting("CASH:USD", "USD", "100"),
+                posting("EXTERNAL_EQUITY:USD", "USD", "-100"),
+            ),
+        )
+        changed = JournalTransaction(
+            transaction_id="tx-1",
+            cause_event_id="cause-b",
+            postings=(
+                posting("CASH:USD", "USD", "200"),
+                posting("EXTERNAL_EQUITY:USD", "USD", "-200"),
+            ),
+        )
+        self.assertTrue(book.append(first))
+        with self.assertRaisesRegex(AccountingConflict, "transaction_id"):
+            book.append(changed)
+        self.assertEqual(book.cash("USD"), Decimal("100"))
+
     def test_unbalanced_transaction_is_rejected(self):
         transaction = JournalTransaction(
             transaction_id="bad",

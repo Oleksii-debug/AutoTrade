@@ -217,6 +217,15 @@ def prepare_json_export(
     )
 
 
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ExportBoundaryError("serialized JSON contains duplicate object key")
+        result[key] = value
+    return result
+
+
 def _serialized_payload_is_safe(value: object) -> bool:
     """Revalidate serialized JSON without trusting PreparedExport provenance."""
 
@@ -259,7 +268,11 @@ def verify_prepared_export(export: PreparedExport) -> bool:
         if not isinstance(export.data, bytes):
             return False
         decoded = export.data.decode("utf-8")
-        parsed = json.loads(decoded, parse_float=Decimal)
+        parsed = json.loads(
+            decoded,
+            parse_float=Decimal,
+            object_pairs_hook=_unique_json_object,
+        )
     except (UnicodeError, json.JSONDecodeError, ExportBoundaryError, TypeError):
         return False
     if not _serialized_payload_is_safe(parsed):

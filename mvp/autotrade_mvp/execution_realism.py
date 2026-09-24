@@ -125,9 +125,9 @@ class ExecutionModel:
         multiplier = _positive(
             self.scenario_cost_multiplier, name="scenario_cost_multiplier"
         )
-        if scenario == "ADVERSE" and multiplier < 1:
+        if scenario in {"BASE", "ADVERSE"} and multiplier < 1:
             raise ExecutionRealismError(
-                "ADVERSE scenario_cost_multiplier cannot be below 1"
+                f"{scenario} scenario_cost_multiplier cannot be below 1"
             )
         object.__setattr__(self, "model_version", _text(self.model_version, name="model_version"))
         object.__setattr__(
@@ -192,9 +192,9 @@ class ExecutionModel:
             scenario_cost_multiplier,
             name="scenario_cost_multiplier",
         )
-        if normalized_scenario == "ADVERSE" and multiplier < 1:
+        if normalized_scenario in {"BASE", "ADVERSE"} and multiplier < 1:
             raise ExecutionRealismError(
-                "ADVERSE scenario_cost_multiplier cannot be below 1"
+                f"{normalized_scenario} scenario_cost_multiplier cannot be below 1"
             )
         return cls(
             model_version=_text(model_version, name="model_version"),

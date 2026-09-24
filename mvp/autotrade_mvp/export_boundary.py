@@ -30,6 +30,9 @@ _WINDOWS_RESERVED = {
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
 }
+_MAX_EXPORT_BYTES = 4 * 1024 * 1024
+_MAX_EXPORT_DEPTH = 32
+_MAX_EXPORT_ITEMS = 100_000
 
 
 class ExportBoundaryError(ValueError):
@@ -164,9 +167,9 @@ def prepare_json_export(
     payload: object,
     rights: Mapping[str, object],
     source_refs: tuple[str, ...] | list[str] = (),
-    max_bytes: int = 4 * 1024 * 1024,
-    max_depth: int = 32,
-    maximum_items: int = 100_000,
+    max_bytes: int = _MAX_EXPORT_BYTES,
+    max_depth: int = _MAX_EXPORT_DEPTH,
+    maximum_items: int = _MAX_EXPORT_ITEMS,
 ) -> PreparedExport:
     """Prepare an inert, redacted, rights-aware JSON export.
 
@@ -179,6 +182,18 @@ def prepare_json_export(
         raise ExportBoundaryError("max_bytes must be a positive integer")
     if not isinstance(max_depth, int) or isinstance(max_depth, bool) or max_depth < 1:
         raise ExportBoundaryError("max_depth must be a positive integer")
+    if (
+        not isinstance(maximum_items, int)
+        or isinstance(maximum_items, bool)
+        or maximum_items < 1
+    ):
+        raise ExportBoundaryError("maximum_items must be a positive integer")
+    if max_bytes > _MAX_EXPORT_BYTES:
+        raise ExportBoundaryError("max_bytes exceeds export boundary hard limit")
+    if max_depth > _MAX_EXPORT_DEPTH:
+        raise ExportBoundaryError("max_depth exceeds export boundary hard limit")
+    if maximum_items > _MAX_EXPORT_ITEMS:
+        raise ExportBoundaryError("maximum_items exceeds export boundary hard limit")
 
     normalized_sources = tuple(
         _required_text(item, name="source_ref") for item in source_refs
@@ -226,9 +241,18 @@ def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def _serialized_payload_is_safe(value: object) -> bool:
+def _serialized_payload_is_safe(
+    value: object,
+    *,
+    depth: int,
+    max_depth: int,
+    budget: _Budget,
+) -> bool:
     """Revalidate serialized JSON without trusting PreparedExport provenance."""
 
+    if depth > max_depth:
+        return False
+    budget.consume()
     if value is None or isinstance(value, (bool, int, str)):
         return True
     if isinstance(value, Decimal):
@@ -236,7 +260,15 @@ def _serialized_payload_is_safe(value: object) -> bool:
         # numeric fractions. Exact financial decimals must have been strings.
         return False
     if isinstance(value, list):
-        return all(_serialized_payload_is_safe(item) for item in value)
+        return all(
+            _serialized_payload_is_safe(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                budget=budget,
+            )
+            for item in value
+        )
     if isinstance(value, dict):
         for key, item in value.items():
             if not isinstance(key, str) or not key:
@@ -245,7 +277,12 @@ def _serialized_payload_is_safe(value: object) -> bool:
                 if item != "[REDACTED]":
                     return False
                 continue
-            if not _serialized_payload_is_safe(item):
+            if not _serialized_payload_is_safe(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                budget=budget,
+            ):
                 return False
         return True
     return False
@@ -267,15 +304,28 @@ def verify_prepared_export(export: PreparedExport) -> bool:
             return False
         if not isinstance(export.data, bytes):
             return False
+        if len(export.data) > _MAX_EXPORT_BYTES:
+            return False
         decoded = export.data.decode("utf-8")
         parsed = json.loads(
             decoded,
             parse_float=Decimal,
             object_pairs_hook=_unique_json_object,
         )
-    except (UnicodeError, json.JSONDecodeError, ExportBoundaryError, TypeError):
-        return False
-    if not _serialized_payload_is_safe(parsed):
+        if not _serialized_payload_is_safe(
+            parsed,
+            depth=0,
+            max_depth=_MAX_EXPORT_DEPTH,
+            budget=_Budget(_MAX_EXPORT_ITEMS),
+        ):
+            return False
+    except (
+        UnicodeError,
+        json.JSONDecodeError,
+        ExportBoundaryError,
+        TypeError,
+        RecursionError,
+    ):
         return False
     return export.sha256 == f"sha256:{sha256(export.data).hexdigest()}"
 

@@ -3,6 +3,7 @@ import unittest
 
 from mvp.autotrade_mvp.reconciliation import (
     CoverageSurfaceEvidence,
+    LocalWorkingOrderEvidence,
     ProviderFillEvidence,
     ProviderWorkingOrderEvidence,
     SnapshotConsistencyEvidence,
@@ -318,6 +319,54 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(resolution.provider_order_ids, ("provider-working",))
         self.assertEqual(resolution.provider_execution_ids, ())
         self.assertTrue(result.complete)
+
+    def test_matching_client_id_with_wrong_working_order_economics_blocks(self):
+        provider = ProviderWorkingOrderEvidence.create(
+            provider_order_id="provider-working",
+            client_order_id="client-working",
+            instrument="XYZ",
+            remaining_quantity="2",
+        )
+        local = LocalWorkingOrderEvidence.create(
+            client_order_id="client-working",
+            instrument="ABC",
+            remaining_quantity="1",
+        )
+        result = self.base(
+            local_working_orders=[local],
+            provider_working_orders=[provider],
+        )
+        self.assertFalse(result.complete)
+        self.assertEqual(
+            result.mismatched_working_client_order_ids,
+            ("client-working",),
+        )
+        self.assertEqual(result.matched_working_client_order_ids, ())
+        self.assertIn("INSTRUMENT:ABC", result.blocking_resources)
+        self.assertIn("INSTRUMENT:XYZ", result.blocking_resources)
+
+    def test_detailed_working_order_matches_exact_quantity_and_instrument(self):
+        provider = ProviderWorkingOrderEvidence.create(
+            provider_order_id="provider-working",
+            client_order_id="client-working",
+            instrument="ABC",
+            remaining_quantity="1",
+        )
+        local = LocalWorkingOrderEvidence.create(
+            client_order_id="client-working",
+            instrument="ABC",
+            remaining_quantity="1",
+        )
+        result = self.base(
+            local_working_orders=[local],
+            provider_working_orders=[provider],
+        )
+        self.assertTrue(result.complete)
+        self.assertEqual(
+            result.matched_working_client_order_ids,
+            ("client-working",),
+        )
+        self.assertEqual(result.mismatched_working_client_order_ids, ())
 
     def test_external_working_order_blocks_affected_instrument(self):
         result = self.base(

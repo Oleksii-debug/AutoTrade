@@ -1,5 +1,7 @@
 import unittest
 from decimal import Decimal
+from hashlib import sha256
+import json
 from tempfile import TemporaryDirectory
 
 from mvp.autotrade_mvp.authority import (
@@ -8,7 +10,7 @@ from mvp.autotrade_mvp.authority import (
     InstrumentVersionIdentity,
 )
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 
 
 INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
@@ -675,6 +677,182 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(result.status, "BLOCKED")
             self.assertEqual(result.reason, "policy_revoked")
             self.assertEqual(outbound, 0)
+
+
+    def test_durable_replay_rejects_admitted_scope_outside_policy(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            service = AuthorityService(store)
+            service.register_policy(policy(autonomous=True))
+
+            request = {
+                "policy_id": "p1",
+                "intent_hash": "forged-intent",
+                "account_id": "other-account",
+                "environment": "PAPER",
+                "instrument_id": INSTRUMENT_ID,
+                "instrument_version": 1,
+                "action": "ORDER.SUBMIT",
+                "notional": "100",
+                "state_version": 1,
+                "risk_admitted": True,
+                "confirmation_id": None,
+                "risk_reducing": False,
+            }
+            fingerprint = sha256(
+                json.dumps(
+                    request, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+            ).hexdigest()
+            payload = {
+                "admission_id": "forged-admission",
+                "policy_id": "p1",
+                "intent_hash": "forged-intent",
+                "account_id": "other-account",
+                "environment": "PAPER",
+                "instrument": {
+                    "instrument_id": INSTRUMENT_ID,
+                    "version": 1,
+                },
+                "action": "ORDER.SUBMIT",
+                "notional": "100",
+                "risk_reducing": False,
+                "state_version": 1,
+                "authority_epoch": 1,
+                "outcome": "ADMITTED",
+                "admitted_at": "2026-09-24T18:00:00Z",
+                "confirmation_id": None,
+                "reason": "admitted",
+                "request_fingerprint": fingerprint,
+            }
+            store.append_event(
+                {
+                    "event_id": "forged-admission-event",
+                    "event_type": "AuthorityAdmissionRecorded",
+                    "aggregate_type": "authority_state",
+                    "aggregate_id": "canonical",
+                    "aggregate_version": 2,
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": "2026-09-24T18:00:00Z",
+                }
+            )
+            with self.assertRaisesRegex(
+                Exception, "violates policy scope"
+            ):
+                AuthorityService(store)
+
+    def test_durable_replay_rejects_malformed_admission_types(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            service = AuthorityService(store)
+            service.register_policy(policy(autonomous=True))
+            payload = {
+                "admission_id": "malformed-admission",
+                "policy_id": "p1",
+                "intent_hash": "h",
+                "account_id": "paper-1",
+                "environment": "PAPER",
+                "instrument": {
+                    "instrument_id": INSTRUMENT_ID,
+                    "version": 1,
+                },
+                "action": "ORDER.SUBMIT",
+                "notional": "100",
+                "risk_reducing": "false",
+                "state_version": 1,
+                "authority_epoch": 1,
+                "outcome": "ADMITTED",
+                "admitted_at": "2026-09-24T18:00:00Z",
+                "confirmation_id": None,
+                "reason": "admitted",
+                "request_fingerprint": "a" * 64,
+            }
+            store.append_event(
+                {
+                    "event_id": "malformed-admission-event",
+                    "event_type": "AuthorityAdmissionRecorded",
+                    "aggregate_type": "authority_state",
+                    "aggregate_id": "canonical",
+                    "aggregate_version": 2,
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": "2026-09-24T18:00:00Z",
+                }
+            )
+            with self.assertRaisesRegex(TypeError, "risk_reducing"):
+                AuthorityService(store)
+
+    def test_durable_replay_rejects_double_confirmation_consumption(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            service = AuthorityService(store)
+            service.register_policy(policy())
+            service.add_confirmation(
+                confirmation_id="single-use",
+                policy_id="p1",
+                intent_hash="same-intent",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                expires_at="2026-09-24T23:00:00Z",
+            )
+            first = service.admit(
+                admission_id="first-use",
+                policy_id="p1",
+                intent_hash="same-intent",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                state_version=1,
+                risk_admitted=True,
+                now="2026-09-24T18:00:00Z",
+                confirmation_id="single-use",
+            )
+            self.assertEqual(first.outcome, "ADMITTED")
+            duplicate = {
+                "admission_id": "second-use",
+                "policy_id": first.policy_id,
+                "intent_hash": first.intent_hash,
+                "account_id": first.account_id,
+                "environment": first.environment,
+                "instrument": {
+                    "instrument_id": first.instrument_version.instrument_id,
+                    "version": first.instrument_version.version,
+                },
+                "action": first.action,
+                "notional": str(first.notional),
+                "risk_reducing": first.risk_reducing,
+                "state_version": first.state_version,
+                "authority_epoch": first.authority_epoch,
+                "outcome": first.outcome,
+                "admitted_at": "2026-09-24T18:00:01Z",
+                "confirmation_id": first.confirmation_id,
+                "reason": first.reason,
+                "request_fingerprint": first.request_fingerprint,
+            }
+            store.append_event(
+                {
+                    "event_id": "second-confirmation-use-event",
+                    "event_type": "AuthorityAdmissionRecorded",
+                    "aggregate_type": "authority_state",
+                    "aggregate_id": "canonical",
+                    "aggregate_version": 4,
+                    "payload": duplicate,
+                    "payload_hash": payload_digest(duplicate),
+                    "committed_at": "2026-09-24T18:00:01Z",
+                }
+            )
+            with self.assertRaisesRegex(
+                Exception, "consumed by multiple admissions"
+            ):
+                AuthorityService(store)
 
 
 if __name__ == "__main__":

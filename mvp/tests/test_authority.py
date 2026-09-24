@@ -68,14 +68,20 @@ class AuthorityTests(unittest.TestCase):
         )
         self.assertEqual(admitted.outcome, "ADMITTED")
         self.assertEqual(
-            service.dispatch_allowed("a1", intent_hash="h1", now="2026-09-24T18:01:00Z"),
+            service.dispatch_allowed(
+                "a1", intent_hash="h1", account_id="paper-1", environment="PAPER",
+                instrument="ABC", action="ORDER.SUBMIT", now="2026-09-24T18:01:00Z"
+            ),
             (True, "allowed"),
         )
         service.revoke_policy(
             "p1", reason="operator revoke", revoked_at="2026-09-24T18:02:00Z"
         )
         self.assertEqual(
-            service.dispatch_allowed("a1", intent_hash="h1", now="2026-09-24T18:03:00Z"),
+            service.dispatch_allowed(
+                "a1", intent_hash="h1", account_id="paper-1", environment="PAPER",
+                instrument="ABC", action="ORDER.SUBMIT", now="2026-09-24T18:03:00Z"
+            ),
             (False, "policy_revoked"),
         )
 
@@ -99,9 +105,64 @@ class AuthorityTests(unittest.TestCase):
             risk_admitted=True, now="2026-09-24T18:00:00Z",
         )
         self.assertEqual(
-            service.dispatch_allowed("a1", intent_hash="changed", now="2026-09-24T18:01:00Z"),
+            service.dispatch_allowed(
+                "a1", intent_hash="changed", account_id="paper-1", environment="PAPER",
+                instrument="ABC", action="ORDER.SUBMIT", now="2026-09-24T18:01:00Z"
+            ),
             (False, "intent_hash_changed"),
         )
+
+    def test_dispatch_scope_cannot_change_after_admission(self):
+        service = AuthorityService()
+        service.register_policy(policy(autonomous=True))
+        service.admit(
+            admission_id="a1", policy_id="p1", intent_hash="h1",
+            account_id="paper-1", environment="PAPER", instrument="ABC",
+            action="ORDER.SUBMIT", notional="100", state_version=1,
+            risk_admitted=True, now="2026-09-24T18:00:00Z",
+        )
+        variants = (
+            dict(account_id="other", environment="PAPER", instrument="ABC", action="ORDER.SUBMIT"),
+            dict(account_id="paper-1", environment="SIMULATION", instrument="ABC", action="ORDER.SUBMIT"),
+            dict(account_id="paper-1", environment="PAPER", instrument="XYZ", action="ORDER.SUBMIT"),
+            dict(account_id="paper-1", environment="PAPER", instrument="ABC", action="ORDER.CANCEL"),
+        )
+        for scope in variants:
+            with self.subTest(scope=scope):
+                allowed, reason = service.dispatch_allowed(
+                    "a1", intent_hash="h1", now="2026-09-24T18:01:00Z", **scope
+                )
+                self.assertFalse(allowed)
+                self.assertEqual(reason, "admission_scope_changed")
+
+    def test_future_revocation_applies_only_at_its_effective_time(self):
+        service = AuthorityService()
+        service.register_policy(policy(autonomous=True))
+        service.admit(
+            admission_id="a1", policy_id="p1", intent_hash="h1",
+            account_id="paper-1", environment="PAPER", instrument="ABC",
+            action="ORDER.SUBMIT", notional="100", state_version=1,
+            risk_admitted=True, now="2026-09-24T18:00:00Z",
+        )
+        service.revoke_policy(
+            "p1", reason="scheduled revoke", revoked_at="2026-09-24T18:05:00Z"
+        )
+        before = service.dispatch_allowed(
+            "a1", intent_hash="h1", account_id="paper-1", environment="PAPER",
+            instrument="ABC", action="ORDER.SUBMIT", now="2026-09-24T18:04:59Z"
+        )
+        self.assertEqual(before, (False, "authority_epoch_changed"))
+        at = service.dispatch_allowed(
+            "a1", intent_hash="h1", account_id="paper-1", environment="PAPER",
+            instrument="ABC", action="ORDER.SUBMIT", now="2026-09-24T18:05:00Z"
+        )
+        self.assertEqual(at, (False, "policy_revoked"))
+
+    def test_policy_boolean_inputs_fail_closed(self):
+        with self.assertRaises(TypeError):
+            policy(autonomous="false")
+        with self.assertRaises(TypeError):
+            policy(protection_only="true")
 
     def test_protection_only_policy_cannot_open_nonreducing_risk(self):
         service = AuthorityService()

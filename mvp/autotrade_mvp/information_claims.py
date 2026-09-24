@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import re
 from typing import Iterable
 
 
@@ -27,6 +28,13 @@ def _text(value: str, *, name: str) -> str:
 
 def _digest(text: str) -> str:
     return "sha256:" + sha256(text.encode("utf-8")).hexdigest()
+
+
+def _canonical_digest(value: str, *, name: str) -> str:
+    normalized = _text(value, name=name)
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", normalized) is None:
+        raise ValueError(f"{name} must be a canonical SHA-256 digest")
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -93,6 +101,40 @@ class InformationClaim:
     conflict_key: str
     untrusted_content: bool = True
     permission_effect: str = "NONE"
+
+    def __post_init__(self) -> None:
+        for field in (
+            "subject",
+            "predicate",
+            "value",
+            "source_id",
+            "source_revision",
+            "locator",
+            "rights_basis",
+        ):
+            object.__setattr__(self, field, _text(getattr(self, field), name=field))
+
+        kind = _text(self.source_kind, name="source_kind").upper()
+        if kind not in {"NEWS", "MACRO", "CORPORATE", "OFFICIAL"}:
+            raise ValueError("unsupported source_kind")
+        object.__setattr__(self, "source_kind", kind)
+
+        published = _time(self.published_at, name="published_at")
+        available = _time(self.available_at, name="available_at")
+        if available < published:
+            raise ValueError("available_at cannot precede published_at")
+        object.__setattr__(self, "published_at", published)
+        object.__setattr__(self, "available_at", available)
+
+        for field in ("claim_id", "passage_hash", "syndication_key", "conflict_key"):
+            object.__setattr__(
+                self,
+                field,
+                _canonical_digest(getattr(self, field), name=field),
+            )
+
+        if self.untrusted_content is not True or self.permission_effect != "NONE":
+            raise ValueError("information claims cannot grant authority")
 
 
 class ClaimStore:

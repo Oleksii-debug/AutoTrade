@@ -19,6 +19,7 @@ from mvp.autotrade_mvp.whitebit import (
     collateral_balance_request,
     decode_whitebit_json,
     execution_history_coverage,
+    market_fee_request,
     open_order_coverage,
     open_positions_request,
     order_history_coverage,
@@ -900,6 +901,129 @@ class WhiteBitAdapterTests(unittest.TestCase):
             "unqualified",
         ):
             websocket_recovery_policy("orders_magic")
+
+    def test_fee_schedule_uses_account_defaults_and_market_override(self):
+        schedule = parse_fee_schedule(
+            {
+                "error": None,
+                "taker": "0.1",
+                "maker": "0.1",
+                "futures_taker": "0.035",
+                "futures_maker": "0.01",
+                "rpi_maker_fee_premium": "0.015",
+                "futures_rpi_maker_fee_premium": "0.01",
+                "custom_fee": {
+                    "BTC_PERP": {
+                        "taker": "0.055",
+                        "maker": "0.01",
+                    }
+                },
+            },
+            evidence_id="fee-snapshot:1",
+            observed_at=NOW,
+        )
+        self.assertEqual(
+            schedule.effective_percent(
+                product_family="SPOT",
+                role="TAKER",
+                market="BTC_USDT",
+            ),
+            Decimal("0.1"),
+        )
+        self.assertEqual(
+            schedule.effective_percent(
+                product_family="FUTURES",
+                role="TAKER",
+                market="BTC_PERP",
+            ),
+            Decimal("0.055"),
+        )
+        self.assertEqual(
+            schedule.effective_fraction(
+                product_family="FUTURES",
+                role="TAKER",
+                market="BTC_PERP",
+            ),
+            Decimal("0.00055"),
+        )
+
+    def test_rpi_fee_adds_account_premium_only_to_maker(self):
+        schedule = parse_fee_schedule(
+            {
+                "error": None,
+                "taker": "0.1",
+                "maker": "0.1",
+                "futures_taker": "0.035",
+                "futures_maker": "0.01",
+                "rpi_maker_fee_premium": "0.015",
+                "futures_rpi_maker_fee_premium": None,
+                "custom_fee": {},
+            },
+            evidence_id="fee-snapshot:2",
+            observed_at=NOW,
+        )
+        self.assertEqual(
+            schedule.effective_percent(
+                product_family="SPOT",
+                role="MAKER",
+                market="BTC_USDT",
+                rpi=True,
+            ),
+            Decimal("0.115"),
+        )
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "maker-only",
+        ):
+            schedule.effective_percent(
+                product_family="SPOT",
+                role="TAKER",
+                market="BTC_USDT",
+                rpi=True,
+            )
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "not configured",
+        ):
+            schedule.effective_percent(
+                product_family="FUTURES",
+                role="MAKER",
+                market="BTC_PERP",
+                rpi=True,
+            )
+
+    def test_fee_schedule_rejects_provider_error_and_invalid_percentage(self):
+        base = {
+            "error": None,
+            "taker": "0.1",
+            "maker": "0.1",
+            "futures_taker": "0.035",
+            "futures_maker": "0.01",
+            "rpi_maker_fee_premium": None,
+            "futures_rpi_maker_fee_premium": None,
+            "custom_fee": {},
+        }
+        errored = dict(base)
+        errored["error"] = "provider-error"
+        with self.assertRaisesRegex(WhiteBitAdapterError, "provider error"):
+            parse_fee_schedule(
+                errored,
+                evidence_id="fee:error",
+                observed_at=NOW,
+            )
+        invalid = dict(base)
+        invalid["maker"] = "101"
+        with self.assertRaisesRegex(WhiteBitAdapterError, "between 0 and 100"):
+            parse_fee_schedule(
+                invalid,
+                evidence_id="fee:invalid",
+                observed_at=NOW,
+            )
+
+    def test_market_fee_request_is_network_free(self):
+        request = market_fee_request()
+        self.assertEqual(request.endpoint, "/api/v4/market/fee")
+        self.assertEqual(dict(request.body), {})
 
     def test_private_signer_uses_exact_body_and_caller_owned_nonce(self):
         nonce = 1_790_280_000_123

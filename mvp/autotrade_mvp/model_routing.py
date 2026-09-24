@@ -42,6 +42,7 @@ class ModelRoute:
 class RoutingPolicy:
     mode: str
     max_request_cost: Decimal = Decimal("0")
+    max_total_cost: Decimal | None = None
     allow_remote: bool = False
     fixed_route_id: str | None = None
     allowed_route_ids: frozenset[str] = frozenset()
@@ -51,6 +52,8 @@ class RoutingPolicy:
             raise ValueError(f"unsupported routing mode: {self.mode}")
         if self.max_request_cost < 0:
             raise ValueError("max_request_cost cannot be negative")
+        if self.max_total_cost is not None and self.max_total_cost < 0:
+            raise ValueError("max_total_cost cannot be negative")
         if self.mode == "fixed" and not self.fixed_route_id:
             raise ValueError("fixed mode requires fixed_route_id")
 
@@ -81,18 +84,29 @@ class RoutingDecision:
     model: str | None
     locality: str | None
     estimated_cost: Decimal
+    spent_before: Decimal
+    projected_total_cost: Decimal
     deadline_ms: int | None
     execute: bool
     reason: str
 
 
-def _no_route(request: RouteRequest, reason: str) -> RoutingDecision:
+def _spent(value: Decimal | str | int) -> Decimal:
+    result = value if isinstance(value, Decimal) else Decimal(value)
+    if not result.is_finite() or result < 0:
+        raise ValueError("spent_cost must be a finite non-negative decimal")
+    return result
+
+
+def _no_route(request: RouteRequest, spent_cost: Decimal, reason: str) -> RoutingDecision:
     return RoutingDecision(
         route_id=None,
         provider=None,
         model=None,
         locality=None,
         estimated_cost=Decimal("0"),
+        spent_before=spent_cost,
+        projected_total_cost=spent_cost,
         deadline_ms=request.deadline_ms,
         execute=False,
         reason=reason,
@@ -133,13 +147,19 @@ def select_route(
     routes: Iterable[ModelRoute],
     policy: RoutingPolicy,
     request: RouteRequest,
+    *,
+    spent_cost: Decimal | str | int = Decimal("0"),
 ) -> RoutingDecision:
     """Select one eligible route or return an explicit no-model decision."""
 
+    spent = _spent(spent_cost)
+
     if request.cancelled:
-        return _no_route(request, "request cancelled")
+        return _no_route(request, spent, "request cancelled")
     if policy.mode == "zero":
-        return _no_route(request, "zero-model policy")
+        return _no_route(request, spent, "zero-model policy")
+    if policy.max_total_cost is not None and spent >= policy.max_total_cost:
+        return _no_route(request, spent, "total model budget exhausted")
 
     candidates: list[tuple[Decimal, str, ModelRoute]] = []
     for route in routes:
@@ -148,10 +168,16 @@ def select_route(
         cost = _estimated_cost(route, request)
         if cost > policy.max_request_cost:
             continue
+        if policy.max_total_cost is not None and spent + cost > policy.max_total_cost:
+            continue
         candidates.append((cost, route.route_id, route))
 
     if not candidates:
-        return _no_route(request, "no eligible route within privacy, deadline and budget policy")
+        return _no_route(
+            request,
+            spent,
+            "no eligible route within privacy, deadline and budget policy",
+        )
 
     if policy.mode == "fixed":
         cost, _, route = candidates[0]
@@ -166,6 +192,8 @@ def select_route(
         model=route.model,
         locality=route.locality,
         estimated_cost=cost,
+        spent_before=spent,
+        projected_total_cost=spent + cost,
         deadline_ms=request.deadline_ms,
         execute=True,
         reason=reason,

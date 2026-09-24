@@ -128,6 +128,8 @@ def build_policy(
     revoked = None if revoked_at is None else _aware(revoked_at, name="revoked_at")
     if revoked is not None and revoked < start:
         raise ValueError("revoked_at cannot precede valid_from")
+    if not isinstance(autonomous, bool):
+        raise TypeError("autonomous must be a boolean")
     return AuthorityPolicy(
         policy_id=_text(policy_id, name="policy_id"),
         version=version,
@@ -139,7 +141,7 @@ def build_policy(
         instrument_ids=_scope(instrument_ids, name="instrument_id"),
         valid_from=start,
         valid_until=end,
-        autonomous=bool(autonomous),
+        autonomous=autonomous,
         revoked_at=revoked,
     )
 

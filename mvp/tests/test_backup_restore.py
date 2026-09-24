@@ -21,7 +21,11 @@ from mvp.autotrade_mvp.backup import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.pipeline import run_vertical_slice
-from mvp.autotrade_mvp.reconciliation import reconcile_account
+from mvp.autotrade_mvp.reconciliation import (
+    CoverageSurfaceEvidence,
+    UnknownSubmission,
+    reconcile_account,
+)
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
 
 
@@ -83,6 +87,40 @@ def _reconciliation(*, complete: bool = True):
     )
 
 
+def _resolved_absence_reconciliation():
+    surfaces = [
+        CoverageSurfaceEvidence(
+            surface=surface,
+            coverage_start="2026-09-24T17:00:00Z",
+            coverage_end="2026-09-24T19:00:00Z",
+            pagination_complete=True,
+            consistency_horizon_satisfied=True,
+            provider_semantics_exclude_execution=True,
+        )
+        for surface in ("OPEN_ORDERS", "ORDER_HISTORY", "EXECUTIONS", "ACTIVITIES")
+    ]
+    return reconcile_account(
+        local_cash={"USD": "1000"},
+        provider_cash={"USD": "1000"},
+        local_positions={},
+        provider_positions={},
+        local_execution_ids=[],
+        provider_fills=[],
+        unknown_submissions=[
+            UnknownSubmission.create(
+                attempt_id="attempt-absent",
+                client_order_id="client-absent",
+                started_at="2026-09-24T18:00:00Z",
+            )
+        ],
+        searched_client_order_ids=["client-absent"],
+        coverage_start="2026-09-24T17:00:00Z",
+        coverage_end="2026-09-24T19:00:00Z",
+        pagination_complete=True,
+        absence_coverage=surfaces,
+    )
+
+
 class BackupRestoreTests(unittest.TestCase):
     def _build_sources(self, root: Path) -> tuple[Path, Path]:
         state = root / "state"
@@ -136,6 +174,29 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertEqual(proof["owner_id"], owner.owner_id)
             self.assertEqual(proof["blocking_resources"], [])
             self.assertFalse(restore_requires_reconciliation(restored))
+            self.assertFalse(restore_requires_reconciliation(restored))
+
+    def test_resolved_absence_completion_uses_current_reconciliation_contract(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = RecoveryController()
+            controller.start("restored-host")
+
+            proof = complete_restore_reconciliation(
+                restored,
+                controller=controller,
+                reconciliation=_resolved_absence_reconciliation(),
+                fencing_evidence=_fencing_evidence(),
+                completed_at="2026-09-24T20:00:00Z",
+            )
+
+            resolution = proof["submission_resolutions"][0]
+            self.assertEqual(resolution["outcome"], "PROVEN_ABSENT")
+            self.assertEqual(resolution["provider_execution_ids"], [])
+            self.assertEqual(resolution["provider_order_ids"], [])
             self.assertFalse(restore_requires_reconciliation(restored))
 
     def test_incomplete_reconciliation_never_clears_restore_gate(self):

@@ -91,6 +91,8 @@ class SnapshotConsistencyEvidence:
     buffered_stream_events: bool = False
     replay_complete: bool = False
     sequence_gap_detected: bool = False
+    stream_watermark_start: str | None = None
+    stream_watermark_end: str | None = None
 
     def __post_init__(self) -> None:
         normalized = _text(self.mode, name="mode").upper()
@@ -108,13 +110,28 @@ class SnapshotConsistencyEvidence:
         ):
             if type(getattr(self, field)) is not bool:
                 raise TypeError(f"{field} must be boolean")
+        if normalized == "COMPOSED":
+            object.__setattr__(
+                self,
+                "stream_watermark_start",
+                _text(self.stream_watermark_start, name="stream_watermark_start"),
+            )
+            object.__setattr__(
+                self,
+                "stream_watermark_end",
+                _text(self.stream_watermark_end, name="stream_watermark_end"),
+            )
+        elif self.stream_watermark_start is not None or self.stream_watermark_end is not None:
+            raise ValueError("atomic snapshot must not claim composed stream watermarks")
 
     @property
     def consistent(self) -> bool:
         if self.mode == "ATOMIC":
             return not self.sequence_gap_detected
         return (
-            self.buffered_stream_events
+            self.stream_watermark_start is not None
+            and self.stream_watermark_end is not None
+            and self.buffered_stream_events
             and self.replay_complete
             and not self.sequence_gap_detected
         )

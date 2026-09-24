@@ -292,7 +292,8 @@ class SecurityBoundaryTests(unittest.TestCase):
 
     def test_origin_is_canonicalized_and_invalid_port_fails_closed(self):
         canonical = SecurityBoundary(
-            allowed_origins={"https://LOCAL.AUTOTRADE.INVALID:443/"}
+            allowed_origins={"https://LOCAL.AUTOTRADE.INVALID:443/"},
+            credential_vault=self.vault,
         )
         session = canonical.create_session(
             subject="owner",
@@ -302,7 +303,8 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertEqual(session.origin, "https://local.autotrade.invalid")
         with self.assertRaisesRegex(ValueError, "port"):
             SecurityBoundary(
-                allowed_origins={"https://local.autotrade.invalid:99999"}
+                allowed_origins={"https://local.autotrade.invalid:99999"},
+                credential_vault=self.vault,
             )
 
     def test_diagnostic_redaction_covers_mapping_proxy_and_sets(self):
@@ -313,7 +315,8 @@ class SecurityBoundaryTests(unittest.TestCase):
                     "safe": {"top-secret"},
                     "nested": MappingProxyType({"note": "prefix top-secret suffix"}),
                 }
-            )
+            ),
+            sensitive_values=("top-secret",),
         )
         self.assertNotIn("top-secret", repr(redacted))
         self.assertIn("[REDACTED]", repr(redacted))

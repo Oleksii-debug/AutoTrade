@@ -165,6 +165,7 @@ class RiskPolicy:
     max_slippage_fraction: Decimal | None = None
     max_clock_age_seconds: Decimal | None = None
     allowed_actions: tuple[str, ...] | None = None
+    require_settlement_evidence: bool = False
 
     @classmethod
     def create(
@@ -188,6 +189,7 @@ class RiskPolicy:
         max_slippage_fraction=None,
         max_clock_age_seconds=None,
         allowed_actions: Sequence[str] | None = None,
+        require_settlement_evidence: bool = False,
     ) -> "RiskPolicy":
         values = {
             "max_abs_position": _positive(max_abs_position, name="max_abs_position"),
@@ -243,12 +245,15 @@ class RiskPolicy:
             if allowed_actions is None
             else _normalize_actions(allowed_actions, name="allowed_actions")
         )
+        if not isinstance(require_settlement_evidence, bool):
+            raise TypeError("require_settlement_evidence must be a boolean")
         return cls(
             **values,
             **optional_limits,
             max_abs_factor_exposure=factor_limit,
             max_clock_age_seconds=clock_limit,
             allowed_actions=normalized_allowed_actions,
+            require_settlement_evidence=require_settlement_evidence,
         )
 
 
@@ -274,6 +279,7 @@ class RiskContext:
     spread_fraction: Mapping[str, Decimal] | None = None
     slippage_fraction: Mapping[str, Decimal] | None = None
     clock_age_seconds: Decimal | None = None
+    settlement_allowed: bool | None = None
 
     @classmethod
     def create(
@@ -299,6 +305,7 @@ class RiskContext:
         spread_fraction: Mapping[str, object] | None = None,
         slippage_fraction: Mapping[str, object] | None = None,
         clock_age_seconds=None,
+        settlement_allowed: bool | None = None,
     ) -> "RiskContext":
         if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
@@ -404,6 +411,8 @@ class RiskContext:
             raise TypeError("capability_allowed must be a boolean")
         if borrow_available is not None and not isinstance(borrow_available, bool):
             raise TypeError("borrow_available must be a boolean or None")
+        if settlement_allowed is not None and not isinstance(settlement_allowed, bool):
+            raise TypeError("settlement_allowed must be a boolean or None")
         return cls(
             state_version=state_version,
             equity=_positive(equity, name="equity"),
@@ -425,6 +434,7 @@ class RiskContext:
             spread_fraction=normalized_spread,
             slippage_fraction=normalized_slippage,
             clock_age_seconds=normalized_clock_age,
+            settlement_allowed=settlement_allowed,
         )
 
 
@@ -636,6 +646,18 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
             intent.action,
             ",".join(policy.allowed_actions),
             "intent action class must be explicitly permitted by risk policy",
+        )
+    if policy.require_settlement_evidence:
+        add(
+            "settlement",
+            context.settlement_allowed is True,
+            (
+                context.settlement_allowed
+                if context.settlement_allowed is not None
+                else "UNKNOWN"
+            ),
+            True,
+            "settlement state must affirmatively permit the requested action",
         )
     add(
         "market_freshness",

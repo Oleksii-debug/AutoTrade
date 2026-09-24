@@ -24,6 +24,7 @@ def policy(**overrides):
         max_slippage_fraction=None,
         max_clock_age_seconds=None,
         allowed_actions=None,
+        require_settlement_evidence=False,
     )
     values.update(overrides)
     return RiskPolicy.create(**values)
@@ -656,6 +657,45 @@ class IndependentRiskTests(unittest.TestCase):
             policy(allowed_actions=("TRADE", "trade"))
         with self.assertRaises(ValueError):
             policy(allowed_actions=("MAGIC",))
+
+    def test_settlement_policy_fails_closed_without_affirmative_evidence(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        missing = evaluate_risk(
+            intent,
+            context(settlement_allowed=None),
+            policy(require_settlement_evidence=True),
+        )
+        blocked = evaluate_risk(
+            intent,
+            context(settlement_allowed=False),
+            policy(require_settlement_evidence=True),
+        )
+        self.assertEqual(
+            next(x for x in missing.rules if x.rule == "settlement").observed,
+            "UNKNOWN",
+        )
+        self.assertFalse(next(x for x in missing.rules if x.rule == "settlement").passed)
+        self.assertFalse(next(x for x in blocked.rules if x.rule == "settlement").passed)
+
+    def test_settlement_policy_accepts_only_explicit_true(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(settlement_allowed=True),
+            policy(require_settlement_evidence=True),
+        )
+        self.assertTrue(next(x for x in decision.rules if x.rule == "settlement").passed)
+
+    def test_settlement_inputs_require_real_booleans(self):
+        with self.assertRaises(TypeError):
+            context(settlement_allowed="true")
+        with self.assertRaises(TypeError):
+            policy(require_settlement_evidence="true")
 
 
 if __name__ == "__main__":

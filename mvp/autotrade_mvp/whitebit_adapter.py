@@ -15,7 +15,7 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 from .provider_core import ProviderCoreError, WriteOutcome, classify_write_outcome
-from .reconciliation import ProviderFillEvidence
+from .reconciliation import ProviderFillEvidence, ProviderWorkingOrderEvidence
 
 
 _CLIENT_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -337,6 +337,8 @@ def normalize_order_observation(response: Mapping[str, Any]) -> WhiteBitOrderObs
     cancelled_remainder = status in {
         "CANCELED_TAKER_BAND",
         "AUTO_CANCELED_REDUCE_ONLY",
+        "AUTO_CANCELED_LIQUIDATION",
+        "CANCELED_STP",
     }
     terminal = status in {
         "FILLED",
@@ -344,6 +346,8 @@ def normalize_order_observation(response: Mapping[str, Any]) -> WhiteBitOrderObs
         "CANCELLED",
         "CANCELED_TAKER_BAND",
         "AUTO_CANCELED_REDUCE_ONLY",
+        "AUTO_CANCELED_LIQUIDATION",
+        "CANCELED_STP",
         "REJECTED",
     }
     return WhiteBitOrderObservation(
@@ -687,3 +691,120 @@ def normalize_execution_history(
             continue
         by_id[observed.provider_execution_id] = observed
     return tuple(by_id[key] for key in sorted(by_id))
+
+
+class WhiteBitOpenOrderCoverage:
+    """Proof of contiguous pagination for the active-orders surface."""
+
+    def __init__(self) -> None:
+        self._pages: list[WhiteBitHistoryPageEvidence] = []
+
+    def add_page(self, page: WhiteBitHistoryPageEvidence) -> None:
+        if not isinstance(page, WhiteBitHistoryPageEvidence):
+            raise TypeError("page must be WhiteBitHistoryPageEvidence")
+        if page.limit > 100:
+            raise ProviderCoreError("active-order page limit cannot exceed 100")
+        if self.complete:
+            raise ProviderCoreError("active-order coverage is already complete")
+        expected = 0 if not self._pages else self._pages[-1].offset + self._pages[-1].limit
+        if page.offset != expected:
+            raise ProviderCoreError(
+                f"active-order pagination gap: expected offset {expected}"
+            )
+        self._pages.append(page)
+
+    @property
+    def complete(self) -> bool:
+        return bool(self._pages and self._pages[-1].record_count < self._pages[-1].limit)
+
+    @property
+    def next_offset(self) -> int:
+        if not self._pages:
+            return 0
+        return self._pages[-1].offset + self._pages[-1].limit
+
+    @property
+    def pages(self) -> tuple[WhiteBitHistoryPageEvidence, ...]:
+        return tuple(self._pages)
+
+
+def build_open_order_page_request(
+    *,
+    offset: int,
+    limit: int = 50,
+    market: str | None = None,
+) -> Mapping[str, Any]:
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        raise ProviderCoreError("offset must be a non-negative integer")
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+        raise ProviderCoreError("active-order limit must be between 1 and 100")
+    payload: dict[str, Any] = {"offset": offset, "limit": limit}
+    if market is not None:
+        payload["market"] = _text(market, name="market")
+    return MappingProxyType(
+        {
+            "endpoint": "/api/v4/orders",
+            "payload": payload,
+            "all_markets": market is None,
+        }
+    )
+
+
+def normalize_working_order(
+    response: Mapping[str, Any],
+) -> ProviderWorkingOrderEvidence:
+    """Convert one active-order record to reconciliation truth."""
+
+    if not isinstance(response, Mapping):
+        raise TypeError("response must be a mapping")
+    try:
+        provider_order_id = response["orderId"]
+        market = response["market"]
+        remaining = response["left"]
+    except KeyError as error:
+        raise ProviderCoreError(
+            f"active order missing required field: {error.args[0]}"
+        ) from error
+    raw_client = response.get("clientOrderId")
+    client_id = (
+        None
+        if raw_client is None or raw_client == ""
+        else _text(str(raw_client), name="clientOrderId")
+    )
+    status = str(response.get("status", "")).upper()
+    if status in {
+        "FILLED",
+        "CANCELED",
+        "CANCELLED",
+        "CANCELED_TAKER_BAND",
+        "AUTO_CANCELED_REDUCE_ONLY",
+        "AUTO_CANCELED_LIQUIDATION",
+        "CANCELED_STP",
+        "REJECTED",
+    }:
+        raise ProviderCoreError("terminal provider order cannot be normalized as working")
+    return ProviderWorkingOrderEvidence.create(
+        provider_order_id=_text(str(provider_order_id), name="orderId"),
+        client_order_id=client_id,
+        instrument=_text(str(market), name="market"),
+        remaining_quantity=_decimal(remaining, name="left", positive=True),
+    )
+
+
+def normalize_working_orders(
+    records: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
+) -> tuple[ProviderWorkingOrderEvidence, ...]:
+    if not isinstance(records, (list, tuple)):
+        raise TypeError("records must be a list or tuple")
+    by_provider_id: dict[str, ProviderWorkingOrderEvidence] = {}
+    for record in records:
+        order = normalize_working_order(record)
+        existing = by_provider_id.get(order.provider_order_id)
+        if existing is not None:
+            if existing != order:
+                raise ProviderCoreError(
+                    "provider working order id has conflicting observations"
+                )
+            continue
+        by_provider_id[order.provider_order_id] = order
+    return tuple(by_provider_id[key] for key in sorted(by_provider_id))

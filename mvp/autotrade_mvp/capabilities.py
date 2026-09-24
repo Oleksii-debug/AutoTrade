@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import re
 from types import MappingProxyType
 from typing import Iterable, Mapping
+from urllib.parse import urlsplit
 from uuid import UUID
 
 
@@ -39,7 +41,43 @@ def _set(values: Iterable[str], field: str) -> frozenset[str]:
 def _freeze_evidence(value: Mapping[str, object]) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise CapabilityError("evidence_ref must be an object")
-    return MappingProxyType(dict(value))
+    required = {"artifact_id", "sha256", "observed_at"}
+    allowed = required | {"source_uri", "rights_id"}
+    keys = set(value)
+    if required - keys:
+        raise CapabilityError("evidence_ref is missing required fields")
+    if keys - allowed:
+        raise CapabilityError("evidence_ref contains unknown fields")
+    artifact_id = _text(value["artifact_id"], "artifact_id")
+    try:
+        UUID(artifact_id)
+    except (ValueError, TypeError, AttributeError) as error:
+        raise CapabilityError("evidence artifact_id must be a UUID") from error
+    digest = _text(value["sha256"], "sha256")
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+        raise CapabilityError("evidence sha256 must be a canonical SHA-256 digest")
+    observed_at = _text(value["observed_at"], "observed_at")
+    if not observed_at.endswith("Z"):
+        raise CapabilityError("evidence observed_at must be UTC and end in Z")
+    try:
+        parsed = datetime.fromisoformat(observed_at[:-1] + "+00:00")
+    except ValueError as error:
+        raise CapabilityError("evidence observed_at must be an ISO date-time") from error
+    if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise CapabilityError("evidence observed_at must be UTC")
+    normalized: dict[str, object] = {
+        "artifact_id": artifact_id,
+        "sha256": digest,
+        "observed_at": observed_at,
+    }
+    if "source_uri" in value:
+        source_uri = _text(value["source_uri"], "source_uri")
+        if not urlsplit(source_uri).scheme:
+            raise CapabilityError("evidence source_uri must be an absolute URI")
+        normalized["source_uri"] = source_uri
+    if "rights_id" in value:
+        normalized["rights_id"] = _text(value["rights_id"], "rights_id")
+    return MappingProxyType(normalized)
 
 
 @dataclass(frozen=True)
@@ -196,8 +234,8 @@ def derive_capability_snapshot(
     if not records:
         raise CapabilityError("at least one capability claim is required")
     required = frozenset(_text(source, "required_source").upper() for source in required_sources)
-    if not required or not required <= SOURCES:
-        raise CapabilityError("required_sources must be a non-empty supported subset")
+    if required != SOURCES:
+        raise CapabilityError("all canonical capability sources are required for verification")
 
     first = records[0]
     identity = (
@@ -220,19 +258,16 @@ def derive_capability_snapshot(
         if other != identity:
             raise CapabilityError("capability claims describe different identities")
 
-    live = tuple(
-        claim
-        for claim in records
-        if claim.observed_at <= point < claim.expires_at
-    )
+    all_sources = frozenset(claim.source for claim in records)
+    missing_sources = required - all_sources
+    future_evidence = any(claim.observed_at > point for claim in records)
+    live = tuple(claim for claim in records if claim.observed_at <= point < claim.expires_at)
     live_sources = frozenset(claim.source for claim in live)
-    missing_sources = required - live_sources
     expired_sources = frozenset(
         source
-        for source in missing_sources
+        for source in required - live_sources
         if any(claim.source == source and claim.expires_at <= point for claim in records)
     )
-    absent_sources = missing_sources - expired_sources
 
     order_types = _intersection(live, "supported_order_types")
     tif = _intersection(live, "time_in_force")
@@ -245,8 +280,10 @@ def derive_capability_snapshot(
     set_conflict = bool(live) and (not order_types or not tif or not scopes)
     scalar_conflict = len(position_modes) > 1 or len(rate_policies) > 1
 
-    if absent_sources:
+    if missing_sources:
         status = "UNKNOWN"
+    elif future_evidence:
+        status = "CONFLICTED"
     elif expired_sources:
         status = "EXPIRED"
     elif set_conflict or scalar_conflict:

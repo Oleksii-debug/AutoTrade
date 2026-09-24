@@ -291,6 +291,32 @@ def _evaluate(
     )
 
 
+def _cash_fallback(
+    candidates: Sequence[AllocationCandidate],
+    *,
+    reason: str,
+) -> AllocationResult:
+    return AllocationResult(
+        status="NO_INCREASE_FALLBACK",
+        scale=Decimal("0"),
+        targets=tuple(
+            AllocationTarget(
+                symbol=candidate.symbol,
+                quantity=Decimal("0"),
+                notional=Decimal("0"),
+                estimated_cost=Decimal("0"),
+            )
+            for candidate in candidates
+        ),
+        gross_notional=Decimal("0"),
+        net_notional=Decimal("0"),
+        estimated_cost=Decimal("0"),
+        worst_stress_loss=Decimal("0"),
+        cash_required=Decimal("0"),
+        reason=reason,
+    )
+
+
 def allocate_targets(
     candidates: Sequence[AllocationCandidate],
     policy: AllocationPolicy,
@@ -304,17 +330,7 @@ def allocate_targets(
     """
 
     if not candidates:
-        return AllocationResult(
-            status="NO_INCREASE_FALLBACK",
-            scale=Decimal("0"),
-            targets=(),
-            gross_notional=Decimal("0"),
-            net_notional=Decimal("0"),
-            estimated_cost=Decimal("0"),
-            worst_stress_loss=Decimal("0"),
-            cash_required=Decimal("0"),
-            reason="no allocation candidates",
-        )
+        return _cash_fallback(candidates, reason="no allocation candidates")
 
     symbols = [candidate.symbol for candidate in candidates]
     if len(symbols) != len(set(symbols)):
@@ -348,7 +364,15 @@ def allocate_targets(
 
     requested = _evaluate(candidates, policy, normalized_stress, Decimal("1"))
     if requested.status == "ALLOCATED":
-        return requested
+        if requested.gross_notional > 0:
+            return requested
+        return _cash_fallback(
+            candidates,
+            reason=(
+                "requested allocation contains no executable positive lot after "
+                "lot-size and minimum-notional constraints; remain in cash"
+            ),
+        )
 
     low = Decimal("0")
     high = Decimal("1")
@@ -366,24 +390,11 @@ def allocate_targets(
             high = mid
 
     if best.gross_notional == 0:
-        return AllocationResult(
-            status="NO_INCREASE_FALLBACK",
-            scale=Decimal("0"),
-            targets=tuple(
-                AllocationTarget(
-                    symbol=candidate.symbol,
-                    quantity=Decimal("0"),
-                    notional=Decimal("0"),
-                    estimated_cost=Decimal("0"),
-                )
-                for candidate in candidates
+        return _cash_fallback(
+            candidates,
+            reason=(
+                "bounded search found no positive-lot feasible allocation; remain in cash"
             ),
-            gross_notional=Decimal("0"),
-            net_notional=Decimal("0"),
-            estimated_cost=Decimal("0"),
-            worst_stress_loss=Decimal("0"),
-            cash_required=Decimal("0"),
-            reason="bounded search found no positive-lot feasible allocation; remain in cash",
         )
 
     return AllocationResult(

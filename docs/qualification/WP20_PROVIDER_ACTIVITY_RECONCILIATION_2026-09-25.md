@@ -7,8 +7,9 @@ This increment extends the canonical `mvp/autotrade_mvp/reconciliation.py` accou
 ## Exact lineage
 
 - Source main at branch creation: `6fec062594f767e00039c127014c44f058387534`.
-- Implementation commit before this evidence-only document: `75cda86f0bc3b346faf864cc8396e9d5bedb6e46`.
-- Focused reconciliation test surface at that implementation head: 39 tests.
+- Initial activity-reconciliation implementation: `75cda86f0bc3b346faf864cc8396e9d5bedb6e46`.
+- Durable activity-gap checkpoint/restart increment: `45cae88877fdcafc8cc6d8e066207f9c31efa6b7`.
+- The focused activity logic is covered by the reconciliation and reconciliation-journal regression surfaces.
 - Final PASS must be bound to the final PR head by existing Ubuntu/Windows verification workflows; this document cannot self-certify its own commit.
 
 ## Implemented boundary
@@ -23,7 +24,9 @@ The existing account reconciliation now also supports evidence-bound provider ac
 - manual, external and unknown-origin activities are surfaced for explicit import/reconciliation rather than silently discarded;
 - expected local activity missing from provider evidence blocks account truth;
 - when configured, the complete reconciliation window requires a dedicated complete `ACTIVITIES` coverage surface with elapsed consistency horizon;
-- generic activity evidence never converts an ambiguous send into a fill, working order, or `PROVEN_ABSENT`.
+- generic activity evidence never converts an ambiguous send into a fill, working order, or `PROVEN_ABSENT`;
+- reconciliation checkpoints persist matched/unexpected/missing/manual activity identities and activity-coverage status;
+- after journal restart, unresolved unexpected or missing provider activity identities can be recovered without creating resend authority.
 
 ## Required exact-head verification
 
@@ -42,7 +45,7 @@ WP-20 is not DONE. Product completion still requires:
 - provider adapters to normalize real account/activity taxonomies and pagination semantics into this evidence shape;
 - durable import/posting of legitimate manual/external cash, position, fee, corporate-action and lifecycle events into canonical accounting/order truth;
 - final binding to accepted order projection, execution, journal and provider capability lineages;
-- restart/crash qualification proving that acknowledged activity import cannot be lost or double-applied;
+- durable posting/import of acknowledged activity into accounting still needs same-transaction idempotency; checkpoint persistence now preserves unresolved activity gaps across restart but does not itself post economics;
 - provider-specific evidence windows and consistency horizons to be qualified rather than assumed;
 - whole-flow recovery and release qualification on delivered Windows artifacts.
 

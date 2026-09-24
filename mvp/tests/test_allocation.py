@@ -4,6 +4,8 @@ import unittest
 from mvp.autotrade_mvp.allocation import (
     AllocationCandidate,
     AllocationPolicy,
+    ObjectiveCandidate,
+    allocate_objective_targets,
     allocate_targets,
 )
 
@@ -290,6 +292,178 @@ class AllocationTests(unittest.TestCase):
                 [self.candidate("AAA"), self.candidate("AAA")],
                 self.policy(),
             )
+
+
+    def test_minimum_cash_reserve_is_never_allocated(self):
+        result = allocate_targets(
+            [self.candidate(desired="1000", price="10", lot="1")],
+            self.policy(
+                cash_available="1000",
+                max_gross_notional="2000",
+                max_net_notional="2000",
+                max_symbol_notional="2000",
+                minimum_cash_reserve="250",
+            ),
+        )
+        self.assertEqual(result.status, "ALLOCATED")
+        self.assertLessEqual(result.cash_required, Decimal("750"))
+        self.assertGreaterEqual(
+            Decimal("1000") - result.cash_required,
+            Decimal("250"),
+        )
+
+    def test_impossible_cash_reserve_fails_closed(self):
+        result = allocate_targets(
+            [self.candidate(desired="100", price="10", lot="1")],
+            self.policy(
+                cash_available="100",
+                minimum_cash_reserve="101",
+            ),
+        )
+        self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.gross_notional, Decimal("0"))
+        self.assertIn("reserve exceeds", result.reason)
+
+    def test_objective_selection_prefers_higher_expected_net_utility(self):
+        result = allocate_objective_targets(
+            [
+                ObjectiveCandidate.create(
+                    symbol="HIGH",
+                    desired_notional="1000",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.10",
+                ),
+                ObjectiveCandidate.create(
+                    symbol="LOW",
+                    desired_notional="1000",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.02",
+                ),
+            ],
+            self.policy(
+                cash_available="1000",
+                max_gross_notional="1000",
+                max_net_notional="1000",
+                max_symbol_notional="1000",
+            ),
+        )
+        self.assertEqual(result.allocation.status, "ALLOCATED")
+        self.assertEqual(result.selected_symbols, ("HIGH",))
+        self.assertEqual(result.expected_net_utility, Decimal("100"))
+        self.assertEqual(result.allocation.targets[0].symbol, "HIGH")
+
+    def test_objective_subtracts_actual_estimated_cost_once(self):
+        result = allocate_objective_targets(
+            [
+                ObjectiveCandidate.create(
+                    symbol="EXPENSIVE",
+                    desired_notional="1000",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.01",
+                    fee_floor="20",
+                )
+            ],
+            self.policy(
+                cash_available="2000",
+                max_gross_notional="2000",
+                max_net_notional="2000",
+                max_symbol_notional="2000",
+                max_total_cost="100",
+            ),
+        )
+        self.assertEqual(result.allocation.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.expected_net_utility, Decimal("0"))
+        self.assertEqual(result.selected_symbols, ())
+
+    def test_objective_risk_penalty_can_make_candidate_ineligible(self):
+        result = allocate_objective_targets(
+            [
+                ObjectiveCandidate.create(
+                    symbol="RISKY",
+                    desired_notional="500",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.03",
+                    risk_penalty_rate="0.04",
+                )
+            ],
+            self.policy(),
+        )
+        self.assertEqual(result.allocation.status, "NO_INCREASE_FALLBACK")
+        self.assertIn("risk penalty", result.reason)
+
+    def test_objective_search_budget_fails_closed_instead_of_truncating(self):
+        result = allocate_objective_targets(
+            [
+                ObjectiveCandidate.create(
+                    symbol="AAA",
+                    desired_notional="100",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.02",
+                ),
+                ObjectiveCandidate.create(
+                    symbol="BBB",
+                    desired_notional="100",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.01",
+                ),
+            ],
+            self.policy(),
+            max_candidate_sets=1,
+        )
+        self.assertEqual(result.allocation.status, "NO_INCREASE_FALLBACK")
+        self.assertIn("budget exceeded", result.reason)
+
+    def test_objective_inputs_reject_binary_float(self):
+        with self.assertRaises(TypeError):
+            ObjectiveCandidate.create(
+                symbol="AAA",
+                desired_notional="100",
+                price="10",
+                lot_size="1",
+                expected_return_rate=0.01,
+            )
+
+    def test_objective_selection_preserves_stress_constraints(self):
+        result = allocate_objective_targets(
+            [
+                ObjectiveCandidate.create(
+                    symbol="AAA",
+                    desired_notional="1000",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.10",
+                ),
+                ObjectiveCandidate.create(
+                    symbol="BBB",
+                    desired_notional="1000",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.09",
+                ),
+            ],
+            self.policy(
+                cash_available="5000",
+                max_gross_notional="5000",
+                max_net_notional="5000",
+                max_symbol_notional="5000",
+                max_stress_loss="50",
+            ),
+            stress_scenarios={
+                "joint_down": {
+                    "AAA": "-0.10",
+                    "BBB": "-0.10",
+                }
+            },
+        )
+        self.assertEqual(result.allocation.status, "ALLOCATED")
+        self.assertLessEqual(result.allocation.worst_stress_loss, Decimal("50"))
+        self.assertGreater(result.expected_net_utility, Decimal("0"))
 
 
 if __name__ == "__main__":

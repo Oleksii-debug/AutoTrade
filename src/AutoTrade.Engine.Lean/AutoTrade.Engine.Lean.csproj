@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>AutoTrade.Engine.Lean</AssemblyName>
+    <RootNamespace>AutoTrade.Engine.Lean</RootNamespace>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="lean.pin.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="lean.adoption.evidence.json"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

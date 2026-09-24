@@ -88,7 +88,7 @@ class ProvenanceComponentTests(unittest.TestCase):
 
     def test_policy_does_not_treat_public_source_as_release_permission(self):
         policy = self.document["policy"].lower()
-        self.assertIn("not", policy)
+        self.assertIn("no source import is approved solely because a repository is public", policy)
         self.assertIn("public", policy)
         self.assertIn("license", policy)
         self.assertIn("rights", policy)

@@ -234,6 +234,50 @@ class SecurityBoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(PermissionError, "Unknown session"):
             self.boundary.validate_session(token, origin=self.owner.origin)
 
+    def test_origin_validation_requires_https_or_loopback_http(self):
+        with self.assertRaises(ValueError):
+            SecurityBoundary(allowed_origins={"http://remote.example"})
+        with self.assertRaises(ValueError):
+            SecurityBoundary(allowed_origins={"https://local.autotrade.invalid/path"})
+        with self.assertRaises(ValueError):
+            self.boundary.pair_origin(
+                self.owner.token,
+                origin=self.owner.origin,
+                new_origin="https://user:pass@paired.autotrade.invalid",
+            )
+
+        loopback = SecurityBoundary(allowed_origins={"http://127.0.0.1:8765/"})
+        session = loopback.create_session(
+            subject="owner",
+            role="OWNER",
+            origin="http://127.0.0.1:8765",
+        )
+        self.assertEqual(session.origin, "http://127.0.0.1:8765")
+
+    def test_unpair_then_repair_never_revives_old_token(self):
+        paired = self.boundary.pair_origin(
+            self.owner.token,
+            origin=self.owner.origin,
+            new_origin="https://paired.autotrade.invalid",
+        )
+        old = self.boundary.create_session(
+            subject="operator",
+            role="OPERATOR",
+            origin=paired,
+        )
+        self.boundary.unpair_origin(
+            self.owner.token,
+            origin=self.owner.origin,
+            paired_origin=paired,
+        )
+        self.boundary.pair_origin(
+            self.owner.token,
+            origin=self.owner.origin,
+            new_origin=paired,
+        )
+        with self.assertRaises(PermissionError):
+            self.boundary.validate_session(old.token, origin=paired)
+
     def test_owner_can_pair_new_origin_and_non_owner_cannot(self):
         new_origin = "https://paired.autotrade.invalid"
         self.boundary.pair_origin(

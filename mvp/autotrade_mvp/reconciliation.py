@@ -254,8 +254,13 @@ def _amount_map(
         raise TypeError(f"{name} must be a mapping")
     result: dict[str, Decimal] = {}
     for key, value in values.items():
-        result[_text(str(key), name=f"{name} key")] = _decimal(
-            value, name=f"{name}[{key}]"
+        if not isinstance(key, str):
+            raise TypeError(f"{name} keys must be strings")
+        normalized_key = _text(key, name=f"{name} key")
+        if normalized_key in result:
+            raise ValueError(f"{name} keys must be unique after normalization")
+        result[normalized_key] = _decimal(
+            value, name=f"{name}[{normalized_key}]"
         )
     return result
 

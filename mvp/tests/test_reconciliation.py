@@ -234,6 +234,12 @@ class ReconciliationTests(unittest.TestCase):
         )
         self.assertIn("INSTRUMENT:ABC", result.blocking_resources)
 
+    def test_account_truth_rejects_non_string_and_normalized_duplicate_keys(self):
+        with self.assertRaisesRegex(TypeError, "keys must be strings"):
+            self.base(local_cash={1: "900"})
+        with self.assertRaisesRegex(ValueError, "unique after normalization"):
+            self.base(local_cash={"USD": "900", " USD ": "900"})
+
     def test_declared_tolerance_is_explicit_not_a_hidden_bucket(self):
         result = self.base(
             provider_cash={"USD": "899.99"},

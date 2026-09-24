@@ -3,6 +3,7 @@ name: control-plane
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     paths:
       - "control/tools/**"
       - "tests/Control/**"
@@ -13,6 +14,10 @@ on:
       - "control/tools/**"
       - "tests/Control/**"
       - ".github/workflows/control-plane.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

@@ -28,20 +28,7 @@ def _money(value: Decimal | str | int | float) -> Decimal:
     return numeric.quantize(MONEY_QUANTUM)
 
 def handle_market_data(prices: Iterable[float | str | Decimal]) -> list[Decimal]:
-    normalized: list[Decimal] = []
-    for value in prices:
-        try:
-            numeric = Decimal(str(value))
-        except (ValueError, ArithmeticError) as error:
-            raise ValueError("Prices must be finite and positive") from error
-        if not numeric.is_finite() or numeric <= 0:
-            raise ValueError("Prices must be finite and positive")
-        normalized_price = _money(numeric)
-        if normalized_price <= 0:
-            raise ValueError("Price is smaller than supported precision")
-        normalized.append(normalized_price)
-    if not normalized:
-        raise ValueError("At least one price is required")
+    normalized = handle_market_data(prices)
     return normalized
 
 def handle_strategy(prices: list[Decimal], quantity: Decimal) -> Decision:

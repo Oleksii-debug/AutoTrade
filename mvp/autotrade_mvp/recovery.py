@@ -8,8 +8,12 @@ UNKNOWN send outcomes until reconciliation, and prevents false READY states.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Iterable
+from uuid import NAMESPACE_URL, uuid5
+
+from .persistence import JournalStore, payload_digest
 
 
 class HostState(str, Enum):
@@ -93,9 +97,29 @@ class OutboundAttempt:
 
 
 class RecoveryController:
-    """Tracks sender ownership, host readiness and unresolved external truth."""
+    """Tracks sender ownership, host readiness and unresolved external truth.
 
-    def __init__(self) -> None:
+    With owner_store supplied, owner epochs are journal-backed. Every new
+    process/start appends the next monotonic epoch before it can reconcile to
+    READY, and sender/admission validation rereads that shared durable fence.
+    This prevents a restart from silently reusing epoch 1.
+    """
+
+    _OWNER_AGGREGATE_TYPE = "recovery_owner"
+    _OWNER_EVENT_TYPE = "RecoveryOwnerChanged"
+
+    def __init__(
+        self,
+        *,
+        owner_store: JournalStore | None = None,
+        owner_scope: str = "default",
+    ) -> None:
+        if owner_store is not None and not isinstance(owner_store, JournalStore):
+            raise TypeError("owner_store must be JournalStore or None")
+        if not isinstance(owner_scope, str) or not owner_scope.strip():
+            raise ValueError("owner_scope is required")
+        self._owner_store = owner_store
+        self._owner_scope = owner_scope.strip()
         self.state = HostState.STOPPED
         self.owner: OwnerFence | None = None
         self.reason_codes: set[str] = set()
@@ -104,12 +128,88 @@ class RecoveryController:
         self.clock_trusted = True
         self.provider_reconciled = False
 
+    @staticmethod
+    def _now() -> str:
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _latest_durable_owner(self) -> OwnerFence | None:
+        if self._owner_store is None:
+            return None
+        events = self._owner_store.load_events(
+            self._OWNER_AGGREGATE_TYPE,
+            self._owner_scope,
+        )
+        if not events:
+            return None
+        latest = events[-1]
+        if latest["event_type"] != self._OWNER_EVENT_TYPE:
+            raise RuntimeError("Recovery owner journal contains unsupported event type")
+        payload = latest["payload"]
+        if not isinstance(payload, dict):
+            raise RuntimeError("Recovery owner journal payload must be an object")
+        if payload_digest(payload) != latest["payload_hash"]:
+            raise RuntimeError("Recovery owner journal payload hash mismatch")
+        owner_id = payload.get("owner_id")
+        epoch_raw = payload.get("owner_epoch")
+        if not isinstance(owner_id, str) or not owner_id.strip():
+            raise RuntimeError("Recovery owner journal contains invalid owner identity")
+        if (
+            not isinstance(epoch_raw, str)
+            or not epoch_raw.isdigit()
+            or epoch_raw == "0"
+            or (len(epoch_raw) > 1 and epoch_raw.startswith("0"))
+        ):
+            raise RuntimeError("Recovery owner journal contains invalid owner epoch")
+        epoch = int(epoch_raw)
+        if int(latest["aggregate_version"]) != epoch:
+            raise RuntimeError("Recovery owner journal epoch/version mismatch")
+        return OwnerFence(owner_id=owner_id.strip(), epoch=epoch)
+
+    def _append_durable_owner(self, owner: OwnerFence) -> None:
+        if self._owner_store is None:
+            return
+        payload = {
+            "owner_id": owner.owner_id,
+            "owner_epoch": str(owner.epoch),
+        }
+        event_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                "https://recovery.autotrade.local/"
+                f"{self._owner_scope!r}/{owner.epoch}/{owner.owner_id!r}",
+            )
+        )
+        self._owner_store.append_event(
+            {
+                "event_id": event_id,
+                "event_type": self._OWNER_EVENT_TYPE,
+                "aggregate_type": self._OWNER_AGGREGATE_TYPE,
+                "aggregate_id": self._owner_scope,
+                "aggregate_version": str(owner.epoch),
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+                "committed_at": self._now(),
+            }
+        )
+
+    def _require_current_durable_owner(self) -> None:
+        if self._owner_store is None or self.owner is None:
+            return
+        durable = self._latest_durable_owner()
+        if durable != self.owner:
+            raise PermissionError("Durable sender fence no longer belongs to this owner")
+
     def start(self, owner_id: str) -> OwnerFence:
-        if not owner_id:
+        if not isinstance(owner_id, str) or not owner_id.strip():
             raise ValueError("Owner identity is required")
         if self.owner is not None:
             raise RuntimeError("Host already has an owner")
-        self.owner = OwnerFence(owner_id=owner_id, epoch=1)
+        normalized_owner = owner_id.strip()
+        durable = self._latest_durable_owner()
+        next_epoch = 1 if durable is None else durable.epoch + 1
+        candidate = OwnerFence(owner_id=normalized_owner, epoch=next_epoch)
+        self._append_durable_owner(candidate)
+        self.owner = candidate
         self.state = HostState.RECOVERING
         self.provider_reconciled = False
         self.reason_codes = {"startup_reconciliation_required"}
@@ -118,6 +218,7 @@ class RecoveryController:
     def record_reconciliation(self, *, consistent: bool, uncertainty: Iterable[str] = ()) -> None:
         if self.owner is None:
             raise RuntimeError("No active owner")
+        self._require_current_durable_owner()
         unresolved = {item for item in uncertainty if item}
         self.unresolved_attempts = unresolved
         self.provider_reconciled = bool(consistent and not unresolved)
@@ -181,7 +282,10 @@ class RecoveryController:
             raise PermissionError("Old sender must be externally fenced")
         if not reconciled or self.unresolved_attempts:
             raise PermissionError("Ownership transfer requires reconciliation")
-        self.owner = OwnerFence(new_owner_id, self.owner.epoch + 1)
+        self._require_current_durable_owner()
+        candidate = OwnerFence(new_owner_id.strip(), self.owner.epoch + 1)
+        self._append_durable_owner(candidate)
+        self.owner = candidate
         self.provider_reconciled = False
         self.reason_codes.discard("lease_expired_no_failover")
         self.reason_codes.add("startup_reconciliation_required")
@@ -191,12 +295,15 @@ class RecoveryController:
     def validate_sender(self, owner_id: str, owner_epoch: int) -> None:
         if self.owner is None:
             raise PermissionError("No active sender")
+        self._require_current_durable_owner()
         if owner_id != self.owner.owner_id or owner_epoch != self.owner.epoch:
             raise PermissionError("Sender fence mismatch")
         if self.state is not HostState.READY:
             raise PermissionError("Host is not ready for new sends")
 
     def validate_admission(self, owner_epoch: int) -> None:
+        if self.owner is not None:
+            self._require_current_durable_owner()
         if self.owner is None or owner_epoch != self.owner.epoch:
             raise PermissionError("Admission owner epoch is stale")
         if self.state is not HostState.READY:

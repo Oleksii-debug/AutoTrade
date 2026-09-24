@@ -243,6 +243,42 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
             self.assertIsNone(migration_table)
 
+    def test_partial_schema_with_columns_but_missing_unique_invariant_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE events(
+                        event_id TEXT PRIMARY KEY,
+                        event_type TEXT NOT NULL,
+                        aggregate_type TEXT NOT NULL,
+                        aggregate_id TEXT NOT NULL,
+                        aggregate_version INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        payload_hash TEXT NOT NULL,
+                        committed_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "missing unique constraint"):
+                JournalStore(path)
+
+            connection = sqlite3.connect(path)
+            try:
+                migration_table = connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'schema_migrations'"
+                ).fetchone()
+            finally:
+                connection.close()
+            self.assertIsNone(migration_table)
+
     def test_v1_database_upgrades_atomically_without_losing_events(self):
         class LegacyJournalStore(JournalStore):
             SCHEMA_VERSION = 1

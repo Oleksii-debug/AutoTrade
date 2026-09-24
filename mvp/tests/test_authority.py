@@ -1,4 +1,5 @@
 import unittest
+from decimal import Decimal
 
 from mvp.autotrade_mvp.authority import AuthorityPolicy, AuthorityService
 

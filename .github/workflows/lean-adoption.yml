@@ -30,6 +30,8 @@ permissions:
 env:
   AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   LEAN_REVISION: 985ef30ad3ac774218c5ac516b4cb0aa2655730f
+  LEAN_TREE: 4b163abf9fca60e731b76510b9ae6721ffff7e6c
+  LEAN_LICENSE_BLOB: 6faed93d21a1a9551b11434e87c9000a393d73f2
 
 jobs:
   exact-revision-probe:
@@ -55,12 +57,20 @@ jobs:
           path: lean
           fetch-depth: 1
 
-      - name: Verify LEAN revision
+      - name: Verify exact LEAN source identity
         shell: pwsh
         run: |
-          $actual = (git -C lean rev-parse HEAD).Trim()
-          if ($actual -ne $env:LEAN_REVISION) {
-            throw "LEAN checkout mismatch: expected $env:LEAN_REVISION, got $actual"
+          $actualCommit = (git -C lean rev-parse HEAD).Trim()
+          if ($actualCommit -ne $env:LEAN_REVISION) {
+            throw "LEAN checkout mismatch: expected $env:LEAN_REVISION, got $actualCommit"
+          }
+          $actualTree = (git -C lean rev-parse "HEAD^{tree}").Trim()
+          if ($actualTree -ne $env:LEAN_TREE) {
+            throw "LEAN tree mismatch: expected $env:LEAN_TREE, got $actualTree"
+          }
+          $actualLicense = (git -C lean hash-object LICENSE).Trim()
+          if ($actualLicense -ne $env:LEAN_LICENSE_BLOB) {
+            throw "LEAN license blob mismatch: expected $env:LEAN_LICENSE_BLOB, got $actualLicense"
           }
 
       - uses: actions/setup-dotnet@v5

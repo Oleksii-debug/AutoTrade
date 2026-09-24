@@ -101,6 +101,7 @@ class SettlementBook:
                 )
             self._settled_cash[unit] = _decimal(amount, name="settled_cash")
         self._obligations: dict[str, SettlementObligation] = {}
+        self._by_cause_event_id: dict[str, SettlementObligation] = {}
         self._settled_ids: set[str] = set()
         for obligation in obligations:
             self.add(obligation)
@@ -126,7 +127,13 @@ class SettlementBook:
                     "obligation_id already exists with different economic content"
                 )
             return False
+        cause_existing = self._by_cause_event_id.get(obligation.cause_event_id)
+        if cause_existing is not None:
+            raise SettlementConflict(
+                "cause_event_id was already represented by a different settlement obligation"
+            )
         self._obligations[obligation.obligation_id] = obligation
+        self._by_cause_event_id[obligation.cause_event_id] = obligation
         return True
 
     def is_settled(self, obligation_id: str) -> bool:

@@ -45,14 +45,20 @@ class SettlementObligation:
     settlement_date: date
 
     def __post_init__(self) -> None:
-        _text(self.obligation_id, name="obligation_id")
-        _text(self.cause_event_id, name="cause_event_id")
-        _text(self.currency, name="currency")
+        obligation_id = _text(self.obligation_id, name="obligation_id")
+        cause_event_id = _text(self.cause_event_id, name="cause_event_id")
+        currency = _text(self.currency, name="currency")
         amount = _decimal(self.amount, name="amount")
         if amount == 0:
             raise ValueError("amount must be non-zero")
+        if type(self.trade_date) is not date or type(self.settlement_date) is not date:
+            raise TypeError("trade_date and settlement_date must be date values")
         if self.settlement_date < self.trade_date:
             raise ValueError("settlement_date cannot precede trade_date")
+        object.__setattr__(self, "obligation_id", obligation_id)
+        object.__setattr__(self, "cause_event_id", cause_event_id)
+        object.__setattr__(self, "currency", currency)
+        object.__setattr__(self, "amount", amount)
 
 
 @dataclass(frozen=True, slots=True)

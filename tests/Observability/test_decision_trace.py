@@ -142,6 +142,20 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             path.write_text(raw, encoding="utf-8")
             self.assertFalse(store.verify())
 
+    def test_idempotent_retry_never_masks_existing_chain_corruption(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = evidence_trace()
+            self.assertTrue(store.append(item))
+
+            records = path.read_text(encoding="utf-8")
+            records = records.replace('"previous_hash":"' + "0" * 64 + '"', '"previous_hash":"' + "1" * 64 + '"')
+            path.write_text(records, encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "chain is corrupt"):
+                store.append(item)
+
     def test_metric_backlog_is_bounded_and_redacts_labels(self):
         backlog = BoundedMetricBacklog(max_items=2)
         backlog.record("queue.delay", 1.0, token="a")

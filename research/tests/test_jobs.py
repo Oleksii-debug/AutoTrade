@@ -192,6 +192,150 @@ class ResearchJobStoreTests(unittest.TestCase):
                     now=self.now,
                 )
 
+
+    def test_waiting_external_can_requeue_only_with_immutable_proof_not_run(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            job, _ = store.enqueue(
+                kind="research.external_annotation",
+                dedupe_key="prove-not-run",
+                input_hashes=[digest("dataset")],
+                resource_budget={"wall_seconds": 60},
+                now=self.now,
+            )
+            claimed = store.claim("worker-a", now=self.now, lease_seconds=10)
+            old_generation = int(claimed["generation"])
+            store.requeue_expired(now=self.now + timedelta(seconds=11))
+            waiting = store.get(job["job_id"])
+            self.assertEqual(waiting["state"], "WAITING_EXTERNAL")
+            self.assertEqual(int(waiting["generation"]), old_generation + 1)
+
+            evidence = (
+                "artifact:11111111-1111-4111-8111-111111111111@sha256:"
+                + "a" * 64
+            )
+            self.assertTrue(
+                store.resolve_waiting_external(
+                    job["job_id"],
+                    verdict="PROVEN_NOT_RUN",
+                    evidence_ref=evidence,
+                    now=self.now + timedelta(seconds=12),
+                )
+            )
+            queued = store.get(job["job_id"])
+            self.assertEqual(queued["state"], "QUEUED")
+            self.assertEqual(
+                queued["external_resolution"]["evidence_ref"],
+                evidence,
+            )
+
+            reclaimed = store.claim(
+                "worker-b",
+                now=self.now + timedelta(seconds=13),
+                lease_seconds=30,
+            )
+            self.assertEqual(reclaimed["job_id"], job["job_id"])
+            self.assertEqual(int(reclaimed["generation"]), old_generation + 1)
+            with self.assertRaises(JobLeaseError):
+                store.succeed(
+                    job["job_id"],
+                    worker_id="worker-a",
+                    generation=old_generation,
+                    output_refs=["artifact:stale"],
+                    now=self.now + timedelta(seconds=14),
+                )
+
+    def test_waiting_external_proven_success_is_terminal_and_idempotent(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            job, _ = store.enqueue(
+                kind="research.external_annotation",
+                dedupe_key="prove-success",
+                input_hashes=[digest("dataset")],
+                resource_budget={"wall_seconds": 60},
+                now=self.now,
+            )
+            store.claim("worker-a", now=self.now, lease_seconds=10)
+            store.requeue_expired(now=self.now + timedelta(seconds=11))
+            evidence = (
+                "artifact:22222222-2222-4222-8222-222222222222@sha256:"
+                + "b" * 64
+            )
+            outputs = ["artifact:accepted-output"]
+            resolved_at = self.now + timedelta(seconds=12)
+            self.assertTrue(
+                store.resolve_waiting_external(
+                    job["job_id"],
+                    verdict="PROVEN_SUCCEEDED",
+                    evidence_ref=evidence,
+                    output_refs=outputs,
+                    now=resolved_at,
+                )
+            )
+            result = store.get(job["job_id"])
+            self.assertEqual(result["state"], "SUCCEEDED")
+            self.assertEqual(result["output_refs"], outputs)
+            self.assertFalse(
+                store.resolve_waiting_external(
+                    job["job_id"],
+                    verdict="PROVEN_SUCCEEDED",
+                    evidence_ref=evidence,
+                    output_refs=outputs,
+                    now=resolved_at,
+                )
+            )
+            with self.assertRaises(JobConflictError):
+                store.resolve_waiting_external(
+                    job["job_id"],
+                    verdict="PROVEN_SUCCEEDED",
+                    evidence_ref=(
+                        "artifact:22222222-2222-4222-8222-222222222222@sha256:"
+                        + "c" * 64
+                    ),
+                    output_refs=outputs,
+                    now=resolved_at,
+                )
+
+    def test_waiting_external_resolution_rejects_weak_evidence_and_output_mismatch(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            job, _ = store.enqueue(
+                kind="research.external_annotation",
+                dedupe_key="bad-resolution",
+                input_hashes=[digest("dataset")],
+                resource_budget={"wall_seconds": 60},
+                now=self.now,
+            )
+            store.claim("worker-a", now=self.now, lease_seconds=10)
+            store.requeue_expired(now=self.now + timedelta(seconds=11))
+
+            with self.assertRaisesRegex(ValueError, "immutable artifact"):
+                store.resolve_waiting_external(
+                    job["job_id"],
+                    verdict="PROVEN_NOT_RUN",
+                    evidence_ref="ticket-123",
+                    now=self.now + timedelta(seconds=12),
+                )
+            evidence = (
+                "artifact:33333333-3333-4333-8333-333333333333@sha256:"
+                + "d" * 64
+            )
+            with self.assertRaisesRegex(ValueError, "requires output_refs"):
+                store.resolve_waiting_external(
+                    job["job_id"],
+                    verdict="PROVEN_SUCCEEDED",
+                    evidence_ref=evidence,
+                    now=self.now + timedelta(seconds=12),
+                )
+            with self.assertRaisesRegex(ValueError, "only for PROVEN_SUCCEEDED"):
+                store.resolve_waiting_external(
+                    job["job_id"],
+                    verdict="PROVEN_FAILED",
+                    evidence_ref=evidence,
+                    output_refs=["unexpected"],
+                    now=self.now + timedelta(seconds=12),
+                )
+
     def test_cancellation_blocks_late_publication(self):
         with TemporaryDirectory() as directory:
             store = ResearchJobStore(Path(directory) / "jobs.sqlite3")

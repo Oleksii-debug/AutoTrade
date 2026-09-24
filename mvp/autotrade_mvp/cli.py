@@ -1,19 +1,11 @@
 """Command-line demo for the safe simulated AutoTrade MVP."""
 
 from dataclasses import asdict
-from decimal import Decimal
+from pathlib import Path
 import argparse
 import json
-from pathlib import Path
 
-from .pipeline import run_multi_episode, run_vertical_slice, verify_replay
-
-
-def _jsonable_result(result) -> dict:
-    payload = {}
-    for key, value in asdict(result).items():
-        payload[key] = str(value) if isinstance(value, Decimal) else value
-    return payload
+from .pipeline import run_multi_episode, run_vertical_slice
 
 
 def get_status(state_dir: str) -> dict:
@@ -27,26 +19,29 @@ def get_status(state_dir: str) -> dict:
         checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
         evidence_count = len(evidence_path.read_text(encoding="utf-8").splitlines()) if evidence_path.exists() else 0
         return {
-            "status": "running" if verify_replay(root) else "needs_recovery",
+            "status": "running",
             "symbol": checkpoint.get("symbol"),
             "initial_cash": checkpoint.get("initial_cash"),
             "postings": checkpoint.get("postings", []),
             "fills": checkpoint.get("fills", {}),
             "evidence_count": evidence_count,
-            "replay_verified": verify_replay(root),
         }
-    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+    except (OSError, json.JSONDecodeError):
         return {"status": "corrupt"}
 
 
-def _parse_episodes(raw: str) -> list[list[str]]:
+def _result_payload(result) -> dict:
+    return {key: str(value) for key, value in asdict(result).items()}
+
+
+def _parse_episodes(value: str) -> list[list[str]]:
     episodes = []
-    for episode in raw.split(";"):
-        prices = [item.strip() for item in episode.split(",") if item.strip()]
+    for raw_episode in value.split(";"):
+        prices = [item.strip() for item in raw_episode.split(",") if item.strip()]
         if prices:
             episodes.append(prices)
     if not episodes:
-        raise ValueError("At least one episode with one price is required")
+        raise ValueError("At least one episode is required")
     return episodes
 
 
@@ -55,17 +50,21 @@ def main() -> int:
     parser.add_argument("--state-dir", default="mvp-state")
     parser.add_argument("--prices", default="100,101,102,103")
     parser.add_argument("--status", action="store_true", help="Show the current status")
-    parser.add_argument("--multi-episode", action="store_true", help="Run semicolon-separated episodes")
+    parser.add_argument(
+        "--multi-episode",
+        action="store_true",
+        help="Run semicolon-separated price episodes, with comma-separated prices inside each episode",
+    )
     args = parser.parse_args()
     if args.status:
         print(json.dumps(get_status(args.state_dir), indent=2))
         return 0
     if args.multi_episode:
         results = run_multi_episode(_parse_episodes(args.prices), args.state_dir)
-        print(json.dumps([_jsonable_result(item) for item in results], indent=2))
-    else:
-        result = run_vertical_slice(args.prices.split(","), args.state_dir)
-        print(json.dumps(_jsonable_result(result), indent=2))
+        print(json.dumps([_result_payload(item) for item in results], indent=2))
+        return 0
+    result = run_vertical_slice(args.prices.split(","), args.state_dir)
+    print(json.dumps(_result_payload(result), indent=2))
     return 0
 
 

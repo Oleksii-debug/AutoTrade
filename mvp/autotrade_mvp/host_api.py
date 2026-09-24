@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from typing import Callable, Mapping
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 
 class EventGap(RuntimeError):
@@ -156,9 +156,41 @@ class HostCommandStore:
     def _normalize_evidence(
         values: tuple[Mapping[str, object], ...],
     ) -> tuple[Mapping[str, object], ...]:
-        if any(not isinstance(item, Mapping) for item in values):
-            raise ValueError("operation evidence must contain objects")
-        return tuple(dict(item) for item in values)
+        normalized: list[Mapping[str, object]] = []
+        for item in values:
+            if not isinstance(item, Mapping):
+                raise ValueError("operation evidence must contain objects")
+            artifact_id = item.get("artifact_id")
+            sha256_value = item.get("sha256")
+            observed_at = item.get("observed_at")
+            if not isinstance(artifact_id, str) or not artifact_id.strip():
+                raise ValueError("operation evidence artifact_id must be a non-empty UUID")
+            try:
+                UUID(artifact_id)
+            except (TypeError, ValueError) as error:
+                raise ValueError("operation evidence artifact_id must be a UUID") from error
+            if (
+                not isinstance(sha256_value, str)
+                or not sha256_value.startswith("sha256:")
+                or len(sha256_value) != 71
+                or any(ch not in "0123456789abcdef" for ch in sha256_value[7:])
+            ):
+                raise ValueError("operation evidence sha256 must be canonical lowercase SHA-256")
+            if not isinstance(observed_at, str) or not observed_at.endswith("Z"):
+                raise ValueError("operation evidence observed_at must be a UTC instant")
+            try:
+                datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+            except ValueError as error:
+                raise ValueError("operation evidence observed_at must be a UTC instant") from error
+            normalized.append(dict(item))
+        return tuple(normalized)
+
+    @staticmethod
+    def _requires_new_resolution_evidence(
+        current: OperationResult,
+        phase: str,
+    ) -> bool:
+        return current.phase == "UNKNOWN" and phase in HostCommandStore.TERMINAL_PHASES
 
     def _emit(self, kind: str, payload: Mapping[str, object]) -> HostEvent:
         self.cursor += 1
@@ -306,6 +338,11 @@ class HostCommandStore:
             raise ValueError("Terminal operation cannot transition again")
         if current.phase == "UNKNOWN" and phase not in self.TERMINAL_PHASES:
             raise ValueError("UNKNOWN operation can only resolve to a terminal outcome")
+        if self._requires_new_resolution_evidence(current, phase):
+            if evidence is None:
+                raise ValueError("UNKNOWN resolution requires new reconciliation evidence")
+            if not normalized_evidence or normalized_evidence == current.evidence:
+                raise ValueError("UNKNOWN resolution requires new reconciliation evidence")
         if phase == "UNKNOWN" and not normalized_uncertainty:
             raise ValueError("UNKNOWN operation must preserve remaining uncertainty")
         if phase in self.TERMINAL_PHASES and normalized_uncertainty:

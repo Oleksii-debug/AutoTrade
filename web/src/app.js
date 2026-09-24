@@ -542,8 +542,26 @@
     }
   }
 
+  async function refreshStateFromUser() {
+    const button = byId("refresh-state");
+    if (button) button.disabled = true;
+    try {
+      await refreshSnapshot();
+      announce("Host state refreshed from the canonical snapshot.");
+    } catch {
+      state.snapshotReady = false;
+      state.sessionIdentity = null;
+      setCommandAvailability(false);
+      text("freshness", "Host unavailable; displayed values may be stale.");
+      announce("Host state refresh failed. Displayed values may be stale.", true);
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
   async function start() {
     byId("host-command-form").addEventListener("submit", submitCommand);
+    byId("refresh-state").addEventListener("click", refreshStateFromUser);
     setCommandAvailability(false);
     try {
       await refreshSnapshot();

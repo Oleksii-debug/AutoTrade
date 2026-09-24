@@ -190,6 +190,26 @@ class CausalFeatureTests(unittest.TestCase):
                 training_cutoff=BASE + timedelta(days=4),
             )
 
+    def test_direct_source_construction_cannot_bypass_causal_invariants(self):
+        with self.assertRaisesRegex(ValueError, "available_at cannot precede"):
+            SourceValue(
+                observation_id="raw",
+                symbol="AAA",
+                event_time=BASE + timedelta(hours=1),
+                available_at=BASE,
+                value=Decimal("1"),
+                source_revision="r1",
+            )
+        with self.assertRaises(TypeError):
+            SourceValue(
+                observation_id="raw-float",
+                symbol="AAA",
+                event_time=BASE,
+                available_at=BASE,
+                value=1.0,
+                source_revision="r1",
+            )
+
     def test_direct_feature_and_label_construction_cannot_bypass_invariants(self):
         with self.assertRaises(ValueError):
             FeaturePoint(
@@ -409,6 +429,26 @@ class CausalFoldTests(unittest.TestCase):
             fold=fold,
         )
         self.assertEqual(rows, ((Decimal("1"), Decimal("0.01")),))
+
+    def test_direct_fold_construction_cannot_bypass_window_invariants(self):
+        with self.assertRaisesRegex(ValueError, "must not overlap"):
+            CausalFold(
+                fold_id="direct-bad",
+                train_start=BASE,
+                train_end=BASE + timedelta(days=4),
+                validation_start=BASE + timedelta(days=4),
+                validation_end=BASE + timedelta(days=5),
+                purge_seconds=0,
+            )
+        with self.assertRaises(ValueError):
+            CausalFold(
+                fold_id="direct-naive",
+                train_start=datetime(2026, 1, 1),
+                train_end=BASE + timedelta(days=1),
+                validation_start=BASE + timedelta(days=2),
+                validation_end=BASE + timedelta(days=3),
+                purge_seconds=0,
+            )
 
     def test_fold_windows_cannot_overlap(self):
         with self.assertRaisesRegex(ValueError, "must not overlap"):

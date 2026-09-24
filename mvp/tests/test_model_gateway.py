@@ -21,9 +21,9 @@ def model(model_id, *, remote, cost, latency=50, quality="0.5"):
         provider_id="provider-" + model_id,
         revision="r1",
         remote=remote,
-        estimated_cost=Decimal(cost),
+        estimated_cost=cost,
         latency_ms=latency,
-        quality_score=Decimal(quality),
+        quality_score=quality,
     )
 
 
@@ -32,7 +32,7 @@ def request(*ids, budget="10", remote=True, deadline=None):
         request_id="req-1",
         allowed_model_ids=tuple(ids),
         privacy_remote_allowed=remote,
-        budget_remaining=Decimal(budget),
+        budget_remaining=budget,
         deadline_utc=deadline or NOW + timedelta(minutes=1),
     )
 
@@ -153,6 +153,61 @@ class ModelGatewayTests(unittest.TestCase):
         self.assertEqual(RouteStatus.REJECTED, decision.status)
         self.assertEqual("deadline_expired", decision.reason)
 
+    def test_binary_float_model_economics_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "exact decimal"):
+            model("float-cost", remote=False, cost=0.1)
+        with self.assertRaisesRegex(ValueError, "exact decimal"):
+            ModelDescriptor(
+                model_id="float-quality",
+                provider_id="provider",
+                revision="r1",
+                remote=False,
+                estimated_cost=Decimal("0"),
+                latency_ms=10,
+                quality_score=0.5,
+            )
+        with self.assertRaisesRegex(ValueError, "exact decimal"):
+            RoutingPolicy(
+                RoutingMode.ZERO,
+                maximum_cost=1.0,
+            )
+        with self.assertRaisesRegex(ValueError, "exact decimal"):
+            request("local", budget=1.0)
+
+    def test_boolean_flags_and_latency_aliases_fail_closed(self):
+        with self.assertRaises(TypeError):
+            ModelDescriptor(
+                model_id="bad-remote",
+                provider_id="provider",
+                revision="r1",
+                remote=1,
+                estimated_cost=Decimal("0"),
+                latency_ms=10,
+                quality_score=Decimal("0.5"),
+            )
+        with self.assertRaises(ValueError):
+            ModelDescriptor(
+                model_id="bad-latency",
+                provider_id="provider",
+                revision="r1",
+                remote=False,
+                estimated_cost=Decimal("0"),
+                latency_ms=True,
+                quality_score=Decimal("0.5"),
+            )
+        with self.assertRaises(TypeError):
+            RoutingPolicy("ZERO", maximum_cost=Decimal("0"))
+        with self.assertRaises(TypeError):
+            RoutingPolicy(RoutingMode.ZERO, allow_remote=1, maximum_cost=Decimal("0"))
+        with self.assertRaises(TypeError):
+            ModelRequest(
+                request_id="bad-privacy",
+                allowed_model_ids=(),
+                privacy_remote_allowed=1,
+                budget_remaining=Decimal("0"),
+                deadline_utc=NOW + timedelta(minutes=1),
+            )
+
     def test_duplicate_descriptor_is_rejected(self):
         with self.assertRaises(ValueError):
             route_model(
@@ -175,6 +230,29 @@ if __name__ == "__main__":
 
 
 class BudgetLedgerTests(unittest.TestCase):
+    def test_budget_ledger_rejects_binary_float_money(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+
+        with self.assertRaisesRegex(ValueError, "exact decimal"):
+            BudgetLedger(1.0)
+
+        ledger = BudgetLedger(Decimal("2"))
+        with self.assertRaisesRegex(ValueError, "exact decimal"):
+            ledger.reserve("req", 0.1)
+
+        ledger.reserve("req", Decimal("1"))
+        with self.assertRaisesRegex(ValueError, "exact decimal"):
+            ledger.settle("req", incurred=0.1)
+        self.assertEqual(Decimal("1"), ledger.snapshot().reserved)
+
+        ledger.settle(
+            "req",
+            incurred=Decimal("0.2"),
+            estimated_unbilled=Decimal("0.5"),
+        )
+        with self.assertRaisesRegex(ValueError, "exact decimal"):
+            ledger.reconcile_unbilled(billing_id="bill-float", billed=0.1)
+
     def test_reservation_is_idempotent(self):
         from mvp.autotrade_mvp.model_gateway import BudgetLedger
         ledger = BudgetLedger(Decimal("2"))
@@ -213,12 +291,29 @@ class BudgetLedgerTests(unittest.TestCase):
             ledger.settle("req", incurred=Decimal("1.01"))
         self.assertEqual(Decimal("1"), ledger.snapshot().reserved)
 
+    def test_unbilled_reconciliation_is_idempotent_by_billing_identity(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+        ledger = BudgetLedger(Decimal("2"))
+        ledger.reserve("req", Decimal("1"))
+        ledger.settle("req", incurred=Decimal("0.2"), estimated_unbilled=Decimal("0.5"))
+        ledger.reconcile_unbilled(billing_id="invoice-line-1", billed=Decimal("0.3"))
+        first = ledger.snapshot()
+        ledger.reconcile_unbilled(billing_id="invoice-line-1", billed=Decimal("0.3"))
+        second = ledger.snapshot()
+        self.assertEqual(first, second)
+        with self.assertRaisesRegex(ValueError, "conflict"):
+            ledger.reconcile_unbilled(
+                billing_id="invoice-line-1",
+                billed=Decimal("0.2"),
+            )
+        self.assertEqual(ledger.snapshot(), second)
+
     def test_unbilled_reconciliation_moves_cost_to_incurred(self):
         from mvp.autotrade_mvp.model_gateway import BudgetLedger
         ledger = BudgetLedger(Decimal("2"))
         ledger.reserve("req", Decimal("1"))
         ledger.settle("req", incurred=Decimal("0.2"), estimated_unbilled=Decimal("0.5"))
-        ledger.reconcile_unbilled(billed=Decimal("0.3"))
+        ledger.reconcile_unbilled(billing_id="bill-1", billed=Decimal("0.3"))
         snap = ledger.snapshot()
         self.assertEqual(Decimal("0.5"), snap.incurred)
         self.assertEqual(Decimal("0.2"), snap.estimated_unbilled)

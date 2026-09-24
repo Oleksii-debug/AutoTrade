@@ -6,6 +6,8 @@ from uuid import uuid4
 
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
+    CapabilityError,
+    EvidenceVerification,
     artifact_store_evidence_verifier,
     derive_capability_snapshot,
 )
@@ -90,6 +92,14 @@ def _publish(store: ArtifactStore, source: str, *, account_id="paper-account") -
 
 
 class CapabilityArtifactEvidenceTests(unittest.TestCase):
+    def test_evidence_verdict_cannot_use_truthy_non_boolean_authority(self):
+        with self.assertRaisesRegex(CapabilityError, "must be boolean"):
+            EvidenceVerification(valid="yes")
+        with self.assertRaisesRegex(CapabilityError, "requires a reason"):
+            EvidenceVerification(valid=False)
+        with self.assertRaisesRegex(CapabilityError, "reason must be text"):
+            EvidenceVerification(valid=False, reason=123)
+
     def test_syntactically_valid_but_missing_artifacts_never_verify(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)

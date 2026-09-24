@@ -134,6 +134,60 @@ class MarketNormalizationTests(unittest.TestCase):
                 )
             )
 
+    def test_late_revision_preserves_original_sequence_as_immutable_correction(self):
+        normalizer = MarketNormalizer(registry())
+        original = normalizer.normalize(
+            raw("TRADE", {"price": "100", "quantity": "1"}, sequence=7, revision=0)
+        )
+        corrected = normalizer.normalize(
+            raw(
+                "TRADE",
+                {"price": "101", "quantity": "1"},
+                sequence=7,
+                revision=1,
+                ingested=at() + timedelta(seconds=2),
+            )
+        )
+        self.assertNotEqual(original.event_id, corrected.event_id)
+        self.assertIn("CORRECTION", corrected.quality_flags)
+        self.assertNotIn("DUPLICATE", corrected.quality_flags)
+        self.assertEqual(corrected.payload["price"], "101")
+
+    def test_revision_gap_and_late_revision_are_explicit_quality_not_mutation(self):
+        normalizer = MarketNormalizer(registry())
+        normalizer.normalize(
+            raw("TRADE", {"price": "100", "quantity": "1"}, sequence=9, revision=0)
+        )
+        rev3 = normalizer.normalize(
+            raw(
+                "TRADE",
+                {"price": "103", "quantity": "1"},
+                sequence=9,
+                revision=3,
+                ingested=at() + timedelta(seconds=3),
+            )
+        )
+        late_rev2 = normalizer.normalize(
+            raw(
+                "TRADE",
+                {"price": "102", "quantity": "1"},
+                sequence=9,
+                revision=2,
+                ingested=at() + timedelta(seconds=4),
+            )
+        )
+        self.assertTrue({"CORRECTION", "REVISION_GAP"} <= set(rev3.quality_flags))
+        self.assertTrue(
+            {"CORRECTION", "OUT_OF_ORDER_REVISION"} <= set(late_rev2.quality_flags)
+        )
+
+    def test_initial_nonzero_revision_is_flagged_without_inventing_base(self):
+        normalizer = MarketNormalizer(registry())
+        revised_only = normalizer.normalize(
+            raw("TRADE", {"price": "100", "quantity": "1"}, sequence=11, revision=2)
+        )
+        self.assertIn("REVISION_BASE_MISSING", revised_only.quality_flags)
+
     def test_sequence_gap_and_late_out_of_order_are_preserved_as_quality(self):
         normalizer = MarketNormalizer(registry())
         normalizer.normalize(raw("TRADE", {"price": "100", "quantity": "1"}, sequence=1))

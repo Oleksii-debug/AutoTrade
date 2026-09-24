@@ -170,7 +170,13 @@ class JournalStore:
 
     @classmethod
     def _required_table_columns(cls) -> dict[str, frozenset[str]]:
-        return {
+        command_columns = {
+            "command_id", "idempotency_key", "request_hash", "result_json",
+            "state_version", "created_at",
+        }
+        if cls.SCHEMA_VERSION >= 3:
+            command_columns.update({"actor", "environment"})
+        required = {
             "schema_migrations": frozenset({"version", "applied_at"}),
             "events": frozenset({
                 "event_id", "event_type", "aggregate_type", "aggregate_id",
@@ -180,15 +186,14 @@ class JournalStore:
                 "outbox_id", "event_id", "topic", "payload_json",
                 "created_at", "delivered_at",
             }),
-            "command_dedupe": frozenset({
-                "command_id", "actor", "environment", "idempotency_key",
-                "request_hash", "result_json", "state_version", "created_at",
-            }),
-            "projection_checkpoints": frozenset({
+            "command_dedupe": frozenset(command_columns),
+        }
+        if cls.SCHEMA_VERSION >= 2:
+            required["projection_checkpoints"] = frozenset({
                 "projection_name", "aggregate_type", "aggregate_id",
                 "aggregate_version", "state_json", "state_hash", "updated_at",
-            }),
-        }
+            })
+        return required
 
     @staticmethod
     def _unique_index_columns(connection, table_name: str) -> set[tuple[str, ...]]:
@@ -212,18 +217,23 @@ class JournalStore:
             "events": ("event_id",),
             "outbox": ("outbox_id",),
             "command_dedupe": ("command_id",),
-            "projection_checkpoints": (
+        }
+        if cls.SCHEMA_VERSION >= 2:
+            expected_primary_keys["projection_checkpoints"] = (
                 "projection_name",
                 "aggregate_type",
                 "aggregate_id",
-            ),
-        }
+            )
         expected_unique = {
             "events": {
                 ("aggregate_type", "aggregate_id", "aggregate_version"),
             },
             "outbox": {("event_id",)},
-            "command_dedupe": {("actor", "environment", "idempotency_key")},
+            "command_dedupe": (
+                {("actor", "environment", "idempotency_key")}
+                if cls.SCHEMA_VERSION >= 3
+                else {("idempotency_key",)}
+            ),
         }
         for table_name, expected_pk in expected_primary_keys.items():
             pk_columns = tuple(
@@ -304,8 +314,9 @@ class JournalStore:
                     "events",
                     "outbox",
                     "command_dedupe",
-                    "projection_checkpoints",
                 }
+                if self.SCHEMA_VERSION >= 2:
+                    required_tables.add("projection_checkpoints")
                 present_tables = {
                     str(row[0])
                     for row in connection.execute(

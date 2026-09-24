@@ -22,6 +22,24 @@ def _instant(value: str, *, field: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _deep_freeze(value: Any) -> Any:
+    if isinstance(value, dict):
+        return MappingProxyType(
+            {key: _deep_freeze(item) for key, item in value.items()}
+        )
+    if isinstance(value, list):
+        return tuple(_deep_freeze(item) for item in value)
+    return value
+
+
+def _plain_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _plain_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_plain_json(item) for item in value]
+    return value
+
+
 def _canonical_payload(value: Mapping[str, Any]) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError("payload must be a mapping")
@@ -30,7 +48,10 @@ def _canonical_payload(value: Mapping[str, Any]) -> Mapping[str, Any]:
     )
     if not isinstance(normalized, dict):
         raise TypeError("payload must serialize as an object")
-    return MappingProxyType(normalized)
+    frozen = _deep_freeze(normalized)
+    if not isinstance(frozen, Mapping):
+        raise TypeError("payload must freeze as an object")
+    return frozen
 
 
 @dataclass(frozen=True)
@@ -76,7 +97,7 @@ def _event_record(event: ReplayEvent) -> dict[str, Any]:
         "sequence": event.sequence,
         "available_at": event.available_at,
         "source_version": event.source_version,
-        "payload": dict(event.payload),
+        "payload": _plain_json(event.payload),
     }
 
 

@@ -51,6 +51,10 @@ def _instant(value: str, *, name: str = "timestamp") -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _utc_text(value: str, *, name: str = "timestamp") -> str:
+    return _instant(value, name=name).isoformat().replace("+00:00", "Z")
+
+
 def _decimal_text(value: Decimal) -> str:
     if not value.is_finite():
         raise ValueError("decimal must be finite")
@@ -98,6 +102,20 @@ class SimulatedOrder:
     quantity: Decimal
     price: Decimal
     submitted_at: str
+
+
+def _same_order_request(left: SimulatedOrder, right: SimulatedOrder) -> bool:
+    """Compare immutable request identity/economics, excluding receipt time."""
+
+    return (
+        left.attempt_id == right.attempt_id
+        and left.client_order_id == right.client_order_id
+        and left.provider_order_id == right.provider_order_id
+        and left.instrument_version == right.instrument_version
+        and left.side == right.side
+        and left.quantity == right.quantity
+        and left.price == right.price
+    )
 
 
 class SimulatedProvider:
@@ -153,7 +171,7 @@ class SimulatedProvider:
             raise ValueError("side must be BUY or SELL")
         qty = _positive(quantity, name="quantity")
         px = _positive(price, name="price")
-        _instant(now, name="now")
+        canonical_now = _utc_text(now, name="now")
         provider_order_id = "sim-" + sha256(cid.encode("utf-8")).hexdigest()[:24]
         proposed = SimulatedOrder(
             attempt_id=aid,
@@ -163,31 +181,31 @@ class SimulatedProvider:
             side=normalized_side,
             quantity=qty,
             price=px,
-            submitted_at=now,
+            submitted_at=canonical_now,
         )
 
         prior_attempt = self._attempts.get(aid)
         if prior_attempt is not None:
-            if prior_attempt != proposed:
+            if not _same_order_request(prior_attempt, proposed):
                 raise SimulatedProviderConflict(
                     "attempt_id already has different simulated order content"
                 )
-            return self._submission_result(prior_attempt, now)
+            return self._submission_result(prior_attempt, canonical_now)
 
         prior_client = self.orders.get(cid)
         if prior_client is not None:
-            if prior_client != proposed:
+            if not _same_order_request(prior_client, proposed):
                 raise SimulatedProviderConflict(
                     "client_order_id already has different simulated order content"
                 )
             self._attempts[aid] = prior_client
-            return self._submission_result(prior_client, now)
+            return self._submission_result(prior_client, canonical_now)
 
         self.orders[cid] = proposed
         self._attempts[aid] = proposed
         if fill_immediately:
-            self._record_fill(proposed, now)
-        return self._submission_result(proposed, now)
+            self._record_fill(proposed, canonical_now)
+        return self._submission_result(proposed, canonical_now)
 
     def _submission_result(
         self, order: SimulatedOrder, now: str
@@ -303,7 +321,7 @@ class SimulatedProvider:
         return tuple(self.fills)
 
     def account_snapshot(self, *, now: str) -> dict[str, Any]:
-        _instant(now, name="now")
+        canonical_now = _utc_text(now, name="now")
         balances = [
             {
                 "currency": self.currency,
@@ -311,7 +329,7 @@ class SimulatedProvider:
                 "available": _decimal_text(self.cash),
                 "reserved": "0",
                 "liability": "0",
-                "as_of": now,
+                "as_of": canonical_now,
             }
         ]
         positions = [
@@ -323,25 +341,44 @@ class SimulatedProvider:
                     "unit": _unit_id(instrument),
                 },
                 "source": "SIMULATED_PROVIDER",
-                "as_of": now,
+                "as_of": canonical_now,
             }
             for instrument, quantity in sorted(self.positions.items())
             if quantity != 0
         ]
-        open_orders: list[dict[str, Any]] = []
+        filled_order_refs = {
+            fill["order_ref"]
+            for fill in self.fills
+        }
+        open_orders = [
+            {
+                "provider_order_id": order.provider_order_id,
+                "client_order_id": order.client_order_id,
+                "instrument_version": order.instrument_version,
+                "side": order.side,
+                "quantity": _decimal_text(order.quantity),
+                "price": _decimal_text(order.price),
+                "submitted_at": order.submitted_at,
+            }
+            for order in sorted(
+                self.orders.values(),
+                key=lambda item: item.client_order_id,
+            )
+            if order.provider_order_id not in filled_order_refs
+        ]
         core = {
             "account_id": self.account_id,
             "environment": "SIMULATION",
-            "query_started_at": now,
-            "query_completed_at": now,
-            "provider_as_of": now,
+            "query_started_at": canonical_now,
+            "query_completed_at": canonical_now,
+            "provider_as_of": canonical_now,
             "consistency": "ATOMIC",
             "balances": balances,
             "positions": positions,
             "open_orders": open_orders,
             "margin": {
                 "account_id": self.account_id,
-                "as_of": now,
+                "as_of": canonical_now,
                 "model_id": "sim-cash-v1",
                 "source": "SIMULATED_PROVIDER",
                 "quality": "DETERMINISTIC",
@@ -361,7 +398,7 @@ class SimulatedProvider:
             "snapshot_id": snapshot_id,
             **core,
             "evidence": [
-                _evidence("snapshot", snapshot_id, now, core)
+                _evidence("snapshot", snapshot_id, canonical_now, core)
             ],
         }
 
@@ -377,7 +414,9 @@ class SimulatedProvider:
         cid = _text(client_order_id, name="client_order_id")
         start = _instant(coverage_start, name="coverage_start")
         end = _instant(coverage_end, name="coverage_end")
-        _instant(now, name="now")
+        canonical_start = start.isoformat().replace("+00:00", "Z")
+        canonical_end = end.isoformat().replace("+00:00", "Z")
+        canonical_now = _utc_text(now, name="now")
         if end < start:
             raise ValueError("coverage_end must not precede coverage_start")
         if not isinstance(pagination_complete, bool):
@@ -385,8 +424,8 @@ class SimulatedProvider:
         order = self.orders.get(cid)
         searched = ["orders-by-client-id", "activity-fills"]
         window = {
-            "start": coverage_start,
-            "end": coverage_end,
+            "start": canonical_start,
+            "end": canonical_end,
         }
         if order is not None:
             verdict = "FOUND"
@@ -410,25 +449,25 @@ class SimulatedProvider:
             "searched_surfaces": searched,
             "time_window": window,
             "pagination_complete": pagination_complete,
-            "consistency_horizon": coverage_end,
+            "consistency_horizon": canonical_end,
         }
         if order_payload is not None:
             core["order"] = order_payload
         return {
             **core,
             "evidence": [
-                _evidence("query-order", cid, now, core)
+                _evidence("query-order", cid, canonical_now, core)
             ],
         }
 
     def health(self, *, now: str) -> dict[str, Any]:
-        _instant(now, name="now")
+        canonical_now = _utc_text(now, name="now")
         return {
             "component": "SIMULATED_PROVIDER",
-            "as_of": now,
+            "as_of": canonical_now,
             "status": "READY",
             "affected_scope": ["SIMULATION"],
             "reason_codes": [],
-            "last_good_at": now,
+            "last_good_at": canonical_now,
             "next_action": "none",
         }

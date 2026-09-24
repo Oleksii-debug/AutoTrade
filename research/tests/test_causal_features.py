@@ -4,6 +4,8 @@ import unittest
 
 from research.autotrade_research.features.causal import (
     FeaturePoint,
+    LabelPoint,
+    Normalizer,
     SourceValue,
     fit_normalizer,
     make_forward_label,
@@ -29,6 +31,79 @@ def source(i, value, *, symbol="AAA", delay=0, revision="rev-1"):
 
 
 class CausalFeatureTests(unittest.TestCase):
+    def test_direct_source_and_feature_construction_cannot_bypass_boundaries(self):
+        with self.assertRaisesRegex(ValueError, "timezone-aware"):
+            SourceValue(
+                observation_id="o1",
+                symbol="AAA",
+                event_time=datetime(2026, 1, 1),
+                available_at=BASE,
+                value=Decimal("1"),
+                source_revision="r1",
+            )
+        with self.assertRaisesRegex(TypeError, "Decimal"):
+            FeaturePoint(
+                "AAA",
+                BASE,
+                1.0,
+                ("o1",),
+                ("r1",),
+                "x",
+            )
+        with self.assertRaisesRegex(ValueError, "equal length"):
+            FeaturePoint(
+                "AAA",
+                BASE,
+                Decimal("1"),
+                ("o1", "o2"),
+                ("r1",),
+                "x",
+            )
+
+    def test_direct_label_cannot_backdate_availability_or_use_float(self):
+        with self.assertRaisesRegex(ValueError, "after anchor_time"):
+            LabelPoint(
+                "AAA",
+                BASE,
+                BASE,
+                Decimal("0.1"),
+                "r1",
+            )
+        with self.assertRaisesRegex(TypeError, "Decimal"):
+            LabelPoint(
+                "AAA",
+                BASE,
+                BASE + timedelta(days=1),
+                0.1,
+                "r1",
+            )
+
+    def test_normalizer_direct_constructor_validates_scale_cutoff_and_provenance(self):
+        with self.assertRaisesRegex(ValueError, "positive"):
+            Normalizer(
+                mean=Decimal("0"),
+                scale=Decimal("0"),
+                fit_cutoff=BASE,
+                fit_input_ids=("o1",),
+                provenance_hash="sha256:" + "a" * 64,
+            )
+        with self.assertRaisesRegex(ValueError, "canonical SHA-256"):
+            Normalizer(
+                mean=Decimal("0"),
+                scale=Decimal("1"),
+                fit_cutoff=BASE,
+                fit_input_ids=("o1",),
+                provenance_hash="bad",
+            )
+        with self.assertRaisesRegex(ValueError, "timezone-aware"):
+            Normalizer(
+                mean=Decimal("0"),
+                scale=Decimal("1"),
+                fit_cutoff=datetime(2026, 1, 1),
+                fit_input_ids=("o1",),
+                provenance_hash="sha256:" + "a" * 64,
+            )
+
     def test_future_available_value_is_not_used(self):
         rows = [source(0, "100"), source(1, "110", delay=2)]
         with self.assertRaises(ValueError):

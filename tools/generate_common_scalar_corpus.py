@@ -8,9 +8,11 @@ hand-authored: every expected result is derived from common.schema.json.  CI run
 from __future__ import annotations
 
 import argparse
+from hashlib import sha256
 import json
 from pathlib import Path
 import sys
+from urllib.parse import urlsplit
 
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
@@ -64,6 +66,23 @@ CANDIDATES: tuple[tuple[str, str, object], ...] = (
 def generated_document() -> dict[str, object]:
     common = json.loads(COMMON.read_text(encoding="utf-8"))
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    contract_version = manifest["contract_version"]
+    schema_base_uri = manifest["schema_base_uri"]
+    base_path_version = urlsplit(schema_base_uri).path.rstrip("/").split("/")[-1]
+    if base_path_version != contract_version:
+        raise ValueError(
+            "schema_base_uri version must match manifest contract_version"
+        )
+    expected_schema_id = schema_base_uri.rstrip("/") + "/common.schema.json"
+    if common["$id"] != expected_schema_id:
+        raise ValueError("common schema $id must match manifest schema_base_uri")
+    canonical_schema = json.dumps(
+        common,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    schema_digest = "sha256:" + sha256(canonical_schema).hexdigest()
     registry = Registry().with_resource(
         common["$id"],
         Resource.from_contents(common),
@@ -91,9 +110,10 @@ def generated_document() -> dict[str, object]:
         )
 
     return {
-        "corpus_version": "1.1.0",
-        "contract_version": manifest["contract_version"],
+        "corpus_version": "1.2.0",
+        "contract_version": contract_version,
         "source_schema_id": common["$id"],
+        "source_schema_sha256": schema_digest,
         "scope": "common-scalar-subset",
         "cases": cases,
     }

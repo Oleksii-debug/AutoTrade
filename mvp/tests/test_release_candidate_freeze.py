@@ -24,6 +24,7 @@ REQUIRED_ROLES = (
     "API_COMPATIBILITY",
     "CLEAN_INSTALL",
     "LICENSE_NOTICES",
+    "RELEASE_QUALIFICATION",
 )
 
 
@@ -154,6 +155,41 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         self.assertIn(
             "evidence_inconclusive:DEPENDENCY_RIGHTS",
             decision.reasons,
+        )
+
+    def test_release_qualification_is_mandatory_and_must_pass(self):
+        artifacts = tuple(
+            item
+            for item in self.candidate().artifacts
+            if item.role != "RELEASE_QUALIFICATION"
+        )
+        missing = freeze_release_candidate(
+            self.candidate(artifacts=artifacts)
+        )
+        self.assertEqual(missing.status, "BLOCKED")
+        self.assertIn(
+            "missing_required_artifact:RELEASE_QUALIFICATION",
+            missing.reasons,
+        )
+
+        inconclusive_artifacts = [
+            (
+                artifact(
+                    "RELEASE_QUALIFICATION",
+                    evidence_status="INCONCLUSIVE",
+                )
+                if item.role == "RELEASE_QUALIFICATION"
+                else item
+            )
+            for item in self.candidate().artifacts
+        ]
+        inconclusive = freeze_release_candidate(
+            self.candidate(artifacts=inconclusive_artifacts)
+        )
+        self.assertEqual(inconclusive.status, "BLOCKED")
+        self.assertIn(
+            "evidence_inconclusive:RELEASE_QUALIFICATION",
+            inconclusive.reasons,
         )
 
     def test_unresolved_blocker_prevents_manifest_publication(self):

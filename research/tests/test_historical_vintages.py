@@ -70,6 +70,71 @@ class HistoricalVintageTests(unittest.TestCase):
         self.assertEqual(late[0]["revision"], "2")
         self.assertEqual(late[0]["payload"]["close"], "101")
 
+    def test_point_in_time_view_orders_by_evidenced_availability(self):
+        earlier_source = {
+            "event_id": str(uuid4()),
+            "instrument_version": "instrument:v1",
+            "kind": "TRADE",
+            "source_event_at": "2026-01-01T10:00:00Z",
+            "available_at": "2026-01-01T10:05:00Z",
+            "ingested_at": "2026-01-01T10:05:01Z",
+            "revision": "1",
+            "availability_basis": "provider-history",
+            "payload": {"price": "100"},
+            "quality_flags": [],
+            "raw_evidence_ref": evidence("2026-01-02T00:00:00Z"),
+        }
+        later_source_but_earlier_available = {
+            "event_id": str(uuid4()),
+            "instrument_version": "instrument:v1",
+            "kind": "TRADE",
+            "source_event_at": "2026-01-01T10:01:00Z",
+            "available_at": "2026-01-01T10:02:00Z",
+            "ingested_at": "2026-01-01T10:02:01Z",
+            "revision": "1",
+            "availability_basis": "provider-history",
+            "payload": {"price": "101"},
+            "quality_flags": [],
+            "raw_evidence_ref": evidence("2026-01-02T00:00:00Z"),
+        }
+
+        view = point_in_time_market_events(
+            [earlier_source, later_source_but_earlier_available],
+            datetime(2026, 1, 1, 11, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(
+            [row["event_id"] for row in view],
+            [
+                later_source_but_earlier_available["event_id"],
+                earlier_source["event_id"],
+            ],
+        )
+
+    def test_market_event_requires_availability_basis_and_raw_evidence(self):
+        base = {
+            "event_id": str(uuid4()),
+            "instrument_version": "instrument:v1",
+            "kind": "TRADE",
+            "source_event_at": "2026-01-01T10:00:00Z",
+            "available_at": "2026-01-01T10:00:01Z",
+            "ingested_at": "2026-01-01T10:00:02Z",
+            "revision": "1",
+            "payload": {"price": "10"},
+            "quality_flags": [],
+        }
+        cutoff = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(HistoricalDataError, "availability_basis"):
+            point_in_time_market_events(
+                [{**base, "availability_basis": "", "raw_evidence_ref": evidence("2026-01-01T10:00:02Z")}],
+                cutoff,
+            )
+        with self.assertRaisesRegex(HistoricalDataError, "raw_evidence_ref"):
+            point_in_time_market_events(
+                [{**base, "availability_basis": "provider", "raw_evidence_ref": "not-an-object"}],
+                cutoff,
+            )
+
     def test_conflicting_same_revision_is_rejected(self):
         event_id = str(uuid4())
         common = {

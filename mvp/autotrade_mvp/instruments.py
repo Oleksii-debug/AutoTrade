@@ -5,8 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+import re
 from types import MappingProxyType
 from typing import Iterable, Mapping
+from urllib.parse import urlsplit
 from uuid import UUID
 
 
@@ -59,6 +61,60 @@ def _decimal_text(value: Decimal) -> str:
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return text
+
+
+_EVIDENCE_REQUIRED = {"artifact_id", "sha256", "observed_at"}
+_EVIDENCE_ALLOWED = _EVIDENCE_REQUIRED | {"source_uri", "rights_id"}
+
+
+def _evidence_ref(value: Mapping[str, object]) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise InstrumentRegistryError("metadata_evidence entries must be objects")
+    keys = set(value)
+    missing = _EVIDENCE_REQUIRED - keys
+    unknown = keys - _EVIDENCE_ALLOWED
+    if missing:
+        raise InstrumentRegistryError(
+            "metadata_evidence is missing required fields: " + ", ".join(sorted(missing))
+        )
+    if unknown:
+        raise InstrumentRegistryError(
+            "metadata_evidence contains unknown fields: " + ", ".join(sorted(unknown))
+        )
+
+    artifact_id = _text(value["artifact_id"], "artifact_id")
+    try:
+        UUID(artifact_id)
+    except (ValueError, TypeError, AttributeError) as error:
+        raise InstrumentRegistryError("metadata artifact_id must be a UUID") from error
+
+    digest = _text(value["sha256"], "sha256")
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+        raise InstrumentRegistryError("metadata sha256 must be a canonical SHA-256 digest")
+
+    observed_at = _text(value["observed_at"], "observed_at")
+    if not observed_at.endswith("Z"):
+        raise InstrumentRegistryError("metadata observed_at must be UTC and end in Z")
+    try:
+        observed = datetime.fromisoformat(observed_at[:-1] + "+00:00")
+    except ValueError as error:
+        raise InstrumentRegistryError("metadata observed_at must be an ISO date-time") from error
+    if observed.utcoffset() != timedelta(0):
+        raise InstrumentRegistryError("metadata observed_at must be UTC")
+
+    normalized: dict[str, object] = {
+        "artifact_id": artifact_id,
+        "sha256": digest,
+        "observed_at": observed_at,
+    }
+    if "source_uri" in value:
+        source_uri = _text(value["source_uri"], "source_uri")
+        if not urlsplit(source_uri).scheme:
+            raise InstrumentRegistryError("metadata source_uri must be an absolute URI")
+        normalized["source_uri"] = source_uri
+    if "rights_id" in value:
+        normalized["rights_id"] = _text(value["rights_id"], "rights_id")
+    return MappingProxyType(normalized)
 
 
 @dataclass(frozen=True)
@@ -257,7 +313,7 @@ class InstrumentVersion:
             raise InstrumentRegistryError("effective_to must be after effective_from")
 
         object.__setattr__(self, "deliverable", tuple(self.deliverable))
-        frozen_evidence = tuple(MappingProxyType(dict(item)) for item in self.metadata_evidence)
+        frozen_evidence = tuple(_evidence_ref(item) for item in self.metadata_evidence)
         object.__setattr__(self, "metadata_evidence", frozen_evidence)
 
         derivative = self.asset_class in {"FUTURE", "PERPETUAL", "OPTION"}

@@ -102,6 +102,34 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertFalse(decision.admitted)
         self.assertIn("reduce_only", {r.rule for r in decision.rules if not r.passed})
 
+    def test_high_order_price_cannot_bypass_single_notional_limit(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="6", price="200",
+                expected_state_version=7,
+            ),
+            context(positions={"ABC": "0"}, marks={"ABC": "100"}),
+            policy(max_single_notional="1000"),
+        )
+        self.assertFalse(decision.admitted)
+        failed = {rule.rule for rule in decision.rules if not rule.passed}
+        self.assertIn("single_notional", failed)
+
+    def test_risk_boolean_inputs_fail_closed(self):
+        with self.assertRaises(TypeError):
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7, reduce_only="false",
+            )
+        with self.assertRaises(TypeError):
+            context(capability_allowed="false")
+        with self.assertRaises(TypeError):
+            context(borrow_available="true")
+
+    def test_drawdown_fraction_above_one_is_rejected(self):
+        with self.assertRaises(ValueError):
+            context(drawdown_fraction="1.01")
+
     def test_stress_and_daily_loss_and_drawdown_are_independent_hard_rules(self):
         decision = evaluate_risk(
             RiskIntent.create(

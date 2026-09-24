@@ -515,17 +515,20 @@ def complete_restore_reconciliation(
     root = Path(destination_root)
     marker = _read_restore_marker(root)
     if marker.get("status") == "RECONCILIATION_COMPLETE":
+        if restore_requires_reconciliation(root):
+            raise BackupIntegrityError("Existing restore completion proof is invalid")
         proof_path = root / RESTORE_COMPLETION_PROOF_NAME
-        if not proof_path.is_file():
-            raise BackupIntegrityError("Restore completion marker has no proof")
-        proof = json.loads(proof_path.read_text(encoding="utf-8"))
-        return proof
+        return json.loads(proof_path.read_text(encoding="utf-8"))
     if marker.get("status") not in {None, "RECONCILIATION_REQUIRED"}:
         raise BackupIntegrityError("Restore reconciliation marker status is invalid")
     if not isinstance(controller, RecoveryController):
         raise TypeError("controller must be RecoveryController")
     if not isinstance(reconciliation, ReconciliationResult):
         raise TypeError("reconciliation must be ReconciliationResult")
+    if isinstance(fencing_evidence, (str, bytes)) or not isinstance(
+        fencing_evidence, Sequence
+    ):
+        raise TypeError("fencing_evidence must be a sequence of evidence references")
     refs = tuple(
         item.strip()
         for item in fencing_evidence

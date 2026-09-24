@@ -43,10 +43,12 @@ class SettlementObligation:
     amount: Decimal
     trade_date: date
     settlement_date: date
+    component_id: str = "PRIMARY"
 
     def __post_init__(self) -> None:
         obligation_id = _text(self.obligation_id, name="obligation_id")
         cause_event_id = _text(self.cause_event_id, name="cause_event_id")
+        component_id = _text(self.component_id, name="component_id").upper()
         currency = _text(self.currency, name="currency").upper()
         amount = _decimal(self.amount, name="amount")
         if amount == 0:
@@ -57,6 +59,7 @@ class SettlementObligation:
             raise ValueError("settlement_date cannot precede trade_date")
         object.__setattr__(self, "obligation_id", obligation_id)
         object.__setattr__(self, "cause_event_id", cause_event_id)
+        object.__setattr__(self, "component_id", component_id)
         object.__setattr__(self, "currency", currency)
         object.__setattr__(self, "amount", amount)
 
@@ -101,7 +104,7 @@ class SettlementBook:
                 )
             self._settled_cash[unit] = _decimal(amount, name="settled_cash")
         self._obligations: dict[str, SettlementObligation] = {}
-        self._by_cause_event_id: dict[str, SettlementObligation] = {}
+        self._by_cause_component: dict[tuple[str, str], SettlementObligation] = {}
         self._settled_ids: set[str] = set()
         for obligation in obligations:
             self.add(obligation)
@@ -127,13 +130,14 @@ class SettlementBook:
                     "obligation_id already exists with different economic content"
                 )
             return False
-        cause_existing = self._by_cause_event_id.get(obligation.cause_event_id)
+        cause_key = (obligation.cause_event_id, obligation.component_id)
+        cause_existing = self._by_cause_component.get(cause_key)
         if cause_existing is not None:
             raise SettlementConflict(
-                "cause_event_id was already represented by a different settlement obligation"
+                "cause_event_id and component_id were already represented by a different settlement obligation"
             )
         self._obligations[obligation.obligation_id] = obligation
-        self._by_cause_event_id[obligation.cause_event_id] = obligation
+        self._by_cause_component[cause_key] = obligation
         return True
 
     def is_settled(self, obligation_id: str) -> bool:
@@ -230,4 +234,5 @@ def equity_cash_obligation(
         amount=amount,
         trade_date=trade_date,
         settlement_date=settlement_date,
+        component_id="PRINCIPAL_AND_SAME_CURRENCY_FEE",
     )

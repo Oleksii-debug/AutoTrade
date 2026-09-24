@@ -168,6 +168,28 @@ class SpecialistDagTests(unittest.TestCase):
                 decision_deadline=NOW,
             )
 
+    def test_direction_must_match_score_sign(self):
+        with self.assertRaisesRegex(SpecialistDagError, "direction must match score sign"):
+            SpecialistRun(
+                role_id="x",
+                direction="SHORT",
+                score=Decimal("0.4"),
+                confidence=Decimal("1"),
+                evidence_refs=("evidence:x",),
+                cost=Decimal("0"),
+                completed_at=NOW,
+            )
+        with self.assertRaisesRegex(SpecialistDagError, "direction must match score sign"):
+            SpecialistRun(
+                role_id="flat",
+                direction="LONG",
+                score=Decimal("0"),
+                confidence=Decimal("1"),
+                evidence_refs=("evidence:flat",),
+                cost=Decimal("0"),
+                completed_at=NOW,
+            )
+
     def test_output_requires_evidence_and_rejects_binary_floats(self):
         with self.assertRaises(SpecialistDagError):
             SpecialistRun(

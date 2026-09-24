@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from hashlib import sha256
+import json
 from typing import FrozenSet
 
 
@@ -106,6 +108,7 @@ class AdmissionRecord:
     admitted_at: str
     confirmation_id: str | None
     reason: str
+    request_fingerprint: str
 
 
 class AuthorityConflict(ValueError):
@@ -205,23 +208,50 @@ class AuthorityService:
         aid = _text(admission_id, name="admission_id")
         pid = _text(policy_id, name="policy_id")
         ihash = _text(intent_hash, name="intent_hash")
+        account = _text(account_id, name="account_id")
+        env = _text(environment, name="environment").upper()
+        symbol = _text(instrument, name="instrument")
+        normalized_action = _text(action, name="action").upper()
         if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
+        if not isinstance(risk_admitted, bool) or not isinstance(risk_reducing, bool):
+            raise TypeError("risk_admitted and risk_reducing must be booleans")
         policy = self._policies.get(pid)
         if policy is None:
             raise KeyError(pid)
         amount = _decimal(notional, name="notional")
         if amount < 0:
             raise ValueError("notional must be non-negative")
+        request_payload = {
+            "policy_id": pid,
+            "intent_hash": ihash,
+            "account_id": account,
+            "environment": env,
+            "instrument": symbol,
+            "action": normalized_action,
+            "notional": str(amount),
+            "state_version": state_version,
+            "risk_admitted": risk_admitted,
+            "confirmation_id": confirmation_id,
+            "risk_reducing": risk_reducing,
+        }
+        request_fingerprint = sha256(
+            json.dumps(request_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        existing_admission = self._admissions.get(aid)
+        if existing_admission is not None:
+            if existing_admission.request_fingerprint != request_fingerprint:
+                raise AuthorityConflict("admission_id already has different request content")
+            return existing_admission
 
         active, reason = self._policy_active(policy, now)
         checks = [
             (active, reason),
             (risk_admitted, "risk_rejected"),
-            (account_id == policy.account_id, "account_out_of_scope"),
-            (environment.upper() in policy.environments, "environment_out_of_scope"),
-            (instrument in policy.instruments, "instrument_out_of_scope"),
-            (action.upper() in policy.actions, "action_out_of_scope"),
+            (account == policy.account_id, "account_out_of_scope"),
+            (env in policy.environments, "environment_out_of_scope"),
+            (symbol in policy.instruments, "instrument_out_of_scope"),
+            (normalized_action in policy.actions, "action_out_of_scope"),
             (amount <= policy.max_notional, "notional_out_of_scope"),
             (not policy.protection_only or risk_reducing, "protection_policy_requires_risk_reduction"),
         ]
@@ -262,12 +292,8 @@ class AuthorityService:
             admitted_at=now,
             confirmation_id=used_confirmation,
             reason=failure_reason,
+            request_fingerprint=request_fingerprint,
         )
-        existing = self._admissions.get(aid)
-        if existing is not None:
-            if existing != record:
-                raise AuthorityConflict("admission_id already has different content")
-            return existing
         self._admissions[aid] = record
         if outcome == "ADMITTED" and used_confirmation is not None:
             self._used_confirmations.add(used_confirmation)

@@ -45,6 +45,28 @@ class CorporateSettlementTests(unittest.TestCase):
         self.assertEqual(result.economic_pnl, Decimal("0"))
         self.assertEqual(book.apply(event), result)
 
+    def test_split_scales_short_borrow_and_recall_obligations(self):
+        book = CorporateActionBook(
+            state(
+                quantity="-10",
+                total_basis="1000",
+                borrowed_quantity="10",
+                recalled_quantity="4",
+            )
+        )
+        event = CorporateEvent.create(
+            event_id="short-split-1",
+            kind="SPLIT",
+            effective_date=date(2026, 1, 2),
+            source_revision="r1",
+            payload={"numerator": 2, "denominator": 1},
+        )
+        result = book.apply(event)
+        self.assertEqual(result.after.quantity, Decimal("-20"))
+        self.assertEqual(result.after.borrowed_quantity, Decimal("20"))
+        self.assertEqual(result.after.recalled_quantity, Decimal("8"))
+        self.assertEqual(result.after.total_basis, Decimal("1000"))
+
     def test_cash_dividend_stays_unsettled_until_explicit_settlement(self):
         book = CorporateActionBook(state())
         event = CorporateEvent.create(

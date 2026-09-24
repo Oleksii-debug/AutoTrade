@@ -114,6 +114,10 @@ class CorporateEvent:
         normalized_payload: dict[str, str] = {}
         for raw_key, raw_value in payload.items():
             key = _text(raw_key, name="payload key")
+            if key in normalized_payload:
+                raise ValueError(
+                    "corporate-event payload keys must be unique after normalization"
+                )
             if isinstance(raw_value, bool) or isinstance(raw_value, float):
                 raise TypeError("corporate-event numeric payload must use exact decimal input")
             if not isinstance(raw_value, (str, int, Decimal)):

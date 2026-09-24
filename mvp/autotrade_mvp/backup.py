@@ -505,7 +505,8 @@ def _normalize_fencing_evidence(
     allowed = {"artifact_id", "sha256", "source_uri", "observed_at", "rights_id"}
     required = {"artifact_id", "sha256", "observed_at"}
     normalized: list[dict[str, str]] = []
-    identities: set[tuple[str, str]] = set()
+    artifact_ids: set[str] = set()
+    digests: set[str] = set()
     for index, value in enumerate(values):
         if not isinstance(value, Mapping):
             raise BackupError("fencing evidence must use canonical EvidenceRef objects")
@@ -544,10 +545,16 @@ def _normalize_fencing_evidence(
                 if not isinstance(optional_value, str) or not optional_value.strip():
                     raise BackupError(f"fencing evidence {optional} must be non-empty")
                 item[optional] = optional_value.strip()
-        identity = (artifact_id, digest)
-        if identity in identities:
-            raise BackupError("unique old-sender fencing evidence is required")
-        identities.add(identity)
+        if artifact_id in artifact_ids:
+            raise BackupError(
+                "fencing evidence artifact_id cannot identify conflicting evidence"
+            )
+        if digest in digests:
+            raise BackupError(
+                "unique old-sender fencing evidence bytes are required"
+            )
+        artifact_ids.add(artifact_id)
+        digests.add(digest)
         normalized.append(item)
     if not normalized:
         raise BackupError("unique old-sender fencing evidence is required")

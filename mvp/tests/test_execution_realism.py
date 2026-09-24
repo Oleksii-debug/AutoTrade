@@ -48,6 +48,7 @@ def order(**overrides):
 
 def top(**overrides):
     values = dict(
+        instrument_version="ABC@v1",
         market_time="2026-09-24T10:00:00.200000Z",
         available_at="2026-09-24T10:00:00.250000Z",
         available_volume="100",
@@ -59,6 +60,21 @@ def top(**overrides):
 
 
 class ExecutionRealismTests(unittest.TestCase):
+    def test_cross_instrument_liquidity_cannot_execute_order(self):
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "instrument_version must exactly match",
+        ):
+            simulate_execution(
+                order(instrument_version="ABC@v1"),
+                top(instrument_version="XYZ@v9"),
+                model(),
+            )
+
+    def test_liquidity_identity_is_required_and_canonical(self):
+        with self.assertRaisesRegex(ExecutionRealismError, "instrument_version is required"):
+            top(instrument_version="")
+
     def test_order_cannot_fill_against_same_or_earlier_liquidity(self):
         result = simulate_execution(
             order(),
@@ -179,6 +195,7 @@ class ExecutionRealismTests(unittest.TestCase):
                 limit_price="103",
             ),
             LiquidityObservation.create(
+                instrument_version="ABC@v1",
                 market_time="2026-09-24T10:01:00Z",
                 available_at="2026-09-24T10:01:01Z",
                 available_volume="100",
@@ -234,6 +251,7 @@ class ExecutionRealismTests(unittest.TestCase):
                 submitted_at="2026-09-24T10:00:00Z",
             ),
             LiquidityObservation.create(
+                instrument_version="ABC@v1",
                 market_time="2026-09-24T10:02:00Z",
                 available_at="2026-09-24T10:02:01Z",
                 available_volume="100",
@@ -249,6 +267,7 @@ class ExecutionRealismTests(unittest.TestCase):
         result = simulate_execution(
             order(side="SELL"),
             LiquidityObservation.create(
+                instrument_version="ABC@v1",
                 market_time="2026-09-24T10:01:00Z",
                 available_at="2026-09-24T10:01:01Z",
                 available_volume="100",
@@ -328,6 +347,7 @@ class ExecutionRealismTests(unittest.TestCase):
             )
         with self.assertRaises(ExecutionRealismError):
             LiquidityObservation(
+                instrument_version="ABC@v1",
                 market_time="2026-09-24T10:00:01Z",
                 available_at="2026-09-24T10:00:00Z",
                 available_volume=Decimal("1"),
@@ -349,6 +369,7 @@ class ExecutionRealismTests(unittest.TestCase):
             simulate_execution(
                 order(),
                 LiquidityObservation.create(
+                    instrument_version="ABC@v1",
                     market_time="2026-09-24T10:01:00Z",
                     available_at="2026-09-24T10:01:01Z",
                     available_volume="100",

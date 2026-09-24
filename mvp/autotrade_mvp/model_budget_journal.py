@@ -162,6 +162,21 @@ class DurableModelBudget:
         identity = _text(identity, name="identity")
         idempotency_key = f"model-budget:{self.budget_id}:{action}:{identity}"
         command_id = _command_id(self.budget_id, idempotency_key)
+        event_id = _event_id(self.budget_id, idempotency_key)
+
+        # Resolve idempotency before re-applying a mutation to the projection.
+        # This matters after restart: a settled reservation is no longer active,
+        # but replaying the exact same settlement must remain a safe no-op.
+        existing = self.journal.get_event(event_id)
+        if existing is not None:
+            if (
+                existing["event_type"] != event_type
+                or existing["aggregate_type"] != _AGGREGATE_TYPE
+                or existing["aggregate_id"] != self.budget_id
+                or existing["payload"] != payload
+            ):
+                raise ValueError("model budget idempotency identity conflicts with durable event")
+            return False
 
         # Validate on a fresh durable projection so rejected operations never
         # create events or mutate process-only state.
@@ -172,7 +187,7 @@ class DurableModelBudget:
             event_type=event_type,
             version=version,
             payload=payload,
-            event_id=_event_id(self.budget_id, idempotency_key),
+            event_id=event_id,
         )
         try:
             _, inserted, _ = self.journal.commit_command(
@@ -197,7 +212,7 @@ class DurableModelBudget:
                 event_type=event_type,
                 version=version,
                 payload=payload,
-                event_id=_event_id(self.budget_id, idempotency_key),
+                event_id=event_id,
             )
             _, inserted, _ = self.journal.commit_command(
                 command_id=command_id,
@@ -252,17 +267,9 @@ class DurableModelBudget:
 
     def settle(self, request_id: str, *, incurred, estimated_unbilled="0") -> bool:
         request_id = _text(request_id, name="request_id")
-        # Canonical BudgetLedger performs exact-decimal validation before write.
-        probe = self._replay()
-        probe.settle(
-            request_id,
-            incurred=incurred,
-            estimated_unbilled=estimated_unbilled,
-        )
-        before = self._replay().snapshot()
-        after = probe.snapshot()
-        normalized_incurred = after.incurred - before.incurred
-        normalized_unbilled = after.estimated_unbilled - before.estimated_unbilled
+        # Reuse the canonical ledger parser without mutating durable state.
+        normalized_incurred = BudgetLedger(incurred).snapshot().ceiling
+        normalized_unbilled = BudgetLedger(estimated_unbilled).snapshot().ceiling
         request = {
             "request_id": request_id,
             "incurred": str(normalized_incurred),
@@ -288,11 +295,9 @@ class DurableModelBudget:
 
     def reconcile_unbilled(self, *, billing_id: str, billed) -> bool:
         billing_id = _text(billing_id, name="billing_id")
-        probe = self._replay()
-        before = probe.snapshot()
-        probe.reconcile_unbilled(billing_id=billing_id, billed=billed)
-        after = probe.snapshot()
-        normalized = after.incurred - before.incurred
+        # The ceiling parser enforces the same exact, finite, non-negative
+        # Decimal boundary as the canonical ledger.
+        normalized = BudgetLedger(billed).snapshot().ceiling
         request = {"billing_id": billing_id, "billed": str(normalized)}
 
         def validate(ledger: BudgetLedger) -> None:

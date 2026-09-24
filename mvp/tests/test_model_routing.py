@@ -133,6 +133,38 @@ class ModelRoutingTests(unittest.TestCase):
         self.assertFalse(decision.execute)
         self.assertEqual(decision.reason, "request cancelled")
 
+    def test_total_budget_exhaustion_is_fail_closed(self):
+        decision = select_route(
+            [self.remote],
+            RoutingPolicy(
+                mode="dynamic",
+                max_request_cost=Decimal("1"),
+                max_total_cost=Decimal("0.010"),
+                allow_remote=True,
+            ),
+            RouteRequest("public", 1000, 1000),
+            spent_cost=Decimal("0.005"),
+        )
+        self.assertFalse(decision.execute)
+        self.assertEqual(decision.projected_total_cost, Decimal("0.005"))
+
+    def test_total_budget_projects_exact_cost(self):
+        decision = select_route(
+            [self.remote],
+            RoutingPolicy(
+                mode="dynamic",
+                max_request_cost=Decimal("1"),
+                max_total_cost=Decimal("1"),
+                allow_remote=True,
+            ),
+            RouteRequest("public", 1000, 1000),
+            spent_cost=Decimal("0.250"),
+        )
+        self.assertTrue(decision.execute)
+        self.assertEqual(decision.estimated_cost, Decimal("0.010"))
+        self.assertEqual(decision.spent_before, Decimal("0.250"))
+        self.assertEqual(decision.projected_total_cost, Decimal("0.260"))
+
     def test_negative_token_estimate_is_rejected(self):
         with self.assertRaises(ValueError):
             RouteRequest("public", -1, 0)

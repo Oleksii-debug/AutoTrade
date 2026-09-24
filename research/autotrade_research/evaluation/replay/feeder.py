@@ -17,7 +17,9 @@ from types import MappingProxyType
 from typing import Iterable, Mapping, Sequence
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_EVENT_SCHEMA_VERSION = 1
 _CHECKPOINT_SCHEMA_VERSION = 1
+_ORDERING_POLICY_VERSION = "available_at/source_priority/source_sequence/event_id:v1"
 
 
 class CausalReplayError(ValueError):
@@ -101,6 +103,7 @@ class CausalEvent:
     kind: str
     event_time: datetime
     available_at: datetime
+    ingested_at: datetime
     source_priority: int
     source_sequence: int
     payload: Mapping[str, object]
@@ -110,13 +113,17 @@ class CausalEvent:
         object.__setattr__(self, "kind", _text(self.kind, name="kind").upper())
         event_time = _utc(self.event_time, name="event_time")
         available_at = _utc(self.available_at, name="available_at")
+        ingested_at = _utc(self.ingested_at, name="ingested_at")
         if available_at < event_time:
             raise CausalReplayError(
                 "available_at cannot precede event_time; finalized/revised data "
                 "must become visible no earlier than its evidenced availability"
             )
+        if ingested_at < available_at:
+            raise CausalReplayError("ingested_at cannot precede evidenced availability")
         object.__setattr__(self, "event_time", event_time)
         object.__setattr__(self, "available_at", available_at)
+        object.__setattr__(self, "ingested_at", ingested_at)
         object.__setattr__(
             self,
             "source_priority",
@@ -139,6 +146,7 @@ class CausalEvent:
         kind: str,
         event_time: datetime | str,
         available_at: datetime | str,
+        ingested_at: datetime | str,
         source_priority: int,
         source_sequence: int,
         payload: Mapping[str, object],
@@ -148,10 +156,15 @@ class CausalEvent:
             kind=kind,
             event_time=_utc(event_time, name="event_time"),
             available_at=_utc(available_at, name="available_at"),
+            ingested_at=_utc(ingested_at, name="ingested_at"),
             source_priority=source_priority,
             source_sequence=source_sequence,
             payload=payload,
         )
+
+    @property
+    def schema_version(self) -> int:
+        return _EVENT_SCHEMA_VERSION
 
     @property
     def ordering_key(self) -> tuple[datetime, int, int, str]:
@@ -165,15 +178,26 @@ class CausalEvent:
     @property
     def digest(self) -> str:
         payload = {
+            "schema_version": _EVENT_SCHEMA_VERSION,
             "event_id": self.event_id,
             "kind": self.kind,
             "event_time": self.event_time.isoformat(),
             "available_at": self.available_at.isoformat(),
+            "ingested_at": self.ingested_at.isoformat(),
             "source_priority": self.source_priority,
             "source_sequence": self.source_sequence,
             "payload": self.payload,
         }
         return "sha256:" + sha256(_canonical_bytes(payload)).hexdigest()
+
+
+def _dataset_digest(manifest_sha256: str, events: Sequence[CausalEvent]) -> str:
+    identity = {
+        "ordering_policy_version": _ORDERING_POLICY_VERSION,
+        "manifest_sha256": manifest_sha256,
+        "event_digests": [item.digest for item in events],
+    }
+    return "sha256:" + sha256(_canonical_bytes(identity)).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +207,30 @@ class CausalDataset:
     manifest_sha256: str
     events: tuple[CausalEvent, ...]
     dataset_sha256: str
+
+    def __post_init__(self) -> None:
+        manifest = _digest(self.manifest_sha256, name="manifest_sha256")
+        if not isinstance(self.events, tuple):
+            raise TypeError("events must be a tuple")
+        if any(not isinstance(item, CausalEvent) for item in self.events):
+            raise TypeError("events must contain only CausalEvent")
+        if self.events != tuple(sorted(self.events, key=lambda item: item.ordering_key)):
+            raise CausalReplayError("events must already be in deterministic causal order")
+        ids: set[str] = set()
+        for item in self.events:
+            if item.event_id in ids:
+                raise CausalReplayError(f"duplicate event_id: {item.event_id}")
+            ids.add(item.event_id)
+        supplied = _digest(self.dataset_sha256, name="dataset_sha256")
+        expected = _dataset_digest(manifest, self.events)
+        if supplied != expected:
+            raise CausalReplayError("dataset_sha256 does not match manifest and event content")
+        object.__setattr__(self, "manifest_sha256", manifest)
+        object.__setattr__(self, "dataset_sha256", supplied)
+
+    @property
+    def ordering_policy_version(self) -> str:
+        return _ORDERING_POLICY_VERSION
 
     @classmethod
     def create(
@@ -203,15 +251,10 @@ class CausalDataset:
             if item.event_id in ids:
                 raise CausalReplayError(f"duplicate event_id: {item.event_id}")
             ids.add(item.event_id)
-        identity = {
-            "manifest_sha256": manifest,
-            "event_digests": [item.digest for item in ordered],
-        }
-        dataset_digest = "sha256:" + sha256(_canonical_bytes(identity)).hexdigest()
         return cls(
             manifest_sha256=manifest,
             events=ordered,
-            dataset_sha256=dataset_digest,
+            dataset_sha256=_dataset_digest(manifest, ordered),
         )
 
 
@@ -253,7 +296,11 @@ class FeederCheckpoint:
     published_prefix_sha256: str
 
     def __post_init__(self) -> None:
-        if self.schema_version != _CHECKPOINT_SCHEMA_VERSION:
+        if (
+            isinstance(self.schema_version, bool)
+            or not isinstance(self.schema_version, int)
+            or self.schema_version != _CHECKPOINT_SCHEMA_VERSION
+        ):
             raise CausalReplayError("unsupported checkpoint schema_version")
         object.__setattr__(
             self,
@@ -276,6 +323,57 @@ class FeederCheckpoint:
             _utc(self.simulation_time, name="simulation_time"),
         )
         object.__setattr__(self, "cursor", _nonnegative_int(self.cursor, name="cursor"))
+
+    def to_record(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "manifest_sha256": self.manifest_sha256,
+            "dataset_sha256": self.dataset_sha256,
+            "simulation_time": self.simulation_time.isoformat().replace("+00:00", "Z"),
+            "cursor": self.cursor,
+            "published_prefix_sha256": self.published_prefix_sha256,
+        }
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> "FeederCheckpoint":
+        if not isinstance(record, Mapping):
+            raise TypeError("checkpoint record must be a mapping")
+        required = {
+            "schema_version",
+            "manifest_sha256",
+            "dataset_sha256",
+            "simulation_time",
+            "cursor",
+            "published_prefix_sha256",
+        }
+        if set(record) != required:
+            missing = sorted(required - set(record))
+            unexpected = sorted(set(record) - required)
+            raise CausalReplayError(
+                f"checkpoint record keys mismatch; missing={missing}, unexpected={unexpected}"
+            )
+        if (
+            isinstance(record["schema_version"], bool)
+            or not isinstance(record["schema_version"], int)
+            or record["schema_version"] != _CHECKPOINT_SCHEMA_VERSION
+        ):
+            raise CausalReplayError("unsupported checkpoint schema_version")
+        if not isinstance(record["manifest_sha256"], str):
+            raise TypeError("manifest_sha256 must be text")
+        if not isinstance(record["dataset_sha256"], str):
+            raise TypeError("dataset_sha256 must be text")
+        if not isinstance(record["simulation_time"], (str, datetime)):
+            raise TypeError("simulation_time must be an ISO timestamp")
+        if not isinstance(record["published_prefix_sha256"], str):
+            raise TypeError("published_prefix_sha256 must be text")
+        return cls(
+            schema_version=_CHECKPOINT_SCHEMA_VERSION,
+            manifest_sha256=record["manifest_sha256"],
+            dataset_sha256=record["dataset_sha256"],
+            simulation_time=record["simulation_time"],
+            cursor=_nonnegative_int(record["cursor"], name="cursor"),
+            published_prefix_sha256=record["published_prefix_sha256"],
+        )
 
 
 def _prefix_digest(events: Sequence[CausalEvent], cursor: int) -> str:

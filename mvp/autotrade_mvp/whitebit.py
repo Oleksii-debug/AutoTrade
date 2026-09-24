@@ -41,6 +41,32 @@ _ORDER_TYPES = frozenset({"MARKET", "LIMIT", "STOP_MARKET", "STOP_LIMIT"})
 _SIDES = frozenset({"BUY", "SELL"})
 
 
+def decode_whitebit_json(raw: str | bytes):
+    """Decode provider JSON while preserving every decimal token exactly."""
+    if isinstance(raw, bytes):
+        try:
+            raw = raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise WhiteBitAdapterError("provider JSON must be UTF-8") from error
+    if not isinstance(raw, str) or not raw.strip():
+        raise WhiteBitAdapterError("provider JSON is required")
+
+    def reject_constant(value: str):
+        raise WhiteBitAdapterError(
+            f"provider JSON contains non-finite numeric token: {value}"
+        )
+
+    try:
+        return json.loads(
+            raw,
+            parse_float=Decimal,
+            parse_int=int,
+            parse_constant=reject_constant,
+        )
+    except json.JSONDecodeError as error:
+        raise WhiteBitAdapterError("provider JSON is invalid") from error
+
+
 def _text(value: str, *, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise WhiteBitAdapterError(f"{name} is required")

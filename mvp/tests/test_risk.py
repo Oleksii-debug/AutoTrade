@@ -23,6 +23,7 @@ def policy(**overrides):
         max_spread_fraction=None,
         max_slippage_fraction=None,
         max_clock_age_seconds=None,
+        allowed_actions=None,
     )
     values.update(overrides)
     return RiskPolicy.create(**values)
@@ -611,6 +612,50 @@ class IndependentRiskTests(unittest.TestCase):
     def test_clock_age_rejects_binary_float(self):
         with self.assertRaises(TypeError):
             context(clock_age_seconds=0.1)
+
+    def test_action_policy_blocks_disallowed_action_class(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7, action="HEDGE",
+            ),
+            context(),
+            policy(allowed_actions=("TRADE", "REDUCE")),
+        )
+        rule = next(item for item in decision.rules if item.rule == "allowed_action")
+        self.assertFalse(rule.passed)
+        self.assertEqual(rule.observed, "HEDGE")
+        self.assertFalse(decision.admitted)
+
+    def test_reduce_and_flatten_labels_require_reduce_only_semantics(self):
+        with self.assertRaisesRegex(ValueError, "requires reduce_only"):
+            RiskIntent.create(
+                symbol="ABC", side="SELL", quantity="1", price="100",
+                expected_state_version=7, action="REDUCE",
+            )
+        with self.assertRaisesRegex(ValueError, "requires reduce_only"):
+            RiskIntent.create(
+                symbol="ABC", side="SELL", quantity="1", price="100",
+                expected_state_version=7, action="FLATTEN",
+            )
+
+    def test_action_label_does_not_override_numeric_risk(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="20", price="100",
+                expected_state_version=7, action="HEDGE",
+            ),
+            context(),
+            policy(allowed_actions=("HEDGE",)),
+        )
+        self.assertFalse(decision.admitted)
+        self.assertIn("position_limit", {x.rule for x in decision.rules if not x.passed})
+
+    def test_allowed_action_configuration_rejects_duplicates_and_unknowns(self):
+        with self.assertRaises(ValueError):
+            policy(allowed_actions=("TRADE", "trade"))
+        with self.assertRaises(ValueError):
+            policy(allowed_actions=("MAGIC",))
 
 
 if __name__ == "__main__":

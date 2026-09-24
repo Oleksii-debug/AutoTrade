@@ -7,6 +7,9 @@ from decimal import Decimal, InvalidOperation
 from typing import Mapping, Sequence
 
 
+RISK_ACTIONS = frozenset({"TRADE", "REDUCE", "HEDGE", "FLATTEN", "EXERCISE"})
+
+
 def _decimal(value, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")
@@ -56,6 +59,24 @@ def _normalize_text_mapping(values, *, name: str) -> dict[str, str]:
     return normalized
 
 
+def _normalize_actions(values, *, name: str) -> tuple[str, ...]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        raise TypeError(f"{name} must be a sequence of action names")
+    normalized: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} values must be non-empty strings")
+        action = value.strip().upper()
+        if action not in RISK_ACTIONS:
+            raise ValueError(f"Unsupported risk action: {action}")
+        if action in normalized:
+            raise ValueError(f"{name} values must be unique")
+        normalized.append(action)
+    if not normalized:
+        raise ValueError(f"{name} must contain at least one action")
+    return tuple(normalized)
+
+
 def _normalize_nested_mapping(values, *, name: str) -> dict[str, dict[str, Decimal]]:
     if not isinstance(values, Mapping):
         raise TypeError(f"{name} must be a mapping")
@@ -83,6 +104,7 @@ class RiskIntent:
     price: Decimal
     expected_state_version: int
     reduce_only: bool = False
+    action: str = "TRADE"
 
     @classmethod
     def create(
@@ -94,6 +116,7 @@ class RiskIntent:
         price,
         expected_state_version: int,
         reduce_only: bool = False,
+        action: str = "TRADE",
     ) -> "RiskIntent":
         if not isinstance(symbol, str) or not symbol.strip():
             raise ValueError("symbol is required")
@@ -104,6 +127,13 @@ class RiskIntent:
             raise ValueError("expected_state_version must be a non-negative integer")
         if not isinstance(reduce_only, bool):
             raise TypeError("reduce_only must be a boolean")
+        if not isinstance(action, str) or not action.strip():
+            raise ValueError("action is required")
+        normalized_action = action.strip().upper()
+        if normalized_action not in RISK_ACTIONS:
+            raise ValueError(f"Unsupported risk action: {normalized_action}")
+        if normalized_action in {"REDUCE", "FLATTEN"} and not reduce_only:
+            raise ValueError(f"{normalized_action} action requires reduce_only")
         return cls(
             symbol=symbol.strip(),
             side=normalized_side,
@@ -111,6 +141,7 @@ class RiskIntent:
             price=_positive(price, name="price"),
             expected_state_version=expected_state_version,
             reduce_only=reduce_only,
+            action=normalized_action,
         )
 
 
@@ -133,6 +164,7 @@ class RiskPolicy:
     max_spread_fraction: Decimal | None = None
     max_slippage_fraction: Decimal | None = None
     max_clock_age_seconds: Decimal | None = None
+    allowed_actions: tuple[str, ...] | None = None
 
     @classmethod
     def create(
@@ -155,6 +187,7 @@ class RiskPolicy:
         max_spread_fraction=None,
         max_slippage_fraction=None,
         max_clock_age_seconds=None,
+        allowed_actions: Sequence[str] | None = None,
     ) -> "RiskPolicy":
         values = {
             "max_abs_position": _positive(max_abs_position, name="max_abs_position"),
@@ -205,11 +238,17 @@ class RiskPolicy:
                 allow_zero=True,
             )
         )
+        normalized_allowed_actions = (
+            None
+            if allowed_actions is None
+            else _normalize_actions(allowed_actions, name="allowed_actions")
+        )
         return cls(
             **values,
             **optional_limits,
             max_abs_factor_exposure=factor_limit,
             max_clock_age_seconds=clock_limit,
+            allowed_actions=normalized_allowed_actions,
         )
 
 
@@ -590,6 +629,14 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         True,
         "account/instrument capability must be currently evidenced",
     )
+    if policy.allowed_actions is not None:
+        add(
+            "allowed_action",
+            intent.action in policy.allowed_actions,
+            intent.action,
+            ",".join(policy.allowed_actions),
+            "intent action class must be explicitly permitted by risk policy",
+        )
     add(
         "market_freshness",
         context.market_data_age_seconds <= policy.max_data_age_seconds,

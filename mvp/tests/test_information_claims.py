@@ -78,14 +78,59 @@ class InformationClaimTests(unittest.TestCase):
         store.add(new)
         self.assertEqual(store.revisions("corp"), (old, new))
 
-    def test_mutated_authority_flag_is_rejected(self):
+    def test_mutated_authority_flag_is_rejected_at_claim_boundary(self):
         store = ClaimStore()
         claim = store.build_claim(doc("a", "r1", "plain"), subject="X", predicate="state", value="up")
-        unsafe = InformationClaim(
-            **{**claim.__dict__, "permission_effect": "TRADE_ALLOWED"}
+        with self.assertRaisesRegex(ValueError, "cannot grant authority"):
+            InformationClaim(
+                **{**claim.__dict__, "permission_effect": "TRADE_ALLOWED"}
+            )
+
+    def test_direct_claim_construction_cannot_bypass_time_or_digest_integrity(self):
+        store = ClaimStore()
+        claim = store.build_claim(
+            doc("a", "r1", "plain"),
+            subject="X",
+            predicate="state",
+            value="up",
         )
-        with self.assertRaises(ValueError):
-            store.add(unsafe)
+        with self.assertRaisesRegex(ValueError, "canonical SHA-256"):
+            InformationClaim(
+                **{**claim.__dict__, "passage_hash": "not-a-digest"}
+            )
+        with self.assertRaisesRegex(ValueError, "timezone-aware"):
+            InformationClaim(
+                **{
+                    **claim.__dict__,
+                    "available_at": datetime(2026, 1, 1),
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "cannot precede"):
+            InformationClaim(
+                **{
+                    **claim.__dict__,
+                    "available_at": BASE - timedelta(seconds=1),
+                }
+            )
+
+    def test_direct_claim_normalizes_valid_offset_times_to_utc(self):
+        store = ClaimStore()
+        claim = store.build_claim(
+            doc("a", "r1", "plain"),
+            subject="X",
+            predicate="state",
+            value="up",
+        )
+        offset = timezone(timedelta(hours=2))
+        normalized = InformationClaim(
+            **{
+                **claim.__dict__,
+                "published_at": datetime(2026, 1, 1, 2, tzinfo=offset),
+                "available_at": datetime(2026, 1, 1, 3, tzinfo=offset),
+            }
+        )
+        self.assertEqual(normalized.published_at, BASE)
+        self.assertEqual(normalized.available_at, BASE + timedelta(hours=1))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AutoTrade control</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+  <header>
+    <h1>AutoTrade control</h1>
+    <p id="connection-summary">Host connection has not been established.</p>
+  </header>
+
+  <nav aria-label="Primary">
+    <ul>
+      <li><a href="#overview">Overview</a></li>
+      <li><a href="#accounts">Accounts and host</a></li>
+      <li><a href="#portfolio">Portfolio and orders</a></li>
+      <li><a href="#risk">Risk and authority</a></li>
+      <li><a href="#research">Research and replay</a></li>
+      <li><a href="#learning">Learning and memory</a></li>
+      <li><a href="#models">Models and costs</a></li>
+      <li><a href="#history">History and diagnostics</a></li>
+      <li><a href="#settings">Settings</a></li>
+    </ul>
+  </nav>
+
+  <main id="main" tabindex="-1">
+    <div id="polite-status" role="status" aria-live="polite" aria-atomic="true"></div>
+    <div id="urgent-status" role="alert" aria-live="assertive" aria-atomic="true"></div>
+
+    <section id="overview" aria-labelledby="overview-heading">
+      <h2 id="overview-heading">Overview</h2>
+      <dl>
+        <dt>State version</dt><dd><output id="state-version">Unavailable</output></dd>
+        <dt>Event cursor</dt><dd><output id="event-cursor">Unavailable</output></dd>
+        <dt>Freshness</dt><dd><output id="freshness">Unavailable</output></dd>
+      </dl>
+    </section>
+
+    <section id="accounts" aria-labelledby="accounts-heading">
+      <h2 id="accounts-heading">Accounts and host</h2>
+      <dl>
+        <dt>Active host</dt><dd><output id="active-host">Unavailable</output></dd>
+        <dt>Account</dt><dd><output id="active-account">Unavailable</output></dd>
+        <dt>Environment</dt><dd><output id="active-environment">Unavailable</output></dd>
+      </dl>
+    </section>
+
+    <section id="portfolio" aria-labelledby="portfolio-heading">
+      <h2 id="portfolio-heading">Portfolio and orders</h2>
+      <p>Financial values remain host-authoritative. Accepted commands are not fills.</p>
+      <table>
+        <caption>Current host operations</caption>
+        <thead><tr><th scope="col">Operation</th><th scope="col">Phase</th></tr></thead>
+        <tbody id="operations-body">
+          <tr><td colspan="2">No operation state loaded.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="risk" aria-labelledby="risk-heading">
+      <h2 id="risk-heading">Risk and authority</h2>
+      <form id="host-command-form">
+        <input id="expected-state-version" name="expected_state_version" type="hidden" value="0">
+        <fieldset>
+          <legend>Host safety command</legend>
+          <label for="host-action">Action</label>
+          <select id="host-action" name="action" required>
+            <option value="BLOCK_NEW_EXPOSURE">Block new exposure</option>
+            <option value="REVOKE_AUTHORITY">Revoke active authority</option>
+            <option value="REFRESH_STATE">Refresh host state</option>
+          </select>
+          <button type="submit">Submit command</button>
+        </fieldset>
+      </form>
+      <p id="command-result" tabindex="-1">No host command has been submitted.</p>
+    </section>
+
+    <section id="research" aria-labelledby="research-heading"><h2 id="research-heading">Research and replay</h2><p>Not loaded.</p></section>
+    <section id="learning" aria-labelledby="learning-heading"><h2 id="learning-heading">Learning and memory</h2><p>Not loaded.</p></section>
+    <section id="models" aria-labelledby="models-heading"><h2 id="models-heading">Models and costs</h2><p>Not loaded.</p></section>
+
+    <section id="history" aria-labelledby="history-heading">
+      <h2 id="history-heading">History and diagnostics</h2>
+      <h3>Material notifications</h3>
+      <ol id="notification-history">
+        <li>No material notifications recorded in this page session.</li>
+      </ol>
+    </section>
+
+    <section id="settings" aria-labelledby="settings-heading"><h2 id="settings-heading">Settings</h2><p>Browser session settings are host-controlled.</p></section>
+  </main>
+
+  <noscript>AutoTrade requires JavaScript for live host synchronization. No financial action has been performed.</noscript>
+  <script src="/app.js" defer></script>
+</body>
+</html>

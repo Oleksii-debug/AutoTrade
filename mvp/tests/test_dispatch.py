@@ -35,6 +35,41 @@ class DispatchTests(unittest.TestCase):
         self.assertNotEqual(paper, live)
         self.assertNotEqual(paper, other_account)
 
+    def test_delimiters_inside_external_ids_cannot_alias_client_identity(self):
+        first = stable_client_order_id(
+            "provider",
+            "c",
+            environment="PAPER",
+            account_id="a|b",
+        )
+        second = stable_client_order_id(
+            "provider",
+            "b|c",
+            environment="PAPER",
+            account_id="a",
+        )
+        self.assertNotEqual(first, second)
+
+    def test_delimiters_inside_external_ids_cannot_alias_aggregate_identity(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            first = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="a:b",
+                owner_token="owner-1",
+            )
+            second = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="a",
+                owner_token="owner-2",
+            )
+            self.assertNotEqual(
+                first._aggregate_id("c"),
+                second._aggregate_id("b:c"),
+            )
+
     def test_same_attempt_id_can_exist_independently_in_two_scopes(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)
@@ -70,10 +105,10 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(len(sends), 2)
             self.assertNotEqual(sends[0], sends[1])
             paper_events = store.load_events(
-                "submission_attempt", "PAPER:acct:same-attempt"
+                "submission_attempt", paper._aggregate_id("same-attempt")
             )
             live_events = store.load_events(
-                "submission_attempt", "LIVE:acct:same-attempt"
+                "submission_attempt", live._aggregate_id("same-attempt")
             )
             self.assertEqual(len(paper_events), 3)
             self.assertEqual(len(live_events), 3)
@@ -104,7 +139,7 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(result.status, "SENT")
             self.assertEqual(len(checks), 2)
             self.assertEqual(len(sends), 1)
-            events = store.load_events("submission_attempt", "SIMULATION:acct:a1")
+            events = store.load_events("submission_attempt", dispatcher._aggregate_id("a1"))
             self.assertEqual(
                 [event["event_type"] for event in events],
                 ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
@@ -291,7 +326,7 @@ class DispatchTests(unittest.TestCase):
                 observed_times,
                 ["2026-09-24T18:00:00Z", "2026-09-24T18:02:00Z"],
             )
-            events = store.load_events("submission_attempt", "SIMULATION:acct:expiry-a1")
+            events = store.load_events("submission_attempt", dispatcher._aggregate_id("expiry-a1"))
             self.assertEqual(
                 [event["event_type"] for event in events],
                 ["SubmissionPrepared", "SubmissionBlocked"],
@@ -332,7 +367,7 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(result.status, "BLOCKED")
             self.assertEqual(result.reason, "final_barrier_clock_moved_backwards")
             self.assertEqual(outbound, 0)
-            events = store.load_events("submission_attempt", "SIMULATION:acct:clock-a1")
+            events = store.load_events("submission_attempt", dispatcher._aggregate_id("clock-a1"))
             self.assertEqual(
                 [event["event_type"] for event in events],
                 ["SubmissionPrepared", "SubmissionBlocked"],
@@ -365,7 +400,7 @@ class DispatchTests(unittest.TestCase):
             )
             self.assertEqual(result.status, "UNKNOWN")
             self.assertEqual(outbound, 1)
-            events = store.load_events("submission_attempt", "SIMULATION:acct:response-a1")
+            events = store.load_events("submission_attempt", dispatcher._aggregate_id("response-a1"))
             self.assertEqual(
                 [event["event_type"] for event in events],
                 ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],

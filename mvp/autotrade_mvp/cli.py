@@ -1,10 +1,33 @@
 """Command-line demo for the safe simulated AutoTrade MVP."""
 
 from dataclasses import asdict
+from pathlib import Path
 import argparse
 import json
 
-from .pipeline import run_vertical_slice, run_multi_episode
+from .pipeline import run_multi_episode, run_vertical_slice
+
+
+def get_status(state_dir: str) -> dict:
+    """Get the current status of the AutoTrade MVP."""
+    root = Path(state_dir)
+    checkpoint_path = root / "checkpoint.json"
+    evidence_path = root / "learning-evidence.jsonl"
+    if not checkpoint_path.exists():
+        return {"status": "not_started"}
+    try:
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        evidence_count = len(evidence_path.read_text(encoding="utf-8").splitlines()) if evidence_path.exists() else 0
+        return {
+            "status": "running",
+            "symbol": checkpoint.get("symbol"),
+            "initial_cash": checkpoint.get("initial_cash"),
+            "postings": checkpoint.get("postings", []),
+            "fills": checkpoint.get("fills", {}),
+            "evidence_count": evidence_count,
+        }
+    except (OSError, json.JSONDecodeError):
+        return {"status": "corrupt"}
 
 
 def main() -> int:
@@ -29,23 +52,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-def get_status(state_dir: str) -> dict:
-    """Get the current status of the AutoTrade MVP."""
-    root = Path(state_dir)
-    checkpoint_path = root / "checkpoint.json"
-    evidence_path = root / "learning-evidence.jsonl"
-    if not checkpoint_path.exists():
-        return {"status": "not_started"}
-    try:
-        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-        evidence_count = len(evidence_path.read_text(encoding="utf-8").splitlines()) if evidence_path.exists() else 0
-        return {
-            "status": "running",
-            "symbol": checkpoint.get("symbol"),
-            "initial_cash": checkpoint.get("initial_cash"),
-            "postings": checkpoint.get("postings", []),
-            "fills": checkpoint.get("fills", {}),
-            "evidence_count": evidence_count,
-        }
-    except (OSError, json.JSONDecodeError):
-        return {"status": "corrupt"}

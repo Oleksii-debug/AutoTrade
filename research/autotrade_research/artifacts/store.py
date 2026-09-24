@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,40 @@ class ArtifactAudit:
     unreferenced_objects: tuple[str, ...]
     missing_objects: tuple[str, ...]
     corrupt_objects: tuple[str, ...]
+
+
+def _manifest_integrity_hash(manifest: dict[str, Any]) -> str:
+    payload = {key: value for key, value in manifest.items() if key != "manifest_hash"}
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + sha256(canonical).hexdigest()
+
+
+def _verify_manifest_integrity(
+    manifest: dict[str, Any],
+    *,
+    required: bool,
+) -> bool:
+    recorded = manifest.get("manifest_hash")
+    if recorded is None:
+        if required:
+            raise ArtifactIntegrityError("artifact manifest lacks integrity binding")
+        return False
+    if (
+        not isinstance(recorded, str)
+        or len(recorded) != 71
+        or not recorded.startswith("sha256:")
+        or any(ch not in "0123456789abcdef" for ch in recorded[7:])
+    ):
+        raise ArtifactIntegrityError("artifact manifest integrity hash is invalid")
+    if recorded != _manifest_integrity_hash(manifest):
+        raise ArtifactIntegrityError("artifact manifest integrity mismatch")
+    return True
 
 
 class ArtifactStore:
@@ -88,6 +123,7 @@ class ArtifactStore:
             raise ArtifactIntegrityError(f"invalid artifact manifest: {path.name}") from error
         if type(value) is not dict or value.get("schema_version") != self.SCHEMA_VERSION:
             raise ArtifactIntegrityError(f"unsupported artifact manifest: {path.name}")
+        _verify_manifest_integrity(value, required=False)
         return value
 
     def load_manifest(self, artifact_id: str) -> dict[str, Any]:
@@ -138,6 +174,10 @@ class ArtifactStore:
                 if any(existing.get(key) != value for key, value in immutable.items()):
                     raise ArtifactConflict("artifact_id is already committed with different content or metadata")
                 self._verify_manifest_object(existing)
+                if not _verify_manifest_integrity(existing, required=False):
+                    existing = dict(existing)
+                    existing["manifest_hash"] = _manifest_integrity_hash(existing)
+                    atomic_write_json(manifest_path, existing)
                 return existing
 
             object_path.parent.mkdir(parents=True, exist_ok=True)
@@ -180,6 +220,7 @@ class ArtifactStore:
                 "metadata": meta,
                 "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             }
+            manifest["manifest_hash"] = _manifest_integrity_hash(manifest)
             atomic_write_json(manifest_path, manifest)
             return manifest
 
@@ -203,6 +244,7 @@ class ArtifactStore:
 
     def export(self, artifact_id: str, destination: str | Path) -> Path:
         manifest = self.load_manifest(artifact_id)
+        _verify_manifest_integrity(manifest, required=True)
         if manifest.get("rights", {}).get("export") is not True:
             raise PermissionError("artifact rights do not permit export")
         source = self._verify_manifest_object(manifest)

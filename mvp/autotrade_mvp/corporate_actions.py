@@ -109,7 +109,16 @@ class CorporateEvent:
             raise ValueError("unsupported corporate event kind")
         if not isinstance(effective_date, date):
             raise ValueError("effective_date is required")
-        normalized_payload = {str(k): str(v) for k, v in payload.items()}
+        if not isinstance(payload, Mapping):
+            raise ValueError("payload must be a mapping")
+        normalized_payload: dict[str, str] = {}
+        for raw_key, raw_value in payload.items():
+            key = _text(raw_key, name="payload key")
+            if isinstance(raw_value, bool) or isinstance(raw_value, float):
+                raise TypeError("corporate-event numeric payload must use exact decimal input")
+            if not isinstance(raw_value, (str, int, Decimal)):
+                raise TypeError("corporate-event payload values must be text or exact decimal input")
+            normalized_payload[key] = str(raw_value)
         return cls(
             event_id=_text(event_id, name="event_id"),
             kind=normalized_kind,
@@ -223,12 +232,21 @@ class CorporateActionBook:
 
 
 def settle_cash(state: EquityState, amount) -> EquityState:
-    value = _positive(amount, name="amount", allow_zero=True)
-    if value > state.unsettled_cash:
+    """Move an evidenced receivable or payable from unsettled to settled cash."""
+
+    value = _decimal(amount, name="amount")
+    outstanding = state.unsettled_cash
+    if value == 0:
+        return state
+    if outstanding == 0:
+        raise ValueError("cannot settle cash when no unsettled balance exists")
+    if (value > 0) != (outstanding > 0):
+        raise ValueError("settlement amount must have the same sign as unsettled cash")
+    if abs(value) > abs(outstanding):
         raise ValueError("cannot settle more cash than is currently unsettled")
     return replace(
         state,
-        unsettled_cash=state.unsettled_cash - value,
+        unsettled_cash=outstanding - value,
         settled_cash=state.settled_cash + value,
     )
 

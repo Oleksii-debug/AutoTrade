@@ -382,6 +382,34 @@ class ProtectedCredentialVault:
             "generation": handle.generation,
         }
 
+    def _prove_current_identity_can_decrypt(
+        self,
+        record: dict[str, object],
+        handle: PersistentCredentialHandle,
+        *,
+        owner_identity: str,
+    ) -> None:
+        entropy = _scope_entropy(
+            handle_id=handle.handle_id,
+            owner_identity=owner_identity,
+            account_id=handle.account_id,
+            provider=handle.provider,
+            purpose=handle.purpose,
+            generation=handle.generation,
+        )
+        try:
+            plaintext = self._protector.unprotect(
+                b64decode(record["ciphertext"], validate=True),
+                entropy=entropy,
+            )
+            if not isinstance(plaintext, bytes) or not plaintext:
+                raise OSError("protector returned invalid plaintext")
+            plaintext.decode("utf-8")
+        except (UnicodeDecodeError, OSError, ValueError, TypeError) as error:
+            raise PermissionError(
+                "Credential cannot be decrypted in this identity"
+            ) from error
+
     def resolve(
         self,
         handle: PersistentCredentialHandle,
@@ -425,8 +453,10 @@ class ProtectedCredentialVault:
                 b64decode(record["ciphertext"], validate=True),
                 entropy=entropy,
             )
+            if not isinstance(plaintext, bytes) or not plaintext:
+                raise OSError("protector returned invalid plaintext")
             return plaintext.decode("utf-8")
-        except (UnicodeDecodeError, OSError) as error:
+        except (UnicodeDecodeError, OSError, ValueError, TypeError) as error:
             raise PermissionError(
                 "Credential cannot be decrypted in this identity"
             ) from error
@@ -453,6 +483,15 @@ class ProtectedCredentialVault:
                 raise PermissionError("Credential handle generation is stale")
             if record["owner_identity"] != owner:
                 raise PermissionError("Secret identity mismatch")
+            # The metadata identity is only a scope label.  Rotation must also
+            # prove that the current OS/protector identity can decrypt the
+            # existing generation; otherwise a copied vault could be silently
+            # rebound to a different Windows user that supplies the same label.
+            self._prove_current_identity_can_decrypt(
+                record,
+                current,
+                owner_identity=owner,
+            )
             next_handle = PersistentCredentialHandle(
                 handle_id=current.handle_id,
                 account_id=current.account_id,

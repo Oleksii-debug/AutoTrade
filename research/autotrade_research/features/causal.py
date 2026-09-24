@@ -43,6 +43,22 @@ class SourceValue:
     value: Decimal
     source_revision: str
 
+    def __post_init__(self) -> None:
+        event = _time(self.event_time, name="event_time")
+        available = _time(self.available_at, name="available_at")
+        if available < event:
+            raise ValueError("available_at cannot precede event_time")
+        object.__setattr__(self, "observation_id", _text(self.observation_id, name="observation_id"))
+        object.__setattr__(self, "symbol", _text(self.symbol, name="symbol"))
+        object.__setattr__(self, "event_time", event)
+        object.__setattr__(self, "available_at", available)
+        object.__setattr__(self, "value", _decimal(self.value, name="value"))
+        object.__setattr__(
+            self,
+            "source_revision",
+            _text(self.source_revision, name="source_revision"),
+        )
+
     @classmethod
     def create(
         cls,
@@ -378,6 +394,32 @@ class CausalFold:
     validation_start: datetime
     validation_end: datetime
     purge_seconds: int
+
+    def __post_init__(self) -> None:
+        start = _time(self.train_start, name="train_start")
+        end = _time(self.train_end, name="train_end")
+        validation_from = _time(self.validation_start, name="validation_start")
+        validation_to = _time(self.validation_end, name="validation_end")
+        if start > end:
+            raise ValueError("train_start cannot follow train_end")
+        if validation_from > validation_to:
+            raise ValueError("validation_start cannot follow validation_end")
+        if end >= validation_from:
+            raise ValueError("training and validation windows must not overlap")
+        if (
+            isinstance(self.purge_seconds, bool)
+            or not isinstance(self.purge_seconds, int)
+            or self.purge_seconds < 0
+        ):
+            raise ValueError("purge_seconds must be a non-negative integer")
+        purge_cutoff = validation_from - timedelta(seconds=self.purge_seconds)
+        if purge_cutoff < start:
+            raise ValueError("purge removes the entire training window")
+        object.__setattr__(self, "fold_id", _text(self.fold_id, name="fold_id"))
+        object.__setattr__(self, "train_start", start)
+        object.__setattr__(self, "train_end", end)
+        object.__setattr__(self, "validation_start", validation_from)
+        object.__setattr__(self, "validation_end", validation_to)
 
     @classmethod
     def create(

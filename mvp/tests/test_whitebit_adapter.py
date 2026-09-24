@@ -1,5 +1,9 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import base64
+import hashlib
+import hmac
+import json
 import unittest
 from uuid import uuid4
 
@@ -21,6 +25,8 @@ from mvp.autotrade_mvp.whitebit import (
     parse_execution_history,
     parse_order_snapshot,
     prepare_order_request,
+    redact_whitebit_debug,
+    sign_private_request,
     validate_client_order_id,
     validate_intent_market_rules,
 )
@@ -574,6 +580,95 @@ class WhiteBitAdapterTests(unittest.TestCase):
                 end_unix=1_700_000_000 + 31 * 24 * 60 * 60 + 1,
                 offset=0,
             )
+
+    def test_private_signer_uses_exact_body_and_caller_owned_nonce(self):
+        nonce = 1_790_280_000_123
+        signed = sign_private_request(
+            endpoint="/api/v4/order/new",
+            parameters={
+                "market": "BTC_USDT",
+                "side": "buy",
+                "amount": "0.01",
+            },
+            nonce=nonce,
+            api_key="public-key",
+            api_secret="private-secret",
+            nonce_window=True,
+            server_time_ms=nonce + 1000,
+        )
+        body = json.loads(signed.body.decode("utf-8"))
+        self.assertEqual(body["request"], "/api/v4/order/new")
+        self.assertEqual(body["nonce"], nonce)
+        self.assertIs(body["nonceWindow"], True)
+
+        encoded = base64.b64encode(signed.body)
+        expected = hmac.new(
+            b"private-secret",
+            encoded,
+            hashlib.sha512,
+        ).hexdigest()
+        self.assertEqual(signed.headers["X-TXC-PAYLOAD"], encoded.decode("ascii"))
+        self.assertEqual(signed.headers["X-TXC-SIGNATURE"], expected)
+
+        safe = signed.safe_debug()
+        self.assertEqual(safe["headers"]["X-TXC-APIKEY"], "<redacted>")
+        self.assertEqual(safe["headers"]["X-TXC-PAYLOAD"], "<redacted>")
+        self.assertEqual(safe["headers"]["X-TXC-SIGNATURE"], "<redacted>")
+
+    def test_nonce_window_requires_current_server_time_evidence(self):
+        with self.assertRaisesRegex(WhiteBitAdapterError, "server_time_ms"):
+            sign_private_request(
+                endpoint="/api/v4/orders",
+                parameters={},
+                nonce=1_790_280_000_000,
+                api_key="key",
+                api_secret="secret",
+                nonce_window=True,
+            )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "5 second"):
+            sign_private_request(
+                endpoint="/api/v4/orders",
+                parameters={},
+                nonce=1_790_280_000_000,
+                api_key="key",
+                api_secret="secret",
+                nonce_window=True,
+                server_time_ms=1_790_280_010_001,
+            )
+
+    def test_private_signer_rejects_nonce_conflict_and_binary_float(self):
+        with self.assertRaisesRegex(WhiteBitAdapterError, "conflicts"):
+            sign_private_request(
+                endpoint="/api/v4/orders",
+                parameters={"nonce": 9},
+                nonce=10,
+                api_key="key",
+                api_secret="secret",
+            )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "binary float"):
+            sign_private_request(
+                endpoint="/api/v4/order/new",
+                parameters={"amount": 0.01},
+                nonce=10,
+                api_key="key",
+                api_secret="secret",
+            )
+
+    def test_recursive_debug_redaction_covers_nested_auth_fields(self):
+        redacted = redact_whitebit_debug(
+            {
+                "headers": {
+                    "X-TXC-APIKEY": "key",
+                    "X-TXC-PAYLOAD": "payload",
+                    "X-TXC-SIGNATURE": "signature",
+                    "Content-Type": "application/json",
+                },
+                "nested": [{"api_secret": "secret", "market": "BTC_USDT"}],
+            }
+        )
+        self.assertEqual(redacted["headers"]["X-TXC-APIKEY"], "<redacted>")
+        self.assertEqual(redacted["nested"][0]["api_secret"], "<redacted>")
+        self.assertEqual(redacted["nested"][0]["market"], "BTC_USDT")
 
     def test_one_or_two_empty_order_surfaces_do_not_prove_absence(self):
         evidence = WhiteBitAbsenceEvidence(

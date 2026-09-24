@@ -92,6 +92,15 @@ class HostCommandStateTests(unittest.TestCase):
         self.assertIn("stale_state_version", stale.reason_codes)
         self.assertEqual(stale.state_version, "1")
 
+    def test_unsupported_action_is_rejected_without_state_mutation(self):
+        command = self.command(action="ARBITRARY_PROVIDER_COMMAND")
+        rejected = self.store.submit(command)
+        self.assertEqual(rejected.status, "REJECTED")
+        self.assertEqual(rejected.reason_codes, ("unsupported_action",))
+        self.assertEqual(self.store.state_version, 0)
+        self.assertEqual(self.store.cursor, 0)
+        self.assertEqual(self.store.submit(command), rejected)
+
     def test_unauthorized_session_is_rejected_before_mutation(self):
         with self.assertRaises(PermissionError):
             self.store.submit(self.command(session="forged"))

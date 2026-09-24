@@ -25,9 +25,13 @@ Required roles are currently:
 - API_COMPATIBILITY
 - CLEAN_INSTALL
 - LICENSE_NOTICES
+- RELEASE_QUALIFICATION
 
-HOST, WEB and DESKTOP must carry verified signatures. Every required artifact
-must carry the same exact source SHA as the candidate. FAIL and INCONCLUSIVE are
+HOST, WEB, DESKTOP and WINDOWS_PACKAGE must carry verified signatures. Every required artifact
+must carry the same exact source SHA as the candidate. RELEASE_QUALIFICATION is
+the exact-head PASS evidence produced by the canonical release-qualification
+authority (WP-59/WP-54 integration boundary); the freeze gate does not duplicate
+its provider, recovery, NVDA or security decisions. FAIL and INCONCLUSIVE are
 both blocking. Any explicit unresolved blocker also prevents manifest
 publication.
 
@@ -47,8 +51,8 @@ for an accepted exact build.
 - `mvp/tests/test_release_candidate_freeze.py`
 
 The tests cover missing evidence, source-SHA mismatch, missing binary signatures,
-failed accessibility, inconclusive dependency/rights evidence, unresolved
-blockers, duplicate roles and deterministic manifest hashing.
+failed accessibility, inconclusive dependency/rights or release-qualification
+evidence, unresolved blockers, duplicate roles and deterministic manifest hashing.
 
 ## Still required for WP-54
 

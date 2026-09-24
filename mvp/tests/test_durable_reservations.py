@@ -13,6 +13,12 @@ from mvp.autotrade_mvp.reservations import (
 )
 
 
+EVIDENCE = (
+    "artifact:provider-evidence@sha256:"
+    + "a" * 64
+)
+
+
 class DurableReservationBookTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -82,7 +88,7 @@ class DurableReservationBookTests(unittest.TestCase):
             idempotency_key="idem-terminal",
             reservation_id="r1",
             outcome="PROVEN_ABSENT",
-            resolution_evidence="provider-complete-coverage",
+            resolution_evidence=EVIDENCE,
         )
 
         restarted = self.book()
@@ -90,7 +96,7 @@ class DurableReservationBookTests(unittest.TestCase):
         self.assertEqual(snapshot.state, "PROVEN_ABSENT")
         self.assertEqual(
             snapshot.resolution_evidence,
-            "provider-complete-coverage",
+            EVIDENCE,
         )
         self.assertEqual(restarted.total_reserved("CASH:USD"), Decimal("0"))
 
@@ -265,7 +271,7 @@ class DurableReservationBookTests(unittest.TestCase):
                 idempotency_key="idem-absent",
                 reservation_id="r1",
                 outcome="PROVEN_ABSENT",
-                resolution_evidence="history",
+                resolution_evidence=EVIDENCE,
             )
         self.assertEqual(book.total_reserved("CASH:USD"), Decimal("90"))
 
@@ -372,6 +378,39 @@ class DurableReservationBookTests(unittest.TestCase):
                 available={"CASH:USD": "100"},
             )
         self.assertEqual(book.version, 0)
+
+    def test_terminal_release_requires_immutable_evidence_before_journal_mutation(self):
+        book = self.book()
+        self.reserve(book)
+        before_version = book.version
+        before_reserved = book.total_reserved("CASH:USD")
+        with self.assertRaisesRegex(ValueError, "immutable artifact"):
+            book.mark_terminal(
+                command_id="cmd-terminal-weak",
+                idempotency_key="idem-terminal-weak",
+                reservation_id="r1",
+                outcome="PROVEN_ABSENT",
+                resolution_evidence="provider-complete-coverage",
+            )
+        self.assertEqual(book.version, before_version)
+        self.assertEqual(book.total_reserved("CASH:USD"), before_reserved)
+        self.assertEqual(self.book().total_reserved("CASH:USD"), before_reserved)
+
+    def test_terminal_release_rejects_noncanonical_evidence_digest(self):
+        book = self.book()
+        self.reserve(book)
+        with self.assertRaisesRegex(ValueError, "canonical lowercase"):
+            book.mark_terminal(
+                command_id="cmd-terminal-bad-digest",
+                idempotency_key="idem-terminal-bad-digest",
+                reservation_id="r1",
+                outcome="PROVEN_ABSENT",
+                resolution_evidence=(
+                    "artifact:provider-evidence@sha256:"
+                    + "A" * 64
+                ),
+            )
+        self.assertEqual(book.version, 1)
 
     def test_binary_float_inputs_fail_before_journal_mutation(self):
         book = self.book()

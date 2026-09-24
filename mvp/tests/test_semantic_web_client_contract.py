@@ -137,6 +137,28 @@ class SemanticWebClientContractTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, js)
 
+    def test_snapshot_environment_and_time_fail_closed_before_commands_enable(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function canonicalEnvironment(value, name)", js)
+        self.assertIn('["REPLAY", "SIMULATION", "PAPER", "LIVE"]', js)
+        self.assertIn(
+            'environment: canonicalEnvironment(snapshot.environment, "environment")',
+            js,
+        )
+        self.assertIn("function utcInstant(value, name)", js)
+        self.assertIn(
+            'serverTime: utcInstant(snapshot.server_time, "server_time")',
+            js,
+        )
+        self.assertIn(
+            'startedAt: utcInstant(result.started_at, "started_at")',
+            js,
+        )
+        self.assertIn(
+            'updatedAt: utcInstant(result.updated_at, "updated_at")',
+            js,
+        )
+
     def test_incomplete_freshness_fails_closed_and_never_claims_current(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn(

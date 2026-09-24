@@ -160,6 +160,20 @@ def qualify_scientific_learning(evidence: ScientificQualificationInput) -> Scien
             "protocol": evidence.frozen_protocol_hash,
             "snapshot": evidence.input_snapshot_hash,
             "claim": evidence.economic_claim,
+            "holdout_used_for_tuning": evidence.holdout_used_for_tuning,
+            "future_information_used_for_routing": evidence.future_information_used_for_routing,
+            "gates": [
+                {
+                    "gate_id": gate.gate_id,
+                    "status": gate.status,
+                    "evidence_hashes": list(gate.evidence_hashes),
+                    "candidate_hash": gate.candidate_hash,
+                    "frozen_protocol_hash": gate.frozen_protocol_hash,
+                    "input_snapshot_hash": gate.input_snapshot_hash,
+                    "reason_codes": list(gate.reason_codes),
+                }
+                for gate in sorted(evidence.gates, key=lambda item: item.gate_id)
+            ],
             "checks": checks,
             "reasons": sorted(set(reasons)),
         },

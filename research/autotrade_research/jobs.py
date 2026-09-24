@@ -215,6 +215,7 @@ class ResearchJobStore:
             "generation": str(row["generation"]),
             "attempt": row["attempt"],
             "resource_budget": json.loads(row["resource_budget_json"]),
+            "resource_usage": json.loads(row["resource_usage_json"]),
             "lease_requeueable": bool(row["lease_requeueable"]),
             "output_refs": json.loads(row["output_refs_json"]),
         }
@@ -563,16 +564,23 @@ class ResearchJobStore:
             row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (identifier,)).fetchone()
             self._require_live_lease(row, worker, generation, current)
             budget = json.loads(row["resource_budget_json"])
+            previous_usage = json.loads(row["resource_usage_json"])
+            merged_usage = dict(previous_usage)
             for key, value in usage.items():
                 if key not in budget or value > float(budget[key]):
                     connection.rollback()
                     raise JobBudgetError(f"resource budget exceeded or undeclared: {key}")
+                previous_value = float(previous_usage.get(key, 0.0))
+                if value < previous_value:
+                    connection.rollback()
+                    raise JobBudgetError(f"resource usage cannot decrease: {key}")
+                merged_usage[key] = value
             connection.execute(
                 """
                 UPDATE jobs SET checkpoint_ref=?, resource_usage_json=?, updated_at=?
                 WHERE job_id=?
                 """,
-                (checkpoint, _json(usage), _iso(current), identifier),
+                (checkpoint, _json(merged_usage), _iso(current), identifier),
             )
             updated = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (identifier,)).fetchone()
             connection.commit()

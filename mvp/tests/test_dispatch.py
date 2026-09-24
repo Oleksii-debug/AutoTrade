@@ -181,5 +181,56 @@ class DispatchTests(unittest.TestCase):
         self.assertLessEqual(len(first), 20)
 
 
+    def test_final_barrier_uses_fresh_time_and_blocks_expired_authority(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(store, owner_token="owner")
+            outbound = 0
+            observed_times = []
+
+            def authority(intent_hash, current_time):
+                observed_times.append(current_time)
+                return (
+                    (True, "allowed")
+                    if current_time < "2026-09-24T18:01:00Z"
+                    else (False, "policy_expired")
+                )
+
+            def transport(client_id, request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            result = dispatcher.dispatch(
+                attempt_id="expiry-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+                final_barrier_clock=lambda: "2026-09-24T18:02:00Z",
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "policy_expired")
+            self.assertEqual(outbound, 0)
+            self.assertEqual(
+                observed_times,
+                ["2026-09-24T18:00:00Z", "2026-09-24T18:02:00Z"],
+            )
+            events = store.load_events("submission_attempt", "expiry-a1")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+            self.assertEqual(
+                events[-1]["committed_at"],
+                "2026-09-24T18:02:00Z",
+            )
+
+
+
 if __name__ == "__main__":
     unittest.main()

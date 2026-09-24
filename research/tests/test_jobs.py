@@ -126,6 +126,48 @@ class ResearchJobStoreTests(unittest.TestCase):
                     now=self.now + timedelta(seconds=2),
                 )
 
+    def test_checkpoint_resource_usage_is_monotonic_and_sparse_updates_preserve_totals(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            job, _ = self._enqueue(store, "monotonic-usage")
+            claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
+            generation = int(claimed["generation"])
+
+            first = store.checkpoint(
+                job["job_id"],
+                worker_id="worker-a",
+                generation=generation,
+                checkpoint_ref="artifact:checkpoint-1",
+                resource_usage={"wall_seconds": 20, "memory_bytes": 512},
+                now=self.now + timedelta(seconds=1),
+            )
+            self.assertEqual(first["resource_usage"]["wall_seconds"], 20.0)
+            self.assertEqual(first["resource_usage"]["memory_bytes"], 512.0)
+
+            second = store.checkpoint(
+                job["job_id"],
+                worker_id="worker-a",
+                generation=generation,
+                checkpoint_ref="artifact:checkpoint-2",
+                resource_usage={"memory_bytes": 768},
+                now=self.now + timedelta(seconds=2),
+            )
+            self.assertEqual(second["resource_usage"]["wall_seconds"], 20.0)
+            self.assertEqual(second["resource_usage"]["memory_bytes"], 768.0)
+
+            with self.assertRaises(JobBudgetError):
+                store.checkpoint(
+                    job["job_id"],
+                    worker_id="worker-a",
+                    generation=generation,
+                    checkpoint_ref="artifact:checkpoint-regression",
+                    resource_usage={"wall_seconds": 19},
+                    now=self.now + timedelta(seconds=3),
+                )
+            current = store.get(job["job_id"])
+            self.assertEqual(current["resource_usage"]["wall_seconds"], 20.0)
+            self.assertEqual(current["resource_usage"]["memory_bytes"], 768.0)
+
     def test_only_one_result_is_accepted_for_a_generation(self):
         with TemporaryDirectory() as directory:
             store = ResearchJobStore(Path(directory) / "jobs.sqlite3")

@@ -115,6 +115,68 @@ class JournalStoreTests(unittest.TestCase):
             self.assertFalse(inserted)
             self.assertEqual(replayed, {"status": "ACCEPTED"})
 
+    def test_command_events_and_outbox_commit_in_one_transaction(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            first = event()
+            second = event("evt-2", 2, {"kind": "fee", "amount": "0.1"})
+            result = {"status": "ACCEPTED", "state_version": 2}
+
+            saved, inserted, appended = store.commit_command(
+                command_id="cmd-atomic",
+                idempotency_key="key-atomic",
+                request={"action": "ORDER.SUBMIT", "intent_id": "i1"},
+                result=result,
+                state_version=2,
+                events=[(first, "events"), (second, None)],
+            )
+
+            self.assertTrue(inserted)
+            self.assertEqual(saved, result)
+            self.assertEqual([item.event_id for item in appended], ["evt-1", "evt-2"])
+            self.assertEqual(len(store.load_events("account", "paper-1")), 2)
+            self.assertEqual(len(store.pending_outbox()), 1)
+
+            replayed, inserted, appended = store.commit_command(
+                command_id="cmd-retry",
+                idempotency_key="key-atomic",
+                request={"action": "ORDER.SUBMIT", "intent_id": "i1"},
+                result={"status": "MUST_NOT_REPLACE"},
+                state_version=999,
+                events=[(first, "events"), (second, None)],
+            )
+            self.assertFalse(inserted)
+            self.assertEqual(replayed, result)
+            self.assertEqual(appended, ())
+            self.assertEqual(len(store.load_events("account", "paper-1")), 2)
+
+    def test_atomic_command_rolls_back_on_event_version_gap(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            with self.assertRaisesRegex(ValueError, "aggregate_version must be 1"):
+                store.commit_command(
+                    command_id="cmd-bad",
+                    idempotency_key="key-bad",
+                    request={"action": "ORDER.SUBMIT"},
+                    result={"status": "ACCEPTED"},
+                    state_version=1,
+                    events=[(event("evt-gap", 2), "events")],
+                )
+
+            self.assertEqual(store.load_events("account", "paper-1"), [])
+            self.assertEqual(store.pending_outbox(), [])
+            saved, inserted = store.record_command(
+                command_id="cmd-bad",
+                idempotency_key="key-bad",
+                request={"action": "ORDER.SUBMIT"},
+                result={"status": "RETRY"},
+                state_version=1,
+            )
+            self.assertTrue(inserted)
+            self.assertEqual(saved, {"status": "RETRY"})
+
 
 if __name__ == "__main__":
     unittest.main()

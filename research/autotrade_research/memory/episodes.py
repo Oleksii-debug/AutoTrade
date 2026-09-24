@@ -192,21 +192,16 @@ class ExperienceMemory:
         correction_id: str | None = None,
     ) -> tuple[str, bool]:
         episode = _identifier(episode_id)
-        availability = _time(
-            available_at or datetime.now(timezone.utc),
-            name="available_at",
+        requested_availability = (
+            _time(available_at, name="available_at")
+            if available_at is not None
+            else None
         )
         if not isinstance(payload, dict) or not payload:
             raise ValueError("correction payload must be non-empty")
         if "supersedes_fields" not in payload or not isinstance(payload["supersedes_fields"], list):
             raise ValueError("correction must declare supersedes_fields")
         identifier = _identifier(correction_id)
-        digest = _hash(
-            {
-                "available_at": availability.isoformat(),
-                "payload": payload,
-            }
-        )
         canonical = _canonical(payload)
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -215,14 +210,39 @@ class ExperienceMemory:
             existing = con.execute("SELECT * FROM corrections WHERE correction_id=?", (identifier,)).fetchone()
             if existing is not None:
                 existing_availability = existing["available_at"] or existing["created_at"]
+                effective_availability = (
+                    requested_availability.isoformat()
+                    if requested_availability is not None
+                    else existing_availability
+                )
+                current_digest = _hash(
+                    {
+                        "available_at": existing_availability,
+                        "payload": payload,
+                    }
+                )
+                legacy_digest = _hash(payload)
+                hash_matches = existing["correction_hash"] == current_digest or (
+                    existing["available_at"] is None
+                    and existing["correction_hash"] == legacy_digest
+                )
                 same = (
                     existing["episode_id"] == episode
-                    and existing["correction_hash"] == digest
-                    and existing_availability == availability.isoformat()
+                    and existing["payload_json"] == canonical
+                    and hash_matches
+                    and existing_availability == effective_availability
                 )
                 if not same:
                     raise MemoryConflict("correction identity conflict")
                 return identifier, False
+
+            availability = requested_availability or datetime.now(timezone.utc)
+            digest = _hash(
+                {
+                    "available_at": availability.isoformat(),
+                    "payload": payload,
+                }
+            )
             con.execute(
                 """
                 INSERT INTO corrections(

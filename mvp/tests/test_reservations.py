@@ -142,6 +142,18 @@ class ReservationFoundationTests(unittest.TestCase):
         with self.assertRaises(ReservationConflict):
             book.consume("r1", {"POSITION:ABC": "1"})
 
+    def test_returned_snapshot_cannot_mutate_book_state(self):
+        book = ReservationBook()
+        snapshot = book.reserve(
+            reservation_id="r1",
+            intent_id="i1",
+            requirements={"CASH:USD": "10"},
+            available={"CASH:USD": "100"},
+        )
+        with self.assertRaises(TypeError):
+            snapshot.remaining["CASH:USD"] = Decimal("0")
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("10"))
+
     def test_binary_float_inputs_fail_closed(self):
         book = ReservationBook()
         with self.assertRaises(TypeError):

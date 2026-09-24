@@ -90,6 +90,58 @@ class HistoricalVintageTests(unittest.TestCase):
                 datetime(2026, 1, 2, tzinfo=timezone.utc),
             )
 
+    def test_visible_revision_cannot_backdate_availability(self):
+        event_id = str(uuid4())
+        common = {
+            "event_id": event_id,
+            "instrument_version": "instrument:v1",
+            "kind": "TRADE",
+            "source_event_at": "2026-01-01T10:00:00Z",
+            "availability_basis": "provider",
+            "quality_flags": [],
+        }
+        first = {
+            **common,
+            "available_at": "2026-01-01T10:05:00Z",
+            "ingested_at": "2026-01-01T10:06:00Z",
+            "revision": "1",
+            "payload": {"price": "10"},
+            "raw_evidence_ref": evidence("2026-01-01T10:06:00Z"),
+        }
+        backdated = {
+            **common,
+            "available_at": "2026-01-01T10:04:00Z",
+            "ingested_at": "2026-01-01T10:07:00Z",
+            "revision": "2",
+            "payload": {"price": "11"},
+            "raw_evidence_ref": evidence("2026-01-01T10:07:00Z"),
+        }
+        with self.assertRaisesRegex(HistoricalConflict, "backdate"):
+            point_in_time_market_events(
+                [first, backdated],
+                datetime(2026, 1, 1, 12, tzinfo=timezone.utc),
+            )
+
+    def test_raw_evidence_cannot_postdate_event_ingestion(self):
+        row = {
+            "event_id": str(uuid4()),
+            "instrument_version": "instrument:v1",
+            "kind": "TRADE",
+            "source_event_at": "2026-01-01T10:00:00Z",
+            "available_at": "2026-01-01T10:00:01Z",
+            "ingested_at": "2026-01-01T10:00:02Z",
+            "revision": "1",
+            "availability_basis": "provider",
+            "quality_flags": [],
+            "payload": {"price": "10"},
+            "raw_evidence_ref": evidence("2026-01-01T10:00:03Z"),
+        }
+        with self.assertRaisesRegex(HistoricalDataError, "observed after event ingestion"):
+            point_in_time_market_events(
+                [row],
+                datetime(2026, 1, 2, tzinfo=timezone.utc),
+            )
+
     def test_point_in_time_universe_retains_delisted_asset(self):
         delisted_id = str(uuid4())
         future_id = str(uuid4())

@@ -1,17 +1,23 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from fractions import Fraction
 import unittest
 
 from mvp.autotrade_mvp.perpetuals import (
     CollateralQuote,
     FundingConvention,
     FundingLedger,
+    LiquidationSnapshot,
     MarginSnapshot,
     MarketSnapshot,
     PerpetualContract,
     PerpetualError,
     funding_cashflow,
+    inverse_funding_cashflow_exact,
+    inverse_perpetual_pnl_exact,
+    inverse_stressed_loss_exact,
     linear_notional,
+    require_liquidation_headroom,
     require_new_risk_capacity,
     stressed_loss,
 )
@@ -67,6 +73,102 @@ class PerpetualLifecycleTests(unittest.TestCase):
         with self.assertRaises(PerpetualError):
             self.market(mark="102000", index="100000").require_valid(NOW)
 
+    def test_inverse_contract_exact_pnl_funding_and_stress(self):
+        contract = PerpetualContract(
+            instrument_id="BTC-USD-INVERSE-PERP",
+            settlement_currency="BTC",
+            collateral_currency="BTC",
+            multiplier=Decimal("1"),
+            payoff="INVERSE",
+            face_currency="USD",
+            price_quote_currency="USD",
+            price_base_currency="BTC",
+        )
+        self.assertEqual(
+            inverse_perpetual_pnl_exact(
+                contract=contract,
+                signed_contracts="100",
+                entry_price="10000",
+                exit_price="11000",
+            ),
+            Fraction(1, 1100),
+        )
+        currency, funding = inverse_funding_cashflow_exact(
+            contract=contract,
+            signed_contracts="100",
+            funding_rate="0.001",
+            snapshot=self.market(mark="10000", index="10000"),
+            convention=FundingConvention("LONG_PAYS", "MARK"),
+            at=NOW,
+        )
+        self.assertEqual(currency, "BTC")
+        self.assertEqual(funding, Fraction(-1, 100000))
+        self.assertEqual(
+            inverse_stressed_loss_exact(
+                contract=contract,
+                signed_contracts="100",
+                mark_price="10000",
+                adverse_move_fraction="0.1",
+            ),
+            Fraction(1, 900),
+        )
+        self.assertEqual(
+            inverse_stressed_loss_exact(
+                contract=contract,
+                signed_contracts="-100",
+                mark_price="10000",
+                adverse_move_fraction="0.1",
+            ),
+            Fraction(1, 1100),
+        )
+
+    def test_inverse_exact_math_rejects_currency_dimension_mismatch(self):
+        contract = PerpetualContract(
+            instrument_id="BTC-USD-INVERSE-PERP",
+            settlement_currency="BTC",
+            collateral_currency="BTC",
+            multiplier=Decimal("1"),
+            payoff="INVERSE",
+            face_currency="USD",
+            price_quote_currency="EUR",
+            price_base_currency="BTC",
+        )
+        with self.assertRaisesRegex(PerpetualError, "face_currency must match"):
+            inverse_perpetual_pnl_exact(
+                contract=contract,
+                signed_contracts="100",
+                entry_price="10000",
+                exit_price="11000",
+            )
+
+    def test_inverse_exact_math_rejects_settlement_currency_dimension_mismatch(self):
+        contract = PerpetualContract(
+            instrument_id="BTC-USD-INVERSE-PERP",
+            settlement_currency="USDT",
+            collateral_currency="USDT",
+            multiplier=Decimal("1"),
+            payoff="INVERSE",
+            face_currency="USD",
+            price_quote_currency="USD",
+            price_base_currency="BTC",
+        )
+        with self.assertRaisesRegex(PerpetualError, "settlement_currency must match"):
+            inverse_perpetual_pnl_exact(
+                contract=contract,
+                signed_contracts="100",
+                entry_price="10000",
+                exit_price="11000",
+            )
+
+    def test_inverse_exact_math_requires_face_currency_evidence(self):
+        with self.assertRaises(PerpetualError):
+            inverse_perpetual_pnl_exact(
+                contract=self.contract("INVERSE"),
+                signed_contracts="1",
+                entry_price="10000",
+                exit_price="11000",
+            )
+
     def test_inverse_contract_needs_provider_specific_qualification(self):
         with self.assertRaises(PerpetualError):
             funding_cashflow(
@@ -84,6 +186,62 @@ class PerpetualLifecycleTests(unittest.TestCase):
                 mark_price="100000",
                 adverse_move_fraction="0.1",
             )
+
+    def test_liquidation_headroom_requires_fresh_tier_evidence(self):
+        liquidation = LiquidationSnapshot(
+            side="LONG",
+            liquidation_price="90000",
+            tier_id="tier-2",
+            evidence_ref="provider-margin-tier:rev-7",
+            observed_at=NOW,
+            max_age=timedelta(seconds=5),
+        )
+        headroom = require_liquidation_headroom(
+            liquidation=liquidation,
+            market=self.market(),
+            minimum_headroom_fraction="0.08",
+            at=NOW,
+        )
+        self.assertEqual(headroom, Decimal("0.1"))
+
+        with self.assertRaises(PerpetualError):
+            require_liquidation_headroom(
+                liquidation=liquidation,
+                market=self.market(),
+                minimum_headroom_fraction="0.11",
+                at=NOW,
+            )
+        with self.assertRaises(PerpetualError):
+            require_liquidation_headroom(
+                liquidation=liquidation,
+                market=self.market(),
+                minimum_headroom_fraction="0.08",
+                at=NOW + timedelta(seconds=6),
+            )
+
+    def test_short_liquidation_boundary_has_opposite_direction(self):
+        liquidation = LiquidationSnapshot(
+            side="SHORT",
+            liquidation_price="110000",
+            tier_id="tier-short-1",
+            evidence_ref="provider-margin-tier:rev-8",
+            observed_at=NOW,
+            max_age=timedelta(seconds=5),
+        )
+        self.assertEqual(
+            liquidation.headroom_fraction("100000"),
+            Decimal("0.1"),
+        )
+        invalid = LiquidationSnapshot(
+            side="SHORT",
+            liquidation_price="90000",
+            tier_id="bad-tier",
+            evidence_ref="provider-margin-tier:bad",
+            observed_at=NOW,
+            max_age=timedelta(seconds=5),
+        )
+        with self.assertRaises(PerpetualError):
+            invalid.headroom_fraction("100000")
 
     def test_margin_admission_requires_fresh_sufficient_equity(self):
         margin = MarginSnapshot(

@@ -16,6 +16,7 @@ from typing import Mapping
 import re
 
 from .capabilities import CapabilitySnapshot
+from .reconciliation import ProviderFillEvidence
 
 
 class WhiteBitAdapterError(ValueError):
@@ -401,3 +402,147 @@ class WhiteBitAbsenceEvidence:
         ):
             return "PROVEN_ABSENT"
         return "INCONCLUSIVE"
+
+
+def _unix_instant(value, *, name: str) -> str:
+    """Convert an exact Unix timestamp to UTC without binary-float rounding."""
+    instant = _decimal(value, name=name)
+    if instant < 0:
+        raise WhiteBitAdapterError(f"{name} cannot be negative")
+    whole = int(instant)
+    fractional = instant - Decimal(whole)
+    microseconds = fractional * Decimal("1000000")
+    if microseconds != microseconds.to_integral_value():
+        raise WhiteBitAdapterError(f"{name} exceeds microsecond precision")
+    parsed = datetime.fromtimestamp(whole, tz=timezone.utc).replace(
+        microsecond=int(microseconds)
+    )
+    return parsed.isoformat().replace("+00:00", "Z")
+
+
+@dataclass(frozen=True)
+class WhiteBitExecutionDeal:
+    provider_execution_id: str
+    provider_order_id: str
+    client_order_id: str | None
+    market: str
+    side: str
+    role: str
+    quantity: Decimal
+    price: Decimal
+    deal_value: Decimal
+    fee_amount: Decimal
+    fee_currency: str
+    trade_time: str
+
+    def to_reconciliation_fill(self) -> ProviderFillEvidence:
+        return ProviderFillEvidence.create(
+            provider_execution_id=self.provider_execution_id,
+            client_order_id=self.client_order_id,
+            instrument=self.market,
+            quantity=self.quantity,
+            price=self.price,
+            fee_amount=self.fee_amount,
+            fee_currency=self.fee_currency,
+            trade_time=self.trade_time,
+        )
+
+
+def parse_execution_deal(
+    payload: Mapping[str, object],
+    *,
+    market: str,
+) -> WhiteBitExecutionDeal:
+    """Normalize one provider deal; the deal id is the unique fill identity."""
+    if not isinstance(payload, Mapping):
+        raise TypeError("payload must be a mapping")
+    required = (
+        "id",
+        "orderId",
+        "time",
+        "side",
+        "role",
+        "amount",
+        "price",
+        "deal",
+        "fee",
+        "feeAsset",
+    )
+    missing = [name for name in required if name not in payload]
+    if missing:
+        raise WhiteBitAdapterError(
+            "execution deal missing required fields: " + ", ".join(missing)
+        )
+
+    side = _text(str(payload["side"]), name="side").upper()
+    if side not in _SIDES:
+        raise WhiteBitAdapterError("execution side must be BUY or SELL")
+
+    raw_role = payload["role"]
+    if raw_role == 1 or raw_role == "1":
+        role = "MAKER"
+    elif raw_role == 2 or raw_role == "2":
+        role = "TAKER"
+    else:
+        raise WhiteBitAdapterError("execution role must be 1 (maker) or 2 (taker)")
+
+    quantity = _decimal(payload["amount"], name="amount", positive=True)
+    price = _decimal(payload["price"], name="price", positive=True)
+    deal_value = _decimal(payload["deal"], name="deal", positive=True)
+    if deal_value != quantity * price:
+        raise WhiteBitAdapterError(
+            "execution deal value must equal exact amount multiplied by price"
+        )
+    fee = _decimal(payload["fee"], name="fee")
+    if fee < 0:
+        raise WhiteBitAdapterError("execution fee cannot be negative")
+
+    raw_client_id = payload.get("clientOrderId")
+    client_order_id = (
+        None
+        if raw_client_id in {None, ""}
+        else validate_client_order_id(str(raw_client_id))
+    )
+
+    return WhiteBitExecutionDeal(
+        provider_execution_id=_text(
+            str(payload["id"]),
+            name="execution id",
+        ),
+        provider_order_id=_text(
+            str(payload["orderId"]),
+            name="order id",
+        ),
+        client_order_id=client_order_id,
+        market=_text(market, name="market").upper(),
+        side=side,
+        role=role,
+        quantity=quantity,
+        price=price,
+        deal_value=deal_value,
+        fee_amount=fee,
+        fee_currency=_text(str(payload["feeAsset"]), name="feeAsset").upper(),
+        trade_time=_unix_instant(payload["time"], name="time"),
+    )
+
+
+def parse_execution_history(
+    records: list[Mapping[str, object]] | tuple[Mapping[str, object], ...],
+    *,
+    market: str,
+) -> tuple[WhiteBitExecutionDeal, ...]:
+    """Deduplicate exact repeated deal observations and reject contradictions."""
+    if not isinstance(records, (list, tuple)):
+        raise TypeError("records must be a list or tuple")
+    by_id: dict[str, WhiteBitExecutionDeal] = {}
+    for payload in records:
+        deal = parse_execution_deal(payload, market=market)
+        existing = by_id.get(deal.provider_execution_id)
+        if existing is not None:
+            if existing != deal:
+                raise WhiteBitAdapterError(
+                    "provider execution id has conflicting observations"
+                )
+            continue
+        by_id[deal.provider_execution_id] = deal
+    return tuple(by_id[key] for key in sorted(by_id))

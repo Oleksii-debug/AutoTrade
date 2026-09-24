@@ -403,6 +403,8 @@ class ModelRoutingDecision:
     estimated_cost: Decimal
     expected_latency_ms: int | None
     deadline_ms: int
+    reserved_input_tokens: int
+    reserved_output_tokens: int
     price_evidence_sha256: str | None
     quality_evidence_sha256: str | None
     reproducibility_limitations: tuple[str, ...]
@@ -434,6 +436,8 @@ def _fallback(policy: ModelRoutingPolicy, task: ModelTask, reason: str) -> Model
         estimated_cost=Decimal("0"),
         expected_latency_ms=None,
         deadline_ms=policy.deadline_ms,
+        reserved_input_tokens=task.input_tokens,
+        reserved_output_tokens=task.max_output_tokens,
         price_evidence_sha256=None,
         quality_evidence_sha256=None,
         reproducibility_limitations=(),
@@ -539,6 +543,8 @@ def route_model(
         estimated_cost=cost,
         expected_latency_ms=chosen.expected_latency_ms,
         deadline_ms=policy.deadline_ms,
+        reserved_input_tokens=task.input_tokens,
+        reserved_output_tokens=task.max_output_tokens,
         price_evidence_sha256=chosen.price_evidence_sha256,
         quality_evidence_sha256=chosen.quality_evidence_sha256,
         reproducibility_limitations=chosen.reproducibility_limitations,
@@ -626,6 +632,8 @@ class ModelCallRecord:
     billing_status: str
     cost: Decimal
     output_schema_valid: bool
+    token_limits_met: bool
+    cost_within_reservation: bool
     usable: bool
     evidence_sha256: str
     reproducibility_limitations: tuple[str, ...]
@@ -685,7 +693,20 @@ def record_model_call(
         cost = observation.billed_cost
 
     deadline_met = observation.elapsed_ms <= decision.deadline_ms
-    usable = deadline_met and observation.output_schema_valid
+    token_limits_met = (
+        observation.actual_input_tokens <= decision.reserved_input_tokens
+        and observation.actual_output_tokens <= decision.reserved_output_tokens
+    )
+    cost_within_reservation = (
+        observation.billed_cost is None
+        or observation.billed_cost <= decision.estimated_cost
+    )
+    usable = (
+        deadline_met
+        and observation.output_schema_valid
+        and token_limits_met
+        and cost_within_reservation
+    )
     limitations = list(decision.reproducibility_limitations)
     if decision.revision is None and observation.revision is not None:
         limitations = [
@@ -709,6 +730,8 @@ def record_model_call(
         billing_status=billing_status,
         cost=cost,
         output_schema_valid=observation.output_schema_valid,
+        token_limits_met=token_limits_met,
+        cost_within_reservation=cost_within_reservation,
         usable=usable,
         evidence_sha256=observation.evidence_sha256,
         reproducibility_limitations=tuple(limitations),

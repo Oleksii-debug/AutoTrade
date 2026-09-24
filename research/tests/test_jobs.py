@@ -217,6 +217,7 @@ class ResearchJobStoreTests(unittest.TestCase):
             self.assertTrue(
                 store.resolve_waiting_external(
                     job["job_id"],
+                    generation=int(store.get(job["job_id"])["generation"]),
                     verdict="PROVEN_NOT_RUN",
                     evidence_ref=evidence,
                     now=self.now + timedelta(seconds=12),
@@ -266,6 +267,7 @@ class ResearchJobStoreTests(unittest.TestCase):
             self.assertTrue(
                 store.resolve_waiting_external(
                     job["job_id"],
+                    generation=int(store.get(job["job_id"])["generation"]),
                     verdict="PROVEN_SUCCEEDED",
                     evidence_ref=evidence,
                     output_refs=outputs,
@@ -278,6 +280,7 @@ class ResearchJobStoreTests(unittest.TestCase):
             self.assertFalse(
                 store.resolve_waiting_external(
                     job["job_id"],
+                    generation=int(store.get(job["job_id"])["generation"]),
                     verdict="PROVEN_SUCCEEDED",
                     evidence_ref=evidence,
                     output_refs=outputs,
@@ -287,6 +290,7 @@ class ResearchJobStoreTests(unittest.TestCase):
             with self.assertRaises(JobConflictError):
                 store.resolve_waiting_external(
                     job["job_id"],
+                    generation=int(store.get(job["job_id"])["generation"]),
                     verdict="PROVEN_SUCCEEDED",
                     evidence_ref=evidence,
                     output_refs=["artifact:different-output"],
@@ -295,6 +299,7 @@ class ResearchJobStoreTests(unittest.TestCase):
             with self.assertRaises(JobConflictError):
                 store.resolve_waiting_external(
                     job["job_id"],
+                    generation=int(store.get(job["job_id"])["generation"]),
                     verdict="PROVEN_SUCCEEDED",
                     evidence_ref=(
                         "artifact:22222222-2222-4222-8222-222222222222@sha256:"
@@ -303,6 +308,84 @@ class ResearchJobStoreTests(unittest.TestCase):
                     output_refs=outputs,
                     now=resolved_at,
                 )
+
+    def test_old_external_resolution_cannot_be_reused_after_new_ambiguous_attempt(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            job, _ = store.enqueue(
+                kind="research.external_annotation",
+                dedupe_key="generation-bound-resolution",
+                input_hashes=[digest("dataset")],
+                resource_budget={"wall_seconds": 60},
+                now=self.now,
+            )
+            first_claim = store.claim("worker-a", now=self.now, lease_seconds=10)
+            store.requeue_expired(now=self.now + timedelta(seconds=11))
+            first_waiting = store.get(job["job_id"])
+            first_waiting_generation = int(first_waiting["generation"])
+            self.assertEqual(
+                first_waiting_generation,
+                int(first_claim["generation"]) + 1,
+            )
+            first_evidence = (
+                "artifact:44444444-4444-4444-8444-444444444444@sha256:"
+                + "e" * 64
+            )
+            self.assertTrue(
+                store.resolve_waiting_external(
+                    job["job_id"],
+                    generation=first_waiting_generation,
+                    verdict="PROVEN_NOT_RUN",
+                    evidence_ref=first_evidence,
+                    now=self.now + timedelta(seconds=12),
+                )
+            )
+
+            second_claim = store.claim(
+                "worker-b",
+                now=self.now + timedelta(seconds=13),
+                lease_seconds=10,
+            )
+            self.assertEqual(
+                int(second_claim["generation"]),
+                first_waiting_generation,
+            )
+            store.requeue_expired(now=self.now + timedelta(seconds=24))
+            second_waiting = store.get(job["job_id"])
+            second_waiting_generation = int(second_waiting["generation"])
+            self.assertEqual(
+                second_waiting_generation,
+                first_waiting_generation + 1,
+            )
+
+            with self.assertRaisesRegex(JobLeaseError, "generation is stale"):
+                store.resolve_waiting_external(
+                    job["job_id"],
+                    generation=first_waiting_generation,
+                    verdict="PROVEN_NOT_RUN",
+                    evidence_ref=first_evidence,
+                    now=self.now + timedelta(seconds=25),
+                )
+            still_waiting = store.get(job["job_id"])
+            self.assertEqual(still_waiting["state"], "WAITING_EXTERNAL")
+            self.assertEqual(
+                int(still_waiting["generation"]),
+                second_waiting_generation,
+            )
+
+            second_evidence = (
+                "artifact:55555555-5555-4555-8555-555555555555@sha256:"
+                + "f" * 64
+            )
+            self.assertTrue(
+                store.resolve_waiting_external(
+                    job["job_id"],
+                    generation=second_waiting_generation,
+                    verdict="PROVEN_NOT_RUN",
+                    evidence_ref=second_evidence,
+                    now=self.now + timedelta(seconds=26),
+                )
+            )
 
     def test_waiting_external_resolution_rejects_weak_evidence_and_output_mismatch(self):
         with TemporaryDirectory() as directory:
@@ -320,6 +403,7 @@ class ResearchJobStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "immutable artifact"):
                 store.resolve_waiting_external(
                     job["job_id"],
+                    generation=int(store.get(job["job_id"])["generation"]),
                     verdict="PROVEN_NOT_RUN",
                     evidence_ref="ticket-123",
                     now=self.now + timedelta(seconds=12),
@@ -331,6 +415,7 @@ class ResearchJobStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "requires output_refs"):
                 store.resolve_waiting_external(
                     job["job_id"],
+                    generation=int(store.get(job["job_id"])["generation"]),
                     verdict="PROVEN_SUCCEEDED",
                     evidence_ref=evidence,
                     now=self.now + timedelta(seconds=12),
@@ -338,6 +423,7 @@ class ResearchJobStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "only for PROVEN_SUCCEEDED"):
                 store.resolve_waiting_external(
                     job["job_id"],
+                    generation=int(store.get(job["job_id"])["generation"]),
                     verdict="PROVEN_FAILED",
                     evidence_ref=evidence,
                     output_refs=["unexpected"],

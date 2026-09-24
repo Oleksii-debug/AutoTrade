@@ -3,6 +3,7 @@ from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Barrier, Lock, Thread
 import unittest
 from uuid import uuid4
 
@@ -69,6 +70,26 @@ class HistoricalVintageTests(unittest.TestCase):
         self.assertEqual(early[0]["payload"]["close"], "100")
         self.assertEqual(late[0]["revision"], "2")
         self.assertEqual(late[0]["payload"]["close"], "101")
+
+    def test_point_in_time_view_rejects_availability_before_source_event(self):
+        event = {
+            "event_id": str(uuid4()),
+            "instrument_version": "instrument:v1",
+            "kind": "TRADE",
+            "source_event_at": "2026-01-01T10:00:02Z",
+            "available_at": "2026-01-01T10:00:01Z",
+            "ingested_at": "2026-01-01T10:00:03Z",
+            "revision": "1",
+            "availability_basis": "provider",
+            "payload": {"price": "10"},
+            "quality_flags": [],
+            "raw_evidence_ref": evidence("2026-01-01T10:00:03Z"),
+        }
+        with self.assertRaisesRegex(HistoricalDataError, "source_event_at"):
+            point_in_time_market_events(
+                [event],
+                datetime(2026, 1, 2, tzinfo=timezone.utc),
+            )
 
     def test_conflicting_same_revision_is_rejected(self):
         event_id = str(uuid4())
@@ -196,6 +217,46 @@ class HistoricalVintageTests(unittest.TestCase):
             self.assertEqual(registry.digest(dataset_id, 1), first_digest)
             self.assertEqual(registry.load(dataset_id, 1)["content_hashes"], [digest("first")])
             self.assertEqual(registry.load(dataset_id, 2)["content_hashes"], [digest("second")])
+
+    def test_concurrent_conflicting_writers_cannot_replace_same_vintage(self):
+        with TemporaryDirectory() as directory:
+            registry = HistoricalVintageRegistry(Path(directory))
+            dataset_id = str(uuid4())
+            manifests = (
+                self._manifest(dataset_id, 1, "writer-a"),
+                self._manifest(dataset_id, 1, "writer-b"),
+            )
+            barrier = Barrier(2)
+            result_lock = Lock()
+            outcomes = []
+
+            def writer(manifest):
+                barrier.wait()
+                try:
+                    outcome = ("ok", registry.commit(manifest))
+                except HistoricalConflict as error:
+                    outcome = ("conflict", str(error))
+                with result_lock:
+                    outcomes.append(outcome)
+
+            threads = [Thread(target=writer, args=(manifest,)) for manifest in manifests]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+                self.assertFalse(thread.is_alive())
+
+            self.assertEqual(sorted(kind for kind, _ in outcomes), ["conflict", "ok"])
+            stored = registry.load(dataset_id, 1)
+            self.assertIn(
+                stored["content_hashes"],
+                ([digest("writer-a")], [digest("writer-b")]),
+            )
+            stored_digest = registry.digest(dataset_id, 1)
+            self.assertEqual(
+                stored_digest,
+                next(value for kind, value in outcomes if kind == "ok"),
+            )
 
     def test_manifest_refuses_rights_or_missingness_that_weaken_reproducibility(self):
         with TemporaryDirectory() as directory:

@@ -297,12 +297,19 @@ class SimulatedProviderContractHarness:
         events = tuple(event for event in self._stream_events if event.sequence > after_sequence)
         expected = after_sequence + 1
         first = events[0].sequence if events else None
-        gap = first is not None and first != expected
+        gap_at: int | None = None
+        next_expected = expected
+        for event in events:
+            if event.sequence != next_expected:
+                gap_at = next_expected
+                break
+            next_expected += 1
         return {
             "after_sequence": after_sequence,
-            "gap_detected": gap,
+            "gap_detected": gap_at is not None,
             "expected_sequence": expected,
             "first_available_sequence": first,
+            "gap_at_sequence": gap_at,
             "events": events,
         }
 

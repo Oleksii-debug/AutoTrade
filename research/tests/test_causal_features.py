@@ -82,6 +82,61 @@ class CausalFeatureTests(unittest.TestCase):
         self.assertEqual(selected["AAA"].observation_id, "AAA-1-r1")
         self.assertEqual(selected["AAA"].value, Decimal("110"))
 
+    def test_simultaneous_conflicting_revisions_fail_closed(self):
+        first = SourceValue.create(
+            observation_id="AAA-r-a",
+            symbol="AAA",
+            event_time=BASE,
+            available_at=BASE + timedelta(hours=1),
+            value="100",
+            source_revision="provider-revision-a",
+        )
+        conflicting = SourceValue.create(
+            observation_id="AAA-r-b",
+            symbol="AAA",
+            event_time=BASE,
+            available_at=BASE + timedelta(hours=1),
+            value="101",
+            source_revision="provider-revision-b",
+        )
+        with self.assertRaisesRegex(ValueError, "ambiguous simultaneously available revisions"):
+            rolling_return(
+                [first, conflicting, source(1, "110")],
+                symbol="AAA",
+                decision_time=BASE + timedelta(days=1),
+                count=2,
+            )
+        with self.assertRaisesRegex(ValueError, "ambiguous simultaneously available revisions"):
+            require_universe_members(
+                ["AAA"],
+                [first, conflicting],
+                decision_time=BASE + timedelta(hours=1),
+            )
+
+    def test_duplicate_same_truth_at_same_availability_is_deterministic(self):
+        first = SourceValue.create(
+            observation_id="AAA-copy-b",
+            symbol="AAA",
+            event_time=BASE,
+            available_at=BASE + timedelta(hours=1),
+            value="100",
+            source_revision="same-revision",
+        )
+        duplicate = SourceValue.create(
+            observation_id="AAA-copy-a",
+            symbol="AAA",
+            event_time=BASE,
+            available_at=BASE + timedelta(hours=1),
+            value="100",
+            source_revision="same-revision",
+        )
+        selected = require_universe_members(
+            ["AAA"],
+            [first, duplicate],
+            decision_time=BASE + timedelta(hours=1),
+        )
+        self.assertEqual(selected["AAA"].observation_id, "AAA-copy-a")
+
     def test_normalizer_rejects_future_fit_input(self):
         points = [
             FeaturePoint("AAA", BASE, Decimal("1"), ("a",), ("r1",), "x"),

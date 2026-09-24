@@ -492,8 +492,23 @@ def reconcile_account(
         raise TypeError(
             "snapshot_consistency must be SnapshotConsistencyEvidence"
         )
+    snapshot_window_covered = False
+    if snapshot_consistency is not None:
+        snapshot_started = _instant(
+            snapshot_consistency.query_started_at,
+            name="snapshot_consistency.query_started_at",
+        )
+        snapshot_completed = _instant(
+            snapshot_consistency.query_completed_at,
+            name="snapshot_consistency.query_completed_at",
+        )
+        snapshot_window_covered = (
+            start <= snapshot_started <= snapshot_completed <= end
+        )
     snapshot_is_consistent = bool(
-        snapshot_consistency is not None and snapshot_consistency.consistent
+        snapshot_consistency is not None
+        and snapshot_consistency.consistent
+        and snapshot_window_covered
     )
 
     cash_differences: dict[str, Decimal] = {}
@@ -579,6 +594,10 @@ def reconcile_account(
         blocking.add("ACCOUNT")
         if snapshot_consistency is None:
             reasons.append("provider snapshot consistency is not evidenced")
+        elif not snapshot_window_covered:
+            reasons.append(
+                "provider snapshot query window is outside reconciliation coverage"
+            )
         elif snapshot_consistency.sequence_gap_detected:
             reasons.append("provider snapshot stream contains a sequence gap")
         else:

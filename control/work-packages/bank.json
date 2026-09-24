@@ -234,8 +234,8 @@
         "Exclusive mutation key: PERSISTENCE / journal-outbox",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "SQLite WAL journal/outbox and command-dedupe primitive implemented in mvp/autotrade_mvp/persistence.py with focused tests covering atomic event/outbox commit, idempotent replay, payload tamper rejection, aggregate-version gaps, event-ID conflicts, command idempotency conflicts and reopen persistence. Focused standalone suite passed 5/5 locally before commit. Remaining WP-05 work: integrate canonical EventEnvelope/UiCommand validation into the runtime, crash-at-each-commit-boundary qualification, projection rebuild equivalence, migration rollback/upgrade tests, Windows/exact-head CI and production placement under src/AutoTrade.Persistence/."
     },
     {
       "id": "WP-06",

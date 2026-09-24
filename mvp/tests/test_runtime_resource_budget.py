@@ -15,10 +15,18 @@ from mvp.autotrade_mvp.performance_qualification import (
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 
 
+RELEASE_SHA = "1" * 40
+CONFIG_HASH = "sha256:" + "a" * 64
+HOST_HASH = "sha256:" + "b" * 64
+
+
 class RuntimeResourceBudgetTests(unittest.TestCase):
     def spec(self, **overrides):
         values = dict(
             scenario_id="declared-host-load-a",
+            release_sha=RELEASE_SHA,
+            configuration_hash=CONFIG_HASH,
+            host_fingerprint=HOST_HASH,
             strategy_horizon_us=5_000_000,
             max_p95_financial_latency_us=2_000_000,
             max_financial_staleness_us=2_000_000,
@@ -32,6 +40,9 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
     def observation(self, **overrides):
         values = dict(
             scenario_id="declared-host-load-a",
+            release_sha=RELEASE_SHA,
+            configuration_hash=CONFIG_HASH,
+            host_fingerprint=HOST_HASH,
             expected_financial_events=20,
             recovered_financial_events=20,
             financial_latency_us=[100_000] * 20,
@@ -137,6 +148,31 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
                 self.observation(scenario_id="different-load"),
             )
 
+    def test_evidence_cannot_be_reused_across_release_config_or_host(self):
+        with self.assertRaisesRegex(RuntimeBudgetError, "another release SHA"):
+            evaluate_runtime_budget(
+                self.spec(),
+                self.observation(release_sha="2" * 40),
+            )
+        with self.assertRaisesRegex(RuntimeBudgetError, "another configuration"):
+            evaluate_runtime_budget(
+                self.spec(),
+                self.observation(configuration_hash="sha256:" + "c" * 64),
+            )
+        with self.assertRaisesRegex(RuntimeBudgetError, "another host"):
+            evaluate_runtime_budget(
+                self.spec(),
+                self.observation(host_fingerprint="sha256:" + "d" * 64),
+            )
+
+    def test_exact_evidence_identity_is_validated(self):
+        with self.assertRaisesRegex(RuntimeBudgetError, "40-hex"):
+            self.spec(release_sha="main")
+        with self.assertRaisesRegex(RuntimeBudgetError, "sha256"):
+            self.observation(configuration_hash="config")
+        with self.assertRaisesRegex(RuntimeBudgetError, "sha256"):
+            self.observation(host_fingerprint="host")
+
     def test_real_journal_burst_probe_recovers_every_financial_event(self):
         # This is wiring evidence only. The generous thresholds deliberately do
         # not turn shared CI hardware into a target-host performance claim.
@@ -163,6 +199,9 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
             recovered = store.load_events("PERFORMANCE_PROBE", "burst-a")
             observation = RuntimeLoadObservation.create(
                 scenario_id="journal-wiring-ci",
+                release_sha=RELEASE_SHA,
+                configuration_hash=CONFIG_HASH,
+                host_fingerprint=HOST_HASH,
                 expected_financial_events=count,
                 recovered_financial_events=len(recovered),
                 financial_latency_us=latencies,
@@ -173,6 +212,9 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
             decision = evaluate_runtime_budget(
                 RuntimeBudgetSpec(
                     scenario_id="journal-wiring-ci",
+                    release_sha=RELEASE_SHA,
+                    configuration_hash=CONFIG_HASH,
+                    host_fingerprint=HOST_HASH,
                     strategy_horizon_us=60_000_000,
                     max_p95_financial_latency_us=60_000_000,
                     max_financial_staleness_us=60_000_000,

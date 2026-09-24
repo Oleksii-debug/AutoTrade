@@ -136,6 +136,11 @@ def point_in_time_market_events(
         available = _utc(event.get("available_at"), "available_at")
         source_at = _utc(event.get("source_event_at"), "source_event_at")
         ingested = _utc(event.get("ingested_at"), "ingested_at")
+        _text(event.get("availability_basis"), "availability_basis")
+        raw_evidence = event.get("raw_evidence_ref")
+        if not isinstance(raw_evidence, Mapping):
+            raise HistoricalDataError("raw_evidence_ref must be an object")
+        _evidence(raw_evidence)
         if ingested < available:
             raise HistoricalDataError("ingested_at cannot precede evidenced available_at")
         if available > point:
@@ -151,8 +156,10 @@ def point_in_time_market_events(
     rows = [item[2] for item in selected.values()]
     rows.sort(
         key=lambda row: (
+            _utc(row["available_at"], "available_at"),
             _utc(row["source_event_at"], "source_event_at"),
             row["event_id"],
+            _sequence(row["revision"], "revision"),
         )
     )
     return tuple(rows)

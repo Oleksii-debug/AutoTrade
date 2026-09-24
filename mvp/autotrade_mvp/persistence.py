@@ -142,7 +142,7 @@ class JournalStore:
 
     @classmethod
     def _required_table_columns(cls) -> dict[str, frozenset[str]]:
-        return {
+        required = {
             "schema_migrations": frozenset({"version", "applied_at"}),
             "events": frozenset({
                 "event_id", "event_type", "aggregate_type", "aggregate_id",
@@ -156,11 +156,13 @@ class JournalStore:
                 "command_id", "idempotency_key", "request_hash", "result_json",
                 "state_version", "created_at",
             }),
-            "projection_checkpoints": frozenset({
+        }
+        if cls.SCHEMA_VERSION >= 2:
+            required["projection_checkpoints"] = frozenset({
                 "projection_name", "aggregate_type", "aggregate_id",
                 "aggregate_version", "state_json", "state_hash", "updated_at",
-            }),
-        }
+            })
+        return required
 
     @staticmethod
     def _unique_index_columns(connection, table_name: str) -> set[tuple[str, ...]]:
@@ -184,12 +186,13 @@ class JournalStore:
             "events": ("event_id",),
             "outbox": ("outbox_id",),
             "command_dedupe": ("command_id",),
-            "projection_checkpoints": (
+        }
+        if cls.SCHEMA_VERSION >= 2:
+            expected_primary_keys["projection_checkpoints"] = (
                 "projection_name",
                 "aggregate_type",
                 "aggregate_id",
-            ),
-        }
+            )
         expected_unique = {
             "events": {
                 ("aggregate_type", "aggregate_id", "aggregate_version"),
@@ -271,13 +274,7 @@ class JournalStore:
                         (version, self._now()),
                     )
 
-                required_tables = {
-                    "schema_migrations",
-                    "events",
-                    "outbox",
-                    "command_dedupe",
-                    "projection_checkpoints",
-                }
+                required_tables = set(self._required_table_columns())
                 present_tables = {
                     str(row[0])
                     for row in connection.execute(

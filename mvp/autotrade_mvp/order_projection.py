@@ -173,7 +173,9 @@ class OrderProjection:
                 return "FILLED_AFTER_CANCEL"
             return "PARTIALLY_FILLED_CANCELLED" if filled > 0 else "CANCELLED"
         if self.rejected:
-            return "FILLED_AFTER_REJECT" if filled > 0 else "REJECTED"
+            if filled == self.requested_quantity:
+                return "FILLED_AFTER_REJECT"
+            return "PARTIALLY_FILLED_AFTER_REJECT" if filled > 0 else "REJECTED"
         if filled == self.requested_quantity:
             return "FILLED"
         if filled > 0:
@@ -189,9 +191,9 @@ class OrderProjection:
         state = self.state
         if state in {"FILLED", "FILLED_AFTER_CANCEL", "FILLED_AFTER_REJECT"}:
             return "FILLED"
-        if state == "CANCELLED":
+        if state in {"CANCELLED", "PARTIALLY_FILLED_CANCELLED"}:
             return "CANCELLED"
-        if state == "REJECTED":
+        if state in {"REJECTED", "PARTIALLY_FILLED_AFTER_REJECT"}:
             return "REJECTED"
         return None
 

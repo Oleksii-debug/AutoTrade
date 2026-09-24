@@ -87,6 +87,10 @@ class RetentionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "max_recent_degradation must be non-negative"):
             policy(max_recent_degradation="-0.001")
 
+    def test_negative_recent_improvement_threshold_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "min_recent_improvement must be non-negative"):
+            policy(min_recent_improvement="-0.001")
+
     def test_delayed_labels_are_inconclusive_not_failure_or_pass(self):
         result = evaluate_retention(
             {"old": metric("old", "0.10", "0.10"), "new": metric("new", "0.05", "0.20", label_complete=False)},

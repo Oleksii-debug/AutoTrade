@@ -1,3 +1,5 @@
+export declare const CONTRACT_VERSION: "1.0.0";
+
 export type CommonScalarKind =
   | "Decimal"
   | "Sequence"

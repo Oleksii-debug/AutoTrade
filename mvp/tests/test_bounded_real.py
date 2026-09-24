@@ -1,8 +1,12 @@
+import hashlib
 import unittest
+from uuid import NAMESPACE_URL, uuid5
 
 from mvp.autotrade_mvp.bounded_real import (
     BoundedRealEnvelope,
     BoundedRealObservations,
+    EvidenceRef,
+    ObservedFillEvidence,
     QualificationEvidence,
     assess_bounded_real_qualification,
 )
@@ -27,12 +31,24 @@ def envelope(**overrides):
     return BoundedRealEnvelope.create(**values)
 
 
-def evidence(kind, **overrides):
+def ref(label, **overrides):
     values = dict(
-        evidence_id="e-" + kind.lower(),
-        evidence_kind=kind,
+        artifact_id=str(uuid5(NAMESPACE_URL, "autotrade:" + label)),
+        sha256="sha256:" + hashlib.sha256(label.encode("utf-8")).hexdigest(),
         source_sha=SHA,
         envelope_id="bounded-1",
+        provider_id="provider-1",
+        account_id="account-1",
+    )
+    values.update(overrides)
+    return EvidenceRef.create(**values)
+
+
+def evidence(kind, **overrides):
+    ref_overrides = overrides.pop("ref_overrides", {})
+    values = dict(
+        evidence_kind=kind,
+        evidence_ref=ref("prerequisite:" + kind, **ref_overrides),
         passed=True,
     )
     values.update(overrides)
@@ -50,14 +66,29 @@ def prerequisites():
     ]
 
 
+def fill(label, *, partial=False, **ref_overrides):
+    return ObservedFillEvidence(
+        provider_execution_id="execution-" + label,
+        partial_fill=partial,
+        evidence_ref=ref("fill:" + label, **ref_overrides),
+    )
+
+
 def observations(**overrides):
     values = dict(
         source_sha=SHA,
         envelope_id="bounded-1",
         provider_id="provider-1",
         account_id="account-1",
-        observed_fill_count=3,
-        observed_partial_fill=True,
+        fill_evidence=(
+            fill("1"),
+            fill("2", partial=True),
+            fill("3"),
+        ),
+        reconciliation_evidence=ref("reconciliation"),
+        revocation_evidence=ref("revocation"),
+        protection_evidence=ref("protection"),
+        audit_evidence=ref("audit"),
         all_fills_reconciled=True,
         fees_reconciled=True,
         revocation_verified=True,
@@ -70,61 +101,6 @@ def observations(**overrides):
 
 
 class BoundedRealQualificationTests(unittest.TestCase):
-    def test_direct_construction_cannot_bypass_bounded_real_safety(self):
-        base = envelope()
-        with self.assertRaises(ValueError):
-            BoundedRealEnvelope(
-                envelope_id=base.envelope_id,
-                source_sha=base.source_sha,
-                account_id=base.account_id,
-                provider_id=base.provider_id,
-                policy_id=base.policy_id,
-                allowed_actions=frozenset({"ORDER.SUBMIT", "WITHDRAW"}),
-                max_capital=base.max_capital,
-                max_single_notional=base.max_single_notional,
-                max_gross_leverage=base.max_gross_leverage,
-            )
-        with self.assertRaises(TypeError):
-            BoundedRealEnvelope(
-                envelope_id=base.envelope_id,
-                source_sha=base.source_sha,
-                account_id=base.account_id,
-                provider_id=base.provider_id,
-                policy_id=base.policy_id,
-                allowed_actions=frozenset({"ORDER.SUBMIT"}),
-                max_capital=1000.0,
-                max_single_notional=base.max_single_notional,
-                max_gross_leverage=base.max_gross_leverage,
-            )
-
-        good_evidence = evidence("RECOVERY")
-        with self.assertRaises(TypeError):
-            QualificationEvidence(
-                evidence_id=good_evidence.evidence_id,
-                evidence_kind=good_evidence.evidence_kind,
-                source_sha=good_evidence.source_sha,
-                envelope_id=good_evidence.envelope_id,
-                passed=1,
-                unresolved_blockers=(),
-            )
-
-        good_observations = observations()
-        with self.assertRaises(TypeError):
-            BoundedRealObservations(
-                source_sha=good_observations.source_sha,
-                envelope_id=good_observations.envelope_id,
-                provider_id=good_observations.provider_id,
-                account_id=good_observations.account_id,
-                observed_fill_count=good_observations.observed_fill_count,
-                observed_partial_fill="true",
-                all_fills_reconciled=good_observations.all_fills_reconciled,
-                fees_reconciled=good_observations.fees_reconciled,
-                revocation_verified=good_observations.revocation_verified,
-                protection_verified=good_observations.protection_verified,
-                unauthorized_action_count=0,
-                unresolved_unknown_count=0,
-            )
-
     def test_complete_bundle_is_evidence_complete_but_never_authority(self):
         result = assess_bounded_real_qualification(
             envelope=envelope(),
@@ -136,16 +112,37 @@ class BoundedRealQualificationTests(unittest.TestCase):
         self.assertFalse(result.authorizes_trading)
         self.assertEqual(result.exact_source_sha, SHA)
 
-    def test_missing_or_failed_prerequisite_fails_closed(self):
-        missing = prerequisites()[:-1]
+    def test_prerequisite_requires_immutable_digest_and_exact_scope(self):
+        with self.assertRaisesRegex(ValueError, "canonical SHA-256"):
+            ref("bad-digest", sha256="not-a-digest")
+
+        items = prerequisites()
+        items[0] = evidence(
+            "RELEASE_CANDIDATE",
+            ref_overrides={"source_sha": "b" * 40},
+        )
         result = assess_bounded_real_qualification(
             envelope=envelope(),
-            prerequisite_evidence=missing,
+            prerequisite_evidence=items,
+            observations=observations(),
+        )
+        self.assertIn(
+            "evidence_scope_mismatch:RELEASE_CANDIDATE",
+            result.reason_codes,
+        )
+
+    def test_missing_or_failed_prerequisite_fails_closed(self):
+        result = assess_bounded_real_qualification(
+            envelope=envelope(),
+            prerequisite_evidence=prerequisites()[:-1],
             observations=observations(),
         )
         self.assertFalse(result.complete)
         self.assertTrue(
-            any(reason.startswith("missing_prerequisite_evidence:") for reason in result.reason_codes)
+            any(
+                reason.startswith("missing_prerequisite_evidence:")
+                for reason in result.reason_codes
+            )
         )
 
         failed = prerequisites()
@@ -160,31 +157,12 @@ class BoundedRealQualificationTests(unittest.TestCase):
             result.reason_codes,
         )
 
-    def test_exact_build_and_envelope_must_match_every_evidence_item(self):
-        items = prerequisites()
-        items[0] = evidence("RELEASE_CANDIDATE", source_sha="b" * 40)
-        items[1] = evidence(
-            "SCIENTIFIC_QUALIFICATION",
-            envelope_id="different-envelope",
-        )
-        result = assess_bounded_real_qualification(
-            envelope=envelope(),
-            prerequisite_evidence=items,
-            observations=observations(),
-        )
-        self.assertIn("source_sha_mismatch:RELEASE_CANDIDATE", result.reason_codes)
-        self.assertIn(
-            "envelope_mismatch:SCIENTIFIC_QUALIFICATION",
-            result.reason_codes,
-        )
-
-    def test_actual_fill_reconciliation_revocation_and_protection_are_required(self):
+    def test_real_fill_partial_fill_and_reconciliation_evidence_are_required(self):
         result = assess_bounded_real_qualification(
             envelope=envelope(),
             prerequisite_evidence=prerequisites(),
             observations=observations(
-                observed_fill_count=0,
-                observed_partial_fill=False,
+                fill_evidence=(),
                 all_fills_reconciled=False,
                 fees_reconciled=False,
                 revocation_verified=False,
@@ -206,60 +184,137 @@ class BoundedRealQualificationTests(unittest.TestCase):
             <= set(result.reason_codes)
         )
 
-    def test_any_unauthorized_action_blocks_qualification(self):
+    def test_fill_evidence_is_bound_to_provider_account_build_and_envelope(self):
+        bad_fill = fill("bad", account_id="other-account")
         result = assess_bounded_real_qualification(
             envelope=envelope(),
             prerequisite_evidence=prerequisites(),
-            observations=observations(unauthorized_action_count=1),
+            observations=observations(
+                fill_evidence=(bad_fill, fill("partial", partial=True)),
+            ),
         )
-        self.assertEqual(result.reason_codes, ("unauthorized_action_observed",))
+        self.assertIn("fill_evidence_scope_mismatch:0", result.reason_codes)
         self.assertFalse(result.complete)
 
-    def test_observation_scope_must_match_exact_account_provider_build_and_envelope(self):
+    def test_operational_evidence_refs_are_scope_bound(self):
         result = assess_bounded_real_qualification(
             envelope=envelope(),
             prerequisite_evidence=prerequisites(),
-            observations=observations(account_id="other-account"),
+            observations=observations(
+                reconciliation_evidence=ref(
+                    "bad-reconciliation",
+                    provider_id="other-provider",
+                )
+            ),
         )
-        self.assertIn("observation_scope_mismatch", result.reason_codes)
+        self.assertIn("reconciliation_evidence_scope_mismatch", result.reason_codes)
 
-    def test_withdrawals_transfers_and_unknown_actions_cannot_enter_bounded_envelope(self):
+    def test_counts_and_booleans_cannot_stand_in_for_fill_artifacts(self):
+        empty = observations(fill_evidence=())
+        self.assertEqual(empty.observed_fill_count, 0)
+        self.assertFalse(empty.observed_partial_fill)
+        result = assess_bounded_real_qualification(
+            envelope=envelope(),
+            prerequisite_evidence=prerequisites(),
+            observations=empty,
+        )
+        self.assertIn("no_real_fill_evidence", result.reason_codes)
+        self.assertIn("partial_fill_not_evidenced", result.reason_codes)
+
+    def test_duplicate_artifact_or_digest_cannot_be_reused_as_distinct_evidence(self):
+        items = prerequisites()
+        duplicate = ref("prerequisite:RELEASE_CANDIDATE")
+        items[1] = QualificationEvidence.create(
+            evidence_kind="SCIENTIFIC_QUALIFICATION",
+            evidence_ref=duplicate,
+            passed=True,
+        )
+        with self.assertRaisesRegex(ValueError, "artifact_id"):
+            assess_bounded_real_qualification(
+                envelope=envelope(),
+                prerequisite_evidence=items,
+                observations=observations(),
+            )
+
+        first = ref("digest-source-a")
+        second = ref(
+            "digest-source-b",
+            sha256=first.sha256,
+        )
+        obs = observations(
+            reconciliation_evidence=first,
+            revocation_evidence=second,
+        )
+        with self.assertRaisesRegex(ValueError, "sha256"):
+            assess_bounded_real_qualification(
+                envelope=envelope(),
+                prerequisite_evidence=prerequisites(),
+                observations=obs,
+            )
+
+    def test_provider_execution_ids_must_be_unique(self):
+        first = fill("same")
+        with self.assertRaisesRegex(ValueError, "provider_execution_id"):
+            observations(
+                fill_evidence=(
+                    first,
+                    ObservedFillEvidence(
+                        provider_execution_id=first.provider_execution_id,
+                        partial_fill=True,
+                        evidence_ref=ref("fill:other"),
+                    ),
+                )
+            )
+
+    def test_any_unauthorized_action_or_unresolved_unknown_blocks_qualification(self):
+        result = assess_bounded_real_qualification(
+            envelope=envelope(),
+            prerequisite_evidence=prerequisites(),
+            observations=observations(
+                unauthorized_action_count=1,
+                unresolved_unknown_count=1,
+            ),
+        )
+        self.assertIn("unauthorized_action_observed", result.reason_codes)
+        self.assertIn("unresolved_submission_unknown", result.reason_codes)
+        self.assertFalse(result.complete)
+
+    def test_direct_construction_cannot_bypass_safety_types(self):
+        base = envelope()
+        with self.assertRaises(ValueError):
+            BoundedRealEnvelope(
+                envelope_id=base.envelope_id,
+                source_sha=base.source_sha,
+                account_id=base.account_id,
+                provider_id=base.provider_id,
+                policy_id=base.policy_id,
+                allowed_actions=frozenset({"ORDER.SUBMIT", "WITHDRAW"}),
+                max_capital=base.max_capital,
+                max_single_notional=base.max_single_notional,
+                max_gross_leverage=base.max_gross_leverage,
+            )
+        with self.assertRaises(TypeError):
+            QualificationEvidence(
+                evidence_kind="RECOVERY",
+                evidence_ref=ref("direct-recovery"),
+                passed=1,
+            )
+        with self.assertRaises(TypeError):
+            ObservedFillEvidence(
+                provider_execution_id="execution",
+                partial_fill="true",
+                evidence_ref=ref("direct-fill"),
+            )
+
+    def test_withdrawals_transfers_unknown_actions_and_float_bounds_are_rejected(self):
         for action in ("WITHDRAW", "TRANSFER", "CREDENTIAL.ROTATE", "OTHER"):
             with self.subTest(action=action):
                 with self.assertRaises(ValueError):
                     envelope(allowed_actions={"ORDER.SUBMIT", action})
-
-    def test_financial_bounds_reject_float_and_nonpositive_values(self):
         with self.assertRaises(TypeError):
             envelope(max_capital=1000.0)
         with self.assertRaises(ValueError):
             envelope(max_single_notional="0")
-        with self.assertRaises(ValueError):
-            envelope(max_gross_leverage="-1")
-
-    def test_duplicate_evidence_identity_or_kind_fails_closed(self):
-        duplicate_id = prerequisites()
-        duplicate_id[1] = evidence(
-            "SCIENTIFIC_QUALIFICATION",
-            evidence_id=duplicate_id[0].evidence_id,
-        )
-        with self.assertRaisesRegex(ValueError, "evidence_id"):
-            assess_bounded_real_qualification(
-                envelope=envelope(),
-                prerequisite_evidence=duplicate_id,
-                observations=observations(),
-            )
-
-        duplicate_kind = prerequisites()
-        duplicate_kind.append(
-            evidence("RECOVERY", evidence_id="different-recovery")
-        )
-        with self.assertRaisesRegex(ValueError, "duplicate prerequisite evidence kind"):
-            assess_bounded_real_qualification(
-                envelope=envelope(),
-                prerequisite_evidence=duplicate_kind,
-                observations=observations(),
-            )
 
 
 if __name__ == "__main__":

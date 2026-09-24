@@ -50,6 +50,17 @@ class DiagnosticTraceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "mismatch"):
                 build_diagnostic_snapshot(directory)
 
+    def test_checkpoint_evidence_tamper_is_detected(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            evidence_id = checkpoint["evidence_ids"][0]
+            checkpoint["evidence_records"][evidence_id]["risk_outcome"] = "tampered"
+            checkpoint_path.write_text(json.dumps(checkpoint) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Checkpoint evidence records"):
+                build_diagnostic_snapshot(directory)
+
     def test_duplicate_evidence_identifier_is_rejected(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

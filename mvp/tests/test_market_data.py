@@ -134,6 +134,104 @@ class MarketNormalizationTests(unittest.TestCase):
                 )
             )
 
+    def test_late_revision_preserves_sequence_as_immutable_correction(self):
+        normalizer = MarketNormalizer(registry())
+        original = normalizer.normalize(
+            raw("TRADE", {"price": "100", "quantity": "1"}, sequence=7, revision=0)
+        )
+        corrected = normalizer.normalize(
+            raw(
+                "TRADE",
+                {"price": "101", "quantity": "1"},
+                sequence=7,
+                revision=1,
+                available=at() + timedelta(seconds=1),
+                ingested=at() + timedelta(seconds=2),
+            )
+        )
+        self.assertNotEqual(original.event_id, corrected.event_id)
+        self.assertIn("CORRECTION", corrected.quality_flags)
+        self.assertNotIn("DUPLICATE", corrected.quality_flags)
+        self.assertEqual(corrected.payload["price"], "101")
+
+    def test_revision_gap_and_out_of_order_revision_are_explicit(self):
+        normalizer = MarketNormalizer(registry())
+        normalizer.normalize(
+            raw("TRADE", {"price": "100", "quantity": "1"}, sequence=9, revision=0)
+        )
+        rev3 = normalizer.normalize(
+            raw(
+                "TRADE",
+                {"price": "103", "quantity": "1"},
+                sequence=9,
+                revision=3,
+                available=at() + timedelta(seconds=3),
+                ingested=at() + timedelta(seconds=4),
+            )
+        )
+        late_rev2 = normalizer.normalize(
+            raw(
+                "TRADE",
+                {"price": "102", "quantity": "1"},
+                sequence=9,
+                revision=2,
+                available=at() + timedelta(seconds=2),
+                ingested=at() + timedelta(seconds=5),
+            )
+        )
+        self.assertTrue({"CORRECTION", "REVISION_GAP"} <= set(rev3.quality_flags))
+        self.assertTrue(
+            {"CORRECTION", "OUT_OF_ORDER_REVISION"} <= set(late_rev2.quality_flags)
+        )
+
+    def test_initial_nonzero_revision_is_flagged_without_inventing_base(self):
+        normalizer = MarketNormalizer(registry())
+        revised_only = normalizer.normalize(
+            raw("TRADE", {"price": "100", "quantity": "1"}, sequence=11, revision=2)
+        )
+        self.assertIn("REVISION_BASE_MISSING", revised_only.quality_flags)
+
+    def test_same_revision_cannot_change_causal_identity_with_same_payload(self):
+        normalizer = MarketNormalizer(registry())
+        normalizer.normalize(
+            raw("TRADE", {"price": "100", "quantity": "1"}, sequence=15, revision=0)
+        )
+        with self.assertRaisesRegex(SequenceConflict, "causal content"):
+            normalizer.normalize(
+                raw(
+                    "TRADE",
+                    {"price": "100", "quantity": "1"},
+                    sequence=15,
+                    revision=0,
+                    available=at() + timedelta(seconds=2),
+                    ingested=at() + timedelta(seconds=3),
+                )
+            )
+
+    def test_higher_revision_cannot_backdate_availability(self):
+        normalizer = MarketNormalizer(registry())
+        normalizer.normalize(
+            raw(
+                "TRADE",
+                {"price": "100", "quantity": "1"},
+                sequence=16,
+                revision=0,
+                available=at() + timedelta(seconds=2),
+                ingested=at() + timedelta(seconds=3),
+            )
+        )
+        with self.assertRaisesRegex(SequenceConflict, "backdate"):
+            normalizer.normalize(
+                raw(
+                    "TRADE",
+                    {"price": "101", "quantity": "1"},
+                    sequence=16,
+                    revision=1,
+                    available=at() + timedelta(seconds=1),
+                    ingested=at() + timedelta(seconds=4),
+                )
+            )
+
     def test_sequence_gap_and_late_out_of_order_are_preserved_as_quality(self):
         normalizer = MarketNormalizer(registry())
         normalizer.normalize(raw("TRADE", {"price": "100", "quantity": "1"}, sequence=1))
@@ -434,6 +532,26 @@ class MarketNormalizationTests(unittest.TestCase):
                         "volume": "1",
                     },
                     sequence=2,
+                )
+            )
+
+    def test_funding_timestamp_string_must_be_parseable_utc(self):
+        normalizer = MarketNormalizer(registry())
+        with self.assertRaisesRegex(MarketDataError, "ISO UTC instant"):
+            normalizer.normalize(
+                raw(
+                    "FUNDING",
+                    {"rate": "0.0001", "next_funding_at": "not-a-dateZ"},
+                )
+            )
+        with self.assertRaisesRegex(MarketDataError, "UTC instant"):
+            normalizer.normalize(
+                raw(
+                    "FUNDING",
+                    {
+                        "rate": "0.0001",
+                        "next_funding_at": "2026-09-25T00:00:00+02:00",
+                    },
                 )
             )
 

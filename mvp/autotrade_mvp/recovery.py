@@ -25,6 +25,7 @@ class SendPhase(str, Enum):
     DURABLE = "DURABLE"
     SENT_UNKNOWN = "SENT_UNKNOWN"
     ACKNOWLEDGED = "ACKNOWLEDGED"
+    EXECUTION_OBSERVED = "EXECUTION_OBSERVED"
     REJECTED = "REJECTED"
     PROVEN_ABSENT = "PROVEN_ABSENT"
 
@@ -42,6 +43,7 @@ class OutboundAttempt:
     owner_epoch: int
     phase: SendPhase = SendPhase.CREATED
     provider_order_id: str | None = None
+    provider_execution_id: str | None = None
     evidence: list[str] = field(default_factory=list)
 
     def persist(self) -> None:
@@ -64,6 +66,15 @@ class OutboundAttempt:
             raise ValueError("Provider order and evidence are required")
         self.phase = SendPhase.ACKNOWLEDGED
         self.provider_order_id = provider_order_id
+        self.evidence.append(evidence_ref)
+
+    def observe_execution(self, provider_execution_id: str, evidence_ref: str) -> None:
+        if self.phase not in {SendPhase.SENT_UNKNOWN, SendPhase.ACKNOWLEDGED}:
+            raise ValueError("Execution observation requires a sent or acknowledged attempt")
+        if not provider_execution_id or not evidence_ref:
+            raise ValueError("Provider execution and evidence are required")
+        self.phase = SendPhase.EXECUTION_OBSERVED
+        self.provider_execution_id = provider_execution_id
         self.evidence.append(evidence_ref)
 
     def reject(self, evidence_ref: str) -> None:
@@ -174,6 +185,7 @@ class RecoveryController:
     def resolve_attempt(self, attempt: OutboundAttempt) -> None:
         if attempt.phase not in {
             SendPhase.ACKNOWLEDGED,
+            SendPhase.EXECUTION_OBSERVED,
             SendPhase.REJECTED,
             SendPhase.PROVEN_ABSENT,
         }:

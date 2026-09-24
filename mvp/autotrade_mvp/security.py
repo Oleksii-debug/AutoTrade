@@ -14,6 +14,7 @@ import re
 import secrets
 import time
 from typing import Callable, Mapping
+from urllib.parse import urlsplit
 
 
 _REDACT_RE = re.compile(
@@ -26,6 +27,22 @@ def _required_text(value: object, *, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must be a non-empty string")
     return value.strip()
+
+
+def _authenticated_origin(value: object) -> str:
+    origin = _required_text(value, name="origin")
+    parsed = urlsplit(origin)
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Origin must not contain user information")
+    if not parsed.hostname or parsed.query or parsed.fragment:
+        raise ValueError("Origin must be an absolute origin without query or fragment")
+    if parsed.path not in ("", "/"):
+        raise ValueError("Origin must not contain a path")
+    if parsed.scheme == "https":
+        return origin[:-1] if origin.endswith("/") else origin
+    if parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+        return origin[:-1] if origin.endswith("/") else origin
+    raise ValueError("Origin must use HTTPS or loopback HTTP")
 
 
 @dataclass(frozen=True)
@@ -74,9 +91,7 @@ class SecurityBoundary:
     ) -> None:
         if not allowed_origins:
             raise ValueError("At least one authenticated origin is required")
-        normalized_origins = {
-            _required_text(value, name="allowed origin") for value in allowed_origins
-        }
+        normalized_origins = {_authenticated_origin(value) for value in allowed_origins}
         self._paired_origins = set(normalized_origins)
         self._now = now or time.time
         self._sessions: dict[str, Session] = {}
@@ -104,7 +119,7 @@ class SecurityBoundary:
     ) -> Session:
         normalized_subject = _required_text(subject, name="subject")
         normalized_role = _required_text(role, name="role").upper()
-        normalized_origin = _required_text(origin, name="origin")
+        normalized_origin = _authenticated_origin(origin)
         if normalized_role not in self._ROLES:
             raise PermissionError("Unknown role")
         if normalized_origin not in self._paired_origins:
@@ -140,7 +155,7 @@ class SecurityBoundary:
         if self._now_value() >= session.expires_at:
             self._sessions.pop(normalized_token, None)
             raise PermissionError("Session expired")
-        if origin is not None and _required_text(origin, name="origin") != session.origin:
+        if origin is not None and _authenticated_origin(origin) != session.origin:
             raise PermissionError("Session origin mismatch")
         if required_roles is not None:
             normalized_roles = {
@@ -179,7 +194,7 @@ class SecurityBoundary:
         new_origin: str,
     ) -> str:
         self.validate_session(token, required_roles={"OWNER"}, origin=origin)
-        normalized = _required_text(new_origin, name="new origin")
+        normalized = _authenticated_origin(new_origin)
         self._paired_origins.add(normalized)
         return normalized
 
@@ -191,7 +206,7 @@ class SecurityBoundary:
         paired_origin: str,
     ) -> None:
         owner = self.validate_session(token, required_roles={"OWNER"}, origin=origin)
-        normalized = _required_text(paired_origin, name="paired origin")
+        normalized = _authenticated_origin(paired_origin)
         if normalized not in self._paired_origins:
             raise PermissionError("Origin is not paired")
         if normalized == owner.origin and len(self._paired_origins) == 1:

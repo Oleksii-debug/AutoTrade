@@ -67,6 +67,7 @@ class PerpetualContract:
     payoff: Literal["LINEAR", "INVERSE"] = "LINEAR"
     face_currency: str | None = None
     price_quote_currency: str | None = None
+    price_base_currency: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "instrument_id", _text(self.instrument_id, "instrument_id"))
@@ -95,6 +96,12 @@ class PerpetualContract:
                 "price_quote_currency",
                 _text(self.price_quote_currency, "price_quote_currency"),
             )
+        if self.price_base_currency is not None:
+            object.__setattr__(
+                self,
+                "price_base_currency",
+                _text(self.price_base_currency, "price_base_currency"),
+            )
 
 
 def _require_inverse_units(contract: PerpetualContract) -> None:
@@ -109,6 +116,14 @@ def _require_inverse_units(contract: PerpetualContract) -> None:
     if contract.face_currency != contract.price_quote_currency:
         raise PerpetualError(
             "inverse face_currency must match the currency of quoted prices"
+        )
+    if contract.price_base_currency is None:
+        raise PerpetualError(
+            "inverse contract requires explicit price_base_currency qualification"
+        )
+    if contract.settlement_currency != contract.price_base_currency:
+        raise PerpetualError(
+            "inverse settlement_currency must match the base currency produced by face/price"
         )
 
 

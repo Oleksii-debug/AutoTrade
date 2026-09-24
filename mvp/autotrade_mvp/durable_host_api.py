@@ -115,6 +115,8 @@ class JournalBackedHostCommandStore:
             return "idempotency_key_conflict"
         if "command_id" in message:
             return "command_id_conflict"
+        if "aggregate_version" in message:
+            return "stale_state_version"
         raise error
 
     def submit(self, command: Mapping[str, object]) -> CommandResult:

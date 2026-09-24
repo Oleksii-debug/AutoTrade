@@ -269,6 +269,40 @@ class InstrumentRegistryTests(unittest.TestCase):
                 ):
                     InstrumentVersion(**kwargs)
 
+    def test_dated_derivative_rejects_contradictory_lifecycle_times(self):
+        base = dict(
+            instrument_id=A,
+            version=1,
+            provider_id="simulated",
+            venue_id="futures",
+            provider_symbol="ABC-FUT",
+            asset_class="FUTURE",
+            base_currency="ABC",
+            quote_currency="USD",
+            settlement_currency="USD",
+            quantity_unit="contract",
+            contract_multiplier="1",
+            price_tick="0.01",
+            quantity_step="1",
+            minimum_quantity="1",
+            calendar_id="CONTINUOUS_24_7",
+            timezone_id="UTC",
+            effective_from=when(1),
+            payoff="LINEAR",
+            underlying_id="ABC",
+            expiry=when(12),
+        )
+        with self.assertRaisesRegex(InstrumentRegistryError, "last_trade_at"):
+            InstrumentVersion(**base, last_trade_at=when(12, 2))
+        with self.assertRaisesRegex(InstrumentRegistryError, "delivery_cutoff"):
+            InstrumentVersion(**base, delivery_cutoff=when(12, 2))
+        with self.assertRaisesRegex(InstrumentRegistryError, "before last_trade_at"):
+            InstrumentVersion(
+                **base,
+                last_trade_at=when(11, 20),
+                delivery_cutoff=when(11, 19),
+            )
+
     def test_perpetual_without_expiry_accepts_linear_payoff(self):
         instrument = InstrumentVersion(
             instrument_id=A,

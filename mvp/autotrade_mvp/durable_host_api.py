@@ -134,7 +134,7 @@ class JournalBackedHostCommandStore:
             "event_type": event_type,
             "aggregate_type": self.AGGREGATE_TYPE,
             "aggregate_id": self.AGGREGATE_ID,
-            "aggregate_version": aggregate_version,
+            "aggregate_version": str(aggregate_version),
             "payload": body,
             "payload_hash": payload_digest(body),
             "committed_at": self._now(),

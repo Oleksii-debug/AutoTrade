@@ -88,7 +88,10 @@ class OptionContract:
         )
         if self.settlement_method not in {"CASH", "PHYSICAL"}:
             raise OptionError("settlement_method must be CASH or PHYSICAL")
-        object.__setattr__(self, "exercise_style", _text(self.exercise_style, "exercise_style"))
+        style = _text(self.exercise_style, "exercise_style").upper()
+        if style not in {"AMERICAN", "EUROPEAN"}:
+            raise OptionError("exercise_style must be AMERICAN or EUROPEAN")
+        object.__setattr__(self, "exercise_style", style)
         object.__setattr__(self, "expiry", _utc(self.expiry, "expiry"))
         object.__setattr__(
             self,
@@ -207,6 +210,10 @@ def exercise_gate(contract: OptionContract, at: datetime) -> str:
         return "EXPIRED"
     if point >= contract.exercise_cutoff:
         return "EXERCISE_WINDOW_CLOSED"
+    if contract.exercise_style == "EUROPEAN":
+        # The canonical contract does not encode a provider-specific European
+        # exercise-open instant. Do not invent one or treat it as American.
+        return "PROVIDER_EXERCISE_WINDOW_REQUIRED"
     return "OPEN"
 
 

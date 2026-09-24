@@ -320,6 +320,13 @@ class InstrumentVersion:
         if derivative:
             if self.payoff not in {"LINEAR", "INVERSE", "OPTION"}:
                 raise InstrumentRegistryError("derivative payoff is required")
+            if self.asset_class in {"FUTURE", "PERPETUAL"} and self.payoff not in {
+                "LINEAR",
+                "INVERSE",
+            }:
+                raise InstrumentRegistryError(
+                    "future/perpetual payoff must be LINEAR or INVERSE"
+                )
             if self.underlying_id is None:
                 raise InstrumentRegistryError("derivative underlying_id is required")
             object.__setattr__(self, "underlying_id", _text(self.underlying_id, "underlying_id"))
@@ -329,8 +336,23 @@ class InstrumentVersion:
         ):
             raise InstrumentRegistryError("derivative fields are not valid for this asset class")
 
+        if self.asset_class == "PERPETUAL" and self.expiry is not None:
+            raise InstrumentRegistryError("perpetual instruments must not define expiry")
         if self.asset_class in {"FUTURE", "OPTION"} and self.expiry is None:
             raise InstrumentRegistryError("dated derivative requires expiry")
+        if self.expiry is not None:
+            if self.last_trade_at is not None and self.last_trade_at > self.expiry:
+                raise InstrumentRegistryError("last_trade_at must not be after expiry")
+            if self.delivery_cutoff is not None and self.delivery_cutoff > self.expiry:
+                raise InstrumentRegistryError("delivery_cutoff must not be after expiry")
+        if (
+            self.last_trade_at is not None
+            and self.delivery_cutoff is not None
+            and self.delivery_cutoff < self.last_trade_at
+        ):
+            raise InstrumentRegistryError(
+                "delivery_cutoff must not be before last_trade_at"
+            )
         if self.asset_class == "OPTION":
             if self.payoff != "OPTION":
                 raise InstrumentRegistryError("option payoff must be OPTION")

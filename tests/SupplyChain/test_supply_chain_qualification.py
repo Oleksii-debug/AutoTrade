@@ -63,65 +63,93 @@ def evidence(comp=None, model_rights=None, **overrides):
     return SupplyChainEvidence(**values)
 
 
+def _trusted_evidence_verifier(_evidence):
+    return True
+
+
+def qualify(value):
+    return qualify_supply_chain(
+        value,
+        evidence_verifier=_trusted_evidence_verifier,
+    )
+
+
 class SupplyChainQualificationTests(unittest.TestCase):
-    def test_exact_release_complete_evidence_passes_without_release_authority(self):
+    def test_self_asserted_release_hashes_are_inconclusive_without_external_evidence(self):
         result = qualify_supply_chain(evidence())
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertFalse(result.release_authority)
+        self.assertIn("SUPPLY_CHAIN.EVIDENCE_UNVERIFIED", result.reason_codes)
+
+    def test_broken_external_evidence_verifier_fails_closed(self):
+        def broken(_evidence):
+            raise RuntimeError("artifact evidence unavailable")
+
+        result = qualify_supply_chain(
+            evidence(),
+            evidence_verifier=broken,
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertIn("SUPPLY_CHAIN.EVIDENCE_UNVERIFIED", result.reason_codes)
+
+    def test_exact_release_complete_evidence_passes_without_release_authority(self):
+        result = qualify(evidence())
         self.assertEqual(result.status, "PASS")
         self.assertFalse(result.release_authority)
 
     def test_unlicensed_component_blocks_release_qualification(self):
-        result = qualify_supply_chain(evidence(component(license_status="BLOCKED")))
+        result = qualify(evidence(component(license_status="BLOCKED")))
         self.assertEqual(result.status, "FAIL")
         self.assertIn("SUPPLY_CHAIN.LICENSE_BLOCKED:pkg:pypi/example@1.0", result.reason_codes)
 
     def test_changed_artifact_hash_blocks(self):
-        result = qualify_supply_chain(evidence(component(observed_artifact_hash=H2)))
+        result = qualify(evidence(component(observed_artifact_hash=H2)))
         self.assertEqual(result.status, "FAIL")
         self.assertIn("SUPPLY_CHAIN.ARTIFACT_HASH_MISMATCH:pkg:pypi/example@1.0", result.reason_codes)
 
     def test_missing_notice_blocks(self):
-        result = qualify_supply_chain(evidence(component(notice_present=False)))
+        result = qualify(evidence(component(notice_present=False)))
         self.assertEqual(result.status, "FAIL")
         self.assertIn("SUPPLY_CHAIN.MISSING_NOTICE:pkg:pypi/example@1.0", result.reason_codes)
 
     def test_blocking_advisory_blocks_and_unknown_is_inconclusive(self):
-        blocked = qualify_supply_chain(evidence(component(advisory_status="BLOCKED")))
-        unknown = qualify_supply_chain(evidence(component(advisory_status="UNKNOWN")))
+        blocked = qualify(evidence(component(advisory_status="BLOCKED")))
+        unknown = qualify(evidence(component(advisory_status="UNKNOWN")))
         self.assertEqual(blocked.status, "FAIL")
         self.assertEqual(unknown.status, "INCONCLUSIVE")
 
     def test_architecture_time_review_cannot_approve_another_release(self):
-        result = qualify_supply_chain(evidence(component(reviewed_for_release_sha="2" * 40)))
+        result = qualify(evidence(component(reviewed_for_release_sha="2" * 40)))
         self.assertEqual(result.status, "FAIL")
         self.assertIn("SUPPLY_CHAIN.STALE_REVIEW:pkg:pypi/example@1.0", result.reason_codes)
 
     def test_build_sha_must_equal_release_sha(self):
-        result = qualify_supply_chain(evidence(built_from_commit_sha="3" * 40))
+        result = qualify(evidence(built_from_commit_sha="3" * 40))
         self.assertEqual(result.status, "FAIL")
         self.assertIn("SUPPLY_CHAIN.BUILD_SHA_MISMATCH", result.reason_codes)
 
     def test_sbom_must_cover_exact_distributed_inventory(self):
-        result = qualify_supply_chain(evidence(distributed_component_ids=("pkg:pypi/other@1.0",)))
+        result = qualify(evidence(distributed_component_ids=("pkg:pypi/other@1.0",)))
         self.assertEqual(result.status, "FAIL")
         self.assertIn("SUPPLY_CHAIN.SBOM_INVENTORY_MISMATCH", result.reason_codes)
 
     def test_parsed_sbom_inventory_is_required_not_just_component_evidence(self):
-        result = qualify_supply_chain(
+        result = qualify(
             evidence(sbom_component_ids=("pkg:pypi/other@1.0",))
         )
         self.assertEqual(result.status, "FAIL")
         self.assertIn("SUPPLY_CHAIN.SBOM_INVENTORY_MISMATCH", result.reason_codes)
 
     def test_top_level_supply_chain_evidence_is_bound_to_exact_release(self):
-        result = qualify_supply_chain(
+        result = qualify(
             evidence(sbom_reviewed_for_release_sha="2" * 40)
         )
         self.assertEqual(result.status, "FAIL")
         self.assertIn("SUPPLY_CHAIN.STALE_SBOM_REVIEW", result.reason_codes)
 
     def test_missing_or_unknown_model_data_rights_cannot_pass(self):
-        missing = qualify_supply_chain(evidence(model_rights=()))
-        unknown = qualify_supply_chain(evidence(model_rights=(rights(rights_status="UNKNOWN"),)))
+        missing = qualify(evidence(model_rights=()))
+        unknown = qualify(evidence(model_rights=(rights(rights_status="UNKNOWN"),)))
         self.assertEqual(missing.status, "INCONCLUSIVE")
         self.assertEqual(unknown.status, "INCONCLUSIVE")
 
@@ -157,8 +185,8 @@ class SupplyChainQualificationTests(unittest.TestCase):
             evidence(model_data_rights=(object(),))
 
     def test_qualification_identity_binds_exact_component_evidence(self):
-        baseline = qualify_supply_chain(evidence())
-        changed = qualify_supply_chain(
+        baseline = qualify(evidence())
+        changed = qualify(
             evidence(comp=component(source_revision="commit:abcdef"))
         )
         self.assertEqual(baseline.status, changed.status)
@@ -167,8 +195,8 @@ class SupplyChainQualificationTests(unittest.TestCase):
     def test_equivalent_rights_order_has_stable_identity(self):
         first = rights(artifact_id="model:a")
         second = rights(artifact_id="data:b", use_scope="train")
-        left = qualify_supply_chain(evidence(model_rights=(first, second)))
-        right = qualify_supply_chain(evidence(model_rights=(second, first)))
+        left = qualify(evidence(model_rights=(first, second)))
+        right = qualify(evidence(model_rights=(second, first)))
         self.assertEqual(left.status, right.status)
         self.assertEqual(left.qualification_id, right.qualification_id)
 

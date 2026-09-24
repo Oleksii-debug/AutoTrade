@@ -151,12 +151,32 @@ class AuthorityTests(unittest.TestCase):
             "a1", intent_hash="h1", account_id="paper-1", environment="PAPER",
             instrument="ABC", action="ORDER.SUBMIT", now="2026-09-24T18:04:59Z"
         )
-        self.assertEqual(before, (False, "authority_epoch_changed"))
+        self.assertEqual(before, (True, "allowed"))
         at = service.dispatch_allowed(
             "a1", intent_hash="h1", account_id="paper-1", environment="PAPER",
             instrument="ABC", action="ORDER.SUBMIT", now="2026-09-24T18:05:00Z"
         )
         self.assertEqual(at, (False, "policy_revoked"))
+
+    def test_unrelated_policy_registration_does_not_cancel_admission(self):
+        service = AuthorityService()
+        service.register_policy(policy(autonomous=True))
+        service.admit(
+            admission_id="a1", policy_id="p1", intent_hash="h1",
+            account_id="paper-1", environment="PAPER", instrument="ABC",
+            action="ORDER.SUBMIT", notional="100", state_version=1,
+            risk_admitted=True, now="2026-09-24T18:00:00Z",
+        )
+        service.register_policy(policy(
+            policy_id="p2", account_id="paper-2", autonomous=True
+        ))
+        self.assertEqual(
+            service.dispatch_allowed(
+                "a1", intent_hash="h1", account_id="paper-1", environment="PAPER",
+                instrument="ABC", action="ORDER.SUBMIT", now="2026-09-24T18:01:00Z"
+            ),
+            (True, "allowed"),
+        )
 
     def test_policy_boolean_inputs_fail_closed(self):
         with self.assertRaises(TypeError):

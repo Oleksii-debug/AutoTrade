@@ -26,7 +26,10 @@ def _authority_decision(
     intent_hash: str,
     now: str,
 ) -> tuple[bool, str]:
-    result = authority_check(intent_hash, now)
+    try:
+        result = authority_check(intent_hash, now)
+    except Exception as error:
+        return False, f"authority_check_error:{type(error).__name__}"
     if not isinstance(result, tuple) or len(result) != 2:
         return False, "authority_check_invalid_result"
     allowed, reason = result

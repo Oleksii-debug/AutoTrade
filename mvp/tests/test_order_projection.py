@@ -39,6 +39,14 @@ class OrderProjectionTests(unittest.TestCase):
         with self.assertRaises(OrderProjectionConflict):
             order.record_fill(fill_id="f1", quantity="1.5", price="10")
 
+    def test_overfill_is_exposed_instead_of_hidden_as_normal_fill(self):
+        order = OrderProjection(client_order_id="c1", requested_quantity="1")
+        order.record_fill(fill_id="f1", quantity="1.2", price="10")
+        snap = order.snapshot()
+        self.assertEqual(snap.state, "OVERFILLED")
+        self.assertEqual(snap.filled_quantity, Decimal("1.2"))
+        self.assertEqual(snap.open_quantity, Decimal("0"))
+
     def test_late_bust_after_terminal_fill_reopens_quantity(self):
         order = OrderProjection(client_order_id="c1", requested_quantity="1")
         order.record_fill(fill_id="f1", quantity="1", price="10")

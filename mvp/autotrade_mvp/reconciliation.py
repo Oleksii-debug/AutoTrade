@@ -112,7 +112,7 @@ class SnapshotConsistencyEvidence:
     @property
     def consistent(self) -> bool:
         if self.mode == "ATOMIC":
-            return True
+            return not self.sequence_gap_detected
         return (
             self.buffered_stream_events
             and self.replay_complete

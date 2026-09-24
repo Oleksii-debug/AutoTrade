@@ -212,6 +212,55 @@ class EconomicBook:
         )
 
 
+class ScopedEconomicBook:
+    """Account/environment-bound facade over the canonical EconomicBook."""
+
+    _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
+
+    def __init__(
+        self,
+        *,
+        environment: str,
+        account_id: str,
+        transactions: Iterable[JournalTransaction] = (),
+    ):
+        normalized_environment = _name(environment, field="environment").upper()
+        if normalized_environment not in self._ENVIRONMENTS:
+            raise ValueError("unsupported environment")
+        self.environment = normalized_environment
+        self.account_id = _name(account_id, field="account_id")
+        self._book = EconomicBook(transactions)
+
+    @property
+    def transactions(self) -> tuple[JournalTransaction, ...]:
+        return self._book.transactions
+
+    def append(self, transaction: JournalTransaction) -> bool:
+        return self._book.append(transaction)
+
+    def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
+        return self._book.balance(ledger_account, asset_or_currency)
+
+    def cash(self, currency: str) -> Decimal:
+        return self._book.cash(currency)
+
+    def position(self, instrument: str) -> Decimal:
+        return self._book.position(instrument)
+
+    def fee_expense(self, currency: str) -> Decimal:
+        return self._book.fee_expense(currency)
+
+    def audit_digest(self) -> str:
+        return payload_digest(
+            {
+                "schema_version": "1.0.0",
+                "environment": self.environment,
+                "account_id": self.account_id,
+                "economic_book_digest": self._book.audit_digest(),
+            }
+        )
+
+
 def book_external_cash_flow(
     *,
     transaction_id: str,

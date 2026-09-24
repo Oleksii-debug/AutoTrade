@@ -106,6 +106,57 @@ class AblationTests(unittest.TestCase):
                 components=("wire-story-group-7", "wire-story-group-7"),
             )
 
+    def test_components_must_be_immutable_tuple(self):
+        mutable = ["base", "agent"]
+        with self.assertRaisesRegex(TypeError, "immutable tuple"):
+            AblationOutcome(
+                case_id="case-mutable-components",
+                input_fingerprint="same",
+                variant="FULL",
+                utility=Decimal("0.1"),
+                cost=Decimal("0.01"),
+                elapsed_ms=10,
+                deadline_ms=100,
+                components=mutable,
+            )
+
+    def test_elapsed_and_deadline_reject_boolean_pseudo_integers(self):
+        with self.assertRaisesRegex(TypeError, "must be integers"):
+            AblationOutcome(
+                case_id="case-bool-elapsed",
+                input_fingerprint="same",
+                variant="FULL",
+                utility=Decimal("0.1"),
+                cost=Decimal("0.01"),
+                elapsed_ms=True,
+                deadline_ms=100,
+                components=("base",),
+            )
+        with self.assertRaisesRegex(TypeError, "must be integers"):
+            AblationOutcome(
+                case_id="case-bool-deadline",
+                input_fingerprint="same",
+                variant="FULL",
+                utility=Decimal("0.1"),
+                cost=Decimal("0.01"),
+                elapsed_ms=10,
+                deadline_ms=True,
+                components=("base",),
+            )
+
+    def test_case_identity_must_be_explicit_string(self):
+        with self.assertRaisesRegex(ValueError, "case_id"):
+            AblationOutcome(
+                case_id=1,
+                input_fingerprint="same",
+                variant="FULL",
+                utility=Decimal("0.1"),
+                cost=Decimal("0.01"),
+                elapsed_ms=10,
+                deadline_ms=100,
+                components=("base",),
+            )
+
     def test_binary_float_utility_and_cost_are_rejected(self):
         with self.assertRaises(TypeError):
             AblationOutcome(

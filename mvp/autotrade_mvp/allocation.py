@@ -43,6 +43,44 @@ class AllocationCandidate:
     price: Decimal
     lot_size: Decimal
     cost_rate: Decimal = Decimal("0")
+    capital_requirement_rate: Decimal = Decimal("1")
+    min_notional: Decimal = Decimal("0")
+    fee_floor: Decimal = Decimal("0")
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbol", _text(self.symbol, name="symbol"))
+        object.__setattr__(
+            self,
+            "desired_notional",
+            _decimal(self.desired_notional, name="desired_notional"),
+        )
+        object.__setattr__(self, "price", _positive(self.price, name="price"))
+        object.__setattr__(
+            self, "lot_size", _positive(self.lot_size, name="lot_size")
+        )
+        object.__setattr__(
+            self,
+            "cost_rate",
+            _positive(self.cost_rate, name="cost_rate", allow_zero=True),
+        )
+        object.__setattr__(
+            self,
+            "capital_requirement_rate",
+            _positive(
+                self.capital_requirement_rate,
+                name="capital_requirement_rate",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "min_notional",
+            _positive(self.min_notional, name="min_notional", allow_zero=True),
+        )
+        object.__setattr__(
+            self,
+            "fee_floor",
+            _positive(self.fee_floor, name="fee_floor", allow_zero=True),
+        )
 
     @classmethod
     def create(
@@ -53,6 +91,9 @@ class AllocationCandidate:
         price,
         lot_size,
         cost_rate=0,
+        capital_requirement_rate=1,
+        min_notional=0,
+        fee_floor=0,
     ) -> "AllocationCandidate":
         return cls(
             symbol=_text(symbol, name="symbol"),
@@ -60,6 +101,12 @@ class AllocationCandidate:
             price=_positive(price, name="price"),
             lot_size=_positive(lot_size, name="lot_size"),
             cost_rate=_positive(cost_rate, name="cost_rate", allow_zero=True),
+            capital_requirement_rate=_positive(
+                capital_requirement_rate,
+                name="capital_requirement_rate",
+            ),
+            min_notional=_positive(min_notional, name="min_notional", allow_zero=True),
+            fee_floor=_positive(fee_floor, name="fee_floor", allow_zero=True),
         )
 
 
@@ -73,6 +120,39 @@ class AllocationPolicy:
     max_stress_loss: Decimal
     max_iterations: int = 64
     min_scale_tolerance: Decimal = Decimal("0.000001")
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "cash_available",
+            "max_gross_notional",
+            "max_net_notional",
+            "max_symbol_notional",
+            "max_total_cost",
+            "max_stress_loss",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _positive(
+                    getattr(self, field_name),
+                    name=field_name,
+                    allow_zero=True,
+                ),
+            )
+        if (
+            not isinstance(self.max_iterations, int)
+            or isinstance(self.max_iterations, bool)
+            or self.max_iterations < 1
+        ):
+            raise ValueError("max_iterations must be a positive integer")
+        object.__setattr__(
+            self,
+            "min_scale_tolerance",
+            _positive(
+                self.min_scale_tolerance,
+                name="min_scale_tolerance",
+            ),
+        )
 
     @classmethod
     def create(
@@ -140,14 +220,27 @@ def _evaluate(
     targets: list[AllocationTarget] = []
     notionals: dict[str, Decimal] = {}
     total_cost = Decimal("0")
+    capital_required = Decimal("0")
 
     for candidate in candidates:
         scaled = candidate.desired_notional * scale
         quantity = _round_quantity(scaled, candidate.price, candidate.lot_size)
         notional = quantity * candidate.price
-        cost = abs(notional) * candidate.cost_rate
+        # Provider/account minimums are hard feasibility constraints. A rounded
+        # order below the explicit minimum is not executable and therefore
+        # becomes a no-trade target instead of being advertised as feasible.
+        if quantity != 0 and abs(notional) < candidate.min_notional:
+            quantity = Decimal("0")
+            notional = Decimal("0")
+        proportional_cost = abs(notional) * candidate.cost_rate
+        cost = (
+            max(proportional_cost, candidate.fee_floor)
+            if notional != 0
+            else Decimal("0")
+        )
         notionals[candidate.symbol] = notional
         total_cost += cost
+        capital_required += abs(notional) * candidate.capital_requirement_rate
         targets.append(
             AllocationTarget(
                 symbol=candidate.symbol,
@@ -159,10 +252,10 @@ def _evaluate(
 
     gross = sum((abs(value) for value in notionals.values()), Decimal("0"))
     net = abs(sum(notionals.values(), Decimal("0")))
-    cash_required = (
-        sum((max(value, Decimal("0")) for value in notionals.values()), Decimal("0"))
-        + total_cost
-    )
+    # Short-sale proceeds are never treated as spendable capital. Each
+    # candidate must declare an explicit capital/margin requirement; the
+    # conservative default is 100% of absolute notional.
+    cash_required = capital_required + total_cost
 
     worst_stress_loss = Decimal("0")
     for scenario in stress_scenarios.values():
@@ -198,6 +291,32 @@ def _evaluate(
     )
 
 
+def _cash_fallback(
+    candidates: Sequence[AllocationCandidate],
+    *,
+    reason: str,
+) -> AllocationResult:
+    return AllocationResult(
+        status="NO_INCREASE_FALLBACK",
+        scale=Decimal("0"),
+        targets=tuple(
+            AllocationTarget(
+                symbol=candidate.symbol,
+                quantity=Decimal("0"),
+                notional=Decimal("0"),
+                estimated_cost=Decimal("0"),
+            )
+            for candidate in candidates
+        ),
+        gross_notional=Decimal("0"),
+        net_notional=Decimal("0"),
+        estimated_cost=Decimal("0"),
+        worst_stress_loss=Decimal("0"),
+        cash_required=Decimal("0"),
+        reason=reason,
+    )
+
+
 def allocate_targets(
     candidates: Sequence[AllocationCandidate],
     policy: AllocationPolicy,
@@ -211,17 +330,7 @@ def allocate_targets(
     """
 
     if not candidates:
-        return AllocationResult(
-            status="NO_INCREASE_FALLBACK",
-            scale=Decimal("0"),
-            targets=(),
-            gross_notional=Decimal("0"),
-            net_notional=Decimal("0"),
-            estimated_cost=Decimal("0"),
-            worst_stress_loss=Decimal("0"),
-            cash_required=Decimal("0"),
-            reason="no allocation candidates",
-        )
+        return _cash_fallback(candidates, reason="no allocation candidates")
 
     symbols = [candidate.symbol for candidate in candidates]
     if len(symbols) != len(set(symbols)):
@@ -255,7 +364,15 @@ def allocate_targets(
 
     requested = _evaluate(candidates, policy, normalized_stress, Decimal("1"))
     if requested.status == "ALLOCATED":
-        return requested
+        if requested.gross_notional > 0:
+            return requested
+        return _cash_fallback(
+            candidates,
+            reason=(
+                "requested allocation contains no executable positive lot after "
+                "lot-size and minimum-notional constraints; remain in cash"
+            ),
+        )
 
     low = Decimal("0")
     high = Decimal("1")
@@ -273,24 +390,11 @@ def allocate_targets(
             high = mid
 
     if best.gross_notional == 0:
-        return AllocationResult(
-            status="NO_INCREASE_FALLBACK",
-            scale=Decimal("0"),
-            targets=tuple(
-                AllocationTarget(
-                    symbol=candidate.symbol,
-                    quantity=Decimal("0"),
-                    notional=Decimal("0"),
-                    estimated_cost=Decimal("0"),
-                )
-                for candidate in candidates
+        return _cash_fallback(
+            candidates,
+            reason=(
+                "bounded search found no positive-lot feasible allocation; remain in cash"
             ),
-            gross_notional=Decimal("0"),
-            net_notional=Decimal("0"),
-            estimated_cost=Decimal("0"),
-            worst_stress_loss=Decimal("0"),
-            cash_required=Decimal("0"),
-            reason="bounded search found no positive-lot feasible allocation; remain in cash",
         )
 
     return AllocationResult(

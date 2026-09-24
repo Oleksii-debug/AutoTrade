@@ -285,6 +285,13 @@ class ExecutionRealismTests(unittest.TestCase):
         self.assertEqual(result.fill_price, Decimal("90") * (Decimal("1") - Decimal("15") / Decimal("10000")))
         self.assertIn("intrabar queue", " ".join(result.warnings))
 
+    def test_base_scenario_cannot_hide_optimistic_cost_multiplier(self):
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "BASE scenario_cost_multiplier cannot be below 1",
+        ):
+            model(scenario="BASE", scenario_cost_multiplier="0.5")
+
     def test_adverse_multiplier_increases_market_execution_cost(self):
         base = simulate_execution(order(), top(), model())
         adverse = simulate_execution(

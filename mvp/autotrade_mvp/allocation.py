@@ -111,6 +111,79 @@ class AllocationCandidate:
 
 
 @dataclass(frozen=True)
+class ObjectiveCandidate:
+    """Allocation candidate plus explicit decision-time objective evidence.
+
+    expected_return_rate is directional: a positive value means the proposed
+    long/short direction has positive expected gross return per unit notional.
+    risk_penalty_rate is a decision preference, not a cash expense.
+    """
+
+    candidate: AllocationCandidate
+    expected_return_rate: Decimal
+    risk_penalty_rate: Decimal = Decimal("0")
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.candidate, AllocationCandidate):
+            raise TypeError("candidate must be an AllocationCandidate")
+        object.__setattr__(
+            self,
+            "expected_return_rate",
+            _decimal(self.expected_return_rate, name="expected_return_rate"),
+        )
+        object.__setattr__(
+            self,
+            "risk_penalty_rate",
+            _positive(
+                self.risk_penalty_rate,
+                name="risk_penalty_rate",
+                allow_zero=True,
+            ),
+        )
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        symbol: str,
+        desired_notional,
+        price,
+        lot_size,
+        expected_return_rate,
+        risk_penalty_rate=0,
+        cost_rate=0,
+        capital_requirement_rate=1,
+        min_notional=0,
+        fee_floor=0,
+    ) -> "ObjectiveCandidate":
+        return cls(
+            candidate=AllocationCandidate.create(
+                symbol=symbol,
+                desired_notional=desired_notional,
+                price=price,
+                lot_size=lot_size,
+                cost_rate=cost_rate,
+                capital_requirement_rate=capital_requirement_rate,
+                min_notional=min_notional,
+                fee_floor=fee_floor,
+            ),
+            expected_return_rate=_decimal(
+                expected_return_rate,
+                name="expected_return_rate",
+            ),
+            risk_penalty_rate=_positive(
+                risk_penalty_rate,
+                name="risk_penalty_rate",
+                allow_zero=True,
+            ),
+        )
+
+    @property
+    def objective_rate(self) -> Decimal:
+        return self.expected_return_rate - self.risk_penalty_rate
+
+
+@dataclass(frozen=True)
 class AllocationPolicy:
     cash_available: Decimal
     max_gross_notional: Decimal
@@ -118,6 +191,7 @@ class AllocationPolicy:
     max_symbol_notional: Decimal
     max_total_cost: Decimal
     max_stress_loss: Decimal
+    minimum_cash_reserve: Decimal = Decimal("0")
     max_iterations: int = 64
     min_scale_tolerance: Decimal = Decimal("0.000001")
 
@@ -129,6 +203,7 @@ class AllocationPolicy:
             "max_symbol_notional",
             "max_total_cost",
             "max_stress_loss",
+            "minimum_cash_reserve",
         ):
             object.__setattr__(
                 self,
@@ -164,6 +239,7 @@ class AllocationPolicy:
         max_symbol_notional,
         max_total_cost,
         max_stress_loss,
+        minimum_cash_reserve=0,
         max_iterations: int = 64,
         min_scale_tolerance="0.000001",
     ) -> "AllocationPolicy":
@@ -176,6 +252,11 @@ class AllocationPolicy:
             max_symbol_notional=_positive(max_symbol_notional, name="max_symbol_notional", allow_zero=True),
             max_total_cost=_positive(max_total_cost, name="max_total_cost", allow_zero=True),
             max_stress_loss=_positive(max_stress_loss, name="max_stress_loss", allow_zero=True),
+            minimum_cash_reserve=_positive(
+                minimum_cash_reserve,
+                name="minimum_cash_reserve",
+                allow_zero=True,
+            ),
             max_iterations=max_iterations,
             min_scale_tolerance=_positive(min_scale_tolerance, name="min_scale_tolerance"),
         )
@@ -202,6 +283,15 @@ class AllocationResult:
     reason: str
 
 
+@dataclass(frozen=True)
+class ObjectiveAllocationResult:
+    allocation: AllocationResult
+    selected_symbols: tuple[str, ...]
+    expected_net_utility: Decimal
+    objective_version: str
+    reason: str
+
+
 def _round_quantity(notional: Decimal, price: Decimal, lot_size: Decimal) -> Decimal:
     if notional == 0:
         return Decimal("0")
@@ -209,6 +299,48 @@ def _round_quantity(notional: Decimal, price: Decimal, lot_size: Decimal) -> Dec
     lots = (absolute_quantity / lot_size).to_integral_value(rounding=ROUND_DOWN)
     quantity = lots * lot_size
     return quantity if notional > 0 else -quantity
+
+
+def _normalize_stress_scenarios(
+    candidates: Sequence[AllocationCandidate],
+    stress_scenarios: Mapping[str, Mapping[str, object]] | None,
+) -> dict[str, dict[str, Decimal]]:
+    symbols = [candidate.symbol for candidate in candidates]
+    if len(symbols) != len(set(symbols)):
+        raise ValueError("candidate symbols must be unique")
+
+    normalized = {
+        _text(name, name="scenario name"): {
+            _text(symbol, name="stress symbol"): _decimal(
+                shock,
+                name=f"stress shock {symbol}",
+            )
+            for symbol, shock in scenario.items()
+        }
+        for name, scenario in (stress_scenarios or {}).items()
+    }
+    symbol_set = set(symbols)
+    unknown = sorted(
+        {
+            symbol
+            for scenario in normalized.values()
+            for symbol in scenario
+            if symbol not in symbol_set
+        }
+    )
+    if unknown:
+        raise ValueError(
+            f"stress scenarios reference unknown symbols: {', '.join(unknown)}"
+        )
+
+    for scenario_name, scenario in normalized.items():
+        missing = sorted(symbol_set - set(scenario))
+        if missing:
+            raise ValueError(
+                f"stress scenario {scenario_name} is missing explicit shocks for: "
+                f"{', '.join(missing)}"
+            )
+    return normalized
 
 
 def _evaluate(
@@ -226,9 +358,6 @@ def _evaluate(
         scaled = candidate.desired_notional * scale
         quantity = _round_quantity(scaled, candidate.price, candidate.lot_size)
         notional = quantity * candidate.price
-        # Provider/account minimums are hard feasibility constraints. A rounded
-        # order below the explicit minimum is not executable and therefore
-        # becomes a no-trade target instead of being advertised as feasible.
         if quantity != 0 and abs(notional) < candidate.min_notional:
             quantity = Decimal("0")
             notional = Decimal("0")
@@ -252,30 +381,30 @@ def _evaluate(
 
     gross = sum((abs(value) for value in notionals.values()), Decimal("0"))
     net = abs(sum(notionals.values(), Decimal("0")))
-    # Short-sale proceeds are never treated as spendable capital. Each
-    # candidate must declare an explicit capital/margin requirement; the
-    # conservative default is 100% of absolute notional.
     cash_required = capital_required + total_cost
 
     worst_stress_loss = Decimal("0")
     for scenario in stress_scenarios.values():
         pnl = sum(
             (
-                notional * scenario.get(symbol, Decimal("0"))
+                notional * scenario[symbol]
                 for symbol, notional in notionals.items()
             ),
             Decimal("0"),
         )
         worst_stress_loss = max(worst_stress_loss, -pnl)
 
-    symbol_ok = all(abs(value) <= policy.max_symbol_notional for value in notionals.values())
+    symbol_ok = all(
+        abs(value) <= policy.max_symbol_notional
+        for value in notionals.values()
+    )
     feasible = (
         symbol_ok
         and gross <= policy.max_gross_notional
         and net <= policy.max_net_notional
         and total_cost <= policy.max_total_cost
         and worst_stress_loss <= policy.max_stress_loss
-        and cash_required <= policy.cash_available
+        and cash_required + policy.minimum_cash_reserve <= policy.cash_available
     )
 
     return AllocationResult(
@@ -287,7 +416,11 @@ def _evaluate(
         estimated_cost=total_cost,
         worst_stress_loss=worst_stress_loss,
         cash_required=cash_required,
-        reason="all hard constraints satisfied" if feasible else "one or more hard constraints failed",
+        reason=(
+            "all hard constraints satisfied"
+            if feasible
+            else "one or more hard constraints failed"
+        ),
     )
 
 
@@ -332,35 +465,13 @@ def allocate_targets(
     if not candidates:
         return _cash_fallback(candidates, reason="no allocation candidates")
 
-    symbols = [candidate.symbol for candidate in candidates]
-    if len(symbols) != len(set(symbols)):
-        raise ValueError("candidate symbols must be unique")
+    normalized_stress = _normalize_stress_scenarios(candidates, stress_scenarios)
 
-    normalized_stress = {
-        _text(name, name="scenario name"): {
-            _text(symbol, name="stress symbol"): _decimal(shock, name=f"stress shock {symbol}")
-            for symbol, shock in scenario.items()
-        }
-        for name, scenario in (stress_scenarios or {}).items()
-    }
-    unknown = sorted(
-        {
-            symbol
-            for scenario in normalized_stress.values()
-            for symbol in scenario
-            if symbol not in set(symbols)
-        }
-    )
-    if unknown:
-        raise ValueError(f"stress scenarios reference unknown symbols: {', '.join(unknown)}")
-
-    required_symbols = set(symbols)
-    for scenario_name, scenario in normalized_stress.items():
-        missing = sorted(required_symbols - set(scenario))
-        if missing:
-            raise ValueError(
-                f"stress scenario {scenario_name} is missing explicit shocks for: {', '.join(missing)}"
-            )
+    if policy.minimum_cash_reserve > policy.cash_available:
+        return _cash_fallback(
+            candidates,
+            reason="minimum cash reserve exceeds available cash",
+        )
 
     requested = _evaluate(candidates, policy, normalized_stress, Decimal("1"))
     if requested.status == "ALLOCATED":
@@ -393,7 +504,8 @@ def allocate_targets(
         return _cash_fallback(
             candidates,
             reason=(
-                "bounded search found no positive-lot feasible allocation; remain in cash"
+                "bounded search found no positive-lot feasible allocation; "
+                "remain in cash"
             ),
         )
 
@@ -406,5 +518,164 @@ def allocate_targets(
         estimated_cost=best.estimated_cost,
         worst_stress_loss=best.worst_stress_loss,
         cash_required=best.cash_required,
-        reason="requested allocation was infeasible; uniformly reduced to the largest verified feasible target found",
+        reason=(
+            "requested allocation was infeasible; uniformly reduced to the "
+            "largest verified feasible target found"
+        ),
+    )
+
+
+def _expected_net_utility(
+    result: AllocationResult,
+    objective_by_symbol: Mapping[str, ObjectiveCandidate],
+) -> Decimal:
+    gross_objective = sum(
+        (
+            abs(target.notional)
+            * objective_by_symbol[target.symbol].objective_rate
+            for target in result.targets
+        ),
+        Decimal("0"),
+    )
+    return gross_objective - result.estimated_cost
+
+
+def allocate_objective_targets(
+    candidates: Sequence[ObjectiveCandidate],
+    policy: AllocationPolicy,
+    *,
+    stress_scenarios: Mapping[str, Mapping[str, object]] | None = None,
+    max_candidate_sets: int = 64,
+) -> ObjectiveAllocationResult:
+    """Select a deterministic feasible candidate prefix by expected net utility.
+
+    Candidates are ranked by directional expected return less an explicit risk
+    penalty. Every tested prefix is then passed through the same hard allocation
+    constraints. Estimated execution cost is subtracted exactly once from the
+    objective. The search is intentionally transparent and bounded; it is not a
+    claim of globally optimal portfolio construction. If the search budget is
+    exceeded, evidence is incomplete, or no positive-utility feasible target is
+    found, the result is a no-increase cash fallback.
+    """
+
+    if not isinstance(max_candidate_sets, int) or isinstance(max_candidate_sets, bool):
+        raise ValueError("max_candidate_sets must be a positive integer")
+    if max_candidate_sets < 1:
+        raise ValueError("max_candidate_sets must be a positive integer")
+
+    allocation_candidates: list[AllocationCandidate] = []
+    for item in candidates:
+        if not isinstance(item, ObjectiveCandidate):
+            raise TypeError("all candidates must be ObjectiveCandidate values")
+        allocation_candidates.append(item.candidate)
+
+    if not candidates:
+        fallback = _cash_fallback((), reason="no objective candidates")
+        return ObjectiveAllocationResult(
+            allocation=fallback,
+            selected_symbols=(),
+            expected_net_utility=Decimal("0"),
+            objective_version="deterministic-net-utility-v1",
+            reason="no objective candidates",
+        )
+
+    normalized_stress = _normalize_stress_scenarios(
+        allocation_candidates,
+        stress_scenarios,
+    )
+
+    if len(candidates) > max_candidate_sets:
+        fallback = _cash_fallback(
+            allocation_candidates,
+            reason="objective search budget exceeded before evaluation",
+        )
+        return ObjectiveAllocationResult(
+            allocation=fallback,
+            selected_symbols=(),
+            expected_net_utility=Decimal("0"),
+            objective_version="deterministic-net-utility-v1",
+            reason="objective search budget exceeded before evaluation",
+        )
+
+    ranked = sorted(
+        (
+            item
+            for item in candidates
+            if item.objective_rate > 0
+        ),
+        key=lambda item: (-item.objective_rate, item.candidate.symbol),
+    )
+
+    if not ranked:
+        fallback = _cash_fallback(
+            allocation_candidates,
+            reason="no candidate has positive expected return after risk penalty",
+        )
+        return ObjectiveAllocationResult(
+            allocation=fallback,
+            selected_symbols=(),
+            expected_net_utility=Decimal("0"),
+            objective_version="deterministic-net-utility-v1",
+            reason="no candidate has positive expected return after risk penalty",
+        )
+
+    objective_by_symbol = {
+        item.candidate.symbol: item
+        for item in ranked
+    }
+    best_result: AllocationResult | None = None
+    best_symbols: tuple[str, ...] = ()
+    best_utility = Decimal("0")
+
+    for prefix_size in range(1, len(ranked) + 1):
+        prefix = ranked[:prefix_size]
+        prefix_symbols = tuple(item.candidate.symbol for item in prefix)
+        projected_stress = {
+            scenario_name: {
+                symbol: scenario[symbol]
+                for symbol in prefix_symbols
+            }
+            for scenario_name, scenario in normalized_stress.items()
+        }
+        result = allocate_targets(
+            [item.candidate for item in prefix],
+            policy,
+            stress_scenarios=projected_stress,
+        )
+        if result.status != "ALLOCATED":
+            continue
+        utility = _expected_net_utility(result, objective_by_symbol)
+        if utility > best_utility:
+            best_result = result
+            best_symbols = prefix_symbols
+            best_utility = utility
+
+    if best_result is None:
+        fallback = _cash_fallback(
+            allocation_candidates,
+            reason=(
+                "no positive-utility feasible allocation survived hard "
+                "constraints and estimated costs"
+            ),
+        )
+        return ObjectiveAllocationResult(
+            allocation=fallback,
+            selected_symbols=(),
+            expected_net_utility=Decimal("0"),
+            objective_version="deterministic-net-utility-v1",
+            reason=(
+                "no positive-utility feasible allocation survived hard "
+                "constraints and estimated costs"
+            ),
+        )
+
+    return ObjectiveAllocationResult(
+        allocation=best_result,
+        selected_symbols=best_symbols,
+        expected_net_utility=best_utility,
+        objective_version="deterministic-net-utility-v1",
+        reason=(
+            "selected the highest positive expected-net-utility deterministic "
+            "candidate prefix that passed all hard allocation constraints"
+        ),
     )

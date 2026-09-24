@@ -80,6 +80,30 @@ class AblationTests(unittest.TestCase):
                 components=("wire-story-group-7", "wire-story-group-7"),
             )
 
+    def test_binary_float_utility_and_cost_are_rejected(self):
+        with self.assertRaises(TypeError):
+            AblationOutcome(
+                case_id="case-float-utility",
+                input_fingerprint="same",
+                variant="FULL",
+                utility=0.1,
+                cost=Decimal("0.01"),
+                elapsed_ms=10,
+                deadline_ms=100,
+                components=("base",),
+            )
+        with self.assertRaises(TypeError):
+            AblationOutcome(
+                case_id="case-float-cost",
+                input_fingerprint="same",
+                variant="FULL",
+                utility=Decimal("0.1"),
+                cost=0.01,
+                elapsed_ms=10,
+                deadline_ms=100,
+                components=("base",),
+            )
+
     def test_negative_cost_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "non-negative"):
             outcome(

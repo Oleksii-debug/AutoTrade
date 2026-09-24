@@ -29,7 +29,11 @@ class DurableReservationBookTests(unittest.TestCase):
         self.temp.cleanup()
 
     def book(self):
-        return DurableReservationBook(self.store, account_id="paper-account")
+        return DurableReservationBook(
+            self.store,
+            environment="PAPER",
+            account_id="paper-account",
+        )
 
     def reserve(self, book, *, amount="70", command="cmd-reserve", idem="idem-reserve"):
         return book.reserve(
@@ -156,8 +160,16 @@ class DurableReservationBookTests(unittest.TestCase):
         self.assertEqual(book.get("r1").consumed["CASH:USD"], Decimal("10"))
 
     def test_command_and_idempotency_namespaces_are_isolated_per_account(self):
-        first = DurableReservationBook(self.store, account_id="account-a")
-        second = DurableReservationBook(self.store, account_id="account-b")
+        first = DurableReservationBook(
+            self.store,
+            environment="PAPER",
+            account_id="account-a",
+        )
+        second = DurableReservationBook(
+            self.store,
+            environment="PAPER",
+            account_id="account-b",
+        )
 
         first.reserve(
             command_id="same-command",
@@ -181,17 +193,88 @@ class DurableReservationBookTests(unittest.TestCase):
         self.assertEqual(
             DurableReservationBook(
                 JournalStore(self.path),
-                account_id="account-a",
+                environment="PAPER",
+                    account_id="account-a",
             ).total_reserved("CASH:USD"),
             Decimal("70"),
         )
         self.assertEqual(
             DurableReservationBook(
                 JournalStore(self.path),
-                account_id="account-b",
+                environment="PAPER",
+                    account_id="account-b",
             ).total_reserved("CASH:USD"),
             Decimal("60"),
         )
+
+    def test_same_account_isolated_between_paper_and_live(self):
+        paper = DurableReservationBook(
+            self.store,
+            environment="PAPER",
+            account_id="same-account",
+        )
+        live = DurableReservationBook(
+            self.store,
+            environment="LIVE",
+            account_id="same-account",
+        )
+        paper.reserve(
+            command_id="same-command",
+            idempotency_key="same-idempotency",
+            reservation_id="paper-r",
+            intent_id="paper-i",
+            requirements={"CASH:USD": "70"},
+            available={"CASH:USD": "100"},
+        )
+        live.reserve(
+            command_id="same-command",
+            idempotency_key="same-idempotency",
+            reservation_id="live-r",
+            intent_id="live-i",
+            requirements={"CASH:USD": "30"},
+            available={"CASH:USD": "100"},
+        )
+        self.assertNotEqual(paper.scope_id, live.scope_id)
+        self.assertEqual(paper.total_reserved("CASH:USD"), Decimal("70"))
+        self.assertEqual(live.total_reserved("CASH:USD"), Decimal("30"))
+        self.assertEqual(
+            DurableReservationBook(
+                JournalStore(self.path),
+                environment="PAPER",
+                account_id="same-account",
+            ).total_reserved("CASH:USD"),
+            Decimal("70"),
+        )
+        self.assertEqual(
+            DurableReservationBook(
+                JournalStore(self.path),
+                environment="LIVE",
+                account_id="same-account",
+            ).total_reserved("CASH:USD"),
+            Decimal("30"),
+        )
+
+    def test_reservation_environment_is_required_and_canonical(self):
+        with self.assertRaises(TypeError):
+            DurableReservationBook(self.store, account_id="acct")
+        with self.assertRaisesRegex(ValueError, "environment must be"):
+            DurableReservationBook(
+                self.store,
+                environment="",
+                account_id="acct",
+            )
+        lower = DurableReservationBook(
+            self.store,
+            environment=" paper ",
+            account_id="acct",
+        )
+        upper = DurableReservationBook(
+            self.store,
+            environment="PAPER",
+            account_id="acct",
+        )
+        self.assertEqual(lower.environment, "PAPER")
+        self.assertEqual(lower.scope_id, upper.scope_id)
 
     def test_journal_failure_does_not_mutate_projection(self):
         book = self.book()
@@ -289,6 +372,7 @@ class DurableReservationBookTests(unittest.TestCase):
                 raced = True
                 competing = DurableReservationBook(
                     JournalStore(self.path),
+                    environment="PAPER",
                     account_id="paper-account",
                 )
                 competing.consume(
@@ -325,6 +409,7 @@ class DurableReservationBookTests(unittest.TestCase):
                 raced = True
                 competing = DurableReservationBook(
                     JournalStore(self.path),
+                    environment="PAPER",
                     account_id="paper-account",
                 )
                 competing.reserve(

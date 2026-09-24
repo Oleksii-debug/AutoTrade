@@ -184,6 +184,41 @@ class NeutralReuseCharacterizationTests(unittest.TestCase):
                     with self.assertRaisesRegex(ResourceLockError, "regular non-symlink"):
                         ResourceLock(symlink).acquire()
 
+    def test_provenance_is_exact_and_keeps_release_rights_unresolved(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        record = json.loads(
+            (
+                repo_root
+                / "provenance"
+                / "reuse"
+                / "autosport-neutral-primitives.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(record["work_package"], "WP-04")
+        self.assertEqual(
+            record["source"]["revision"],
+            "cb102d85f0c820c7097875191deca73e53ec94f5",
+        )
+        self.assertEqual(
+            record["autotrade_base_sha"],
+            "b8a63b477a2328007ddfc4a55b7aa02941d9fa3a",
+        )
+        self.assertEqual(
+            record["source"]["release_distribution_rights"],
+            "UNRESOLVED",
+        )
+        self.assertEqual(record["qualification_status"], "IN_PROGRESS")
+        self.assertEqual(
+            record["characterization"]["exact_head_ci_evidence"],
+            "PENDING",
+        )
+        self.assertFalse(
+            record["authority_boundary"]["financial_ledger_write_allowed"]
+        )
+        self.assertFalse(
+            record["authority_boundary"]["remote_execution_authority_allowed"]
+        )
+
     def test_neutral_reuse_modules_have_no_autosport_runtime_import(self):
         root = Path(__file__).resolve().parents[1] / "autotrade_research"
         files = (

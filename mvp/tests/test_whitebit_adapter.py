@@ -11,6 +11,8 @@ from mvp.autotrade_mvp.whitebit_adapter import (
     build_exact_client_order_lookup,
     build_history_page_request,
     classify_whitebit_write,
+    normalize_execution_deal,
+    normalize_execution_history,
     normalize_order_observation,
     parse_market_rules,
     redact_whitebit_debug,
@@ -274,6 +276,98 @@ class WhiteBitAdapterTests(unittest.TestCase):
         )
         self.assertEqual(rejected.status, "REJECTED")
         self.assertFalse(rejected.retry_same_economic_action)
+
+    def test_execution_deal_uses_unique_deal_id_and_exact_economics(self):
+        deal = normalize_execution_deal(
+            {
+                "id": 123,
+                "clientOrderId": "at-order-1",
+                "time": "1593233939.123456",
+                "side": "buy",
+                "role": 2,
+                "amount": "0.001",
+                "price": "40000",
+                "deal": "40",
+                "fee": "0.04",
+                "orderId": 456,
+                "feeAsset": "USDT",
+            },
+            market="BTC_USDT",
+        )
+        self.assertEqual(deal.provider_execution_id, "123")
+        self.assertEqual(deal.provider_order_id, "456")
+        self.assertEqual(deal.role, "TAKER")
+        self.assertEqual(deal.trade_time, "2020-06-27T07:38:59.123456Z")
+        fill = deal.to_reconciliation_fill()
+        self.assertEqual(fill.provider_execution_id, "123")
+        self.assertEqual(fill.quantity, Decimal("0.001"))
+        self.assertEqual(fill.price, Decimal("40000"))
+        self.assertEqual(fill.fee_amount, Decimal("0.04"))
+
+    def test_execution_deal_rejects_inconsistent_notional(self):
+        with self.assertRaisesRegex(ProviderCoreError, "amount \* price"):
+            normalize_execution_deal(
+                {
+                    "id": 123,
+                    "clientOrderId": "at-order-1",
+                    "time": "1593233939",
+                    "side": "buy",
+                    "role": 1,
+                    "amount": "0.001",
+                    "price": "40000",
+                    "deal": "41",
+                    "fee": "0",
+                    "orderId": 456,
+                    "feeAsset": "USDT",
+                },
+                market="BTC_USDT",
+            )
+
+    def test_execution_history_deduplicates_exact_deals_and_rejects_conflicts(self):
+        first = {
+            "id": 123,
+            "clientOrderId": "at-order-1",
+            "time": "1593233939",
+            "side": "buy",
+            "role": 1,
+            "amount": "0.001",
+            "price": "40000",
+            "deal": "40",
+            "fee": "0.04",
+            "orderId": 456,
+            "feeAsset": "USDT",
+        }
+        deduped = normalize_execution_history(
+            [first, dict(first)],
+            market="BTC_USDT",
+        )
+        self.assertEqual(len(deduped), 1)
+
+        conflict = dict(first)
+        conflict["price"] = "41000"
+        conflict["deal"] = "41"
+        with self.assertRaisesRegex(ProviderCoreError, "conflicting observations"):
+            normalize_execution_history(
+                [first, conflict],
+                market="BTC_USDT",
+            )
+
+    def test_execution_time_requires_exact_microsecond_precision(self):
+        record = {
+            "id": 123,
+            "clientOrderId": "at-order-1",
+            "time": "1593233939.1234567",
+            "side": "sell",
+            "role": 2,
+            "amount": "0.001",
+            "price": "40000",
+            "deal": "40",
+            "fee": "0",
+            "orderId": 456,
+            "feeAsset": "USDT",
+        }
+        with self.assertRaisesRegex(ProviderCoreError, "microsecond"):
+            normalize_execution_deal(record, market="BTC_USDT")
 
     def test_exact_client_lookup_does_not_smuggle_date_filters(self):
         request = build_exact_client_order_lookup(

@@ -718,7 +718,20 @@ class WhiteBitPageEvidence:
 class WhiteBitPaginationCoverage:
     """Contiguous offset pagination proof for one provider surface."""
 
-    def __init__(self, *, maximum_limit: int, initial_offset: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        surface: str,
+        maximum_limit: int,
+        initial_offset: int = 0,
+    ) -> None:
+        normalized_surface = _text(surface, name="surface").upper()
+        if normalized_surface not in {
+            "OPEN_ORDERS",
+            "ORDER_HISTORY",
+            "EXECUTIONS",
+        }:
+            raise WhiteBitAdapterError("unsupported pagination surface")
         if (
             not isinstance(maximum_limit, int)
             or isinstance(maximum_limit, bool)
@@ -731,6 +744,7 @@ class WhiteBitPaginationCoverage:
             or initial_offset < 0
         ):
             raise WhiteBitAdapterError("initial_offset must be non-negative")
+        self.surface = normalized_surface
         self.maximum_limit = maximum_limit
         self.initial_offset = initial_offset
         self._pages: list[WhiteBitPageEvidence] = []
@@ -771,15 +785,24 @@ class WhiteBitPaginationCoverage:
 
 
 def order_history_coverage() -> WhiteBitPaginationCoverage:
-    return WhiteBitPaginationCoverage(maximum_limit=500)
+    return WhiteBitPaginationCoverage(
+        surface="ORDER_HISTORY",
+        maximum_limit=500,
+    )
 
 
 def execution_history_coverage() -> WhiteBitPaginationCoverage:
-    return WhiteBitPaginationCoverage(maximum_limit=500)
+    return WhiteBitPaginationCoverage(
+        surface="EXECUTIONS",
+        maximum_limit=500,
+    )
 
 
 def open_order_coverage() -> WhiteBitPaginationCoverage:
-    return WhiteBitPaginationCoverage(maximum_limit=100)
+    return WhiteBitPaginationCoverage(
+        surface="OPEN_ORDERS",
+        maximum_limit=100,
+    )
 
 
 def _history_window(*, start_unix: int, end_unix: int) -> tuple[int, int]:
@@ -1028,4 +1051,41 @@ def sign_private_request(
         headers=headers,
         nonce=nonce,
         nonce_window=nonce_window,
+    )
+
+
+def absence_evidence_from_coverages(
+    *,
+    order_found: bool,
+    open_orders: WhiteBitPaginationCoverage,
+    order_history: WhiteBitPaginationCoverage,
+    executions: WhiteBitPaginationCoverage,
+    activities_complete: bool,
+    consistency_horizon_satisfied: bool,
+) -> WhiteBitAbsenceEvidence:
+    """Bind absence semantics to concrete, surface-typed pagination proof."""
+    for coverage, expected in (
+        (open_orders, "OPEN_ORDERS"),
+        (order_history, "ORDER_HISTORY"),
+        (executions, "EXECUTIONS"),
+    ):
+        if not isinstance(coverage, WhiteBitPaginationCoverage):
+            raise TypeError(f"{expected} coverage has wrong type")
+        if coverage.surface != expected:
+            raise WhiteBitAdapterError(
+                f"coverage surface mismatch: expected {expected}"
+            )
+    if type(order_found) is not bool:
+        raise TypeError("order_found must be boolean")
+    if type(activities_complete) is not bool:
+        raise TypeError("activities_complete must be boolean")
+    if type(consistency_horizon_satisfied) is not bool:
+        raise TypeError("consistency_horizon_satisfied must be boolean")
+    return WhiteBitAbsenceEvidence(
+        order_found=order_found,
+        open_orders_complete=open_orders.complete,
+        order_history_complete=order_history.complete,
+        executions_complete=executions.complete,
+        activities_complete=activities_complete,
+        consistency_horizon_satisfied=consistency_horizon_satisfied,
     )

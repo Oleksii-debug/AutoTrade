@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import unittest
 
 from mvp.autotrade_mvp.allocation import (
@@ -179,6 +179,31 @@ class AllocationTests(unittest.TestCase):
                 self.policy(cash_available="2000", max_gross_notional="2000"),
                 stress_scenarios={"partial": {"AAA": "-0.20"}},
             )
+
+    def test_lot_rounding_never_overshoots_under_low_decimal_precision(self):
+        with localcontext() as context:
+            context.prec = 1
+            result = allocate_targets(
+                [
+                    self.candidate(
+                        desired="9.999999",
+                        price="1",
+                        lot="1",
+                    )
+                ],
+                self.policy(
+                    cash_available="100",
+                    max_gross_notional="100",
+                    max_net_notional="100",
+                    max_symbol_notional="100",
+                ),
+            )
+        self.assertEqual(result.status, "ALLOCATED")
+        self.assertEqual(result.targets[0].quantity, Decimal("9"))
+        self.assertLessEqual(
+            result.targets[0].notional,
+            Decimal("9.999999"),
+        )
 
     def test_minimum_lot_can_force_cash_fallback(self):
         result = allocate_targets(

@@ -155,6 +155,46 @@
     };
   }
 
+  function parseOperationResult(value, expectedOperationId) {
+    const result = requiredObject(value, "OperationResult");
+    const allowed = new Set([
+      "operation_id", "phase", "started_at", "updated_at",
+      "affected_refs", "evidence", "remaining_uncertainty"
+    ]);
+    for (const key of Object.keys(result)) {
+      if (!allowed.has(key)) {
+        throw new Error("OperationResult contains non-canonical field " + key);
+      }
+    }
+    const operationId = requiredText(result.operation_id, "operation_id");
+    if (operationId !== expectedOperationId) {
+      throw new Error("OperationResult operation_id does not match");
+    }
+    const phases = [
+      "QUEUED", "RUNNING", "WAITING_EXTERNAL",
+      "SUCCEEDED", "FAILED", "UNKNOWN", "CANCELLED"
+    ];
+    if (!phases.includes(result.phase)) {
+      throw new Error("OperationResult phase is not canonical");
+    }
+    if (!Array.isArray(result.evidence) ||
+        result.evidence.some((item) =>
+          !item || typeof item !== "object" || Array.isArray(item))) {
+      throw new Error("OperationResult evidence must be an array of objects");
+    }
+    return {
+      operationId,
+      phase: result.phase,
+      startedAt: requiredText(result.started_at, "started_at"),
+      updatedAt: requiredText(result.updated_at, "updated_at"),
+      affectedRefs: requiredStringArray(result.affected_refs, "affected_refs"),
+      evidence: result.evidence,
+      remainingUncertainty: requiredStringArray(
+        result.remaining_uncertainty,
+        "remaining_uncertainty")
+    };
+  }
+
   function setCommandAvailability(enabled) {
     const form = byId("host-command-form");
     const button = form && form.querySelector('button[type="submit"]');
@@ -254,6 +294,41 @@
     return response.json();
   }
 
+  function renderOperation(operation) {
+    const body = byId("operations-body");
+    if (!body) return;
+
+    let row = [...body.querySelectorAll("tr")].find(
+      (item) => item.dataset.operationId === operation.operationId);
+    if (!row) {
+      if (body.children.length === 1 &&
+          body.firstElementChild.dataset.operationId === undefined) {
+        body.replaceChildren();
+      }
+      row = document.createElement("tr");
+      row.dataset.operationId = operation.operationId;
+      for (let index = 0; index < 4; index += 1) {
+        row.appendChild(document.createElement("td"));
+      }
+      body.appendChild(row);
+    }
+
+    row.children[0].textContent = operation.operationId;
+    row.children[1].textContent = operation.phase;
+    row.children[2].textContent = operation.updatedAt;
+    row.children[3].textContent = operation.remainingUncertainty.length > 0
+      ? operation.remainingUncertainty.join(", ")
+      : "None reported";
+  }
+
+  async function refreshOperation(operationId) {
+    const raw = await jsonFetch(
+      `${API}/operations/${encodeURIComponent(operationId)}`);
+    const operation = parseOperationResult(raw, operationId);
+    renderOperation(operation);
+    return operation;
+  }
+
   function renderSnapshot(snapshot, {announceRefresh = false} = {}) {
     const parsed = parseCanonicalSnapshot(snapshot);
     if (parsed.version < state.version || parsed.cursor < state.cursor) {
@@ -348,6 +423,13 @@
           state.version = version;
         }
         const kind = String(event.kind ?? event.event_type ?? "");
+        if (kind === "OPERATION_UPDATED") {
+          const payload = requiredObject(event.payload, "event.payload");
+          const operationId = requiredText(
+            payload.operation_id,
+            "event.payload.operation_id");
+          await refreshOperation(operationId);
+        }
         if (MATERIAL_EVENTS.has(kind)) {
           announce(eventMessage(event), URGENT_EVENTS.has(kind));
         }
@@ -405,10 +487,24 @@
     try {
       const result = await submitCanonicalCommand(payload);
       if (result.status === "ACCEPTED") {
-        text(
-          "command-result",
+        let acceptedMessage =
           "Command " + commandId +
-            " was accepted for processing. It is not yet a completed financial outcome.");
+          " was accepted for processing. It is not yet a completed financial outcome.";
+        if (result.operationId !== null) {
+          try {
+            const operation = await refreshOperation(result.operationId);
+            const uncertainty = operation.remainingUncertainty.length > 0
+              ? " Remaining uncertainty: " +
+                operation.remainingUncertainty.join(", ") + "."
+              : "";
+            acceptedMessage +=
+              " Operation phase is " + operation.phase + "." + uncertainty;
+          } catch {
+            acceptedMessage +=
+              " Current operation status could not be loaded; the accepted command response remains unchanged.";
+          }
+        }
+        text("command-result", acceptedMessage);
       } else if (result.status === "CONFLICT") {
         text(
           "command-result",

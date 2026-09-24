@@ -142,6 +142,85 @@ class JournalStore:
             }),
         }
 
+    @staticmethod
+    def _unique_index_columns(connection, table_name: str) -> set[tuple[str, ...]]:
+        unique_indexes: set[tuple[str, ...]] = set()
+        for index_row in connection.execute(f"PRAGMA index_list({table_name})"):
+            if not bool(index_row["unique"]):
+                continue
+            index_name = str(index_row["name"]).replace("'", "''")
+            columns = tuple(
+                str(column_row["name"])
+                for column_row in connection.execute(
+                    f"PRAGMA index_info('{index_name}')"
+                )
+            )
+            unique_indexes.add(columns)
+        return unique_indexes
+
+    @classmethod
+    def _validate_key_contracts(cls, connection) -> None:
+        expected_primary_keys = {
+            "events": ("event_id",),
+            "outbox": ("outbox_id",),
+            "command_dedupe": ("command_id",),
+            "projection_checkpoints": (
+                "projection_name",
+                "aggregate_type",
+                "aggregate_id",
+            ),
+        }
+        expected_unique = {
+            "events": {
+                ("aggregate_type", "aggregate_id", "aggregate_version"),
+            },
+            "outbox": {("event_id",)},
+            "command_dedupe": {("idempotency_key",)},
+        }
+        for table_name, expected_pk in expected_primary_keys.items():
+            pk_columns = tuple(
+                str(row["name"])
+                for row in sorted(
+                    (
+                        row
+                        for row in connection.execute(
+                            f"PRAGMA table_info({table_name})"
+                        )
+                        if int(row["pk"]) > 0
+                    ),
+                    key=lambda row: int(row["pk"]),
+                )
+            )
+            if pk_columns != expected_pk:
+                raise ValueError(
+                    f"Journal schema table {table_name} has invalid primary key"
+                )
+
+        for table_name, required_indexes in expected_unique.items():
+            actual = cls._unique_index_columns(connection, table_name)
+            missing = required_indexes - actual
+            if missing:
+                rendered = "; ".join(",".join(columns) for columns in sorted(missing))
+                raise ValueError(
+                    f"Journal schema table {table_name} is missing unique constraint: "
+                    + rendered
+                )
+
+        foreign_keys = [
+            row
+            for row in connection.execute("PRAGMA foreign_key_list(outbox)")
+            if (
+                str(row["table"]) == "events"
+                and str(row["from"]) == "event_id"
+                and str(row["to"]) == "event_id"
+                and str(row["on_delete"]).upper() == "RESTRICT"
+            )
+        ]
+        if not foreign_keys:
+            raise ValueError(
+                "Journal schema table outbox is missing event ownership foreign key"
+            )
+
     def _initialize(self) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -211,6 +290,7 @@ class JournalStore:
                             + " is missing required columns: "
                             + ", ".join(sorted(missing_columns))
                         )
+                self._validate_key_contracts(connection)
                 connection.commit()
             except Exception:
                 connection.rollback()

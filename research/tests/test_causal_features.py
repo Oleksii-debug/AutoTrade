@@ -49,6 +49,108 @@ class CausalFeatureTests(unittest.TestCase):
         self.assertEqual(point.value, Decimal("0.1"))
         self.assertEqual(point.source_revisions, ("r1", "r2"))
 
+    def test_delayed_revision_of_old_event_does_not_reverse_feature_time(self):
+        original = source(0, "100", revision="r1")
+        newer = source(1, "110", revision="r1")
+        corrected_old = SourceValue.create(
+            observation_id="AAA-0-r2",
+            symbol="AAA",
+            event_time=BASE,
+            available_at=BASE + timedelta(days=2),
+            value="101",
+            source_revision="r2",
+        )
+        point = rolling_return(
+            [original, newer, corrected_old],
+            symbol="AAA",
+            decision_time=BASE + timedelta(days=2),
+            count=2,
+        )
+        self.assertEqual(point.input_ids, ("AAA-0-r2", "AAA-1-r1"))
+        self.assertEqual(
+            point.value,
+            (Decimal("110") / Decimal("101")) - Decimal("1"),
+        )
+
+    def test_universe_latest_prefers_later_event_time_over_late_old_revision(self):
+        later_market_event = source(1, "110", revision="r1")
+        corrected_old = SourceValue.create(
+            observation_id="AAA-0-r9",
+            symbol="AAA",
+            event_time=BASE,
+            available_at=BASE + timedelta(days=2),
+            value="999",
+            source_revision="r9",
+        )
+        selected = require_universe_members(
+            ["AAA"],
+            [later_market_event, corrected_old],
+            decision_time=BASE + timedelta(days=2),
+        )
+        self.assertEqual(selected["AAA"].observation_id, "AAA-1-r1")
+        self.assertEqual(selected["AAA"].value, Decimal("110"))
+
+    def test_simultaneous_conflicting_revisions_fail_closed(self):
+        first = SourceValue.create(
+            observation_id="AAA-r-a",
+            symbol="AAA",
+            event_time=BASE,
+            available_at=BASE + timedelta(hours=1),
+            value="100",
+            source_revision="provider-revision-a",
+        )
+        conflicting = SourceValue.create(
+            observation_id="AAA-r-b",
+            symbol="AAA",
+            event_time=BASE,
+            available_at=BASE + timedelta(hours=1),
+            value="101",
+            source_revision="provider-revision-b",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "ambiguous simultaneously available revisions",
+        ):
+            rolling_return(
+                [first, conflicting, source(1, "110")],
+                symbol="AAA",
+                decision_time=BASE + timedelta(days=1),
+                count=2,
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "ambiguous simultaneously available revisions",
+        ):
+            require_universe_members(
+                ["AAA"],
+                [first, conflicting],
+                decision_time=BASE + timedelta(hours=1),
+            )
+
+    def test_duplicate_same_truth_at_same_availability_is_deterministic(self):
+        first = SourceValue.create(
+            observation_id="AAA-copy-b",
+            symbol="AAA",
+            event_time=BASE,
+            available_at=BASE + timedelta(hours=1),
+            value="100",
+            source_revision="same-revision",
+        )
+        duplicate = SourceValue.create(
+            observation_id="AAA-copy-a",
+            symbol="AAA",
+            event_time=BASE,
+            available_at=BASE + timedelta(hours=1),
+            value="100",
+            source_revision="same-revision",
+        )
+        selected = require_universe_members(
+            ["AAA"],
+            [first, duplicate],
+            decision_time=BASE + timedelta(hours=1),
+        )
+        self.assertEqual(selected["AAA"].observation_id, "AAA-copy-a")
+
     def test_normalizer_rejects_future_fit_input(self):
         points = [
             FeaturePoint("AAA", BASE, Decimal("1"), ("a",), ("r1",), "x"),

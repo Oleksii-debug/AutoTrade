@@ -98,6 +98,9 @@ class SpecialistRun:
             raise SpecialistDagError("confidence cannot exceed one")
         if abs(score) > 1:
             raise SpecialistDagError("score magnitude cannot exceed one")
+        expected_direction = "LONG" if score > 0 else "SHORT" if score < 0 else "FLAT"
+        if self.direction != expected_direction:
+            raise SpecialistDagError("direction must match score sign")
         object.__setattr__(self, "score", score)
         object.__setattr__(self, "confidence", confidence)
         refs = tuple(_text(item, "evidence reference") for item in self.evidence_refs)

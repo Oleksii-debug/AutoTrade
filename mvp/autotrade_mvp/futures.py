@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_EVEN, localcontext
+from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 from typing import Literal
 
@@ -160,24 +160,27 @@ def settle_fraction(
     quantum: Decimal | str,
     rounding: Literal["HALF_EVEN", "DOWN"] = "HALF_EVEN",
 ) -> Decimal:
-    """Convert an exact rational only at an explicit settlement boundary."""
+    """Round an exact rational to an exact multiple of the settlement quantum."""
 
     if not isinstance(value, Fraction):
         raise FuturesError("value must be an exact Fraction")
     step = _decimal(quantum, "quantum", positive=True)
-    mode = {"HALF_EVEN": ROUND_HALF_EVEN, "DOWN": ROUND_DOWN}.get(rounding)
-    if mode is None:
+    if rounding not in {"HALF_EVEN", "DOWN"}:
         raise FuturesError("unsupported rounding policy")
-    numerator = Decimal(value.numerator)
-    denominator = Decimal(value.denominator)
-    decimal_places = max(0, -step.as_tuple().exponent)
-    precision = max(
-        50,
-        len(str(abs(value.numerator))) + len(str(abs(value.denominator))) + decimal_places + 12,
-    )
-    with localcontext() as context:
-        context.prec = precision
-        return (numerator / denominator).quantize(step, rounding=mode)
+
+    units = value / _fraction(step)
+    sign = -1 if units < 0 else 1
+    numerator = abs(units.numerator)
+    denominator = units.denominator
+    whole, remainder = divmod(numerator, denominator)
+
+    if rounding == "HALF_EVEN":
+        doubled = remainder * 2
+        if doubled > denominator or (doubled == denominator and whole % 2 == 1):
+            whole += 1
+
+    signed_units = whole * sign
+    return step * Decimal(signed_units)
 
 
 def apply_variation_margin(

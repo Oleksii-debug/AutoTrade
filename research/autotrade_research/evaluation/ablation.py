@@ -6,12 +6,17 @@ causality, profitability or statistical significance by itself.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Iterable
 
 
-def _decimal(value: Decimal | int | str | float, field: str) -> Decimal:
-    number = Decimal(str(value))
+def _decimal(value: Decimal | int | str, field: str) -> Decimal:
+    if isinstance(value, bool) or isinstance(value, float):
+        raise TypeError(f"{field} must use Decimal, string or integer input")
+    try:
+        number = value if isinstance(value, Decimal) else Decimal(value)
+    except (InvalidOperation, TypeError, ValueError) as error:
+        raise ValueError(f"{field} must be a finite decimal") from error
     if not number.is_finite():
         raise ValueError(f"{field} must be finite")
     return number
@@ -29,16 +34,27 @@ class AblationOutcome:
     components: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not self.case_id or not self.input_fingerprint:
-            raise ValueError("case_id and input_fingerprint are required")
+        if not isinstance(self.case_id, str) or not self.case_id.strip():
+            raise ValueError("case_id must be a non-empty string")
+        if not isinstance(self.input_fingerprint, str) or not self.input_fingerprint.strip():
+            raise ValueError("input_fingerprint must be a non-empty string")
         if self.variant not in {"FULL", "ABLATED"}:
             raise ValueError("variant must be FULL or ABLATED")
+        if (
+            not isinstance(self.elapsed_ms, int)
+            or isinstance(self.elapsed_ms, bool)
+            or not isinstance(self.deadline_ms, int)
+            or isinstance(self.deadline_ms, bool)
+        ):
+            raise TypeError("elapsed_ms and deadline_ms must be integers")
         if self.elapsed_ms < 0 or self.deadline_ms <= 0:
             raise ValueError("elapsed_ms must be non-negative and deadline_ms positive")
+        if not isinstance(self.components, tuple):
+            raise TypeError("components must be an immutable tuple")
+        if any(not isinstance(item, str) or not item.strip() for item in self.components):
+            raise ValueError("component identities must be non-empty strings")
         if len(self.components) != len(set(self.components)):
             raise ValueError("components must use deduplicated canonical identities")
-        if any(not item for item in self.components):
-            raise ValueError("component identities must be non-empty")
         object.__setattr__(self, "utility", _decimal(self.utility, "utility"))
         cost = _decimal(self.cost, "cost")
         if cost < 0:
@@ -81,8 +97,14 @@ class AblationPair:
         return self.full.met_deadline == self.ablated.met_deadline
 
     @property
+    def utility_comparable(self) -> bool:
+        """Utility is decision-relevant only when both variants met the deadline."""
+
+        return self.full.met_deadline and self.ablated.met_deadline
+
+    @property
     def utility_delta(self) -> Decimal | None:
-        if not self.deadline_comparable:
+        if not self.utility_comparable:
             return None
         return self.full.utility - self.ablated.utility
 
@@ -101,6 +123,7 @@ class AblationSummary:
     total_pairs: int
     comparable_pairs: int
     deadline_mismatch_pairs: int
+    both_deadline_miss_pairs: int
     full_deadline_misses: int
     ablated_deadline_misses: int
     mean_utility_delta: Decimal | None
@@ -114,7 +137,14 @@ def summarize_ablation(target_component: str, pairs: Iterable[AblationPair]) -> 
     if any(pair.target_component != target_component for pair in selected):
         raise ValueError("all pairs must target the requested component")
 
-    comparable = [pair for pair in selected if pair.deadline_comparable]
+    seen_cases: set[tuple[str, str]] = set()
+    for pair in selected:
+        case_key = (pair.full.case_id, pair.full.input_fingerprint)
+        if case_key in seen_cases:
+            raise ValueError("duplicate matched ablation case")
+        seen_cases.add(case_key)
+
+    comparable = [pair for pair in selected if pair.utility_comparable]
     utility_deltas = [pair.utility_delta for pair in comparable]
     concrete_utility = [value for value in utility_deltas if value is not None]
 
@@ -134,6 +164,10 @@ def summarize_ablation(target_component: str, pairs: Iterable[AblationPair]) -> 
         total_pairs=len(selected),
         comparable_pairs=len(comparable),
         deadline_mismatch_pairs=sum(not pair.deadline_comparable for pair in selected),
+        both_deadline_miss_pairs=sum(
+            not pair.full.met_deadline and not pair.ablated.met_deadline
+            for pair in selected
+        ),
         full_deadline_misses=sum(not pair.full.met_deadline for pair in selected),
         ablated_deadline_misses=sum(not pair.ablated.met_deadline for pair in selected),
         mean_utility_delta=mean_utility,

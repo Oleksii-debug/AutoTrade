@@ -294,6 +294,10 @@ def parse_order_observation(payload: Mapping[str, object]) -> AlpacaOrderObserva
         average = _decimal(average_value, name="filled_avg_price", positive=True)
         if filled == 0:
             raise AlpacaAdapterError("filled_avg_price cannot exist when filled_qty is zero")
+    elif filled > 0:
+        raise AlpacaAdapterError(
+            "filled_avg_price is required when filled_qty is positive"
+        )
     return AlpacaOrderObservation(
         provider_order_id=provider_order_id,
         client_order_id=client_id,

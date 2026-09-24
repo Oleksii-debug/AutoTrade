@@ -46,8 +46,8 @@ class HostEvent:
 class HostCommandStore:
     """Small durable-state analogue for host/API command semantics."""
 
-    TERMINAL_PHASES = {"SUCCEEDED", "FAILED", "UNKNOWN", "CANCELLED"}
-    UPDATE_PHASES = {"RUNNING", "WAITING_EXTERNAL", *TERMINAL_PHASES}
+    TERMINAL_PHASES = {"SUCCEEDED", "FAILED", "CANCELLED"}
+    UPDATE_PHASES = {"RUNNING", "WAITING_EXTERNAL", "UNKNOWN", *TERMINAL_PHASES}
 
     def __init__(
         self,
@@ -184,21 +184,32 @@ class HostCommandStore:
         current = self._operations.get(operation_id)
         if current is None:
             raise KeyError("Unknown operation")
-        if current.phase in self.TERMINAL_PHASES:
-            raise ValueError("Terminal operation cannot transition again")
         if phase not in self.UPDATE_PHASES:
             raise ValueError("Unsupported operation phase")
+        normalized_uncertainty = tuple(str(x) for x in remaining_uncertainty)
+        if current.phase in self.TERMINAL_PHASES:
+            raise ValueError("Terminal operation cannot transition again")
+        if current.phase == "UNKNOWN" and phase not in self.TERMINAL_PHASES:
+            raise ValueError("UNKNOWN operation can only resolve to a terminal outcome")
+        if phase == "UNKNOWN" and not normalized_uncertainty:
+            raise ValueError("UNKNOWN operation must preserve remaining uncertainty")
+        if phase in self.TERMINAL_PHASES and normalized_uncertainty:
+            raise ValueError("Terminal operation cannot retain unresolved uncertainty")
         self.state_version += 1
         updated = OperationResult(
             operation_id=operation_id,
             phase=phase,
             state_version=str(self.state_version),
-            remaining_uncertainty=tuple(remaining_uncertainty),
+            remaining_uncertainty=normalized_uncertainty,
         )
         self._operations[operation_id] = updated
         self._emit(
             "OPERATION_UPDATED",
-            {"operation_id": operation_id, "phase": phase},
+            {
+                "operation_id": operation_id,
+                "phase": phase,
+                "remaining_uncertainty": list(normalized_uncertainty),
+            },
         )
         return updated
 

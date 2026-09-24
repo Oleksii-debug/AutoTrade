@@ -468,7 +468,8 @@ def reconcile_account(
             reason = "provider_working_orders_contains_client_order_id"
             matched_provider_order_ids = (matched_provider_order.provider_order_id,)
         elif (
-            pagination_complete
+            snapshot_is_consistent
+            and pagination_complete
             and submission.client_order_id in searched
             and start <= submission_time <= end
             and _absence_is_proven(absence_evidence, submission_time)
@@ -486,6 +487,8 @@ def reconcile_account(
                 reason = "client_order_id_not_explicitly_searched"
             elif not (start <= submission_time <= end):
                 reason = "submission_time_outside_complete_coverage"
+            elif not snapshot_is_consistent:
+                reason = "provider_snapshot_consistency_not_evidenced"
             else:
                 reason = "absence_surface_evidence_incomplete"
         resolutions.append(

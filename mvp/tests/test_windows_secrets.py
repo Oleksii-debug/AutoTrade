@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -187,6 +188,41 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
             secret_value="read-secret",
         )
         self.assertEqual(read_handle.purpose, "READ")
+
+    def test_concurrent_registrations_do_not_lose_records(self):
+        def register_one(index):
+            vault = ProtectedCredentialVault(
+                self.path,
+                protector=DeterministicProtector(),
+            )
+            return vault.register(
+                handle_id=f"cred-concurrent-{index}",
+                owner_identity="windows-user-1",
+                account_id=f"paper-{index}",
+                provider="SIMULATED",
+                purpose="TRADE",
+                secret_value=f"secret-{index}",
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            handles = list(executor.map(register_one, range(24)))
+
+        restarted = ProtectedCredentialVault(
+            self.path,
+            protector=DeterministicProtector(),
+        )
+        self.assertEqual(len(handles), 24)
+        for index, handle in enumerate(handles):
+            self.assertEqual(
+                restarted.resolve(
+                    handle,
+                    execution_identity="windows-user-1",
+                    account_id=f"paper-{index}",
+                    provider="SIMULATED",
+                    purpose="TRADE",
+                ),
+                f"secret-{index}",
+            )
 
     def test_duplicate_handle_and_corrupt_vault_fail_closed(self):
         self.register()

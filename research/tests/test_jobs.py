@@ -52,6 +52,16 @@ def resolution_proof(directory, *, job_id, generation, verdict, artifact_id=None
     )
 
 
+def result_artifact(artifact_store, *, data=b"accepted-result"):
+    manifest = artifact_store.publish_bytes(
+        artifact_id=str(uuid4()),
+        data=data,
+        media_type="application/octet-stream",
+        rights={"storage": True, "export": False},
+    )
+    return f"artifact:{manifest['artifact_id']}@{manifest['sha256']}"
+
+
 class ResearchJobStoreTests(unittest.TestCase):
     def setUp(self):
         self.now = datetime(2026, 9, 24, 16, 0, tzinfo=timezone.utc)
@@ -302,7 +312,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                 verdict="PROVEN_SUCCEEDED",
                 artifact_id="22222222-2222-4222-8222-222222222222",
             )
-            outputs = ["artifact:accepted-output"]
+            outputs = [result_artifact(artifact_store)]
             resolved_at = self.now + timedelta(seconds=12)
             self.assertTrue(
                 store.resolve_waiting_external(
@@ -334,7 +344,10 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=int(store.get(job["job_id"])["generation"]),
                     verdict="PROVEN_SUCCEEDED",
                     evidence_ref=evidence,
-                    output_refs=["artifact:different-output"],
+                    output_refs=[
+                        "artifact:77777777-7777-4777-8777-777777777777@sha256:"
+                        + "7" * 64
+                    ],
                     now=resolved_at + timedelta(seconds=31),
                 )
             with self.assertRaises(JobConflictError):
@@ -494,6 +507,44 @@ class ResearchJobStoreTests(unittest.TestCase):
                     verdict="PROVEN_NOT_RUN",
                     evidence_ref=evidence_ref,
                     artifact_store=artifact_store,
+                    now=self.now + timedelta(seconds=12),
+                )
+            self.assertEqual(store.get(job["job_id"])["state"], "WAITING_EXTERNAL")
+
+    def test_external_success_rejects_nonexistent_output_artifact(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            job, _ = store.enqueue(
+                kind="research.external_annotation",
+                dedupe_key="missing-output-artifact",
+                input_hashes=[digest("dataset")],
+                resource_budget={"wall_seconds": 60},
+                now=self.now,
+            )
+            store.claim("worker-a", now=self.now, lease_seconds=10)
+            store.requeue_expired(now=self.now + timedelta(seconds=11))
+            generation = int(store.get(job["job_id"])["generation"])
+            artifact_store, evidence_ref = resolution_proof(
+                directory,
+                job_id=job["job_id"],
+                generation=generation,
+                verdict="PROVEN_SUCCEEDED",
+            )
+            nonexistent_output = (
+                "artifact:88888888-8888-4888-8888-888888888888@sha256:"
+                + "8" * 64
+            )
+            with self.assertRaisesRegex(
+                JobConflictError,
+                "verified immutable output artifacts",
+            ):
+                store.resolve_waiting_external(
+                    job["job_id"],
+                    generation=generation,
+                    verdict="PROVEN_SUCCEEDED",
+                    evidence_ref=evidence_ref,
+                    artifact_store=artifact_store,
+                    output_refs=[nonexistent_output],
                     now=self.now + timedelta(seconds=12),
                 )
             self.assertEqual(store.get(job["job_id"])["state"], "WAITING_EXTERNAL")

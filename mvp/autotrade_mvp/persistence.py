@@ -120,6 +120,28 @@ class JournalStore:
             )
         raise ValueError(f"Unsupported journal migration version: {version}")
 
+    @classmethod
+    def _required_table_columns(cls) -> dict[str, frozenset[str]]:
+        return {
+            "schema_migrations": frozenset({"version", "applied_at"}),
+            "events": frozenset({
+                "event_id", "event_type", "aggregate_type", "aggregate_id",
+                "aggregate_version", "payload_json", "payload_hash", "committed_at",
+            }),
+            "outbox": frozenset({
+                "outbox_id", "event_id", "topic", "payload_json",
+                "created_at", "delivered_at",
+            }),
+            "command_dedupe": frozenset({
+                "command_id", "idempotency_key", "request_hash", "result_json",
+                "state_version", "created_at",
+            }),
+            "projection_checkpoints": frozenset({
+                "projection_name", "aggregate_type", "aggregate_id",
+                "aggregate_version", "state_json", "state_hash", "updated_at",
+            }),
+        }
+
     def _initialize(self) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -168,6 +190,27 @@ class JournalStore:
                     raise ValueError(
                         "Journal schema is incomplete: " + ", ".join(sorted(missing_tables))
                     )
+
+                # Table names alone are not sufficient evidence of a valid
+                # migration.  A crash or legacy partial migration can leave a
+                # pre-existing table that makes CREATE TABLE IF NOT EXISTS a
+                # no-op.  Verify the structural column contract before
+                # recording this runtime as schema-compatible.
+                for table_name, required_columns in self._required_table_columns().items():
+                    actual_columns = {
+                        str(row["name"])
+                        for row in connection.execute(
+                            f"PRAGMA table_info({table_name})"
+                        )
+                    }
+                    missing_columns = required_columns - actual_columns
+                    if missing_columns:
+                        raise ValueError(
+                            "Journal schema table "
+                            + table_name
+                            + " is missing required columns: "
+                            + ", ".join(sorted(missing_columns))
+                        )
                 connection.commit()
             except Exception:
                 connection.rollback()

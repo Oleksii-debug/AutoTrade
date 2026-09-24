@@ -91,6 +91,56 @@ def _artifact_store(root: Path) -> str:
     return digest
 
 
+def _publish_json_artifact(root: Path, payload: dict) -> str:
+    data = (
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    digest = sha256(data).hexdigest()
+    object_path = root / "objects" / "sha256" / digest[:2] / digest
+    object_path.parent.mkdir(parents=True, exist_ok=True)
+    object_path.write_bytes(data)
+    manifest_path = root / "manifests" / "sha256" / digest[:2] / f"{digest}.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "algorithm": "sha256",
+                "digest": digest,
+                "size_bytes": len(data),
+                "media_type": "application/json",
+                "rights_basis": "first-party-test-evidence",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return "sha256:" + digest
+
+
+def _build_identity_artifact(
+    root: Path,
+    *,
+    source_sha: str = "a" * 40,
+    composition_sha256: str = "sha256:" + "c" * 64,
+) -> str:
+    return _publish_json_artifact(
+        root,
+        {
+            "schema_version": 1,
+            "kind": "AUTOTRADE_BUILD_IDENTITY",
+            "source_sha": source_sha,
+            "composition_sha256": composition_sha256,
+        },
+    )
+
+
 def _reconciliation(*, complete: bool = True):
     return reconcile_account(
         local_cash={"USD": "1000"},
@@ -169,6 +219,99 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertTrue(restore_requires_reconciliation(restored))
             self.assertTrue((restored / "state" / "journal.sqlite3").is_file())
             self.assertTrue((restored / "artifacts" / "objects" / "sha256").is_dir())
+
+    def test_immutable_build_identity_binds_source_sha_and_restore(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            build_identity = _build_identity_artifact(artifacts)
+            backup = create_backup(
+                state,
+                artifacts,
+                root / "backup",
+                build_identity_sha256=build_identity,
+            )
+            manifest = verify_backup(
+                backup,
+                expected_source_sha="a" * 40,
+                expected_build_identity_sha256=build_identity,
+            )
+            self.assertEqual(manifest["source_sha"], "a" * 40)
+            self.assertTrue(manifest["source_sha_bound"])
+            self.assertEqual(manifest["build_identity_sha256"], build_identity)
+            self.assertEqual(manifest["composition_sha256"], "sha256:" + "c" * 64)
+            self.assertNotIn("SOURCE_SHA_UNBOUND", manifest["unresolved_limits"])
+
+            with self.assertRaisesRegex(BackupCompatibilityError, "source SHA"):
+                restore_backup(
+                    backup,
+                    root / "wrong-build",
+                    expected_source_sha="b" * 40,
+                )
+            self.assertFalse((root / "wrong-build").exists())
+
+            restored = restore_backup(
+                backup,
+                root / "matched-build",
+                expected_source_sha="a" * 40,
+                expected_build_identity_sha256=build_identity,
+            )
+            marker = json.loads(
+                (restored / "RESTORE_RECONCILIATION_REQUIRED.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(marker["source_sha"], "a" * 40)
+            self.assertEqual(marker["build_identity_sha256"], build_identity)
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_unbound_backup_is_truthfully_marked_non_exact(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            manifest = verify_backup(backup)
+            self.assertIsNone(manifest["source_sha"])
+            self.assertFalse(manifest["source_sha_bound"])
+            self.assertIsNone(manifest["build_identity_sha256"])
+            self.assertIn("SOURCE_SHA_UNBOUND", manifest["unresolved_limits"])
+            with self.assertRaisesRegex(BackupCompatibilityError, "source SHA"):
+                verify_backup(backup, expected_source_sha="a" * 40)
+
+    def test_missing_or_wrong_build_identity_artifact_blocks_backup_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            missing = "sha256:" + "f" * 64
+            with self.assertRaisesRegex(BackupIntegrityError, "missing"):
+                create_backup(
+                    state,
+                    artifacts,
+                    root / "missing-build",
+                    build_identity_sha256=missing,
+                )
+            self.assertFalse((root / "missing-build").exists())
+
+            wrong_kind = _publish_json_artifact(
+                artifacts,
+                {
+                    "schema_version": 1,
+                    "kind": "NOT_A_BUILD_IDENTITY",
+                    "source_sha": "a" * 40,
+                    "composition_sha256": "sha256:" + "c" * 64,
+                },
+            )
+            with self.assertRaisesRegex(
+                BackupCompatibilityError,
+                "AUTOTRADE_BUILD_IDENTITY",
+            ):
+                create_backup(
+                    state,
+                    artifacts,
+                    root / "wrong-kind",
+                    build_identity_sha256=wrong_kind,
+                )
+            self.assertFalse((root / "wrong-kind").exists())
 
     def test_completed_restore_reconciliation_can_clear_gate_durably(self):
         with TemporaryDirectory() as directory:

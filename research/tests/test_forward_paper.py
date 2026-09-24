@@ -254,5 +254,20 @@ class ForwardPaperQualificationTests(unittest.TestCase):
         self.assertIn("account_reconciliation_incomplete", result.reasons)
 
 
+    def test_evidence_cannot_include_records_after_observed_until(self):
+        result = assess_forward_paper(
+            self.protocol(),
+            self.evidence(observed_until="2026-09-24T20:35:00Z"),
+        )
+        self.assertEqual(result.evidence_status, "INVALID")
+        self.assertIn("outcome_after_observed_until", result.reasons)
+        self.assertIn("operational_case_after_observed_until", result.reasons)
+
+    def test_required_operational_cases_are_case_insensitively_unique(self):
+        with self.assertRaisesRegex(ForwardPaperError, "case-insensitive duplicates"):
+            self.protocol(required_operational_cases=("reconnect", "RECONNECT"))
+
+
+
 if __name__ == "__main__":
     unittest.main()

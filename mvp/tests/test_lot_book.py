@@ -59,6 +59,13 @@ class FifoLotBookTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             book.mark_to_market("NaN")
 
+    def test_binary_float_and_boolean_inputs_are_rejected(self):
+        book = FifoLotBook()
+        with self.assertRaises(TypeError):
+            book.buy(1.0, "100")
+        with self.assertRaises(TypeError):
+            book.buy(True, "100")
+
     def test_full_round_trip_clears_basis(self):
         book = FifoLotBook()
         book.buy("1.25", "80")

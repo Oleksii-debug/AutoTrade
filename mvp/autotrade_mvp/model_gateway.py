@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Iterable
 
@@ -27,6 +27,18 @@ class RouteStatus(StrEnum):
     REJECTED = "REJECTED"
 
 
+def _exact_decimal(value: Decimal | str | int, field: str) -> Decimal:
+    if isinstance(value, bool) or isinstance(value, float):
+        raise ValueError(f"{field} must use exact decimal input")
+    try:
+        result = value if isinstance(value, Decimal) else Decimal(value)
+    except (InvalidOperation, TypeError, ValueError) as error:
+        raise ValueError(f"{field} must be a finite decimal") from error
+    if not result.is_finite():
+        raise ValueError(f"{field} must be a finite decimal")
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class ModelDescriptor:
     model_id: str
@@ -40,6 +52,16 @@ class ModelDescriptor:
     def __post_init__(self) -> None:
         if not self.model_id or not self.provider_id:
             raise ValueError("model and provider identifiers are required")
+        object.__setattr__(
+            self,
+            "estimated_cost",
+            _exact_decimal(self.estimated_cost, "estimated cost"),
+        )
+        object.__setattr__(
+            self,
+            "quality_score",
+            _exact_decimal(self.quality_score, "quality score"),
+        )
         if self.estimated_cost < 0:
             raise ValueError("estimated cost cannot be negative")
         if self.latency_ms < 0:
@@ -58,6 +80,11 @@ class RoutingPolicy:
     maximum_latency_ms: int | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "maximum_cost",
+            _exact_decimal(self.maximum_cost, "maximum cost"),
+        )
         if self.maximum_cost < 0:
             raise ValueError("maximum cost cannot be negative")
         if self.maximum_latency_ms is not None and self.maximum_latency_ms < 0:
@@ -77,6 +104,11 @@ class ModelRequest:
     def __post_init__(self) -> None:
         if not self.request_id:
             raise ValueError("request_id is required")
+        object.__setattr__(
+            self,
+            "budget_remaining",
+            _exact_decimal(self.budget_remaining, "budget remaining"),
+        )
         if self.budget_remaining < 0:
             raise ValueError("budget remaining cannot be negative")
         if self.deadline_utc.tzinfo is None:
@@ -202,6 +234,7 @@ class BudgetLedger:
     """
 
     def __init__(self, ceiling: Decimal) -> None:
+        ceiling = _exact_decimal(ceiling, "budget ceiling")
         if ceiling < 0:
             raise ValueError("budget ceiling cannot be negative")
         self._ceiling = ceiling
@@ -220,6 +253,7 @@ class BudgetLedger:
     def reserve(self, request_id: str, amount: Decimal) -> None:
         if not request_id:
             raise ValueError("request_id is required")
+        amount = _exact_decimal(amount, "reservation")
         if amount < 0:
             raise ValueError("reservation cannot be negative")
         prior = self._reserved.get(request_id)
@@ -241,6 +275,11 @@ class BudgetLedger:
         incurred: Decimal,
         estimated_unbilled: Decimal = Decimal("0"),
     ) -> None:
+        incurred = _exact_decimal(incurred, "incurred cost")
+        estimated_unbilled = _exact_decimal(
+            estimated_unbilled,
+            "estimated unbilled cost",
+        )
         if incurred < 0 or estimated_unbilled < 0:
             raise ValueError("costs cannot be negative")
         reserved = self._reserved.pop(request_id, None)
@@ -253,6 +292,7 @@ class BudgetLedger:
         self._estimated_unbilled += estimated_unbilled
 
     def reconcile_unbilled(self, *, billed: Decimal) -> None:
+        billed = _exact_decimal(billed, "billed cost")
         if billed < 0:
             raise ValueError("billed cost cannot be negative")
         if billed > self._estimated_unbilled:

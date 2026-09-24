@@ -46,6 +46,7 @@ class AllocationCandidate:
     capital_requirement_rate: Decimal = Decimal("1")
     min_notional: Decimal = Decimal("0")
     fee_floor: Decimal = Decimal("0")
+    max_executable_notional: Decimal | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", _text(self.symbol, name="symbol"))
@@ -81,6 +82,16 @@ class AllocationCandidate:
             "fee_floor",
             _positive(self.fee_floor, name="fee_floor", allow_zero=True),
         )
+        if self.max_executable_notional is not None:
+            object.__setattr__(
+                self,
+                "max_executable_notional",
+                _positive(
+                    self.max_executable_notional,
+                    name="max_executable_notional",
+                    allow_zero=True,
+                ),
+            )
 
     @classmethod
     def create(
@@ -94,6 +105,7 @@ class AllocationCandidate:
         capital_requirement_rate=1,
         min_notional=0,
         fee_floor=0,
+        max_executable_notional=None,
     ) -> "AllocationCandidate":
         return cls(
             symbol=_text(symbol, name="symbol"),
@@ -107,6 +119,15 @@ class AllocationCandidate:
             ),
             min_notional=_positive(min_notional, name="min_notional", allow_zero=True),
             fee_floor=_positive(fee_floor, name="fee_floor", allow_zero=True),
+            max_executable_notional=(
+                None
+                if max_executable_notional is None
+                else _positive(
+                    max_executable_notional,
+                    name="max_executable_notional",
+                    allow_zero=True,
+                )
+            ),
         )
 
 
@@ -120,6 +141,7 @@ class AllocationPolicy:
     max_stress_loss: Decimal
     max_iterations: int = 64
     min_scale_tolerance: Decimal = Decimal("0.000001")
+    require_adverse_stress_evidence: bool = True
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -145,6 +167,8 @@ class AllocationPolicy:
             or self.max_iterations < 1
         ):
             raise ValueError("max_iterations must be a positive integer")
+        if not isinstance(self.require_adverse_stress_evidence, bool):
+            raise TypeError("require_adverse_stress_evidence must be a boolean")
         object.__setattr__(
             self,
             "min_scale_tolerance",
@@ -166,9 +190,12 @@ class AllocationPolicy:
         max_stress_loss,
         max_iterations: int = 64,
         min_scale_tolerance="0.000001",
+        require_adverse_stress_evidence: bool = True,
     ) -> "AllocationPolicy":
         if not isinstance(max_iterations, int) or isinstance(max_iterations, bool) or max_iterations < 1:
             raise ValueError("max_iterations must be a positive integer")
+        if not isinstance(require_adverse_stress_evidence, bool):
+            raise TypeError("require_adverse_stress_evidence must be a boolean")
         return cls(
             cash_available=_positive(cash_available, name="cash_available", allow_zero=True),
             max_gross_notional=_positive(max_gross_notional, name="max_gross_notional", allow_zero=True),
@@ -178,6 +205,7 @@ class AllocationPolicy:
             max_stress_loss=_positive(max_stress_loss, name="max_stress_loss", allow_zero=True),
             max_iterations=max_iterations,
             min_scale_tolerance=_positive(min_scale_tolerance, name="min_scale_tolerance"),
+            require_adverse_stress_evidence=require_adverse_stress_evidence,
         )
 
 
@@ -226,6 +254,19 @@ def _evaluate(
         scaled = candidate.desired_notional * scale
         quantity = _round_quantity(scaled, candidate.price, candidate.lot_size)
         notional = quantity * candidate.price
+        # Liquidity/capacity evidence is a hard feasibility boundary. It may
+        # reduce a requested target, but it can never be used to increase it.
+        if (
+            candidate.max_executable_notional is not None
+            and abs(notional) > candidate.max_executable_notional
+        ):
+            capped = (
+                candidate.max_executable_notional
+                if notional > 0
+                else -candidate.max_executable_notional
+            )
+            quantity = _round_quantity(capped, candidate.price, candidate.lot_size)
+            notional = quantity * candidate.price
         # Provider/account minimums are hard feasibility constraints. A rounded
         # order below the explicit minimum is not executable and therefore
         # becomes a no-trade target instead of being advertised as feasible.
@@ -360,6 +401,41 @@ def allocate_targets(
         if missing:
             raise ValueError(
                 f"stress scenario {scenario_name} is missing explicit shocks for: {', '.join(missing)}"
+            )
+
+    if policy.require_adverse_stress_evidence:
+        requested_symbols = {
+            candidate.symbol: candidate.desired_notional
+            for candidate in candidates
+            if candidate.desired_notional != 0
+        }
+        if requested_symbols and not normalized_stress:
+            return _cash_fallback(
+                candidates,
+                reason=(
+                    "adverse stress evidence is required before increasing exposure; "
+                    "no stress scenarios were supplied"
+                ),
+            )
+        uncovered = []
+        for symbol, desired_notional in requested_symbols.items():
+            has_adverse_shock = any(
+                (
+                    scenario[symbol] < 0
+                    if desired_notional > 0
+                    else scenario[symbol] > 0
+                )
+                for scenario in normalized_stress.values()
+            )
+            if not has_adverse_shock:
+                uncovered.append(symbol)
+        if uncovered:
+            return _cash_fallback(
+                candidates,
+                reason=(
+                    "adverse stress evidence is missing for requested exposure: "
+                    + ", ".join(sorted(uncovered))
+                ),
             )
 
     requested = _evaluate(candidates, policy, normalized_stress, Decimal("1"))

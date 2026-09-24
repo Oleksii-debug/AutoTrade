@@ -337,6 +337,28 @@ def create_backup(
     if _inside(target, state) or _inside(target, artifacts):
         raise BackupError("Backup destination must be outside source directories")
     _validate_artifact_source(artifacts)
+    build_identity_ref_path = state / "build-identity.sha256"
+    state_build_identity: str | None = None
+    if build_identity_ref_path.is_file():
+        try:
+            state_build_identity = _canonical_sha256_ref(
+                build_identity_ref_path.read_text(encoding="ascii").strip(),
+                name="state build identity",
+            )
+        except (OSError, UnicodeError) as error:
+            raise BackupIntegrityError("Runtime build identity reference is unreadable") from error
+    if build_identity_sha256 is not None:
+        build_identity_sha256 = _canonical_sha256_ref(
+            build_identity_sha256,
+            name="build_identity_sha256",
+        )
+        if state_build_identity is not None and build_identity_sha256 != state_build_identity:
+            raise BackupIntegrityError(
+                "Caller build identity conflicts with durable runtime build identity"
+            )
+    elif state_build_identity is not None:
+        build_identity_sha256 = state_build_identity
+
     source_sha: str | None = None
     composition_sha256: str | None = None
     owner_fence_path = state / "owner-fence.json"
@@ -349,10 +371,6 @@ def create_backup(
             raise BackupIntegrityError("Runtime owner fence snapshot is invalid") from error
         source_owner_fence_sha256 = "sha256:" + _sha256_file(owner_fence_path)
     if build_identity_sha256 is not None:
-        build_identity_sha256 = _canonical_sha256_ref(
-            build_identity_sha256,
-            name="build_identity_sha256",
-        )
         source_sha, composition_sha256 = _load_build_identity(
             artifacts,
             build_identity_sha256,
@@ -380,6 +398,7 @@ def create_backup(
         for source in [
             state / "checkpoint.json",
             state / "learning-evidence.jsonl",
+            build_identity_ref_path,
             owner_fence_path,
         ]:
             if source.exists():

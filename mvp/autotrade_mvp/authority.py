@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
-from typing import FrozenSet
+from typing import Callable, FrozenSet
 from uuid import UUID
 
 
@@ -490,6 +490,37 @@ class AuthorityService:
             if _instant(now, name="now") >= _instant(confirmation.expires_at, name="confirmation.expires_at"):
                 return False, "confirmation_expired"
         return True, "allowed"
+
+    def dispatch_guard(
+        self,
+        admission_id: str,
+        *,
+        account_id: str,
+        environment: str,
+        instrument_id: str,
+        instrument_version: int,
+        action: str,
+    ) -> Callable[[str, str], tuple[bool, str]]:
+        """Bind one immutable admission scope to the dispatcher's final barrier."""
+        aid = _text(admission_id, name="admission_id")
+        account = _text(account_id, name="account_id")
+        env = _text(environment, name="environment").upper()
+        identity = InstrumentVersionIdentity(instrument_id, instrument_version)
+        normalized_action = _text(action, name="action").upper()
+
+        def check(intent_hash: str, now: str) -> tuple[bool, str]:
+            return self.dispatch_allowed(
+                aid,
+                intent_hash=intent_hash,
+                account_id=account,
+                environment=env,
+                instrument_id=identity.instrument_id,
+                instrument_version=identity.version,
+                action=normalized_action,
+                now=now,
+            )
+
+        return check
 
 
     def export_state(self) -> dict:

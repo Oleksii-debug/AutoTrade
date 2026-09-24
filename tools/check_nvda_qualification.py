@@ -42,6 +42,10 @@ def validate_evidence(
     evidence: dict[str, object],
     requirements: dict[str, object],
 ) -> dict[str, object]:
+    if requirements.get("schema_version") != "1.0.0":
+        raise NvdaQualificationError("unsupported NVDA requirements schema_version")
+    if evidence.get("schema_version") != requirements["schema_version"]:
+        raise NvdaQualificationError("evidence schema_version does not match requirements")
     source_sha = _required_text(evidence.get("source_sha"), name="source_sha").lower()
     artifact_sha = _required_text(
         evidence.get("artifact_sha256"),
@@ -86,6 +90,7 @@ def validate_evidence(
     if not isinstance(observations, list):
         raise NvdaQualificationError("workflows must be an array")
     by_id: dict[str, dict[str, object]] = {}
+    evidence_refs: set[str] = set()
     for item in observations:
         if not isinstance(item, dict):
             raise NvdaQualificationError("workflow evidence must be an object")
@@ -96,7 +101,14 @@ def validate_evidence(
             raise NvdaQualificationError(f"workflow did not pass: {workflow_id}")
         _required_text(item.get("keyboard_steps"), name=f"{workflow_id}.keyboard_steps")
         _required_text(item.get("nvda_observation"), name=f"{workflow_id}.nvda_observation")
-        _required_text(item.get("evidence_ref"), name=f"{workflow_id}.evidence_ref")
+        evidence_ref = _required_text(item.get("evidence_ref"), name=f"{workflow_id}.evidence_ref").lower()
+        if SHA256.fullmatch(evidence_ref) is None:
+            raise NvdaQualificationError(
+                f"{workflow_id}.evidence_ref must be an immutable sha256 digest"
+            )
+        if evidence_ref in evidence_refs:
+            raise NvdaQualificationError("workflow evidence references must be unique")
+        evidence_refs.add(evidence_ref)
         by_id[workflow_id] = item
 
     required = requirements.get("workflows")
@@ -161,7 +173,19 @@ def main() -> int:
                     status.get("evidence_file"),
                     name="status.evidence_file",
                 )
-                evidence_path = ROOT / evidence_file
+                evidence_relative = Path(evidence_file)
+                if evidence_relative.is_absolute() or ".." in evidence_relative.parts:
+                    raise NvdaQualificationError(
+                        "status evidence_file must stay inside qualification/nvda"
+                    )
+                evidence_path = (ROOT / evidence_relative).resolve()
+                qualification_root = (ROOT / "qualification" / "nvda").resolve()
+                try:
+                    evidence_path.relative_to(qualification_root)
+                except ValueError as error:
+                    raise NvdaQualificationError(
+                        "status evidence_file must stay inside qualification/nvda"
+                    ) from error
                 evidence = _load(evidence_path, name="evidence")
                 result = validate_evidence(evidence, requirements)
                 if result["source_sha"] != status.get("source_sha"):

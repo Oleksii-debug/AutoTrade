@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0.0",
+  "foundation_base_sha": "7c49325c2ff7cfed3cd4d5d16714ef5a583ba7cd",
+  "lean_commit": "985ef30ad3ac774218c5ac516b4cb0aa2655730f",
+  "lean_tree": "4b163abf9fca60e731b76510b9ae6721ffff7e6c",
+  "status": "INCONCLUSIVE",
+  "probes": {
+    "source_composition": "INCONCLUSIVE",
+    "embedding": "INCONCLUSIVE",
+    "windows_build": "INCONCLUSIVE",
+    "linux_build": "INCONCLUSIVE",
+    "packaging": "INCONCLUSIVE",
+    "decimal_behavior": "INCONCLUSIVE",
+    "event_ordering": "INCONCLUSIVE",
+    "restart_reconciliation": "INCONCLUSIVE",
+    "adapter_isolation": "INCONCLUSIVE"
+  },
+  "blockers": [
+    "WP-03 exact source/package composition and NOTICE review is not complete.",
+    "No QuantConnect LEAN source or package bytes are imported by this foundation.",
+    "No real embedding, restart/reconciliation or adapter-isolation qualification has been executed yet."
+  ],
+  "live_trading_authority_granted": false
+}

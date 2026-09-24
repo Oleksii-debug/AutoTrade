@@ -195,6 +195,7 @@ class ModelRoutingPolicy:
     max_output_tokens: int
     deadline_ms: int
     fallback: str
+    deterministic_fallback_evidence_sha256: str | None
 
     @classmethod
     def create(
@@ -209,6 +210,7 @@ class ModelRoutingPolicy:
         max_output_tokens: int,
         deadline_ms: int,
         fallback: str = "NO_TRADE",
+        deterministic_fallback_evidence_sha256: str | None = None,
     ) -> "ModelRoutingPolicy":
         normalized_mode = _text(mode, name="mode").upper()
         if normalized_mode not in _MODES:
@@ -228,6 +230,20 @@ class ModelRoutingPolicy:
         normalized_fallback = _text(fallback, name="fallback").upper()
         if normalized_fallback not in _FALLBACKS:
             raise ModelRoutingError("fallback must be DETERMINISTIC or NO_TRADE")
+        fallback_evidence = None
+        if deterministic_fallback_evidence_sha256 is not None:
+            fallback_evidence = _hash(
+                deterministic_fallback_evidence_sha256,
+                name="deterministic_fallback_evidence_sha256",
+            )
+        if normalized_fallback == "DETERMINISTIC" and fallback_evidence is None:
+            raise ModelRoutingError(
+                "DETERMINISTIC fallback requires immutable qualification evidence"
+            )
+        if normalized_fallback == "NO_TRADE" and fallback_evidence is not None:
+            raise ModelRoutingError(
+                "NO_TRADE cannot carry deterministic fallback qualification evidence"
+            )
         return cls(
             policy_id=_text(policy_id, name="policy_id"),
             mode=normalized_mode,
@@ -238,6 +254,7 @@ class ModelRoutingPolicy:
             max_output_tokens=_positive_int(max_output_tokens, name="max_output_tokens"),
             deadline_ms=_positive_int(deadline_ms, name="deadline_ms", allow_zero=True),
             fallback=normalized_fallback,
+            deterministic_fallback_evidence_sha256=fallback_evidence,
         )
 
 
@@ -388,6 +405,7 @@ class ModelRoutingDecision:
     price_evidence_sha256: str | None
     quality_evidence_sha256: str | None
     reproducibility_limitations: tuple[str, ...]
+    fallback_evidence_sha256: str | None
 
     @property
     def authorizes_trading(self) -> bool:
@@ -417,6 +435,7 @@ def _fallback(policy: ModelRoutingPolicy, task: ModelTask, reason: str) -> Model
         price_evidence_sha256=None,
         quality_evidence_sha256=None,
         reproducibility_limitations=(),
+        fallback_evidence_sha256=policy.deterministic_fallback_evidence_sha256,
     )
 
 
@@ -520,4 +539,5 @@ def route_model(
         price_evidence_sha256=chosen.price_evidence_sha256,
         quality_evidence_sha256=chosen.quality_evidence_sha256,
         reproducibility_limitations=chosen.reproducibility_limitations,
+        fallback_evidence_sha256=None,
     )

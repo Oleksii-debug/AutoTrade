@@ -70,9 +70,55 @@ def complete_evidence():
     return [evidence(scenario) for scenario in RecoveryScenario]
 
 
+def _trusted_evidence_verifier(_item):
+    return True
+
+
+def qualify(*, policy, evidence):
+    return qualify_recovery_release(
+        policy=policy,
+        evidence=evidence,
+        evidence_verifier=_trusted_evidence_verifier,
+    )
+
+
 class RecoveryReleaseQualificationTests(unittest.TestCase):
-    def test_complete_same_build_recovery_evidence_can_pass_without_granting_authority(self):
+    def test_self_asserted_recovery_evidence_is_inconclusive_without_verifier(self):
         decision = qualify_recovery_release(
+            policy=policy(),
+            evidence=complete_evidence(),
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.INCONCLUSIVE)
+        self.assertTrue(
+            all(
+                any(
+                    blocker == f"{scenario.value.lower()}:evidence_unverified"
+                    for blocker in decision.blockers
+                )
+                for scenario in RecoveryScenario
+            )
+        )
+        self.assertFalse(decision.authorizes_trading)
+
+    def test_broken_evidence_verifier_fails_closed(self):
+        def broken(_item):
+            raise RuntimeError("evidence store unavailable")
+
+        decision = qualify_recovery_release(
+            policy=policy(),
+            evidence=complete_evidence(),
+            evidence_verifier=broken,
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.INCONCLUSIVE)
+
+    def test_uppercase_release_identities_are_rejected_not_normalized(self):
+        with self.assertRaisesRegex(ValueError, "lowercase"):
+            policy(source_sha="A" * 40)
+        with self.assertRaisesRegex(ValueError, "lowercase"):
+            policy(artifact="sha256:" + "B" * 64)
+
+    def test_complete_same_build_recovery_evidence_can_pass_without_granting_authority(self):
+        decision = qualify(
             policy=policy(),
             evidence=complete_evidence(),
         )
@@ -90,7 +136,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             for item in complete_evidence()
             if item.scenario is not RecoveryScenario.SESSION_LOSS
         ]
-        decision = qualify_recovery_release(policy=policy(), evidence=items)
+        decision = qualify(policy=policy(), evidence=items)
         self.assertEqual(decision.status, RecoveryEvidenceStatus.INCONCLUSIVE)
         self.assertIn("missing_scenario:SESSION_LOSS", decision.blockers)
 
@@ -106,7 +152,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             )
             for scenario in RecoveryScenario
         ]
-        decision = qualify_recovery_release(policy=policy(), evidence=items)
+        decision = qualify(policy=policy(), evidence=items)
         self.assertEqual(decision.status, RecoveryEvidenceStatus.INCONCLUSIVE)
         self.assertIn("network_loss:scenario_inconclusive", decision.blockers)
 
@@ -116,7 +162,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             wrong_source[0].scenario,
             source_sha="c" * 40,
         )
-        decision = qualify_recovery_release(policy=policy(), evidence=wrong_source)
+        decision = qualify(policy=policy(), evidence=wrong_source)
         self.assertEqual(decision.status, RecoveryEvidenceStatus.FAIL)
         self.assertTrue(
             any(blocker.endswith(":source_sha_mismatch") for blocker in decision.blockers)
@@ -127,7 +173,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             wrong_artifact[1].scenario,
             artifact="sha256:" + "d" * 64,
         )
-        decision = qualify_recovery_release(policy=policy(), evidence=wrong_artifact)
+        decision = qualify(policy=policy(), evidence=wrong_artifact)
         self.assertEqual(decision.status, RecoveryEvidenceStatus.FAIL)
         self.assertTrue(
             any(blocker.endswith(":release_artifact_mismatch") for blocker in decision.blockers)
@@ -156,7 +202,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             with self.subTest(name=name):
                 items = complete_evidence()
                 items[0] = evidence(items[0].scenario, **kwargs)
-                decision = qualify_recovery_release(policy=policy(), evidence=items)
+                decision = qualify(policy=policy(), evidence=items)
                 self.assertEqual(decision.status, RecoveryEvidenceStatus.FAIL)
                 self.assertTrue(
                     any(blocker.endswith(":" + suffix) for blocker in decision.blockers)
@@ -174,7 +220,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             with self.subTest(suffix=suffix):
                 items = complete_evidence()
                 items[0] = evidence(items[0].scenario, **kwargs)
-                decision = qualify_recovery_release(policy=policy(), evidence=items)
+                decision = qualify(policy=policy(), evidence=items)
                 self.assertEqual(decision.status, RecoveryEvidenceStatus.FAIL)
                 self.assertTrue(
                     any(blocker.endswith(":" + suffix) for blocker in decision.blockers)
@@ -191,7 +237,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             RecoveryScenario.SPLIT_BRAIN_ATTEMPT,
             old_sender_fenced=False,
         )
-        decision = qualify_recovery_release(policy=policy(), evidence=items)
+        decision = qualify(policy=policy(), evidence=items)
         self.assertEqual(decision.status, RecoveryEvidenceStatus.FAIL)
         self.assertIn(
             "split_brain_attempt:old_sender_not_fenced",
@@ -209,14 +255,14 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             RecoveryScenario.UPGRADE_FAILURE,
             rollback_completed=False,
         )
-        decision = qualify_recovery_release(policy=policy(), evidence=items)
+        decision = qualify(policy=policy(), evidence=items)
         self.assertEqual(decision.status, RecoveryEvidenceStatus.FAIL)
         self.assertIn("upgrade_failure:rollback_incomplete", decision.blockers)
 
     def test_declared_downtime_limit_is_enforced_per_scenario(self):
         items = complete_evidence()
         items[0] = evidence(items[0].scenario, downtime_ms=60_001)
-        decision = qualify_recovery_release(policy=policy(), evidence=items)
+        decision = qualify(policy=policy(), evidence=items)
         self.assertEqual(decision.status, RecoveryEvidenceStatus.FAIL)
         self.assertTrue(
             any(
@@ -267,7 +313,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
     def test_duplicate_scenario_evidence_is_rejected(self):
         item = evidence(RecoveryScenario.POWER_LOSS)
         with self.assertRaisesRegex(ValueError, "duplicate evidence"):
-            qualify_recovery_release(
+            qualify(
                 policy=policy(),
                 evidence=[item, item],
             )

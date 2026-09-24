@@ -394,6 +394,8 @@ class ModelRoutingTests(unittest.TestCase):
         )
         self.assertTrue(record.deadline_met)
         self.assertTrue(record.output_schema_valid)
+        self.assertTrue(record.token_limits_met)
+        self.assertTrue(record.cost_within_reservation)
         self.assertTrue(record.usable)
         self.assertEqual(record.billing_status, "FINAL")
         self.assertEqual(record.cost, Decimal("0.00017"))
@@ -468,6 +470,48 @@ class ModelRoutingTests(unittest.TestCase):
         self.assertFalse(record.output_schema_valid)
         self.assertFalse(record.usable)
         self.assertEqual(budget.snapshot().incurred, Decimal("0.00012"))
+
+    def test_post_call_token_or_cost_overrun_is_visible_and_not_usable(self):
+        for actual_output, billed_cost, expected_token_ok, expected_cost_ok in (
+            (51, "0.00017", False, True),
+            (40, "0.5", True, False),
+        ):
+            with self.subTest(
+                actual_output=actual_output,
+                billed_cost=billed_cost,
+            ):
+                budget = ModelBudgetLedger(ceiling="1")
+                decision = route_model(
+                    policy=policy(deadline=100),
+                    task=task(input_tokens=100, output_tokens=50),
+                    models=[model()],
+                    budget=budget,
+                )
+                observation = ModelCallObservation.create(
+                    reservation_id=decision.reservation_id,
+                    model_id=decision.model_id,
+                    provider=decision.provider,
+                    model_name=decision.model_name,
+                    revision=decision.revision,
+                    provider_call_id=f"provider-call-overrun-{actual_output}-{billed_cost}",
+                    elapsed_ms=20,
+                    actual_input_tokens=100,
+                    actual_output_tokens=actual_output,
+                    billed_cost=billed_cost,
+                    output_schema_valid=True,
+                    evidence_sha256=HASH_C,
+                )
+                record = record_model_call(
+                    decision=decision,
+                    observation=observation,
+                    budget=budget,
+                )
+                self.assertEqual(record.token_limits_met, expected_token_ok)
+                self.assertEqual(
+                    record.cost_within_reservation,
+                    expected_cost_ok,
+                )
+                self.assertFalse(record.usable)
 
     def test_actual_identity_mismatch_fails_before_budget_mutation(self):
         budget = ModelBudgetLedger(ceiling="1")

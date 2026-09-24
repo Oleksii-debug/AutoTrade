@@ -118,13 +118,15 @@ class ForwardPaperProtocol:
         )
         if not capabilities:
             raise ForwardPaperError("at least one provider capability is required")
-        cases = tuple(
-            value.upper()
-            for value in _unique_text(
-                required_operational_cases,
-                name="required_operational_cases",
-            )
+        raw_cases = _unique_text(
+            required_operational_cases,
+            name="required_operational_cases",
         )
+        cases = tuple(value.upper() for value in raw_cases)
+        if len(set(cases)) != len(cases):
+            raise ForwardPaperError(
+                "required_operational_cases contains case-insensitive duplicates"
+            )
         return cls(
             campaign_id=_text(campaign_id, name="campaign_id"),
             exact_build_sha=build,
@@ -376,6 +378,8 @@ def assess_forward_paper(
         sealed = _instant(prediction.sealed_at, name="sealed_at")
         if sealed < campaign_start or sealed > campaign_end:
             invalid.append("prediction_outside_campaign_window")
+        if sealed > observed_until:
+            invalid.append("prediction_after_observed_until")
         if prediction.provider_capability not in capability_counts:
             invalid.append("undeclared_provider_capability")
         else:
@@ -411,6 +415,9 @@ def assess_forward_paper(
         )
         if available < horizon:
             invalid.append("outcome_available_before_registered_horizon")
+        evaluated = _instant(outcome.evaluated_at, name="evaluated_at")
+        if available > observed_until or evaluated > observed_until:
+            invalid.append("outcome_after_observed_until")
 
     if observed_until < campaign_end:
         incomplete.append("campaign_window_not_finished")
@@ -436,6 +443,11 @@ def assess_forward_paper(
             continue
         if item.provider_capability not in capability_counts:
             invalid.append("operational_case_for_undeclared_capability")
+        observed_at = _instant(item.observed_at, name="observed_at")
+        if observed_at < campaign_start or observed_at > campaign_end:
+            invalid.append("operational_case_outside_campaign_window")
+        if observed_at > observed_until:
+            invalid.append("operational_case_after_observed_until")
         if not item.reconciled:
             operational_failures.append("unreconciled_operational_case")
 

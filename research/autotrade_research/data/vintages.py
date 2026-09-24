@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from uuid import UUID
 
-from autotrade_research.artifacts.durable_publish import atomic_write_json
+from autotrade_research.artifacts.durable_publish import atomic_write_json, durable_path_lock
 from autotrade_research.io.strict_json import strict_json_loads
 
 
@@ -136,6 +136,8 @@ def point_in_time_market_events(
         available = _utc(event.get("available_at"), "available_at")
         source_at = _utc(event.get("source_event_at"), "source_event_at")
         ingested = _utc(event.get("ingested_at"), "ingested_at")
+        if source_at > available:
+            raise HistoricalDataError("source_event_at cannot be after evidenced available_at")
         if ingested < available:
             raise HistoricalDataError("ingested_at cannot precede evidenced available_at")
         if available > point:
@@ -370,15 +372,20 @@ class HistoricalVintageRegistry:
         version = _sequence(normalized["version"], "version")
         path = self._path(normalized["dataset_id"], version)
         digest = "sha256:" + sha256(_canonical_bytes(normalized)).hexdigest()
-        if path.exists():
-            try:
-                existing = strict_json_loads(path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, ValueError) as error:
-                raise HistoricalConflict("existing dataset manifest is unreadable") from error
-            if existing != normalized:
-                raise HistoricalConflict("dataset version is immutable")
-            return digest
-        atomic_write_json(path, normalized)
+
+        # The immutable check and publication must share one cross-process
+        # critical section. Otherwise two writers can both observe absence and
+        # the later os.replace silently wins with different bytes.
+        with durable_path_lock(path):
+            if path.exists():
+                try:
+                    existing = strict_json_loads(path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, ValueError) as error:
+                    raise HistoricalConflict("existing dataset manifest is unreadable") from error
+                if existing != normalized:
+                    raise HistoricalConflict("dataset version is immutable")
+                return digest
+            atomic_write_json(path, normalized)
         return digest
 
     def load(self, dataset_id: str, version: int) -> dict[str, Any]:

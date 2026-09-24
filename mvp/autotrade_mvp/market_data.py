@@ -203,7 +203,11 @@ class MarketNormalizer:
         self._registry = registry
         self._max_available_age = max_available_age
         self._last_sequence: dict[tuple[str, str, str, str], int] = {}
-        self._seen_sequence: dict[tuple[str, str, str, str, int], tuple[str, str]] = {}
+        self._seen_sequence_ids: set[tuple[str, str, str, str, int]] = set()
+        self._last_revision: dict[tuple[str, str, str, str, int], int] = {}
+        self._seen_revision: dict[
+            tuple[str, str, str, str, int, int], tuple[str, str]
+        ] = {}
 
     @staticmethod
     def _instrument_version_id(instrument: InstrumentVersion) -> str:
@@ -393,30 +397,52 @@ class MarketNormalizer:
             *stream_key,
             update.source_sequence,
         ) if update.source_sequence is not None else None
+        revision_identity = (
+            *sequence_identity,
+            update.revision,
+        ) if sequence_identity is not None else None
 
-        new_sequence = False
-        if update.source_sequence is not None:
-            existing = self._seen_sequence.get(sequence_identity)
+        new_revision = False
+        if sequence_identity is not None and revision_identity is not None:
+            existing = self._seen_revision.get(revision_identity)
             if existing is not None:
                 existing_digest, _ = existing
                 if existing_digest != payload_digest:
                     raise SequenceConflict(
-                        "source sequence was reused with different normalized content"
+                        "source sequence revision was reused with different normalized content"
                     )
                 flags.add("DUPLICATE")
             else:
-                new_sequence = True
-                last = self._last_sequence.get(stream_key)
-                if last is not None:
-                    if update.source_sequence > last + 1:
-                        flags.add("SEQUENCE_GAP")
-                    elif update.source_sequence < last:
-                        flags.add("OUT_OF_ORDER")
-                self._last_sequence[stream_key] = (
-                    update.source_sequence
-                    if last is None
-                    else max(last, update.source_sequence)
+                new_revision = True
+                last_revision = self._last_revision.get(sequence_identity)
+                if last_revision is None:
+                    if update.revision > 0:
+                        flags.add("REVISION_BASE_MISSING")
+                else:
+                    flags.add("CORRECTION")
+                    if update.revision > last_revision + 1:
+                        flags.add("REVISION_GAP")
+                    elif update.revision < last_revision:
+                        flags.add("OUT_OF_ORDER_REVISION")
+                self._last_revision[sequence_identity] = (
+                    update.revision
+                    if last_revision is None
+                    else max(last_revision, update.revision)
                 )
+
+                if sequence_identity not in self._seen_sequence_ids:
+                    last = self._last_sequence.get(stream_key)
+                    if last is not None:
+                        if update.source_sequence > last + 1:
+                            flags.add("SEQUENCE_GAP")
+                        elif update.source_sequence < last:
+                            flags.add("OUT_OF_ORDER")
+                    self._last_sequence[stream_key] = (
+                        update.source_sequence
+                        if last is None
+                        else max(last, update.source_sequence)
+                    )
+                    self._seen_sequence_ids.add(sequence_identity)
 
         identity_material = "|".join(
             [
@@ -435,8 +461,8 @@ class MarketNormalizer:
             ]
         )
         event_id = str(uuid5(NAMESPACE_URL, identity_material))
-        if update.source_sequence is not None and new_sequence:
-            self._seen_sequence[sequence_identity] = (payload_digest, event_id)
+        if revision_identity is not None and new_revision:
+            self._seen_revision[revision_identity] = (payload_digest, event_id)
 
         return NormalizedMarketEvent(
             event_id=event_id,

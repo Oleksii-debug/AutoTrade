@@ -165,5 +165,43 @@ class ReservationFoundationTests(unittest.TestCase):
             )
 
 
+    def test_filled_terminal_cannot_release_unconsumed_remainder(self):
+        book = ReservationBook()
+        book.reserve(
+            reservation_id="r1",
+            intent_id="i1",
+            requirements={"CASH:USD": "100"},
+            available={"CASH:USD": "100"},
+        )
+        book.consume("r1", {"CASH:USD": "40"})
+        with self.assertRaisesRegex(ReservationConflict, "FILLED"):
+            book.mark_terminal(
+                "r1",
+                outcome="FILLED",
+                resolution_evidence="provider-filled",
+            )
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("60"))
+
+    def test_rejected_or_absent_cannot_erase_consumed_exposure(self):
+        for outcome in ("REJECTED", "PROVEN_ABSENT"):
+            with self.subTest(outcome=outcome):
+                book = ReservationBook()
+                book.reserve(
+                    reservation_id="r1",
+                    intent_id="i1",
+                    requirements={"CASH:USD": "100"},
+                    available={"CASH:USD": "100"},
+                )
+                book.consume("r1", {"CASH:USD": "10"})
+                with self.assertRaises(ReservationConflict):
+                    book.mark_terminal(
+                        "r1",
+                        outcome=outcome,
+                        resolution_evidence="provider-history",
+                    )
+                self.assertEqual(book.total_reserved("CASH:USD"), Decimal("90"))
+
+
+
 if __name__ == "__main__":
     unittest.main()

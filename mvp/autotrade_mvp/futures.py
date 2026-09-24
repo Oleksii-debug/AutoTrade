@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_EVEN, localcontext
+from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 from typing import Literal
 
@@ -68,6 +68,7 @@ class FuturesContract:
     delivery_cutoff: datetime
     expiry: datetime
     settlement_method: Literal["CASH", "PHYSICAL"]
+    price_base_currency: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "instrument", _text(self.instrument, "instrument"))
@@ -88,6 +89,46 @@ class FuturesContract:
             raise FuturesError("delivery_cutoff cannot be after expiry")
         if self.settlement_method not in {"CASH", "PHYSICAL"}:
             raise FuturesError("settlement_method must be CASH or PHYSICAL")
+        if self.price_base_currency is not None:
+            object.__setattr__(
+                self,
+                "price_base_currency",
+                _text(self.price_base_currency, "price_base_currency"),
+            )
+        if self.payoff == "INVERSE":
+            if self.price_base_currency is None:
+                raise FuturesError(
+                    "inverse futures require explicit price_base_currency qualification"
+                )
+            if self.settlement_currency != self.price_base_currency:
+                raise FuturesError(
+                    "inverse settlement_currency must match the base currency produced by face/price"
+                )
+
+
+@dataclass(frozen=True)
+class InverseVariationMarginState:
+    """Exact inverse-futures state between explicit settlement boundaries."""
+
+    contract: FuturesContract
+    signed_contracts: Decimal
+    last_settlement_price: Decimal
+    cumulative_variation_margin: Fraction = Fraction(0, 1)
+
+    def __post_init__(self) -> None:
+        if self.contract.payoff != "INVERSE":
+            raise FuturesError("inverse variation-margin state requires INVERSE futures")
+        contracts = _decimal(self.signed_contracts, "signed_contracts")
+        if contracts == 0:
+            raise FuturesError("signed_contracts must be non-zero")
+        object.__setattr__(self, "signed_contracts", contracts)
+        object.__setattr__(
+            self,
+            "last_settlement_price",
+            _decimal(self.last_settlement_price, "last_settlement_price", positive=True),
+        )
+        if not isinstance(self.cumulative_variation_margin, Fraction):
+            raise FuturesError("cumulative inverse variation margin must be an exact Fraction")
 
 
 @dataclass(frozen=True)
@@ -137,7 +178,7 @@ def inverse_futures_pnl_exact(
     entry_price: Decimal | str | int,
     exit_price: Decimal | str | int,
 ) -> Fraction:
-    """Return exact settlement-currency P&L as a rational number.
+    """Return exact price-base-currency P&L as a rational number.
 
     For a contract whose multiplier is a quote-currency face value:
     contracts * face * (1 / entry - 1 / exit).
@@ -160,24 +201,27 @@ def settle_fraction(
     quantum: Decimal | str,
     rounding: Literal["HALF_EVEN", "DOWN"] = "HALF_EVEN",
 ) -> Decimal:
-    """Convert an exact rational only at an explicit settlement boundary."""
+    """Round an exact rational to an exact multiple of the settlement quantum."""
 
     if not isinstance(value, Fraction):
         raise FuturesError("value must be an exact Fraction")
     step = _decimal(quantum, "quantum", positive=True)
-    mode = {"HALF_EVEN": ROUND_HALF_EVEN, "DOWN": ROUND_DOWN}.get(rounding)
-    if mode is None:
+    if rounding not in {"HALF_EVEN", "DOWN"}:
         raise FuturesError("unsupported rounding policy")
-    numerator = Decimal(value.numerator)
-    denominator = Decimal(value.denominator)
-    decimal_places = max(0, -step.as_tuple().exponent)
-    precision = max(
-        50,
-        len(str(abs(value.numerator))) + len(str(abs(value.denominator))) + decimal_places + 12,
-    )
-    with localcontext() as context:
-        context.prec = precision
-        return (numerator / denominator).quantize(step, rounding=mode)
+
+    units = value / _fraction(step)
+    sign = -1 if units < 0 else 1
+    numerator = abs(units.numerator)
+    denominator = units.denominator
+    whole, remainder = divmod(numerator, denominator)
+
+    if rounding == "HALF_EVEN":
+        doubled = remainder * 2
+        if doubled > denominator or (doubled == denominator and whole % 2 == 1):
+            whole += 1
+
+    signed_units = whole * sign
+    return step * Decimal(signed_units)
 
 
 def apply_variation_margin(
@@ -198,6 +242,79 @@ def apply_variation_margin(
             cumulative_variation_margin=state.cumulative_variation_margin + amount,
         ),
         amount,
+    )
+
+
+def apply_inverse_variation_margin(
+    state: InverseVariationMarginState,
+    settlement_price: Decimal | str | int,
+) -> tuple[InverseVariationMarginState, Fraction]:
+    """Apply one inverse settlement step without premature decimal rounding."""
+
+    price = _decimal(settlement_price, "settlement_price", positive=True)
+    amount = inverse_futures_pnl_exact(
+        signed_contracts=state.signed_contracts,
+        contract_quote_value=state.contract.multiplier,
+        entry_price=state.last_settlement_price,
+        exit_price=price,
+    )
+    return (
+        replace(
+            state,
+            last_settlement_price=price,
+            cumulative_variation_margin=state.cumulative_variation_margin + amount,
+        ),
+        amount,
+    )
+
+
+def settle_and_book_inverse_variation_margin(
+    *,
+    transaction_id: str,
+    cause_event_id: str,
+    contract: FuturesContract,
+    exact_amount: Fraction,
+    settlement_quantum: Decimal | str,
+    rounding: Literal["HALF_EVEN", "DOWN"] = "HALF_EVEN",
+) -> tuple[Decimal, JournalTransaction | None]:
+    """Round only at the explicit settlement boundary and book exact currency truth.
+
+    A sub-quantum amount that rounds to zero creates no artificial zero posting.
+    The caller retains the exact rational amount as evidence; the returned Decimal
+    is the provider-facing cash settlement amount.
+    """
+
+    if not isinstance(contract, FuturesContract) or contract.payoff != "INVERSE":
+        raise FuturesError("inverse settlement booking requires an INVERSE futures contract")
+    settled = settle_fraction(
+        exact_amount,
+        quantum=settlement_quantum,
+        rounding=rounding,
+    )
+    if settled == 0:
+        return settled, None
+    return (
+        settled,
+        book_variation_margin(
+            transaction_id=transaction_id,
+            cause_event_id=cause_event_id,
+            settlement_currency=contract.settlement_currency,
+            amount=settled,
+        ),
+    )
+
+
+def unrealized_inverse_after_variation(
+    state: InverseVariationMarginState,
+    mark_price: Decimal | str | int,
+) -> Fraction:
+    """Return exact inverse mark P&L from the last settled price."""
+
+    return inverse_futures_pnl_exact(
+        signed_contracts=state.signed_contracts,
+        contract_quote_value=state.contract.multiplier,
+        entry_price=state.last_settlement_price,
+        exit_price=mark_price,
     )
 
 

@@ -14,6 +14,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -55,6 +56,16 @@ def _sha256_file(path: Path) -> str:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _git_sha(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{40}", value) is None:
+        raise BackupCompatibilityError(
+            "source_sha must be an exact lowercase 40-character Git SHA"
+        )
+    return value
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -225,6 +236,8 @@ def create_backup(
     state_dir: str | Path,
     artifact_root: str | Path,
     destination: str | Path,
+    *,
+    source_sha: str | None = None,
 ) -> Path:
     """Create an atomic verified backup bundle.
 
@@ -234,6 +247,7 @@ def create_backup(
     mixing versions.
     """
 
+    exact_source_sha = _git_sha(source_sha)
     state = Path(state_dir)
     artifacts = Path(artifact_root)
     target = Path(destination)
@@ -317,12 +331,18 @@ def create_backup(
                     "Runtime state, journal and evidence are not one consistent snapshot"
                 ) from error
 
+        unresolved_limits = ["RECONCILIATION_REQUIRED_AFTER_RESTORE"]
+        if exact_source_sha is None:
+            unresolved_limits.append("SOURCE_SHA_UNBOUND")
         manifest = {
             "schema_version": BACKUP_SCHEMA_VERSION,
             "created_at": _utc_now(),
+            "source_sha": exact_source_sha,
+            "source_sha_bound": exact_source_sha is not None,
             "journal_schema_version": journal_schema,
             "reconciliation_required_after_restore": True,
             "runtime_consistency_check": "DURABLE_TRACE_RECONSTRUCTION",
+            "unresolved_limits": unresolved_limits,
             "files": sorted(entries, key=lambda item: item["path"]),
         }
         manifest_bytes = _canonical_json(manifest)
@@ -340,7 +360,11 @@ def create_backup(
         raise
 
 
-def verify_backup(backup_root: str | Path) -> dict[str, Any]:
+def verify_backup(
+    backup_root: str | Path,
+    *,
+    expected_source_sha: str | None = None,
+) -> dict[str, Any]:
     """Verify the backup manifest, every payload byte and compatibility gates."""
 
     root = Path(backup_root)
@@ -359,6 +383,21 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
 
     if not isinstance(manifest, dict) or manifest.get("schema_version") != BACKUP_SCHEMA_VERSION:
         raise BackupCompatibilityError("Unsupported backup schema version")
+    source_sha = _git_sha(manifest.get("source_sha"))
+    if manifest.get("source_sha_bound") is not (source_sha is not None):
+        raise BackupIntegrityError("Backup source-SHA binding metadata is inconsistent")
+    requested_source_sha = _git_sha(expected_source_sha)
+    if requested_source_sha is not None and source_sha != requested_source_sha:
+        raise BackupCompatibilityError("Backup source SHA does not match requested build")
+    unresolved_limits = manifest.get("unresolved_limits")
+    if not isinstance(unresolved_limits, list) or any(
+        not isinstance(item, str) or not item for item in unresolved_limits
+    ):
+        raise BackupIntegrityError("Backup unresolved limits are missing")
+    if source_sha is None and "SOURCE_SHA_UNBOUND" not in unresolved_limits:
+        raise BackupIntegrityError("Unbound backup must declare SOURCE_SHA_UNBOUND")
+    if source_sha is not None and "SOURCE_SHA_UNBOUND" in unresolved_limits:
+        raise BackupIntegrityError("Bound backup cannot declare SOURCE_SHA_UNBOUND")
     if manifest.get("journal_schema_version") != JournalStore.SCHEMA_VERSION:
         raise BackupCompatibilityError("Unsupported backed-up journal schema version")
     if manifest.get("reconciliation_required_after_restore") is not True:
@@ -436,11 +475,16 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
     return manifest
 
 
-def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Path:
+def restore_backup(
+    backup_root: str | Path,
+    destination_root: str | Path,
+    *,
+    expected_source_sha: str | None = None,
+) -> Path:
     """Restore through staging and leave a mandatory reconciliation marker."""
 
     backup = Path(backup_root)
-    manifest = verify_backup(backup)
+    manifest = verify_backup(backup, expected_source_sha=expected_source_sha)
     destination = Path(destination_root)
     if destination.exists():
         raise BackupError("Restore destination already exists")

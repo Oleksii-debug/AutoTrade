@@ -89,11 +89,8 @@ def export_ref(ref: str) -> Path:
         check=True,
         stdout=subprocess.PIPE,
     ).stdout
-    subprocess.run(
-        ["tar", "-xf", "-", "-C", str(temporary)],
-        input=archive,
-        check=True,
-    )
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as bundle:
+        bundle.extractall(temporary, filter="data")
     return temporary
 
 

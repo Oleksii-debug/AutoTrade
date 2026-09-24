@@ -65,7 +65,7 @@ def candidate(
     qualified_sha=None,
     unsupported=(),
 ):
-    code = code_sha or f"{provider.lower()}-sha"
+    code = code_sha or "1" * 40
     evidence_sha = qualified_sha or code
     return ProviderCandidate(
         provider_id=provider,
@@ -150,12 +150,16 @@ class ProviderSelectionTests(unittest.TestCase):
         stale = candidate(
             "BYBIT",
             "SPOT",
-            code_sha="new-code",
-            qualified_sha="old-code",
+            code_sha="2" * 40,
+            qualified_sha="3" * 40,
         )
         result = select_provider(request(), [stale], at=NOW)
         self.assertEqual(result.status, "NO_ELIGIBLE_PROVIDER")
         self.assertIn("QUALIFICATION_CODE_MISMATCH", result.decisions[0].reasons)
+
+    def test_candidate_requires_actual_hex_code_sha_shape(self):
+        with self.assertRaisesRegex(ValueError, "hex SHA"):
+            candidate("BYBIT", "SPOT", code_sha="build-label")
 
     def test_live_never_inherits_nonlive_qualification(self):
         live = candidate("BYBIT", "SPOT", environment="LIVE")

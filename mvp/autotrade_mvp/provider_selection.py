@@ -69,6 +69,17 @@ def _text(value: str, name: str) -> str:
     return value.strip()
 
 
+def _code_sha(value: str) -> str:
+    text = _text(value, "adapter_code_sha")
+    if len(text) not in {40, 64}:
+        raise ProviderSelectionError("adapter_code_sha must be a 40- or 64-character hex SHA")
+    try:
+        int(text, 16)
+    except ValueError as error:
+        raise ProviderSelectionError("adapter_code_sha must be hexadecimal") from error
+    return text
+
+
 def _instant(value: datetime, name: str) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise ProviderSelectionError(f"{name} must be timezone-aware")
@@ -139,7 +150,7 @@ class ProviderCandidate:
         object.__setattr__(self, "provider_id", provider)
         object.__setattr__(self, "product_family", family)
         object.__setattr__(
-            self, "adapter_code_sha", _text(self.adapter_code_sha, "adapter_code_sha")
+            self, "adapter_code_sha", _code_sha(self.adapter_code_sha)
         )
 
 

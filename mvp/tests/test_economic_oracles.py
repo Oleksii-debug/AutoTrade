@@ -73,6 +73,25 @@ class EconomicOracleTests(unittest.TestCase):
             Decimal("-2"),
         )
 
+    def test_binary_float_inputs_are_rejected_by_independent_oracles(self):
+        with self.assertRaisesRegex(ValueError, "exact decimal"):
+            cash_round_trip(
+                start_cash=1000.0,
+                buy_quantity="1",
+                buy_price="100",
+                buy_fee="0",
+                sell_quantity="0",
+                sell_price="100",
+                sell_fee="0",
+                mark_price="100",
+            )
+        with self.assertRaisesRegex(ValueError, "exact decimal"):
+            linear_futures_mark_pnl("1", "10", "100", 101.0)
+        with self.assertRaisesRegex(ValueError, "exact decimal"):
+            investment_pnl_excluding_external_flows("1000", "1500", 500.0)
+        with self.assertRaisesRegex(ValueError, "exact decimal"):
+            inverse_futures_pnl("100", "1", "10000", 11000.0)
+
     def test_invalid_values_fail_closed(self):
         with self.assertRaises(ValueError):
             cash_round_trip(

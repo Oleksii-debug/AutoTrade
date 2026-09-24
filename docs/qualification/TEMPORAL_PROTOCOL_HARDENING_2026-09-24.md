@@ -8,9 +8,11 @@ train/validation/test/forward periods. Each period must contain exact UTC
 windows must be ordered without overlap.
 
 `purge_embargo` is machine-readable in seconds. Registered label horizons are
-positive integer seconds and the purge must cover the longest registered
-horizon. This makes a protocol incapable of claiming a purged split while its
-declared label dependency is longer than the purge.
+positive integer seconds; both purge and embargo must cover the longest declared
+dependency horizon, and every adjacent train/validation/test/forward interval
+must contain a real time gap at least as large as the strongest registered
+purge/embargo requirement. This prevents a protocol from claiming isolation in
+metadata while the registered windows still touch or sit too close together.
 
 Focused tests cover legacy free text, overlapping windows, reversed windows,
 naive timestamps, insufficient purge, booleans and negative temporal controls.

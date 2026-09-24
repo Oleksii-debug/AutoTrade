@@ -150,5 +150,41 @@ class AuthorityTests(unittest.TestCase):
                 self.assertEqual(record.reason, reason)
 
 
+    def test_retry_of_same_admission_is_idempotent_after_confirmation_consumed(self):
+        service = AuthorityService()
+        service.register_policy(policy())
+        service.add_confirmation(
+            confirmation_id="c1",
+            policy_id="p1",
+            intent_hash="h1",
+            expires_at="2026-09-24T23:00:00Z",
+        )
+        kwargs = dict(
+            admission_id="a1", policy_id="p1", intent_hash="h1",
+            account_id="paper-1", environment="PAPER", instrument="ABC",
+            action="ORDER.SUBMIT", notional="100", state_version=1,
+            risk_admitted=True, now="2026-09-24T18:00:00Z",
+            confirmation_id="c1",
+        )
+        first = service.admit(**kwargs)
+        second = service.admit(**kwargs)
+        self.assertEqual(first, second)
+        self.assertEqual(second.outcome, "ADMITTED")
+
+    def test_same_admission_id_with_changed_scope_conflicts(self):
+        service = AuthorityService()
+        service.register_policy(policy(autonomous=True))
+        base = dict(
+            admission_id="a1", policy_id="p1", intent_hash="h1",
+            account_id="paper-1", environment="PAPER", instrument="ABC",
+            action="ORDER.SUBMIT", notional="100", state_version=1,
+            risk_admitted=True, now="2026-09-24T18:00:00Z",
+        )
+        service.admit(**base)
+        with self.assertRaisesRegex(Exception, "admission_id"):
+            service.admit(**{**base, "notional": "101"})
+
+
+
 if __name__ == "__main__":
     unittest.main()

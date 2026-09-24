@@ -155,6 +155,31 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("field_errors must be an array", js)
         self.assertIn("response.status !== 200 && response.status !== 409", js)
 
+    def test_accepted_command_tracks_canonical_operation_without_claiming_fill(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("Remaining uncertainty", html)
+        self.assertIn("function parseOperationResult(value, expectedOperationId)", js)
+        self.assertIn(
+            "${API}/operations/${encodeURIComponent(operationId)}",
+            js,
+        )
+        self.assertIn("OperationResult operation_id does not match", js)
+        self.assertIn("OperationResult phase is not canonical", js)
+        self.assertIn("renderOperation(operation)", js)
+        self.assertIn("await refreshOperation(result.operationId)", js)
+        self.assertIn("await refreshOperation(operationId)", js)
+        self.assertIn(
+            "Current operation status could not be loaded; "
+            "the accepted command response remains unchanged.",
+            js,
+        )
+        self.assertIn(
+            "It is not yet a completed financial outcome.",
+            js,
+        )
+        self.assertNotIn("innerHTML", js)
+
     def test_keyboard_and_high_contrast_rules_are_explicit(self):
         css = CSS.read_text(encoding="utf-8")
         self.assertIn(".skip-link:focus", css)

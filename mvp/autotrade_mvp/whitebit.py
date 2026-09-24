@@ -1670,3 +1670,195 @@ class WhiteBitRecoveryCheckpoint:
         if policy.requires_backfill:
             return self.baseline_observed and self.backfill_complete
         return self.baseline_observed
+
+
+@dataclass(frozen=True)
+class WhiteBitFeeSchedule:
+    evidence_id: str
+    observed_at: datetime
+    spot_taker_percent: Decimal
+    spot_maker_percent: Decimal
+    futures_taker_percent: Decimal
+    futures_maker_percent: Decimal
+    spot_rpi_maker_premium_percent: Decimal | None
+    futures_rpi_maker_premium_percent: Decimal | None
+    custom_fee_percent: Mapping[str, Mapping[str, Decimal]]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "evidence_id",
+            _text(self.evidence_id, name="evidence_id"),
+        )
+        object.__setattr__(
+            self,
+            "observed_at",
+            _instant(self.observed_at, name="observed_at"),
+        )
+        custom_copy = {
+            market: MappingProxyType(dict(rates))
+            for market, rates in self.custom_fee_percent.items()
+        }
+        object.__setattr__(
+            self,
+            "custom_fee_percent",
+            MappingProxyType(custom_copy),
+        )
+
+    def effective_percent(
+        self,
+        *,
+        product_family: str,
+        role: str,
+        market: str,
+        rpi: bool = False,
+    ) -> Decimal:
+        product = _text(product_family, name="product_family").upper()
+        normalized_role = _text(role, name="role").upper()
+        normalized_market = _text(market, name="market").upper()
+        if product not in {"SPOT", "COLLATERAL", "FUTURES"}:
+            raise WhiteBitAdapterError("unsupported fee product family")
+        if normalized_role not in {"MAKER", "TAKER"}:
+            raise WhiteBitAdapterError("role must be MAKER or TAKER")
+        if type(rpi) is not bool:
+            raise WhiteBitAdapterError("rpi must be boolean")
+        if rpi and normalized_role != "MAKER":
+            raise WhiteBitAdapterError("RPI premium is maker-only")
+
+        if product == "FUTURES":
+            base = (
+                self.futures_maker_percent
+                if normalized_role == "MAKER"
+                else self.futures_taker_percent
+            )
+            premium = self.futures_rpi_maker_premium_percent
+        else:
+            base = (
+                self.spot_maker_percent
+                if normalized_role == "MAKER"
+                else self.spot_taker_percent
+            )
+            premium = self.spot_rpi_maker_premium_percent
+
+        override = self.custom_fee_percent.get(normalized_market)
+        if override is not None:
+            base = override[normalized_role.lower()]
+
+        if rpi:
+            if premium is None:
+                raise WhiteBitAdapterError(
+                    "RPI fee premium is not configured for this account"
+                )
+            base += premium
+        return base
+
+    def effective_fraction(self, **kwargs) -> Decimal:
+        return self.effective_percent(**kwargs) / Decimal("100")
+
+
+def _fee_percent(value, *, name: str, nullable: bool = False) -> Decimal | None:
+    if value is None and nullable:
+        return None
+    result = _decimal(value, name=name)
+    if result < 0 or result > 100:
+        raise WhiteBitAdapterError(
+            f"{name} must be a percentage between 0 and 100"
+        )
+    return result
+
+
+def parse_fee_schedule(
+    payload: Mapping[str, object],
+    *,
+    evidence_id: str,
+    observed_at: datetime,
+) -> WhiteBitFeeSchedule:
+    if not isinstance(payload, Mapping):
+        raise TypeError("payload must be a mapping")
+    required = {
+        "error",
+        "taker",
+        "maker",
+        "futures_taker",
+        "futures_maker",
+        "rpi_maker_fee_premium",
+        "futures_rpi_maker_fee_premium",
+        "custom_fee",
+    }
+    missing = sorted(required - set(payload))
+    if missing:
+        raise WhiteBitAdapterError(
+            "market fee response missing required fields: " + ", ".join(missing)
+        )
+    if payload["error"] is not None:
+        raise WhiteBitAdapterError(
+            "market fee response contains provider error"
+        )
+    custom_raw = payload["custom_fee"]
+    if not isinstance(custom_raw, Mapping):
+        raise WhiteBitAdapterError("custom_fee must be an object")
+    custom: dict[str, Mapping[str, Decimal]] = {}
+    for raw_market, raw_rates in custom_raw.items():
+        market = _text(str(raw_market), name="custom fee market").upper()
+        if not isinstance(raw_rates, Mapping):
+            raise WhiteBitAdapterError(
+                "custom fee market value must be an object"
+            )
+        if set(raw_rates) != {"maker", "taker"}:
+            raise WhiteBitAdapterError(
+                "custom fee must contain exactly maker and taker"
+            )
+        if market in custom:
+            raise WhiteBitAdapterError(
+                "duplicate normalized custom fee market"
+            )
+        custom[market] = {
+            "maker": _fee_percent(
+                raw_rates["maker"],
+                name=f"{market}.maker",
+            ),
+            "taker": _fee_percent(
+                raw_rates["taker"],
+                name=f"{market}.taker",
+            ),
+        }
+
+    return WhiteBitFeeSchedule(
+        evidence_id=evidence_id,
+        observed_at=observed_at,
+        spot_taker_percent=_fee_percent(
+            payload["taker"],
+            name="taker",
+        ),
+        spot_maker_percent=_fee_percent(
+            payload["maker"],
+            name="maker",
+        ),
+        futures_taker_percent=_fee_percent(
+            payload["futures_taker"],
+            name="futures_taker",
+        ),
+        futures_maker_percent=_fee_percent(
+            payload["futures_maker"],
+            name="futures_maker",
+        ),
+        spot_rpi_maker_premium_percent=_fee_percent(
+            payload["rpi_maker_fee_premium"],
+            name="rpi_maker_fee_premium",
+            nullable=True,
+        ),
+        futures_rpi_maker_premium_percent=_fee_percent(
+            payload["futures_rpi_maker_fee_premium"],
+            name="futures_rpi_maker_fee_premium",
+            nullable=True,
+        ),
+        custom_fee_percent=custom,
+    )
+
+
+def market_fee_request() -> WhiteBitLookupRequest:
+    return WhiteBitLookupRequest(
+        "MARKET_FEES",
+        "/api/v4/market/fee",
+        {},
+    )

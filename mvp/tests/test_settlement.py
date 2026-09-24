@@ -44,6 +44,18 @@ class SettlementBookTests(unittest.TestCase):
                 date(2026, 9, 25),
             )
 
+    def test_initial_settled_cash_rejects_duplicate_normalized_currency_codes(self):
+        with self.assertRaisesRegex(
+            SettlementConflict,
+            "duplicate normalized currency codes",
+        ):
+            SettlementBook(
+                settled_cash={
+                    "USD": "100",
+                    " USD ": "999",
+                }
+            )
+
     def test_unsettled_sale_proceeds_are_not_spendable(self):
         book = SettlementBook(settled_cash={"USD": "100"})
         sale = equity_cash_obligation(

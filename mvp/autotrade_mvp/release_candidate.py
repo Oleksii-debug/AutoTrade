@@ -74,6 +74,38 @@ class ReleaseArtifactEvidence:
     signature_status: str
     evidence_status: str
 
+    def __post_init__(self) -> None:
+        role = _text(self.role, name="role").upper()
+        signature = _text(
+            self.signature_status,
+            name="signature_status",
+        ).upper()
+        evidence = _text(
+            self.evidence_status,
+            name="evidence_status",
+        ).upper()
+        if signature not in _SIGNATURE_STATUSES:
+            raise ReleaseCandidateError("unsupported signature_status")
+        if evidence not in _EVIDENCE_STATUSES:
+            raise ReleaseCandidateError("unsupported evidence_status")
+        if role in _SIGNED_BINARY_ROLES and signature == "NOT_APPLICABLE":
+            raise ReleaseCandidateError(
+                f"{role} signature cannot be NOT_APPLICABLE"
+            )
+        object.__setattr__(self, "role", role)
+        object.__setattr__(
+            self,
+            "artifact_sha256",
+            _sha256(self.artifact_sha256, name="artifact_sha256"),
+        )
+        object.__setattr__(
+            self,
+            "source_sha",
+            _git_sha(self.source_sha, name="source_sha"),
+        )
+        object.__setattr__(self, "signature_status", signature)
+        object.__setattr__(self, "evidence_status", evidence)
+
     @classmethod
     def create(
         cls,
@@ -121,6 +153,66 @@ class ReleaseCandidateInput:
     schema_contract_hash: str
     artifacts: tuple[ReleaseArtifactEvidence, ...]
     unresolved_blockers: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if isinstance(self.artifacts, (str, bytes)) or not isinstance(
+            self.artifacts, Sequence
+        ):
+            raise ReleaseCandidateError("artifacts must be a sequence")
+        artifacts = tuple(self.artifacts)
+        roles: set[str] = set()
+        for artifact in artifacts:
+            if not isinstance(artifact, ReleaseArtifactEvidence):
+                raise ReleaseCandidateError(
+                    "every artifact must be ReleaseArtifactEvidence"
+                )
+            if artifact.role in roles:
+                raise ReleaseCandidateError(
+                    f"duplicate release artifact role: {artifact.role}"
+                )
+            roles.add(artifact.role)
+
+        if isinstance(self.unresolved_blockers, (str, bytes)) or not isinstance(
+            self.unresolved_blockers,
+            Sequence,
+        ):
+            raise ReleaseCandidateError(
+                "unresolved_blockers must be a sequence"
+            )
+        blockers = tuple(
+            _text(value, name="unresolved_blocker")
+            for value in self.unresolved_blockers
+        )
+        if len(set(blockers)) != len(blockers):
+            raise ReleaseCandidateError(
+                "unresolved_blockers contains duplicates"
+            )
+
+        object.__setattr__(
+            self,
+            "release_id",
+            _text(self.release_id, name="release_id"),
+        )
+        object.__setattr__(
+            self,
+            "source_sha",
+            _git_sha(self.source_sha, name="source_sha"),
+        )
+        object.__setattr__(
+            self,
+            "baseline_hash",
+            _sha256(self.baseline_hash, name="baseline_hash"),
+        )
+        object.__setattr__(
+            self,
+            "schema_contract_hash",
+            _sha256(
+                self.schema_contract_hash,
+                name="schema_contract_hash",
+            ),
+        )
+        object.__setattr__(self, "artifacts", artifacts)
+        object.__setattr__(self, "unresolved_blockers", blockers)
 
     @classmethod
     def create(

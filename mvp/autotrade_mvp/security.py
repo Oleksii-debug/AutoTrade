@@ -81,6 +81,9 @@ class SecurityBoundary:
         self._now = now or time.time
         self._sessions: dict[str, Session] = {}
         self._records: dict[str, _SecretRecord] = {}
+        # Redaction history is deliberately separate from credential usability:
+        # rotated/revoked values remain scrubbed from future diagnostics.
+        self._secret_redactions: set[str] = set()
 
     def _now_value(self) -> float:
         value = self._now()
@@ -217,6 +220,7 @@ class SecurityBoundary:
             owner_identity=normalized_owner,
             value=secret_value,
         )
+        self._secret_redactions.add(secret_value)
         return handle
 
     def rotate_secret(
@@ -244,6 +248,7 @@ class SecurityBoundary:
         )
         record.handle = new_handle
         record.value = new_secret_value
+        self._secret_redactions.add(new_secret_value)
         return new_handle
 
     def revoke_secret(
@@ -317,11 +322,7 @@ class SecurityBoundary:
     def redact_for_diagnostics(self, value: object) -> object:
         """Redact sensitive keys plus any currently known raw secret material."""
         keyed = self.redact(value)
-        known = tuple(
-            record.value
-            for record in self._records.values()
-            if record.active and record.value
-        )
+        known = tuple(sorted(self._secret_redactions, key=len, reverse=True))
 
         def scrub(item: object) -> object:
             if isinstance(item, dict):

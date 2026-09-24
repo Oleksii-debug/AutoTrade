@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0.0",
   "baseline_date": "2026-09-22",
-  "evidence_as_of": "2026-09-24T20:40:20Z",
+  "evidence_as_of": "2026-09-24T20:56:08Z",
   "overall_status": "IMPLEMENTATION_IN_PROGRESS_SIMULATED_VERTICAL_SLICE_AVAILABLE",
   "gates": {
     "engineering_baseline": "RECONCILED_00_16_WITH_GENERATED_BANK_AND_EXPORT_VALIDATION",
@@ -10,7 +10,7 @@
     "financial_runtime": "IN_PROGRESS_ACCOUNTING_RESERVATIONS_RISK_AUTHORITY_DISPATCH_ORDER_PROJECTION_RECONCILIATION",
     "providers": "IN_PROGRESS_SIMULATED_PROVIDER_ONLY_REAL_ADAPTERS_NOT_QUALIFIED",
     "economic_edge": "UNPROVEN",
-    "learning": "IN_PROGRESS_PROTOCOL_GATES_MEMORY_MODEL_AGENT_JOB_CHAMPION_FOUNDATIONS",
+    "learning": "IN_PROGRESS_PROTOCOL_GATES_MEMORY_RETENTION_MODEL_AGENT_JOB_CHAMPION_FOUNDATIONS",
     "accessibility": "NOT_STARTED",
     "release": "NOT_STARTED",
     "quality_pipeline": "ACTIVE_WINDOWS_AND_LINUX_PR_VERIFICATION_OBSERVED_PASSING",
@@ -41,9 +41,22 @@
     "host_api": "IN_PROGRESS_COMMAND_STATE_FOUNDATION",
     "secrets_auth": "IN_PROGRESS_SECURITY_FOUNDATION_OS_BACKED_STORE_OPEN",
     "decision_traces": "IN_PROGRESS_DURABLE_TRACE_FOUNDATION",
-    "runtime_recovery": "IN_PROGRESS_RESTART_RECOVERY_FOUNDATION"
+    "runtime_recovery": "IN_PROGRESS_RESTART_RECOVERY_FOUNDATION",
+    "market_normalization": "IN_PROGRESS_EVIDENCE_BOUND_CAUSAL_NORMALIZATION_FOUNDATION",
+    "historical_vintages": "IN_PROGRESS_POINT_IN_TIME_IMMUTABLE_FOUNDATION",
+    "information_claims": "IN_PROGRESS_PROVENANCE_BOUND_CLAIM_FOUNDATION",
+    "causal_replay": "IN_PROGRESS_DETERMINISTIC_CHECKPOINT_FOUNDATION",
+    "futures_lifecycle": "IN_PROGRESS_EXACT_SETTLEMENT_VARIATION_MARGIN_FOUNDATION",
+    "perpetual_lifecycle": "IN_PROGRESS_EXACT_FUNDING_MARGIN_FOUNDATION",
+    "deterministic_strategy": "IN_PROGRESS_ZERO_MODEL_BASELINE_FOUNDATION",
+    "causal_features": "IN_PROGRESS_AVAILABILITY_AWARE_FEATURE_FOUNDATION",
+    "continual_retention": "IN_PROGRESS_REGIME_RETENTION_GATE_FOUNDATION",
+    "backup_restore": "IN_PROGRESS_VERIFIED_FAIL_CLOSED_RESTORE_FOUNDATION",
+    "ablation": "IN_PROGRESS_MATCHED_INPUT_VALUE_MEASUREMENT_FOUNDATION"
   },
   "evidence_notes": [
+    "Current main 3cae63fac37820611cddd38128a91185cb271fff also contains implemented foundations for market normalization, immutable historical vintages, information claims, causal replay, futures/perpetual lifecycles, deterministic zero-model strategy, causal features, continual retention, verified backup/restore and matched-input ablation.",
+    "Main 3cae63fac37820611cddd38128a91185cb271fff extends the durable decision-trace foundation with a single evidence journal for financial decisions.",
     "Main 6c943052c42f299b8535cad43c9e6216b33da674 binds confirmation authority to exact financial scope; d412fde8c64f22595142c646c524449b70d4dc28 integrates order lifecycle projection; c283e37bc33cc87e6f51b5de42e2c2081a71a06f hardens historical capability evidence.",
     "Main 8d66d7845685d11757e86d6ad73b66229a7648b2 converged the large financial/autonomous foundation including options, corporate actions, allocation, scientific registry/gates, experience memory, model routing, specialist agents, durable research jobs, champion control, host/security/recovery and decision-trace foundations.",
     "Status IN_PROGRESS means a verified implementation foundation exists on main; it does not mean provider, economic-edge, Windows/NVDA, release or bounded-real qualification is complete.",

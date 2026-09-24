@@ -167,6 +167,165 @@ class MarketNormalizationTests(unittest.TestCase):
         )
         self.assertEqual(delta.payload["bids"][0]["quantity"], "0")
 
+    def test_book_gap_blocks_new_risk_until_new_snapshot(self):
+        normalizer = MarketNormalizer(registry())
+        normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=10,
+                stream="book",
+            )
+        )
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "READY",
+        )
+        normalizer.require_executable_book(
+            provider_id="provider-a",
+            venue_id="venue-a",
+            provider_symbol="ABC-USD",
+            stream="book",
+        )
+
+        gap = normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [["99.98", "1"]], "asks": []},
+                sequence=12,
+                stream="book",
+            )
+        )
+        self.assertIn("SEQUENCE_GAP", gap.quality_flags)
+        self.assertIn("BOOK_UNUSABLE", gap.quality_flags)
+        with self.assertRaisesRegex(MarketDataError, "new risk is blocked"):
+            normalizer.require_executable_book(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            )
+
+        contiguous_after_gap = normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [["99.97", "1"]], "asks": []},
+                sequence=13,
+                stream="book",
+            )
+        )
+        self.assertIn("BOOK_UNUSABLE", contiguous_after_gap.quality_flags)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "GAPPED",
+        )
+
+        recovery = normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.96", "2"]], "asks": [["100.02", "2"]]},
+                sequence=20,
+                stream="book",
+            )
+        )
+        self.assertNotIn("BOOK_UNUSABLE", recovery.quality_flags)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "READY",
+        )
+        normalizer.require_executable_book(
+            provider_id="provider-a",
+            venue_id="venue-a",
+            provider_symbol="ABC-USD",
+            stream="book",
+        )
+
+    def test_book_without_sequence_never_becomes_executable(self):
+        normalizer = MarketNormalizer(registry())
+        event = normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=None,
+                stream="book",
+            )
+        )
+        self.assertIn("BOOK_SEQUENCE_UNVERIFIED", event.quality_flags)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+            ),
+            "UNVERIFIED",
+        )
+        with self.assertRaisesRegex(MarketDataError, "new risk is blocked"):
+            normalizer.require_executable_book(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+            )
+
+    def test_raw_evidence_ref_is_strict_contract_evidence(self):
+        base = raw("TRADE", {"price": "100", "quantity": "1"})
+        with self.assertRaisesRegex(MarketDataError, "missing required"):
+            RawMarketUpdate(
+                provider_id=base.provider_id,
+                venue_id=base.venue_id,
+                provider_symbol=base.provider_symbol,
+                kind=base.kind,
+                source_event_at=base.source_event_at,
+                available_at=base.available_at,
+                ingested_at=base.ingested_at,
+                availability_basis=base.availability_basis,
+                revision=base.revision,
+                payload=base.payload,
+                raw_evidence_ref={"artifact_id": EVIDENCE["artifact_id"]},
+            )
+        with self.assertRaisesRegex(MarketDataError, "sha256"):
+            RawMarketUpdate(
+                provider_id=base.provider_id,
+                venue_id=base.venue_id,
+                provider_symbol=base.provider_symbol,
+                kind=base.kind,
+                source_event_at=base.source_event_at,
+                available_at=base.available_at,
+                ingested_at=base.ingested_at,
+                availability_basis=base.availability_basis,
+                revision=base.revision,
+                payload=base.payload,
+                raw_evidence_ref={**EVIDENCE, "sha256": "bad"},
+            )
+        with self.assertRaisesRegex(MarketDataError, "unknown fields"):
+            RawMarketUpdate(
+                provider_id=base.provider_id,
+                venue_id=base.venue_id,
+                provider_symbol=base.provider_symbol,
+                kind=base.kind,
+                source_event_at=base.source_event_at,
+                available_at=base.available_at,
+                ingested_at=base.ingested_at,
+                availability_basis=base.availability_basis,
+                revision=base.revision,
+                payload=base.payload,
+                raw_evidence_ref={**EVIDENCE, "secret": "must-not-pass"},
+            )
+
     def test_crossed_book_and_precision_edges_fail_closed(self):
         normalizer = MarketNormalizer(registry())
         with self.assertRaisesRegex(MarketDataError, "crossed"):

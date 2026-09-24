@@ -142,8 +142,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Data/Artifacts/ and its contract/qualification evidence.
 - **Forbidden scope:** Artifact hashes presented as admin-proof security; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: ARTIFACT / immutable-store; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Content-addressed artifact store implemented under research/autotrade_research/artifacts/store.py using the migrated durable publication and resource-lock primitives. It verifies SHA-256 and size, enforces explicit storage/export rights, rejects immutable identity conflicts, audits missing/corrupt/unreferenced objects and removes only unreferenced objects/staging leftovers under a store lock. Focused tests cover idempotent publication, corruption, rights-aware export, orphan recovery and denied storage. Remaining WP-06 work: crash-injection qualification at every publication boundary, manifest schema/version contract, lawful dataset/model integration, Windows exact-head evidence and production integration.
 
 ### WP-07 — instrument-registry
 

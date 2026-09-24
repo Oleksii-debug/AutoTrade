@@ -224,6 +224,12 @@ class QuotaBucket:
             raise ProviderCoreError("recovery quota reserve is protected")
         self.used += amount
 
+    def release(self, cost) -> None:
+        amount = _decimal(cost, "quota cost", non_negative=True)
+        if amount > self.used:
+            raise ProviderCoreError("cannot release more quota than was acquired")
+        self.used -= amount
+
     def reset(self) -> None:
         self.used = Decimal("0")
 

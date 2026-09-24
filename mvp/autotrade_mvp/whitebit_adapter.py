@@ -393,3 +393,158 @@ def redact_whitebit_debug(value: Any) -> Any:
     if isinstance(value, tuple):
         return tuple(redact_whitebit_debug(item) for item in value)
     return value
+
+
+@dataclass(frozen=True)
+class WhiteBitHistoryPageEvidence:
+    offset: int
+    limit: int
+    record_count: int
+
+    def __post_init__(self) -> None:
+        for field in ("offset", "limit", "record_count"):
+            value = getattr(self, field)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ProviderCoreError(f"{field} must be an integer")
+        if self.offset < 0:
+            raise ProviderCoreError("offset cannot be negative")
+        if self.limit < 1 or self.limit > 500:
+            raise ProviderCoreError("limit must be between 1 and 500")
+        if self.record_count < 0 or self.record_count > self.limit:
+            raise ProviderCoreError("record_count must be between zero and limit")
+
+    @property
+    def proves_last_page(self) -> bool:
+        return self.record_count < self.limit
+
+
+class WhiteBitHistoryCoverage:
+    """Tracks contiguous order-history pagination; it is not absence proof alone."""
+
+    def __init__(self, *, initial_offset: int = 0) -> None:
+        if (
+            not isinstance(initial_offset, int)
+            or isinstance(initial_offset, bool)
+            or initial_offset < 0
+        ):
+            raise ProviderCoreError("initial_offset must be a non-negative integer")
+        self.initial_offset = initial_offset
+        self._pages: list[WhiteBitHistoryPageEvidence] = []
+
+    def add_page(self, page: WhiteBitHistoryPageEvidence) -> None:
+        if not isinstance(page, WhiteBitHistoryPageEvidence):
+            raise TypeError("page must be WhiteBitHistoryPageEvidence")
+        if self.complete:
+            raise ProviderCoreError("history coverage is already complete")
+        expected = (
+            self.initial_offset
+            if not self._pages
+            else self._pages[-1].offset + self._pages[-1].limit
+        )
+        if page.offset != expected:
+            raise ProviderCoreError(
+                f"history pagination gap: expected offset {expected}"
+            )
+        self._pages.append(page)
+
+    @property
+    def complete(self) -> bool:
+        return bool(self._pages and self._pages[-1].proves_last_page)
+
+    @property
+    def pages(self) -> tuple[WhiteBitHistoryPageEvidence, ...]:
+        return tuple(self._pages)
+
+    @property
+    def next_offset(self) -> int:
+        if not self._pages:
+            return self.initial_offset
+        return self._pages[-1].offset + self._pages[-1].limit
+
+
+def build_exact_client_order_lookup(
+    *,
+    market: str,
+    client_order_id: str,
+) -> Mapping[str, Any]:
+    cid = _text(client_order_id, name="client_order_id")
+    if not _CLIENT_ID.fullmatch(cid):
+        raise ProviderCoreError("client_order_id violates WhiteBIT format")
+    return MappingProxyType(
+        {
+            "endpoint": "/api/v4/trade-account/order/history",
+            "payload": {
+                "market": _text(market, name="market"),
+                "clientOrderId": cid,
+            },
+            "single_order_lookup": True,
+        }
+    )
+
+
+def build_history_page_request(
+    *,
+    market: str | None,
+    start_unix: int,
+    end_unix: int,
+    offset: int,
+    limit: int = 50,
+) -> Mapping[str, Any]:
+    for value, name in (
+        (start_unix, "start_unix"),
+        (end_unix, "end_unix"),
+        (offset, "offset"),
+        (limit, "limit"),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ProviderCoreError(f"{name} must be an integer")
+    if start_unix < 0 or end_unix < 0 or end_unix < start_unix:
+        raise ProviderCoreError("history time window is invalid")
+    if end_unix - start_unix > 31 * 24 * 60 * 60:
+        raise ProviderCoreError("WhiteBIT history window cannot exceed 31 days")
+    if offset < 0 or limit < 1 or limit > 500:
+        raise ProviderCoreError("invalid history pagination")
+    payload: dict[str, Any] = {
+        "startDate": start_unix,
+        "endDate": end_unix,
+        "offset": offset,
+        "limit": limit,
+    }
+    if market is not None:
+        payload["market"] = _text(market, name="market")
+    return MappingProxyType(
+        {
+            "endpoint": "/api/v4/trade-account/order/history",
+            "payload": payload,
+            "single_order_lookup": False,
+        }
+    )
+
+
+def parse_market_rules(record: Mapping[str, Any]) -> WhiteBitMarketRules:
+    """Parse the rule fields required for deterministic admission.
+
+    The caller must bind this record to source/version evidence before using it
+    for financial admission; this function only validates the economic fields.
+    """
+
+    if not isinstance(record, Mapping):
+        raise TypeError("record must be a mapping")
+    try:
+        market = record["name"]
+        amount_step = record["stepSize"]
+        price_tick = record["tickSize"]
+        minimum_amount = record["minAmount"]
+        minimum_total = record["minTotal"]
+    except KeyError as error:
+        raise ProviderCoreError(
+            f"market metadata missing required field: {error.args[0]}"
+        ) from error
+    return WhiteBitMarketRules.create(
+        market=str(market),
+        amount_step=amount_step,
+        price_tick=price_tick,
+        minimum_amount=minimum_amount,
+        minimum_total=minimum_total,
+        maximum_total=record.get("maxTotal"),
+    )

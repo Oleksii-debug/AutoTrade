@@ -249,6 +249,41 @@ class RuntimeRecoveryTests(unittest.TestCase):
                 ["host-a", "host-b"],
             )
 
+    def test_tampered_older_owner_generation_blocks_restart(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            first = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="paper-account",
+            )
+            first.start("host-a")
+            first.record_reconciliation(consistent=True)
+            first.transfer_owner(
+                new_owner_id="host-b",
+                old_sender_fenced=True,
+                reconciled=True,
+            )
+
+            with sqlite3.connect(path) as connection:
+                row = connection.execute(
+                    "SELECT event_id, payload_json FROM events "
+                    "WHERE aggregate_type = 'recovery_owner' "
+                    "AND aggregate_version = 1"
+                ).fetchone()
+                self.assertIsNotNone(row)
+                connection.execute(
+                    "UPDATE events SET payload_json = ? WHERE event_id = ?",
+                    ('{"owner_epoch":"1","owner_id":"tampered-host"}', row[0]),
+                )
+                connection.commit()
+
+            restarted = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="paper-account",
+            )
+            with self.assertRaisesRegex(RuntimeError, "payload hash mismatch"):
+                restarted.start("host-c")
+
     def test_tampered_durable_owner_record_blocks_sender_validation(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

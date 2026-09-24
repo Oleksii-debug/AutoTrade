@@ -17,6 +17,9 @@ from mvp.autotrade_mvp.options import (
     physical_exercise_obligation,
     require_holder_exercise_open,
     require_physical_resources,
+    OptionRiskEvidence,
+    OptionScenarioResult,
+    require_current_option_risk,
 )
 
 
@@ -43,7 +46,7 @@ class OptionLifecycleTests(unittest.TestCase):
             instrument=f"OPT:{right}",
             right=right,
             strike=Decimal("50"),
-            multiplier=Decimal("150"),
+            multiplier=Decimal("100"),
             settlement_currency="USD",
             settlement_method="PHYSICAL",
             exercise_style="AMERICAN",
@@ -53,6 +56,7 @@ class OptionLifecycleTests(unittest.TestCase):
                 DeliverableLeg("SHARES:ADJUSTED", Decimal("150")),
                 DeliverableLeg("CASHLIKE:MERGER_RIGHT", Decimal("2.5")),
             ),
+            exercise_cash_per_contract=Decimal("5000"),
         )
 
     def test_call_and_put_intrinsic_values_are_exact(self):
@@ -98,6 +102,41 @@ class OptionLifecycleTests(unittest.TestCase):
             Decimal("-1400"),
         )
 
+    def test_adjusted_deliverable_rejects_duplicate_asset_identity(self):
+        with self.assertRaisesRegex(OptionError, "asset_id values must be unique"):
+            OptionContract(
+                instrument="OPT:ADJUSTED",
+                right="CALL",
+                strike=Decimal("50"),
+                multiplier=Decimal("100"),
+                settlement_currency="USD",
+                settlement_method="PHYSICAL",
+                exercise_style="AMERICAN",
+                expiry=at(20),
+                exercise_cutoff=at(19),
+                deliverable=(
+                    DeliverableLeg("SHARES:ADJUSTED", Decimal("60")),
+                    DeliverableLeg("SHARES:ADJUSTED", Decimal("40")),
+                ),
+                exercise_cash_per_contract=Decimal("5000"),
+            )
+
+    def test_adjusted_deliverable_requires_typed_legs(self):
+        with self.assertRaisesRegex(OptionError, "DeliverableLeg"):
+            OptionContract(
+                instrument="OPT:ADJUSTED",
+                right="CALL",
+                strike=Decimal("50"),
+                multiplier=Decimal("100"),
+                settlement_currency="USD",
+                settlement_method="PHYSICAL",
+                exercise_style="AMERICAN",
+                expiry=at(20),
+                exercise_cutoff=at(19),
+                deliverable=(("SHARES:ADJUSTED", Decimal("100")),),
+                exercise_cash_per_contract=Decimal("5000"),
+            )
+
     def test_adjusted_deliverable_never_assumes_one_hundred_shares(self):
         call = self._physical("CALL")
         obligation = physical_exercise_obligation(call, signed_contracts=2)
@@ -108,17 +147,17 @@ class OptionLifecycleTests(unittest.TestCase):
                 ("CASHLIKE:MERGER_RIGHT", Decimal("5.0")),
             ),
         )
-        self.assertEqual(obligation.settlement_cash, Decimal("-15000"))
+        self.assertEqual(obligation.settlement_cash, Decimal("-10000"))
 
     def test_put_and_short_assignment_reverse_physical_direction(self):
         put = self._physical("PUT")
         long_put = physical_exercise_obligation(put, signed_contracts=1)
         self.assertEqual(long_put.asset_quantities[0][1], Decimal("-150"))
-        self.assertEqual(long_put.settlement_cash, Decimal("7500"))
+        self.assertEqual(long_put.settlement_cash, Decimal("5000"))
 
         short_put = physical_exercise_obligation(put, signed_contracts=-1)
         self.assertEqual(short_put.asset_quantities[0][1], Decimal("150"))
-        self.assertEqual(short_put.settlement_cash, Decimal("-7500"))
+        self.assertEqual(short_put.settlement_cash, Decimal("-5000"))
 
     def test_physical_resource_check_fails_closed(self):
         put = self._physical("PUT")
@@ -190,11 +229,183 @@ class OptionLifecycleTests(unittest.TestCase):
             physical_book.position("SHARES:ADJUSTED"),
             Decimal("150"),
         )
-        self.assertEqual(physical_book.cash("USD"), Decimal("-7500"))
+        self.assertEqual(physical_book.cash("USD"), Decimal("-5000"))
 
     def test_float_inputs_are_rejected(self):
         with self.assertRaises(OptionError):
             intrinsic_value_per_unit(self._cash_call(), 101.0)
+
+
+class OptionRiskEvidenceTests(unittest.TestCase):
+    def test_adjusted_physical_contract_requires_explicit_exercise_cash(self):
+        with self.assertRaisesRegex(OptionError, "exercise_cash_per_contract"):
+            OptionContract(
+                instrument="OPT:ADJUSTED",
+                right="CALL",
+                strike=Decimal("50"),
+                multiplier=Decimal("100"),
+                settlement_currency="USD",
+                settlement_method="PHYSICAL",
+                exercise_style="AMERICAN",
+                exercise_cutoff=at(19),
+                expiry=at(20),
+                deliverable=(DeliverableLeg("SHARES:ADJUSTED", Decimal("150")),),
+            )
+
+    def test_adjusted_deliverable_does_not_rewrite_strike_cash_by_multiplier(self):
+        contract = OptionContract(
+            instrument="OPT:ADJUSTED",
+            right="CALL",
+            strike=Decimal("50"),
+            multiplier=Decimal("100"),
+            settlement_currency="USD",
+            settlement_method="PHYSICAL",
+            exercise_style="AMERICAN",
+            exercise_cutoff=at(19),
+            expiry=at(20),
+            deliverable=(DeliverableLeg("SHARES:ADJUSTED", Decimal("150")),),
+            exercise_cash_per_contract=Decimal("5000"),
+        )
+        obligation = physical_exercise_obligation(contract, signed_contracts=1)
+        self.assertEqual(
+            obligation.asset_quantities,
+            (("SHARES:ADJUSTED", Decimal("150")),),
+        )
+        self.assertEqual(obligation.settlement_cash, Decimal("-5000"))
+
+    def _risk(self):
+        return OptionRiskEvidence(
+            instrument="OPT:CALL",
+            model_id="scenario-greeks",
+            model_version="1.2.0",
+            source_sha="a" * 40,
+            input_digest="sha256:" + "b" * 64,
+            schema_version=1,
+            market_as_of=at(17),
+            calculated_at=at(18),
+            expires_at=at(19),
+            delta="0.52",
+            gamma="0.03",
+            vega="12.5",
+            theta="-4.2",
+            rho="1.1",
+            scenarios=(
+                OptionScenarioResult(
+                    scenario_id="spot-down-vol-up",
+                    underlying_price="80",
+                    implied_volatility="0.55",
+                    pnl="-725.25",
+                ),
+                OptionScenarioResult(
+                    scenario_id="spot-up-vol-flat",
+                    underlying_price="120",
+                    implied_volatility="0.30",
+                    pnl="410.10",
+                ),
+            ),
+        )
+
+    def test_greeks_are_versioned_estimates_and_stress_is_explicit(self):
+        evidence = self._risk()
+        self.assertEqual(evidence.delta, Decimal("0.52"))
+        self.assertEqual(evidence.worst_scenario_loss, Decimal("725.25"))
+        require_current_option_risk(
+            evidence,
+            instrument="OPT:CALL",
+            at=datetime(2026, 9, 25, 18, 30, tzinfo=timezone.utc),
+        )
+
+    def test_missing_scenarios_and_float_inputs_fail_closed(self):
+        with self.assertRaisesRegex(OptionError, "scenario stress"):
+            OptionRiskEvidence(
+                instrument="OPT:CALL",
+                model_id="model",
+                model_version="1",
+                source_sha="a" * 40,
+                input_digest="sha256:" + "b" * 64,
+                schema_version=1,
+                market_as_of=at(17),
+                calculated_at=at(18),
+                expires_at=at(19),
+                delta="0",
+                gamma="0",
+                vega="0",
+                theta="0",
+                rho="0",
+                scenarios=(),
+            )
+        with self.assertRaises(OptionError):
+            OptionScenarioResult(
+                scenario_id="bad",
+                underlying_price=100.0,
+                implied_volatility="0.3",
+                pnl="-1",
+            )
+
+    def test_duplicate_scenarios_and_bad_provenance_fail_closed(self):
+        scenario = OptionScenarioResult(
+            scenario_id="same",
+            underlying_price="100",
+            implied_volatility="0.3",
+            pnl="-1",
+        )
+        with self.assertRaisesRegex(OptionError, "unique"):
+            OptionRiskEvidence(
+                instrument="OPT:CALL",
+                model_id="model",
+                model_version="1",
+                source_sha="a" * 40,
+                input_digest="sha256:" + "b" * 64,
+                schema_version=1,
+                market_as_of=at(17),
+                calculated_at=at(18),
+                expires_at=at(19),
+                delta="0",
+                gamma="0",
+                vega="0",
+                theta="0",
+                rho="0",
+                scenarios=(scenario, scenario),
+            )
+        with self.assertRaisesRegex(OptionError, "source_sha"):
+            OptionRiskEvidence(
+                instrument="OPT:CALL",
+                model_id="model",
+                model_version="1",
+                source_sha="NOT_A_SHA",
+                input_digest="sha256:" + "b" * 64,
+                schema_version=1,
+                market_as_of=at(17),
+                calculated_at=at(18),
+                expires_at=at(19),
+                delta="0",
+                gamma="0",
+                vega="0",
+                theta="0",
+                rho="0",
+                scenarios=(scenario,),
+            )
+
+    def test_future_stale_and_cross_instrument_evidence_are_blocked(self):
+        evidence = self._risk()
+        with self.assertRaisesRegex(OptionError, "future"):
+            require_current_option_risk(
+                evidence,
+                instrument="OPT:CALL",
+                at=at(17),
+            )
+        with self.assertRaisesRegex(OptionError, "stale"):
+            require_current_option_risk(
+                evidence,
+                instrument="OPT:CALL",
+                at=at(19),
+            )
+        with self.assertRaisesRegex(OptionError, "another instrument"):
+            require_current_option_risk(
+                evidence,
+                instrument="OPT:PUT",
+                at=datetime(2026, 9, 25, 18, 30, tzinfo=timezone.utc),
+            )
 
 
 if __name__ == "__main__":

@@ -318,6 +318,44 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(resolution.outcome, "OBSERVED_WORKING_ORDER")
         self.assertEqual(resolution.provider_order_ids, ("provider-working",))
         self.assertEqual(resolution.provider_execution_ids, ())
+        self.assertFalse(result.complete)
+        self.assertEqual(
+            result.mismatched_working_client_order_ids,
+            ("client-working",),
+        )
+        self.assertIn("ACCOUNT", result.blocking_resources)
+        self.assertIn("INSTRUMENT:ABC", result.blocking_resources)
+
+    def test_unknown_send_with_exact_local_working_truth_can_be_ready(self):
+        unknown = UnknownSubmission.create(
+            attempt_id="attempt-working-exact",
+            client_order_id="client-working",
+            started_at="2026-09-24T18:00:00Z",
+        )
+        provider = ProviderWorkingOrderEvidence.create(
+            provider_order_id="provider-working",
+            client_order_id="client-working",
+            instrument="ABC",
+            remaining_quantity="1",
+        )
+        local = LocalWorkingOrderEvidence.create(
+            client_order_id="client-working",
+            instrument="ABC",
+            remaining_quantity="1",
+        )
+        result = self.base(
+            local_working_orders=[local],
+            provider_working_orders=[provider],
+            unknown_submissions=[unknown],
+        )
+        self.assertEqual(
+            result.submission_resolutions[0].outcome,
+            "OBSERVED_WORKING_ORDER",
+        )
+        self.assertEqual(
+            result.matched_working_client_order_ids,
+            ("client-working",),
+        )
         self.assertTrue(result.complete)
 
     def test_matching_client_id_with_wrong_working_order_economics_blocks(self):

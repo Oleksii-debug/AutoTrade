@@ -21,7 +21,15 @@ def digest(text: str) -> str:
     return "sha256:" + sha256(text.encode("utf-8")).hexdigest()
 
 
-def resolution_proof(directory, *, job_id, generation, verdict, artifact_id=None):
+def resolution_proof(
+    directory,
+    *,
+    job_id,
+    generation,
+    verdict,
+    artifact_id=None,
+    output_refs=None,
+):
     artifact_store = ArtifactStore(Path(directory) / "external-resolution-artifacts")
     proof = {
         "schema_version": "1.0.0",
@@ -30,6 +38,9 @@ def resolution_proof(directory, *, job_id, generation, verdict, artifact_id=None
         "generation": generation,
         "verdict": verdict,
     }
+    canonical_outputs = [] if output_refs is None else sorted(output_refs)
+    if verdict == "PROVEN_SUCCEEDED":
+        proof["output_refs"] = canonical_outputs
     manifest = artifact_store.publish_bytes(
         artifact_id=str(uuid4()) if artifact_id is None else artifact_id,
         data=json.dumps(
@@ -44,6 +55,11 @@ def resolution_proof(directory, *, job_id, generation, verdict, artifact_id=None
             "job_id": job_id,
             "generation": generation,
             "verdict": verdict,
+            **(
+                {"output_refs": canonical_outputs}
+                if verdict == "PROVEN_SUCCEEDED"
+                else {}
+            ),
         },
     )
     return (
@@ -305,14 +321,18 @@ class ResearchJobStoreTests(unittest.TestCase):
             store.claim("worker-a", now=self.now, lease_seconds=10)
             store.requeue_expired(now=self.now + timedelta(seconds=11))
             generation = int(store.get(job["job_id"])["generation"])
+            artifact_store = ArtifactStore(
+                Path(directory) / "external-resolution-artifacts"
+            )
+            outputs = [result_artifact(artifact_store)]
             artifact_store, evidence = resolution_proof(
                 directory,
                 job_id=job["job_id"],
                 generation=generation,
                 verdict="PROVEN_SUCCEEDED",
                 artifact_id="22222222-2222-4222-8222-222222222222",
+                output_refs=outputs,
             )
-            outputs = [result_artifact(artifact_store)]
             resolved_at = self.now + timedelta(seconds=12)
             self.assertTrue(
                 store.resolve_waiting_external(
@@ -524,15 +544,16 @@ class ResearchJobStoreTests(unittest.TestCase):
             store.claim("worker-a", now=self.now, lease_seconds=10)
             store.requeue_expired(now=self.now + timedelta(seconds=11))
             generation = int(store.get(job["job_id"])["generation"])
+            nonexistent_output = (
+                "artifact:88888888-8888-4888-8888-888888888888@sha256:"
+                + "8" * 64
+            )
             artifact_store, evidence_ref = resolution_proof(
                 directory,
                 job_id=job["job_id"],
                 generation=generation,
                 verdict="PROVEN_SUCCEEDED",
-            )
-            nonexistent_output = (
-                "artifact:88888888-8888-4888-8888-888888888888@sha256:"
-                + "8" * 64
+                output_refs=[nonexistent_output],
             )
             with self.assertRaisesRegex(
                 JobConflictError,
@@ -548,6 +569,107 @@ class ResearchJobStoreTests(unittest.TestCase):
                     now=self.now + timedelta(seconds=12),
                 )
             self.assertEqual(store.get(job["job_id"])["state"], "WAITING_EXTERNAL")
+
+    def test_success_proof_cannot_be_rebound_to_different_outputs(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            job, _ = store.enqueue(
+                kind="research.external_annotation",
+                dedupe_key="proof-output-binding",
+                input_hashes=[digest("dataset")],
+                resource_budget={"wall_seconds": 60},
+                now=self.now,
+            )
+            store.claim("worker-a", now=self.now, lease_seconds=10)
+            store.requeue_expired(now=self.now + timedelta(seconds=11))
+            generation = int(store.get(job["job_id"])["generation"])
+            artifacts = ArtifactStore(
+                Path(directory) / "external-resolution-artifacts"
+            )
+            output_a = result_artifact(artifacts, data=b"output-a")
+            output_b = result_artifact(artifacts, data=b"output-b")
+            artifacts, evidence = resolution_proof(
+                directory,
+                job_id=job["job_id"],
+                generation=generation,
+                verdict="PROVEN_SUCCEEDED",
+                output_refs=[output_a],
+            )
+            with self.assertRaisesRegex(
+                JobConflictError,
+                "matching immutable artifact evidence",
+            ):
+                store.resolve_waiting_external(
+                    job["job_id"],
+                    generation=generation,
+                    verdict="PROVEN_SUCCEEDED",
+                    evidence_ref=evidence,
+                    artifact_store=artifacts,
+                    output_refs=[output_b],
+                    now=self.now + timedelta(seconds=12),
+                )
+            self.assertEqual(store.get(job["job_id"])["state"], "WAITING_EXTERNAL")
+
+    def test_success_outputs_are_canonicalized_and_duplicates_rejected(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            job, _ = store.enqueue(
+                kind="research.external_annotation",
+                dedupe_key="canonical-success-outputs",
+                input_hashes=[digest("dataset")],
+                resource_budget={"wall_seconds": 60},
+                now=self.now,
+            )
+            store.claim("worker-a", now=self.now, lease_seconds=10)
+            store.requeue_expired(now=self.now + timedelta(seconds=11))
+            generation = int(store.get(job["job_id"])["generation"])
+            artifacts = ArtifactStore(
+                Path(directory) / "external-resolution-artifacts"
+            )
+            output_a = result_artifact(artifacts, data=b"a")
+            output_b = result_artifact(artifacts, data=b"b")
+            artifacts, evidence = resolution_proof(
+                directory,
+                job_id=job["job_id"],
+                generation=generation,
+                verdict="PROVEN_SUCCEEDED",
+                output_refs=[output_a, output_b],
+            )
+            self.assertTrue(
+                store.resolve_waiting_external(
+                    job["job_id"],
+                    generation=generation,
+                    verdict="PROVEN_SUCCEEDED",
+                    evidence_ref=evidence,
+                    artifact_store=artifacts,
+                    output_refs=[output_b, output_a],
+                    now=self.now + timedelta(seconds=12),
+                )
+            )
+            self.assertEqual(
+                store.get(job["job_id"])["output_refs"],
+                sorted([output_a, output_b]),
+            )
+
+            other, _ = store.enqueue(
+                kind="research.external_annotation",
+                dedupe_key="duplicate-success-outputs",
+                input_hashes=[digest("dataset-2")],
+                resource_budget={"wall_seconds": 60},
+                now=self.now,
+            )
+            store.claim("worker-b", now=self.now, lease_seconds=10)
+            store.requeue_expired(now=self.now + timedelta(seconds=11))
+            with self.assertRaisesRegex(ValueError, "must not contain duplicates"):
+                store.resolve_waiting_external(
+                    other["job_id"],
+                    generation=int(store.get(other["job_id"])["generation"]),
+                    verdict="PROVEN_SUCCEEDED",
+                    evidence_ref=evidence,
+                    artifact_store=artifacts,
+                    output_refs=[output_a, output_a],
+                    now=self.now + timedelta(seconds=12),
+                )
 
     def test_waiting_external_resolution_rejects_weak_evidence_and_output_mismatch(self):
         with TemporaryDirectory() as directory:

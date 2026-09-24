@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 import os
 from pathlib import Path
-import tempfile
 
 
 class DiskReserveError(ValueError):
@@ -84,15 +83,21 @@ class EmergencyDiskReserve:
                 "existing emergency reserve path is invalid; refusing to overwrite"
             )
 
-        fd, temporary_name = tempfile.mkstemp(
-            prefix=self.path.name + ".",
-            suffix=".tmp",
-            dir=self.path.parent,
-        )
-        temporary = Path(temporary_name)
+        try:
+            fd = os.open(
+                self.path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError as error:
+            raise DiskReserveError(
+                "emergency reserve appeared during provisioning"
+            ) from error
+
+        complete = False
         try:
             with os.fdopen(fd, "wb", buffering=0) as stream:
-                chunk = b"\0" * min(1024 * 1024, self.reserve_bytes)
+                chunk = b"\\0" * min(1024 * 1024, self.reserve_bytes)
                 remaining = self.reserve_bytes
                 while remaining:
                     piece = chunk if remaining >= len(chunk) else chunk[:remaining]
@@ -102,14 +107,13 @@ class EmergencyDiskReserve:
                     remaining -= written
                 stream.flush()
                 os.fsync(stream.fileno())
-            if self.path.exists() or self.path.is_symlink():
-                raise DiskReserveError(
-                    "emergency reserve appeared during provisioning"
-                )
-            os.replace(temporary, self.path)
+            complete = True
         finally:
-            if temporary.exists():
-                temporary.unlink()
+            if not complete:
+                try:
+                    self.path.unlink()
+                except FileNotFoundError:
+                    pass
         result = self.status()
         if not result.available_for_emergency:
             raise DiskReserveError("emergency reserve provisioning did not persist exact bytes")

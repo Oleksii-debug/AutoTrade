@@ -158,6 +158,27 @@ class ExperienceMemoryTests(unittest.TestCase):
                 (),
             )
 
+    def test_future_decision_with_old_information_cutoff_is_not_retrieved_early(self):
+        with TemporaryDirectory() as directory:
+            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            future = BASE + timedelta(days=2)
+            store.append_episode(
+                decision_time=future,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload(),
+            )
+            self.assertEqual(
+                store.retrieve(
+                    information_cutoff=BASE + timedelta(days=1),
+                    granted_permissions={"research"},
+                ),
+                (),
+            )
+
     def test_reopen_preserves_episode(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "memory.sqlite3"

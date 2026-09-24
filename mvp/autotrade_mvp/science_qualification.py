@@ -47,17 +47,23 @@ class QualificationGate:
     reason_codes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.gate_id.strip():
+        if not isinstance(self.gate_id, str) or not self.gate_id.strip():
             raise ValueError("gate_id is required")
+        if self.gate_id not in _REQUIRED_GATES:
+            raise ValueError("gate_id is not a supported scientific qualification gate")
         if self.status not in _VALID_STATUS:
             raise ValueError("gate status must be PASS, FAIL or INCONCLUSIVE")
-        if not self.evidence_hashes:
-            raise ValueError("gate evidence is required")
+        if not isinstance(self.evidence_hashes, tuple) or not self.evidence_hashes:
+            raise ValueError("gate evidence must be a non-empty tuple")
         for item in self.evidence_hashes:
             _sha256_identity(item, "gate evidence hash")
         _sha256_identity(self.candidate_hash, "gate candidate_hash")
         _sha256_identity(self.frozen_protocol_hash, "gate frozen_protocol_hash")
         _sha256_identity(self.input_snapshot_hash, "gate input_snapshot_hash")
+        if not isinstance(self.reason_codes, tuple) or any(
+            not isinstance(item, str) or not item.strip() for item in self.reason_codes
+        ):
+            raise ValueError("reason_codes must be a tuple of non-empty strings")
         if self.status == "FAIL" and not self.reason_codes:
             raise ValueError("failed gate requires a reason code")
 
@@ -78,6 +84,10 @@ class ScientificQualificationInput:
         _sha256_identity(self.input_snapshot_hash, "input_snapshot_hash")
         if self.economic_claim not in _VALID_CLAIMS:
             raise ValueError("economic_claim is not supported")
+        if not isinstance(self.gates, tuple):
+            raise TypeError("gates must be a tuple")
+        if any(not isinstance(gate, QualificationGate) for gate in self.gates):
+            raise TypeError("gates must contain QualificationGate values")
         if not isinstance(self.holdout_used_for_tuning, bool):
             raise TypeError("holdout_used_for_tuning must be boolean")
         if not isinstance(self.future_information_used_for_routing, bool):

@@ -159,8 +159,9 @@ class OrderProjection:
 
     def reject(self, intent_id: str) -> None:
         intent = self._require_intent(intent_id)
-        if self.filled_quantity(intent.intent_id) > 0:
-            raise OrderProjectionConflict("provider rejection cannot erase observed fills")
+        # Provider status and execution facts can arrive out of order. Preserve
+        # a late rejection even when fills are already known; snapshot() exposes
+        # the contradiction explicitly instead of erasing economic truth.
         intent.rejected = True
         intent.unknown = False
 

@@ -153,6 +153,7 @@ class SubmissionResolution:
     client_order_id: str
     outcome: str
     evidence_reason: str
+    provider_execution_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -268,6 +269,7 @@ def reconcile_account(
 
     provider_by_id: dict[str, ProviderFillEvidence] = {}
     provider_client_ids: set[str] = set()
+    provider_execution_ids_by_client: dict[str, set[str]] = {}
     for fill in provider_fills:
         if not isinstance(fill, ProviderFillEvidence):
             raise TypeError("provider_fills must contain ProviderFillEvidence")
@@ -278,6 +280,9 @@ def reconcile_account(
         provider_by_id[fill.provider_execution_id] = fill
         if fill.client_order_id is not None:
             provider_client_ids.add(fill.client_order_id)
+            provider_execution_ids_by_client.setdefault(fill.client_order_id, set()).add(
+                fill.provider_execution_id
+            )
 
     provider_ids = set(provider_by_id)
     local_id_set = set(local_ids)
@@ -317,7 +322,10 @@ def reconcile_account(
         submission_time = _instant(
             submission.started_at, name="unknown_submission.started_at"
         )
-        if submission.client_order_id in provider_client_ids:
+        matched_provider_execution_ids = tuple(
+            sorted(provider_execution_ids_by_client.get(submission.client_order_id, set()))
+        )
+        if matched_provider_execution_ids:
             outcome = "OBSERVED_EXECUTION"
             reason = "provider_activity_contains_client_order_id"
         elif (
@@ -347,6 +355,7 @@ def reconcile_account(
                 client_order_id=submission.client_order_id,
                 outcome=outcome,
                 evidence_reason=reason,
+                provider_execution_ids=matched_provider_execution_ids,
             )
         )
 

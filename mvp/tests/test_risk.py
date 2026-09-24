@@ -25,6 +25,7 @@ def policy(**overrides):
         max_clock_age_seconds=None,
         allowed_actions=None,
         require_settlement_evidence=False,
+        require_option_exercise_evidence=False,
     )
     values.update(overrides)
     return RiskPolicy.create(**values)
@@ -696,6 +697,70 @@ class IndependentRiskTests(unittest.TestCase):
             context(settlement_allowed="true")
         with self.assertRaises(TypeError):
             policy(require_settlement_evidence="true")
+
+    def test_option_exercise_requires_verified_deliverable_and_buying_power(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="5",
+                expected_state_version=7,
+                action="EXERCISE", instrument_type="OPTION",
+            ),
+            context(
+                option_deliverable_verified=None,
+                option_exercise_cash_required="5000",
+                option_exercise_cash_available="4999.99",
+            ),
+            policy(
+                max_single_notional="10000",
+                require_option_exercise_evidence=True,
+            ),
+        )
+        failed = {item.rule for item in decision.rules if not item.passed}
+        self.assertIn("option_deliverable", failed)
+        self.assertIn("option_exercise_funding", failed)
+
+    def test_option_exercise_accepts_exact_buying_power_boundary(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="5",
+                expected_state_version=7,
+                action="EXERCISE", instrument_type="OPTION",
+            ),
+            context(
+                option_deliverable_verified=True,
+                option_exercise_cash_required="5000",
+                option_exercise_cash_available="5000",
+            ),
+            policy(
+                max_single_notional="10000",
+                require_option_exercise_evidence=True,
+            ),
+        )
+        option_rules = {
+            item.rule: item.passed
+            for item in decision.rules
+            if item.rule.startswith("option_")
+        }
+        self.assertEqual(
+            option_rules,
+            {"option_deliverable": True, "option_exercise_funding": True},
+        )
+
+    def test_exercise_action_cannot_be_labeled_on_non_option(self):
+        with self.assertRaisesRegex(ValueError, "requires OPTION"):
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+                action="EXERCISE", instrument_type="EQUITY",
+            )
+
+    def test_option_obligation_inputs_reject_binary_float_and_fake_booleans(self):
+        with self.assertRaises(TypeError):
+            context(option_exercise_cash_required=5000.0)
+        with self.assertRaises(TypeError):
+            context(option_deliverable_verified="true")
+        with self.assertRaises(TypeError):
+            policy(require_option_exercise_evidence="true")
 
 
 if __name__ == "__main__":

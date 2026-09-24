@@ -8,6 +8,9 @@ from typing import Mapping, Sequence
 
 
 RISK_ACTIONS = frozenset({"TRADE", "REDUCE", "HEDGE", "FLATTEN", "EXERCISE"})
+RISK_INSTRUMENT_TYPES = frozenset(
+    {"GENERIC", "SPOT", "EQUITY", "FUTURE", "PERPETUAL", "OPTION"}
+)
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -105,6 +108,7 @@ class RiskIntent:
     expected_state_version: int
     reduce_only: bool = False
     action: str = "TRADE"
+    instrument_type: str = "GENERIC"
 
     @classmethod
     def create(
@@ -117,6 +121,7 @@ class RiskIntent:
         expected_state_version: int,
         reduce_only: bool = False,
         action: str = "TRADE",
+        instrument_type: str = "GENERIC",
     ) -> "RiskIntent":
         if not isinstance(symbol, str) or not symbol.strip():
             raise ValueError("symbol is required")
@@ -134,6 +139,15 @@ class RiskIntent:
             raise ValueError(f"Unsupported risk action: {normalized_action}")
         if normalized_action in {"REDUCE", "FLATTEN"} and not reduce_only:
             raise ValueError(f"{normalized_action} action requires reduce_only")
+        if not isinstance(instrument_type, str) or not instrument_type.strip():
+            raise ValueError("instrument_type is required")
+        normalized_instrument_type = instrument_type.strip().upper()
+        if normalized_instrument_type not in RISK_INSTRUMENT_TYPES:
+            raise ValueError(
+                f"Unsupported risk instrument type: {normalized_instrument_type}"
+            )
+        if normalized_action == "EXERCISE" and normalized_instrument_type != "OPTION":
+            raise ValueError("EXERCISE action requires OPTION instrument_type")
         return cls(
             symbol=symbol.strip(),
             side=normalized_side,
@@ -142,6 +156,7 @@ class RiskIntent:
             expected_state_version=expected_state_version,
             reduce_only=reduce_only,
             action=normalized_action,
+            instrument_type=normalized_instrument_type,
         )
 
 
@@ -166,6 +181,7 @@ class RiskPolicy:
     max_clock_age_seconds: Decimal | None = None
     allowed_actions: tuple[str, ...] | None = None
     require_settlement_evidence: bool = False
+    require_option_exercise_evidence: bool = False
 
     @classmethod
     def create(
@@ -190,6 +206,7 @@ class RiskPolicy:
         max_clock_age_seconds=None,
         allowed_actions: Sequence[str] | None = None,
         require_settlement_evidence: bool = False,
+        require_option_exercise_evidence: bool = False,
     ) -> "RiskPolicy":
         values = {
             "max_abs_position": _positive(max_abs_position, name="max_abs_position"),
@@ -247,6 +264,8 @@ class RiskPolicy:
         )
         if not isinstance(require_settlement_evidence, bool):
             raise TypeError("require_settlement_evidence must be a boolean")
+        if not isinstance(require_option_exercise_evidence, bool):
+            raise TypeError("require_option_exercise_evidence must be a boolean")
         return cls(
             **values,
             **optional_limits,
@@ -254,6 +273,7 @@ class RiskPolicy:
             max_clock_age_seconds=clock_limit,
             allowed_actions=normalized_allowed_actions,
             require_settlement_evidence=require_settlement_evidence,
+            require_option_exercise_evidence=require_option_exercise_evidence,
         )
 
 
@@ -280,6 +300,9 @@ class RiskContext:
     slippage_fraction: Mapping[str, Decimal] | None = None
     clock_age_seconds: Decimal | None = None
     settlement_allowed: bool | None = None
+    option_deliverable_verified: bool | None = None
+    option_exercise_cash_required: Decimal | None = None
+    option_exercise_cash_available: Decimal | None = None
 
     @classmethod
     def create(
@@ -306,6 +329,9 @@ class RiskContext:
         slippage_fraction: Mapping[str, object] | None = None,
         clock_age_seconds=None,
         settlement_allowed: bool | None = None,
+        option_deliverable_verified: bool | None = None,
+        option_exercise_cash_required=None,
+        option_exercise_cash_available=None,
     ) -> "RiskContext":
         if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
@@ -384,6 +410,24 @@ class RiskContext:
                 allow_zero=True,
             )
         )
+        normalized_exercise_required = (
+            None
+            if option_exercise_cash_required is None
+            else _positive(
+                option_exercise_cash_required,
+                name="option_exercise_cash_required",
+                allow_zero=True,
+            )
+        )
+        normalized_exercise_available = (
+            None
+            if option_exercise_cash_available is None
+            else _positive(
+                option_exercise_cash_available,
+                name="option_exercise_cash_available",
+                allow_zero=True,
+            )
+        )
         if not isinstance(stress_scenarios, Sequence) or isinstance(
             stress_scenarios,
             (str, bytes),
@@ -413,6 +457,11 @@ class RiskContext:
             raise TypeError("borrow_available must be a boolean or None")
         if settlement_allowed is not None and not isinstance(settlement_allowed, bool):
             raise TypeError("settlement_allowed must be a boolean or None")
+        if (
+            option_deliverable_verified is not None
+            and not isinstance(option_deliverable_verified, bool)
+        ):
+            raise TypeError("option_deliverable_verified must be a boolean or None")
         return cls(
             state_version=state_version,
             equity=_positive(equity, name="equity"),
@@ -435,6 +484,9 @@ class RiskContext:
             slippage_fraction=normalized_slippage,
             clock_age_seconds=normalized_clock_age,
             settlement_allowed=settlement_allowed,
+            option_deliverable_verified=option_deliverable_verified,
+            option_exercise_cash_required=normalized_exercise_required,
+            option_exercise_cash_available=normalized_exercise_available,
         )
 
 
@@ -658,6 +710,42 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
             ),
             True,
             "settlement state must affirmatively permit the requested action",
+        )
+    if (
+        policy.require_option_exercise_evidence
+        and intent.action == "EXERCISE"
+    ):
+        add(
+            "option_deliverable",
+            context.option_deliverable_verified is True,
+            (
+                context.option_deliverable_verified
+                if context.option_deliverable_verified is not None
+                else "UNKNOWN"
+            ),
+            True,
+            "option exercise requires a verified current deliverable",
+        )
+        exercise_funding_known = (
+            context.option_exercise_cash_required is not None
+            and context.option_exercise_cash_available is not None
+        )
+        add(
+            "option_exercise_funding",
+            exercise_funding_known
+            and context.option_exercise_cash_available
+            >= context.option_exercise_cash_required,
+            (
+                context.option_exercise_cash_available
+                if exercise_funding_known
+                else "UNKNOWN"
+            ),
+            (
+                context.option_exercise_cash_required
+                if context.option_exercise_cash_required is not None
+                else "UNKNOWN"
+            ),
+            "option exercise requires evidenced buying power for its obligation",
         )
     add(
         "market_freshness",

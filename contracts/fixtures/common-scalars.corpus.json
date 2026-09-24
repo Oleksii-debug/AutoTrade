@@ -1,7 +1,8 @@
 {
-  "corpus_version": "1.1.0",
+  "corpus_version": "1.2.0",
   "contract_version": "1.0.0",
   "source_schema_id": "https://schemas.autotrade.local/1.0.0/common.schema.json",
+  "source_schema_sha256": "sha256:c7e35ebc939dfd2fd3fbf6c2ae601f4bdf0d367bd640239564fde578fd695636",
   "scope": "common-scalar-subset",
   "cases": [
     {

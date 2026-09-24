@@ -304,11 +304,29 @@ class ArtifactStore:
                 except Exception:
                     corrupt.append(manifest_path.name)
 
-        object_digests = {
-            path.name
-            for path in self.objects.glob("*/*")
-            if path.is_file() and len(path.name) == 64
-        }
+        object_digests: set[str] = set()
+        for path in self.objects.glob("*/*"):
+            if path.is_symlink():
+                corrupt.append(
+                    "object:" + path.relative_to(self.root).as_posix()
+                )
+                continue
+            if not path.is_file():
+                continue
+            digest = path.name
+            try:
+                canonical = self._object_path(digest)
+            except ValueError:
+                corrupt.append(
+                    "object:" + path.relative_to(self.root).as_posix()
+                )
+                continue
+            if path != canonical:
+                corrupt.append(
+                    "object:" + path.relative_to(self.root).as_posix()
+                )
+                continue
+            object_digests.add(digest)
         return ArtifactAudit(
             manifests=manifest_count,
             objects=len(object_digests),

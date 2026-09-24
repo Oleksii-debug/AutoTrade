@@ -32,7 +32,7 @@ class JournalStore:
     publication intent; a separate qualified dispatcher must perform delivery.
     """
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -51,58 +51,134 @@ class JournalStore:
         finally:
             connection.close()
 
+    @classmethod
+    def _migration_statements(cls, version: int) -> tuple[str, ...]:
+        if version == 1:
+            return (
+                """
+                CREATE TABLE IF NOT EXISTS events (
+                    event_id TEXT PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    aggregate_type TEXT NOT NULL,
+                    aggregate_id TEXT NOT NULL,
+                    aggregate_version INTEGER NOT NULL CHECK (aggregate_version > 0),
+                    payload_json TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    committed_at TEXT NOT NULL,
+                    UNIQUE (aggregate_type, aggregate_id, aggregate_version)
+                )
+                """,
+                """
+                CREATE INDEX IF NOT EXISTS idx_events_aggregate
+                    ON events(aggregate_type, aggregate_id, aggregate_version)
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS outbox (
+                    outbox_id TEXT PRIMARY KEY,
+                    event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id) ON DELETE RESTRICT,
+                    topic TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    delivered_at TEXT
+                )
+                """,
+                """
+                CREATE INDEX IF NOT EXISTS idx_outbox_pending
+                    ON outbox(delivered_at, created_at, outbox_id)
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS command_dedupe (
+                    command_id TEXT PRIMARY KEY,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    request_hash TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    state_version INTEGER NOT NULL CHECK (state_version >= 0),
+                    created_at TEXT NOT NULL
+                )
+                """,
+            )
+        if version == 2:
+            return (
+                """
+                CREATE TABLE IF NOT EXISTS projection_checkpoints (
+                    projection_name TEXT NOT NULL,
+                    aggregate_type TEXT NOT NULL,
+                    aggregate_id TEXT NOT NULL,
+                    aggregate_version INTEGER NOT NULL CHECK (aggregate_version >= 0),
+                    state_json TEXT NOT NULL,
+                    state_hash TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (projection_name, aggregate_type, aggregate_id)
+                )
+                """,
+                """
+                CREATE INDEX IF NOT EXISTS idx_projection_checkpoint_version
+                    ON projection_checkpoints(
+                        aggregate_type, aggregate_id, aggregate_version
+                    )
+                """,
+            )
+        raise ValueError(f"Unsupported journal migration version: {version}")
+
     def _initialize(self) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
-            )
-            versions = [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")]
-            if any(version > self.SCHEMA_VERSION for version in versions):
-                raise ValueError("Journal schema is newer than this runtime")
-            if self.SCHEMA_VERSION not in versions:
-                connection.executescript(
-                    """
-                    CREATE TABLE IF NOT EXISTS events (
-                        event_id TEXT PRIMARY KEY,
-                        event_type TEXT NOT NULL,
-                        aggregate_type TEXT NOT NULL,
-                        aggregate_id TEXT NOT NULL,
-                        aggregate_version INTEGER NOT NULL CHECK (aggregate_version > 0),
-                        payload_json TEXT NOT NULL,
-                        payload_hash TEXT NOT NULL,
-                        committed_at TEXT NOT NULL,
-                        UNIQUE (aggregate_type, aggregate_id, aggregate_version)
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_events_aggregate
-                        ON events(aggregate_type, aggregate_id, aggregate_version);
-
-                    CREATE TABLE IF NOT EXISTS outbox (
-                        outbox_id TEXT PRIMARY KEY,
-                        event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id) ON DELETE RESTRICT,
-                        topic TEXT NOT NULL,
-                        payload_json TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        delivered_at TEXT
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_outbox_pending
-                        ON outbox(delivered_at, created_at, outbox_id);
-
-                    CREATE TABLE IF NOT EXISTS command_dedupe (
-                        command_id TEXT PRIMARY KEY,
-                        idempotency_key TEXT NOT NULL UNIQUE,
-                        request_hash TEXT NOT NULL,
-                        result_json TEXT NOT NULL,
-                        state_version INTEGER NOT NULL CHECK (state_version >= 0),
-                        created_at TEXT NOT NULL
-                    );
-                    """
-                )
+            try:
                 connection.execute(
-                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                    (self.SCHEMA_VERSION, self._now()),
+                    "CREATE TABLE IF NOT EXISTS schema_migrations "
+                    "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
                 )
-            connection.commit()
+                versions = [
+                    int(row[0])
+                    for row in connection.execute(
+                        "SELECT version FROM schema_migrations ORDER BY version"
+                    )
+                ]
+                if any(version > self.SCHEMA_VERSION for version in versions):
+                    raise ValueError("Journal schema is newer than this runtime")
+                if versions:
+                    expected = list(range(1, versions[-1] + 1))
+                    if versions != expected:
+                        raise ValueError("Journal schema migration history is not contiguous")
+
+                current = versions[-1] if versions else 0
+                for version in range(current + 1, self.SCHEMA_VERSION + 1):
+                    for statement in self._migration_statements(version):
+                        connection.execute(statement)
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                        (version, self._now()),
+                    )
+
+                required_tables = {
+                    "schema_migrations",
+                    "events",
+                    "outbox",
+                    "command_dedupe",
+                    "projection_checkpoints",
+                }
+                present_tables = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+                missing_tables = required_tables - present_tables
+                if missing_tables:
+                    raise ValueError(
+                        "Journal schema is incomplete: " + ", ".join(sorted(missing_tables))
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def current_schema_version(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT MAX(version) FROM schema_migrations"
+            ).fetchone()
+        return 0 if row is None or row[0] is None else int(row[0])
 
     @staticmethod
     def _now() -> str:
@@ -256,6 +332,140 @@ class JournalStore:
             }
             for row in rows
         ]
+
+    def save_projection_checkpoint(
+        self,
+        *,
+        projection_name: str,
+        aggregate_type: str,
+        aggregate_id: str,
+        aggregate_version: int,
+        state: Any,
+    ) -> bool:
+        """Persist only derived projection state; the event journal remains authoritative."""
+
+        self._require_text(projection_name, "projection_name")
+        self._require_text(aggregate_type, "aggregate_type")
+        self._require_text(aggregate_id, "aggregate_id")
+        if (
+            not isinstance(aggregate_version, int)
+            or isinstance(aggregate_version, bool)
+            or aggregate_version < 0
+        ):
+            raise ValueError("aggregate_version must be a non-negative integer")
+        state_json = canonical_json(state)
+        state_hash = payload_digest(state)
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                current = connection.execute(
+                    "SELECT MAX(aggregate_version) FROM events "
+                    "WHERE aggregate_type = ? AND aggregate_id = ?",
+                    (aggregate_type, aggregate_id),
+                ).fetchone()[0]
+                journal_version = 0 if current is None else int(current)
+                if aggregate_version > journal_version:
+                    raise ValueError("projection checkpoint cannot outrun the journal")
+
+                existing = connection.execute(
+                    """
+                    SELECT aggregate_version, state_json, state_hash
+                    FROM projection_checkpoints
+                    WHERE projection_name = ?
+                      AND aggregate_type = ?
+                      AND aggregate_id = ?
+                    """,
+                    (projection_name, aggregate_type, aggregate_id),
+                ).fetchone()
+                if existing is not None:
+                    existing_version = int(existing["aggregate_version"])
+                    exact = (
+                        existing_version == aggregate_version
+                        and existing["state_json"] == state_json
+                        and existing["state_hash"] == state_hash
+                    )
+                    if exact:
+                        connection.commit()
+                        return False
+                    if aggregate_version <= existing_version:
+                        raise ValueError(
+                            "projection checkpoint cannot regress or change at the same version"
+                        )
+
+                connection.execute(
+                    """
+                    INSERT INTO projection_checkpoints(
+                        projection_name, aggregate_type, aggregate_id,
+                        aggregate_version, state_json, state_hash, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(projection_name, aggregate_type, aggregate_id)
+                    DO UPDATE SET
+                        aggregate_version = excluded.aggregate_version,
+                        state_json = excluded.state_json,
+                        state_hash = excluded.state_hash,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        projection_name,
+                        aggregate_type,
+                        aggregate_id,
+                        aggregate_version,
+                        state_json,
+                        state_hash,
+                        self._now(),
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return True
+
+    def load_projection_checkpoint(
+        self,
+        *,
+        projection_name: str,
+        aggregate_type: str,
+        aggregate_id: str,
+    ) -> dict[str, Any] | None:
+        self._require_text(projection_name, "projection_name")
+        self._require_text(aggregate_type, "aggregate_type")
+        self._require_text(aggregate_id, "aggregate_id")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT aggregate_version, state_json, state_hash, updated_at
+                FROM projection_checkpoints
+                WHERE projection_name = ?
+                  AND aggregate_type = ?
+                  AND aggregate_id = ?
+                """,
+                (projection_name, aggregate_type, aggregate_id),
+            ).fetchone()
+            if row is None:
+                return None
+            current = connection.execute(
+                "SELECT MAX(aggregate_version) FROM events "
+                "WHERE aggregate_type = ? AND aggregate_id = ?",
+                (aggregate_type, aggregate_id),
+            ).fetchone()[0]
+
+        state = json.loads(row["state_json"])
+        if payload_digest(state) != row["state_hash"]:
+            raise ValueError("projection checkpoint hash does not match state")
+        journal_version = 0 if current is None else int(current)
+        if int(row["aggregate_version"]) > journal_version:
+            raise ValueError("projection checkpoint is ahead of the journal")
+        return {
+            "projection_name": projection_name,
+            "aggregate_type": aggregate_type,
+            "aggregate_id": aggregate_id,
+            "aggregate_version": int(row["aggregate_version"]),
+            "state": state,
+            "state_hash": row["state_hash"],
+            "updated_at": row["updated_at"],
+        }
 
     def pending_outbox(self, *, limit: int = 100) -> list[dict[str, Any]]:
         if not isinstance(limit, int) or limit < 1 or limit > 1000:

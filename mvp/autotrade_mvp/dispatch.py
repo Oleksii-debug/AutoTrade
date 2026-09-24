@@ -28,6 +28,11 @@ class DispatchOutcome:
     reason: str
 
 
+def _identity_digest(*parts: str) -> str:
+    """Hash a canonical tuple without delimiter-boundary ambiguity."""
+    return sha256(canonical_json(list(parts)).encode("utf-8")).hexdigest()
+
+
 def stable_client_order_id(
     provider: str,
     intent_id: str,
@@ -47,12 +52,12 @@ def stable_client_order_id(
         raise ValueError("account_id is required")
     if not isinstance(max_length, int) or isinstance(max_length, bool) or max_length < 12:
         raise ValueError("max_length must be an integer of at least 12")
-    digest = sha256(
-        (
-            f"{provider.strip().lower()}|{normalized_environment}|"
-            f"{account_id.strip()}|{intent_id.strip()}"
-        ).encode("utf-8")
-    ).hexdigest()
+    digest = _identity_digest(
+        provider.strip().lower(),
+        normalized_environment,
+        account_id.strip(),
+        intent_id.strip(),
+    )
     return ("at-" + digest)[:max_length]
 
 
@@ -72,9 +77,11 @@ def _event_id(scope_key: str, attempt_id: str, event_type: str, version: int) ->
     return str(
         uuid5(
             NAMESPACE_URL,
-            (
-                f"https://events.autotrade.local/dispatch/{scope_key}/"
-                f"{attempt_id}/{event_type}/{version}"
+            "dispatch-event:" + _identity_digest(
+                scope_key,
+                attempt_id,
+                event_type,
+                str(version),
             ),
         )
     )
@@ -108,7 +115,7 @@ def _envelope(
         "correlation_id": str(
             uuid5(
                 NAMESPACE_URL,
-                f"https://events.autotrade.local/dispatch/{scope_key}/{attempt_id}",
+                "dispatch-correlation:" + _identity_digest(scope_key, attempt_id),
             )
         ),
         "causation_id": None,
@@ -145,14 +152,18 @@ class GuardedDispatcher:
             raise ValueError("account_id is required")
         self.environment = normalized_environment
         self.account_id = account_id.strip()
-        self.scope_key = f"{self.environment}:{self.account_id}"
+        self.scope_key = _identity_digest(self.environment, self.account_id)
         self.owner_token = owner_token or str(uuid4())
         if not isinstance(prepared_lease_seconds, int) or isinstance(prepared_lease_seconds, bool) or prepared_lease_seconds < 1:
             raise ValueError("prepared_lease_seconds must be a positive integer")
         self.prepared_lease_seconds = prepared_lease_seconds
 
     def _aggregate_id(self, attempt_id: str) -> str:
-        return f"{self.scope_key}:{attempt_id}"
+        return "submission-attempt:" + _identity_digest(
+            self.environment,
+            self.account_id,
+            attempt_id,
+        )
 
     def _events(self, attempt_id: str) -> list[dict[str, Any]]:
         return self.store.load_events(

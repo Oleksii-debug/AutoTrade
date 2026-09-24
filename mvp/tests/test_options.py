@@ -36,6 +36,7 @@ class OptionLifecycleTests(unittest.TestCase):
             exercise_style="EUROPEAN",
             exercise_cutoff=at(19),
             expiry=at(20),
+            exercise_opens_at=at(18),
         )
 
     def _physical(self, right="CALL"):
@@ -160,6 +161,40 @@ class OptionLifecycleTests(unittest.TestCase):
             ),
             Decimal("20"),
         )
+
+    def test_european_exercise_requires_explicit_window_evidence(self):
+        unknown = OptionContract(
+            instrument="OPT:EUROPEAN:UNKNOWN",
+            right="CALL",
+            strike=Decimal("100"),
+            multiplier=Decimal("100"),
+            settlement_currency="USD",
+            settlement_method="CASH",
+            exercise_style="EUROPEAN",
+            exercise_cutoff=at(19),
+            expiry=at(20),
+        )
+        self.assertEqual(exercise_gate(unknown, at(18)), "EXERCISE_SCHEDULE_UNKNOWN")
+        with self.assertRaises(OptionError):
+            require_holder_exercise_open(unknown, at(18))
+
+        known = self._cash_call()
+        self.assertEqual(exercise_gate(known, at(17)), "EXERCISE_NOT_YET_OPEN")
+        self.assertEqual(exercise_gate(known, at(18)), "OPEN")
+
+    def test_invalid_exercise_style_is_rejected(self):
+        with self.assertRaises(OptionError):
+            OptionContract(
+                instrument="OPT:BAD",
+                right="CALL",
+                strike=Decimal("100"),
+                multiplier=Decimal("100"),
+                settlement_currency="USD",
+                settlement_method="CASH",
+                exercise_style="UNKNOWN",
+                exercise_cutoff=at(19),
+                expiry=at(20),
+            )
 
     def test_exercise_cutoff_and_expiry_are_hard_gates(self):
         contract = self._cash_call()

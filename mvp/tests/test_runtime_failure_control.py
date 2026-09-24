@@ -54,15 +54,45 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.assertEqual(controller.state, HostState.READY)
         self.assertEqual(attempt.retry_disposition, "NEVER")
 
-    def test_absence_requires_independent_evidence_before_retry(self):
+    def test_absence_requires_complete_provider_surfaces_before_retry(self):
         attempt = OutboundAttempt("a1", "intent-1", 1)
         attempt.persist()
         attempt.mark_send_started("journal:send-started")
-        with self.assertRaises(ValueError):
-            attempt.prove_absent(["orders:none"])
-        attempt.prove_absent(["orders:none", "history:none"])
+        incomplete = [
+            "client-order-lookup:missing",
+            "open-orders:complete",
+            "order-history:complete",
+            "executions:complete",
+        ]
+        with self.assertRaisesRegex(ValueError, "activities"):
+            attempt.prove_absent(incomplete)
+
+        attempt.prove_absent(
+            [
+                "client-order-lookup:missing",
+                "open-orders:complete",
+                "order-history:complete",
+                "executions:complete",
+                "activities:complete",
+            ]
+        )
         self.assertEqual(attempt.phase, SendPhase.PROVEN_ABSENT)
         self.assertEqual(attempt.retry_disposition, "SAFE_WITH_NEW_ADMISSION")
+
+    def test_absence_proof_rejects_duplicate_evidence(self):
+        attempt = OutboundAttempt("a1", "intent-1", 1)
+        attempt.persist()
+        attempt.mark_send_started("journal:send-started")
+        refs = [
+            "client-order-lookup:missing",
+            "open-orders:complete",
+            "order-history:complete",
+            "executions:complete",
+            "activities:complete",
+            "activities:complete",
+        ]
+        with self.assertRaisesRegex(ValueError, "unique"):
+            attempt.prove_absent(refs)
 
     def test_full_disk_blocks_new_financial_admission(self):
         controller, owner = self._ready()

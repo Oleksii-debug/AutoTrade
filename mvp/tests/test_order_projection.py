@@ -32,6 +32,29 @@ class OrderProjectionTests(unittest.TestCase):
         self.assertEqual(snap.filled_quantity, Decimal("2"))
         self.assertEqual(snap.open_quantity, Decimal("3"))
 
+    def test_cancel_fill_race_preserves_full_execution_truth(self):
+        order = OrderProjection(client_order_id="c-race", requested_quantity="2")
+        order.cancel()
+        order.record_fill(fill_id="f1", quantity="2", price="10")
+        self.assertEqual(order.state, "FILLED_AFTER_CANCEL")
+        self.assertEqual(order.economic_terminal_outcome, "FILLED")
+        self.assertEqual(order.filled_quantity, Decimal("2"))
+
+    def test_cancel_race_never_hides_overfill(self):
+        order = OrderProjection(client_order_id="c-over", requested_quantity="1")
+        order.cancel()
+        order.record_fill(fill_id="f1", quantity="1.2", price="10")
+        self.assertEqual(order.state, "OVERFILLED")
+        self.assertIsNone(order.economic_terminal_outcome)
+        self.assertEqual(order.filled_quantity, Decimal("1.2"))
+
+    def test_terminal_outcome_maps_only_economically_terminal_states(self):
+        order = OrderProjection(client_order_id="c-map", requested_quantity="2")
+        order.record_fill(fill_id="f1", quantity="1", price="10")
+        order.cancel()
+        self.assertEqual(order.state, "PARTIALLY_FILLED_CANCELLED")
+        self.assertIsNone(order.economic_terminal_outcome)
+
     def test_duplicate_fill_is_idempotent_but_conflict_fails(self):
         order = OrderProjection(client_order_id="c1", requested_quantity="2")
         self.assertTrue(order.record_fill(fill_id="f1", quantity="1", price="10"))

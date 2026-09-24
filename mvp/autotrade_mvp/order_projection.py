@@ -56,6 +56,8 @@ class OrderSnapshot:
     oco_violation: bool
     fill_count: int
     observation_count: int
+    cancel_requested: bool
+    cancel_confirmed: bool
 
 
 class OrderProjectionConflict(ValueError):
@@ -89,6 +91,7 @@ class OrderProjection:
         )
         self.provider_order_id: str | None = None
         self.submission_state = "PENDING"
+        self.cancel_requested = False
         self.cancelled = False
         self.rejected = False
         self._fills: dict[str, FillRecord] = {}
@@ -243,8 +246,19 @@ class OrderProjection:
             provider_revision=provider_revision,
         )
 
-    def cancel(self) -> None:
+    def request_cancel(self) -> None:
+        """Record a pending cancel request without inventing provider confirmation."""
+        if not self.cancelled:
+            self.cancel_requested = True
+
+    def confirm_cancel(self) -> None:
+        """Record provider-confirmed cancellation of the still-unfilled remainder."""
+        self.cancel_requested = True
         self.cancelled = True
+
+    def cancel(self) -> None:
+        """Backward-compatible alias for confirmed cancellation evidence."""
+        self.confirm_cancel()
 
     def mark_oco_peer_filled(self) -> None:
         if self.oco_group_id is None:
@@ -298,6 +312,8 @@ class OrderProjection:
                 return "OVERFILLED_AFTER_CANCEL"
             if self.rejected:
                 return "OVERFILLED_AFTER_REJECT"
+            if self.cancel_requested:
+                return "OVERFILLED_DURING_CANCEL"
             return "OVERFILLED"
         if self.cancelled:
             return "PARTIALLY_FILLED_CANCELLED" if filled > 0 else "CANCELLED"
@@ -305,6 +321,12 @@ class OrderProjection:
             return "FILLED_AFTER_REJECT" if filled > 0 else "REJECTED"
         if filled == self.requested_quantity:
             return "FILLED"
+        if self.cancel_requested:
+            return (
+                "PARTIALLY_FILLED_CANCEL_REQUESTED"
+                if filled > 0
+                else "CANCEL_REQUESTED"
+            )
         if filled > 0:
             return "PARTIALLY_FILLED"
         if self.submission_state == "ACCEPTED":
@@ -328,6 +350,8 @@ class OrderProjection:
             oco_violation=self._oco_violation,
             fill_count=len(self.active_fills),
             observation_count=len(self._history),
+            cancel_requested=self.cancel_requested,
+            cancel_confirmed=self.cancelled,
         )
 
 

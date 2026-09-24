@@ -265,5 +265,26 @@ class ReconciliationJournalTests(unittest.TestCase):
             )
 
 
+    def test_corrupt_null_identities_fail_closed_in_checkpoint_recovery(self):
+        malformed_submission = {
+            "payload": {
+                "submission_resolutions": [
+                    {"attempt_id": None, "outcome": "UNKNOWN"}
+                ]
+            }
+        }
+        with self.assertRaises(ValueError):
+            unresolved_attempt_ids_from_checkpoint(malformed_submission)
+
+        malformed_activity = {
+            "payload": {
+                "unexpected_provider_activity_ids": [None],
+                "missing_local_provider_activity_ids": [],
+            }
+        }
+        with self.assertRaises(ValueError):
+            unresolved_provider_activity_ids_from_checkpoint(malformed_activity)
+
+
 if __name__ == "__main__":
     unittest.main()

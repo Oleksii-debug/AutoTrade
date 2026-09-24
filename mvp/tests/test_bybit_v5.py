@@ -126,6 +126,39 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertNotIn("fill", repr(result).lower())
         self.assertTrue(result["evidence"][0]["sha256"].startswith("sha256:"))
 
+    def test_explicit_observation_time_is_validated_and_normalized_to_utc(self):
+        accepted = parse_submission_response(
+            attempt_id=str(uuid4()),
+            client_order_id="client-time",
+            response={
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "orderId": "provider-time",
+                    "orderLinkId": "client-time",
+                },
+            },
+            observed_at="2026-09-24T22:00:00+02:00",
+        )
+        self.assertEqual(accepted["provider_received_at"], "2026-09-24T20:00:00Z")
+        self.assertEqual(
+            accepted["evidence"][0]["observed_at"],
+            "2026-09-24T20:00:00Z",
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "timezone"):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                client_order_id="client-bad-time",
+                response={
+                    "retCode": 0,
+                    "result": {
+                        "orderId": "provider-bad-time",
+                        "orderLinkId": "client-bad-time",
+                    },
+                },
+                observed_at="2026-09-24T20:00:00",
+            )
+
     def test_ambiguous_bybit_codes_require_reconciliation(self):
         for code in (429, 10000, 10014, 10016):
             with self.subTest(code=code):

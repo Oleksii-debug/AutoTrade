@@ -103,6 +103,9 @@ class RecoveryController:
         self.storage_writable = True
         self.clock_trusted = True
         self.provider_reconciled = False
+        self.market_data_fresh = True
+        self.runtime_overloaded = False
+        self.last_financial_event_sequence: int | None = None
 
     def start(self, owner_id: str) -> OwnerFence:
         if not owner_id:
@@ -124,6 +127,7 @@ class RecoveryController:
         if self.provider_reconciled:
             self.reason_codes.discard("startup_reconciliation_required")
             self.reason_codes.discard("provider_uncertainty")
+            self.reason_codes.discard("financial_event_gap")
         else:
             self.reason_codes.add("provider_uncertainty")
         self._recompute_state()
@@ -143,6 +147,45 @@ class RecoveryController:
         else:
             self.reason_codes.add("clock_untrusted")
         self._recompute_state()
+
+    def set_market_data_fresh(self, fresh: bool) -> None:
+        self.market_data_fresh = bool(fresh)
+        if self.market_data_fresh:
+            self.reason_codes.discard("market_data_stale")
+        else:
+            self.reason_codes.add("market_data_stale")
+        self._recompute_state()
+
+    def set_runtime_overloaded(self, overloaded: bool) -> None:
+        self.runtime_overloaded = bool(overloaded)
+        if self.runtime_overloaded:
+            self.reason_codes.add("runtime_overload")
+        else:
+            self.reason_codes.discard("runtime_overload")
+        self._recompute_state()
+
+    def observe_financial_event_sequence(self, sequence: int) -> bool:
+        """Record a provider financial-event sequence without hiding gaps.
+
+        Duplicate delivery of the current sequence is idempotent. A gap or
+        backward sequence invalidates reconciliation and remains visible until a
+        fresh provider reconciliation is recorded.
+        """
+        if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
+            raise ValueError("Financial event sequence must be a non-negative integer")
+        prior = self.last_financial_event_sequence
+        if prior is None:
+            self.last_financial_event_sequence = sequence
+            return True
+        if sequence == prior:
+            return False
+        if sequence != prior + 1:
+            self.provider_reconciled = False
+            self.reason_codes.add("financial_event_gap")
+            self._recompute_state()
+            return False
+        self.last_financial_event_sequence = sequence
+        return True
 
     def note_unknown_send(self, attempt: OutboundAttempt) -> None:
         if attempt.phase is not SendPhase.SENT_UNKNOWN:
@@ -188,25 +231,54 @@ class RecoveryController:
         self.state = HostState.RECOVERING
         return self.owner
 
-    def validate_sender(self, owner_id: str, owner_epoch: int) -> None:
+    def _soft_pressure_only(self) -> bool:
+        soft = {"market_data_stale", "runtime_overload"}
+        return (
+            self.state is HostState.DEGRADED
+            and bool(self.reason_codes)
+            and self.reason_codes <= soft
+            and self.provider_reconciled
+            and not self.unresolved_attempts
+            and self.storage_writable
+            and self.clock_trusted
+        )
+
+    def validate_sender(
+        self,
+        owner_id: str,
+        owner_epoch: int,
+        *,
+        risk_reducing: bool = False,
+    ) -> None:
         if self.owner is None:
             raise PermissionError("No active sender")
         if owner_id != self.owner.owner_id or owner_epoch != self.owner.epoch:
             raise PermissionError("Sender fence mismatch")
-        if self.state is not HostState.READY:
-            raise PermissionError("Host is not ready for new sends")
+        if self.state is HostState.READY:
+            return
+        if risk_reducing and self._soft_pressure_only():
+            return
+        raise PermissionError("Host is not ready for new sends")
 
-    def validate_admission(self, owner_epoch: int) -> None:
+    def validate_admission(
+        self,
+        owner_epoch: int,
+        *,
+        risk_reducing: bool = False,
+    ) -> None:
         if self.owner is None or owner_epoch != self.owner.epoch:
             raise PermissionError("Admission owner epoch is stale")
-        if self.state is not HostState.READY:
-            raise PermissionError("Host is not ready")
         if not self.storage_writable:
             raise PermissionError("Durable journal is unavailable")
         if not self.clock_trusted:
             raise PermissionError("Clock is not trusted")
         if self.unresolved_attempts:
             raise PermissionError("External uncertainty is unresolved")
+        if self.state is HostState.READY:
+            return
+        if risk_reducing and self._soft_pressure_only():
+            return
+        raise PermissionError("Host is not ready")
 
     def on_lease_expired(self) -> None:
         """Lease expiry never transfers sender authority by itself."""
@@ -236,6 +308,12 @@ class RecoveryController:
             self.state = HostState.DEGRADED
             return
         if "lease_expired_no_failover" in self.reason_codes:
+            self.state = HostState.DEGRADED
+            return
+        if "financial_event_gap" in self.reason_codes:
+            self.state = HostState.DEGRADED
+            return
+        if not self.market_data_fresh or self.runtime_overloaded:
             self.state = HostState.DEGRADED
             return
         if self.provider_reconciled and "startup_reconciliation_required" not in self.reason_codes:

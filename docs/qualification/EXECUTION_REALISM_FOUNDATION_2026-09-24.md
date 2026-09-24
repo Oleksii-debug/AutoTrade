@@ -15,7 +15,7 @@ in `04_PORTFOLIO_RISK_ECONOMIC_ARCHITECTURE.md`:
 1. Every liquidity observation carries the exact canonical `instrument_version`;
    simulation fails closed unless it exactly matches the admitted order. A symbol
    or otherwise compatible price stream can never substitute for versioned identity.
-3. An order cannot fill from liquidity whose market timestamp is at or before
+2. An order cannot fill from liquidity whose market timestamp is at or before
    its latency-adjusted venue arrival time. This prevents same-event and earlier
    liquidity from being reused after a decision.
 3. `BAR`, `TOP_OF_BOOK` and `BOOK` fidelity are explicit. BAR mode reports

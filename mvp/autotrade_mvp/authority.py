@@ -7,7 +7,10 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
-from typing import FrozenSet
+from typing import Any, FrozenSet
+from uuid import NAMESPACE_URL, uuid5
+
+from .persistence import JournalStore, payload_digest
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -134,14 +137,172 @@ class AuthorityConflict(ValueError):
     """Raised when immutable authority identity is reused inconsistently."""
 
 
+def _authority_event_id(event_type: str, key: str) -> str:
+    return str(uuid5(NAMESPACE_URL, f"https://events.autotrade.local/authority/{event_type}/{key}"))
+
+
 class AuthorityService:
-    def __init__(self):
+    def __init__(self, store: JournalStore | None = None):
+        self.store = store
         self._policies: dict[str, AuthorityPolicy] = {}
         self._revocations: dict[str, tuple[str, str]] = {}
         self._confirmations: dict[str, Confirmation] = {}
         self._used_confirmations: set[str] = set()
         self._admissions: dict[str, AdmissionRecord] = {}
         self._epoch = 0
+        if self.store is not None:
+            self._restore()
+
+    @staticmethod
+    def _policy_payload(policy: AuthorityPolicy) -> dict[str, Any]:
+        return {
+            "policy_id": policy.policy_id,
+            "account_id": policy.account_id,
+            "environments": sorted(policy.environments),
+            "instruments": sorted(policy.instruments),
+            "actions": sorted(policy.actions),
+            "max_notional": str(policy.max_notional),
+            "expires_at": policy.expires_at,
+            "autonomous": policy.autonomous,
+            "protection_only": policy.protection_only,
+        }
+
+    @staticmethod
+    def _confirmation_payload(confirmation: Confirmation) -> dict[str, Any]:
+        return {
+            "confirmation_id": confirmation.confirmation_id,
+            "policy_id": confirmation.policy_id,
+            "intent_hash": confirmation.intent_hash,
+            "account_id": confirmation.account_id,
+            "environment": confirmation.environment,
+            "instrument": confirmation.instrument,
+            "action": confirmation.action,
+            "notional": str(confirmation.notional),
+            "expires_at": confirmation.expires_at,
+        }
+
+    @staticmethod
+    def _admission_payload(record: AdmissionRecord) -> dict[str, Any]:
+        return {
+            "admission_id": record.admission_id,
+            "policy_id": record.policy_id,
+            "intent_hash": record.intent_hash,
+            "account_id": record.account_id,
+            "environment": record.environment,
+            "instrument": record.instrument,
+            "action": record.action,
+            "notional": str(record.notional),
+            "risk_reducing": record.risk_reducing,
+            "state_version": record.state_version,
+            "authority_epoch": record.authority_epoch,
+            "outcome": record.outcome,
+            "admitted_at": record.admitted_at,
+            "confirmation_id": record.confirmation_id,
+            "reason": record.reason,
+            "request_fingerprint": record.request_fingerprint,
+        }
+
+    def _persist(self, event_type: str, key: str, payload: dict[str, Any], *, committed_at: str) -> None:
+        if self.store is None:
+            return
+        event_id = _authority_event_id(event_type, key)
+        existing = self.store.get_event(event_id)
+        if existing is not None:
+            if existing["event_type"] != event_type or existing["payload"] != payload:
+                raise AuthorityConflict("durable authority event conflicts with existing content")
+            return
+        envelope = {
+            "event_id": event_id,
+            "event_type": event_type,
+            "aggregate_type": "authority_state",
+            "aggregate_id": "canonical",
+            "aggregate_version": str(self.store.next_aggregate_version("authority_state", "canonical")),
+            "payload": payload,
+            "payload_hash": payload_digest(payload),
+            "committed_at": committed_at,
+        }
+        try:
+            self.store.append_event(envelope)
+        except ValueError:
+            existing = self.store.get_event(event_id)
+            if existing is not None and existing["event_type"] == event_type and existing["payload"] == payload:
+                return
+            raise
+
+    def _restore(self) -> None:
+        assert self.store is not None
+        for event in self.store.load_events("authority_state", "canonical"):
+            payload = event["payload"]
+            event_type = event["event_type"]
+            if event_type == "AuthorityPolicyRegistered":
+                policy = AuthorityPolicy.create(
+                    policy_id=payload["policy_id"],
+                    account_id=payload["account_id"],
+                    environments=payload["environments"],
+                    instruments=payload["instruments"],
+                    actions=payload["actions"],
+                    max_notional=payload["max_notional"],
+                    expires_at=payload["expires_at"],
+                    autonomous=payload["autonomous"],
+                    protection_only=payload["protection_only"],
+                )
+                existing = self._policies.get(policy.policy_id)
+                if existing is not None and existing != policy:
+                    raise AuthorityConflict("durable policy history conflicts")
+                if existing is None:
+                    self._policies[policy.policy_id] = policy
+                    self._epoch += 1
+            elif event_type == "AuthorityPolicyRevoked":
+                value = (payload["reason"], payload["revoked_at"])
+                existing = self._revocations.get(payload["policy_id"])
+                if existing is not None and existing != value:
+                    raise AuthorityConflict("durable revocation history conflicts")
+                if existing is None:
+                    self._revocations[payload["policy_id"]] = value
+                    self._epoch += 1
+            elif event_type == "AuthorityConfirmationAdded":
+                confirmation = Confirmation(
+                    confirmation_id=payload["confirmation_id"],
+                    policy_id=payload["policy_id"],
+                    intent_hash=payload["intent_hash"],
+                    account_id=payload["account_id"],
+                    environment=payload["environment"],
+                    instrument=payload["instrument"],
+                    action=payload["action"],
+                    notional=_decimal(payload["notional"], name="notional"),
+                    expires_at=payload["expires_at"],
+                )
+                existing = self._confirmations.get(confirmation.confirmation_id)
+                if existing is not None and existing != confirmation:
+                    raise AuthorityConflict("durable confirmation history conflicts")
+                self._confirmations[confirmation.confirmation_id] = confirmation
+            elif event_type == "AuthorityAdmissionRecorded":
+                record = AdmissionRecord(
+                    admission_id=payload["admission_id"],
+                    policy_id=payload["policy_id"],
+                    intent_hash=payload["intent_hash"],
+                    account_id=payload["account_id"],
+                    environment=payload["environment"],
+                    instrument=payload["instrument"],
+                    action=payload["action"],
+                    notional=_decimal(payload["notional"], name="notional"),
+                    risk_reducing=payload["risk_reducing"],
+                    state_version=payload["state_version"],
+                    authority_epoch=payload["authority_epoch"],
+                    outcome=payload["outcome"],
+                    admitted_at=payload["admitted_at"],
+                    confirmation_id=payload["confirmation_id"],
+                    reason=payload["reason"],
+                    request_fingerprint=payload["request_fingerprint"],
+                )
+                existing = self._admissions.get(record.admission_id)
+                if existing is not None and existing != record:
+                    raise AuthorityConflict("durable admission history conflicts")
+                self._admissions[record.admission_id] = record
+                if record.outcome == "ADMITTED" and record.confirmation_id is not None:
+                    self._used_confirmations.add(record.confirmation_id)
+            else:
+                raise AuthorityConflict(f"unknown durable authority event: {event_type}")
 
     @property
     def epoch(self) -> int:
@@ -153,6 +314,12 @@ class AuthorityService:
             if existing != policy:
                 raise AuthorityConflict("policy_id already has different content")
             return False
+        self._persist(
+            "AuthorityPolicyRegistered",
+            policy.policy_id,
+            self._policy_payload(policy),
+            committed_at=datetime.now(timezone.utc).isoformat(),
+        )
         self._policies[policy.policy_id] = policy
         self._epoch += 1
         return True
@@ -168,6 +335,12 @@ class AuthorityService:
             if existing != normalized:
                 raise AuthorityConflict("policy revocation already recorded differently")
             return False
+        self._persist(
+            "AuthorityPolicyRevoked",
+            pid,
+            {"policy_id": pid, "reason": normalized[0], "revoked_at": normalized[1]},
+            committed_at=normalized[1],
+        )
         self._revocations[pid] = normalized
         self._epoch += 1
         return True
@@ -209,6 +382,12 @@ class AuthorityService:
             if existing != confirmation:
                 raise AuthorityConflict("confirmation_id already has different content")
             return False
+        self._persist(
+            "AuthorityConfirmationAdded",
+            cid,
+            self._confirmation_payload(confirmation),
+            committed_at=datetime.now(timezone.utc).isoformat(),
+        )
         self._confirmations[cid] = confirmation
         return True
 
@@ -342,6 +521,12 @@ class AuthorityService:
             confirmation_id=used_confirmation,
             reason=failure_reason,
             request_fingerprint=request_fingerprint,
+        )
+        self._persist(
+            "AuthorityAdmissionRecorded",
+            aid,
+            self._admission_payload(record),
+            committed_at=now,
         )
         self._admissions[aid] = record
         if outcome == "ADMITTED" and used_confirmation is not None:

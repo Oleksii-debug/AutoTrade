@@ -6,8 +6,8 @@ This branch adds an independent qualification layer for the scientific-learning 
 
 The evaluator has exactly three scientific outcomes:
 
-- `PASS`: every required evidence gate passes, holdout data was not reused for tuning, routing did not use future information, and the declared economic claim is no stronger than the evidence.
-- `FAIL`: a gate failed, holdout misuse or future leakage was observed, or the economic claim exceeds its forward evidence.
+- `PASS`: every required evidence gate passes, holdout data was not reused for tuning, routing did not use future information, each gate is bound to the same candidate/protocol/input snapshot, and the declared economic claim is no stronger than the evidence.
+- `FAIL`: a gate failed, evidence belongs to a different candidate/protocol/input snapshot, holdout misuse or future leakage was observed, or the economic claim exceeds its forward evidence.
 - `INCONCLUSIVE`: no hard failure is known, but at least one required evidence gate is missing or inconclusive.
 
 A visually strong backtest is intentionally not an input to this qualification layer. Exact SHA-256 identities are required for the candidate, frozen protocol, input snapshot and every gate evidence bundle.
@@ -22,4 +22,4 @@ The implementation was exercised together with the existing science tests. The f
 
 `python -m pytest -q tests/Science/test_science.py tests/Science/test_science_qualification.py`
 
-Result in the local candidate environment: 16 passed. Exact-head CI on this GitHub branch remains required before integration.
+Result in the local candidate environment after evidence-binding hardening: 17 passed. Exact-head CI on this GitHub branch remains required before integration.

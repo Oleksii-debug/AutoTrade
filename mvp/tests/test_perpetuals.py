@@ -7,6 +7,7 @@ from mvp.autotrade_mvp.perpetuals import (
     CollateralQuote,
     FundingConvention,
     FundingLedger,
+    LiquidationSnapshot,
     MarginSnapshot,
     MarketSnapshot,
     PerpetualContract,
@@ -16,6 +17,7 @@ from mvp.autotrade_mvp.perpetuals import (
     inverse_perpetual_pnl_exact,
     inverse_stressed_loss_exact,
     linear_notional,
+    require_liquidation_headroom,
     require_new_risk_capacity,
     stressed_loss,
 )
@@ -144,6 +146,62 @@ class PerpetualLifecycleTests(unittest.TestCase):
                 mark_price="100000",
                 adverse_move_fraction="0.1",
             )
+
+    def test_liquidation_headroom_requires_fresh_tier_evidence(self):
+        liquidation = LiquidationSnapshot(
+            side="LONG",
+            liquidation_price="90000",
+            tier_id="tier-2",
+            evidence_ref="provider-margin-tier:rev-7",
+            observed_at=NOW,
+            max_age=timedelta(seconds=5),
+        )
+        headroom = require_liquidation_headroom(
+            liquidation=liquidation,
+            market=self.market(),
+            minimum_headroom_fraction="0.08",
+            at=NOW,
+        )
+        self.assertEqual(headroom, Decimal("0.1"))
+
+        with self.assertRaises(PerpetualError):
+            require_liquidation_headroom(
+                liquidation=liquidation,
+                market=self.market(),
+                minimum_headroom_fraction="0.11",
+                at=NOW,
+            )
+        with self.assertRaises(PerpetualError):
+            require_liquidation_headroom(
+                liquidation=liquidation,
+                market=self.market(),
+                minimum_headroom_fraction="0.08",
+                at=NOW + timedelta(seconds=6),
+            )
+
+    def test_short_liquidation_boundary_has_opposite_direction(self):
+        liquidation = LiquidationSnapshot(
+            side="SHORT",
+            liquidation_price="110000",
+            tier_id="tier-short-1",
+            evidence_ref="provider-margin-tier:rev-8",
+            observed_at=NOW,
+            max_age=timedelta(seconds=5),
+        )
+        self.assertEqual(
+            liquidation.headroom_fraction("100000"),
+            Decimal("0.1"),
+        )
+        invalid = LiquidationSnapshot(
+            side="SHORT",
+            liquidation_price="90000",
+            tier_id="bad-tier",
+            evidence_ref="provider-margin-tier:bad",
+            observed_at=NOW,
+            max_age=timedelta(seconds=5),
+        )
+        with self.assertRaises(PerpetualError):
+            invalid.headroom_fraction("100000")
 
     def test_margin_admission_requires_fresh_sufficient_equity(self):
         margin = MarginSnapshot(

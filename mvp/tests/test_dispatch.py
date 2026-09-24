@@ -104,7 +104,7 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(result.status, "SENT")
             self.assertEqual(len(checks), 2)
             self.assertEqual(len(sends), 1)
-            events = store.load_events("submission_attempt", "a1")
+            events = store.load_events("submission_attempt", "SIMULATION:acct:a1")
             self.assertEqual(
                 [event["event_type"] for event in events],
                 ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
@@ -291,7 +291,7 @@ class DispatchTests(unittest.TestCase):
                 observed_times,
                 ["2026-09-24T18:00:00Z", "2026-09-24T18:02:00Z"],
             )
-            events = store.load_events("submission_attempt", "expiry-a1")
+            events = store.load_events("submission_attempt", "SIMULATION:acct:expiry-a1")
             self.assertEqual(
                 [event["event_type"] for event in events],
                 ["SubmissionPrepared", "SubmissionBlocked"],
@@ -332,7 +332,7 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(result.status, "BLOCKED")
             self.assertEqual(result.reason, "final_barrier_clock_moved_backwards")
             self.assertEqual(outbound, 0)
-            events = store.load_events("submission_attempt", "clock-a1")
+            events = store.load_events("submission_attempt", "SIMULATION:acct:clock-a1")
             self.assertEqual(
                 [event["event_type"] for event in events],
                 ["SubmissionPrepared", "SubmissionBlocked"],
@@ -365,7 +365,7 @@ class DispatchTests(unittest.TestCase):
             )
             self.assertEqual(result.status, "UNKNOWN")
             self.assertEqual(outbound, 1)
-            events = store.load_events("submission_attempt", "response-a1")
+            events = store.load_events("submission_attempt", "SIMULATION:acct:response-a1")
             self.assertEqual(
                 [event["event_type"] for event in events],
                 ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],

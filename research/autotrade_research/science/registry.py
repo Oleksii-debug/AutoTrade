@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -87,11 +88,15 @@ class ScientificRegistry:
     @contextmanager
     def _connect(self):
         con = sqlite3.connect(self.path, timeout=30)
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA foreign_keys=ON")
         try:
-            con.row_factory = sqlite3.Row
-            con.execute("PRAGMA journal_mode=WAL")
-            con.execute("PRAGMA foreign_keys=ON")
             yield con
+            con.commit()
+        except BaseException:
+            con.rollback()
+            raise
         finally:
             con.close()
 

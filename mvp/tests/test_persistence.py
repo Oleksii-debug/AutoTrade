@@ -12,7 +12,7 @@ def event(event_id="evt-1", version=1, payload=None):
         "event_type": "ExecutionFillObserved",
         "aggregate_type": "account",
         "aggregate_id": "paper-1",
-        "aggregate_version": version,
+        "aggregate_version": str(version),
         "payload": payload,
         "payload_hash": payload_digest(payload),
         "committed_at": "2026-09-24T16:00:00+00:00",
@@ -46,13 +46,13 @@ class JournalStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must be 2"):
                 store.append_event(event("evt-3", 3))
 
-    def test_aggregate_version_rejects_coercible_non_integer_values(self):
+    def test_aggregate_version_rejects_noncanonical_sequence_values(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            for invalid in (True, 1.0, "1", "01"):
+            for invalid in (True, 1, 1.0, "01", "-1", "1.0"):
                 item = event()
                 item["aggregate_version"] = invalid
-                with self.assertRaisesRegex(ValueError, "positive integer"):
+                with self.assertRaisesRegex(ValueError, "canonical integer sequence string"):
                     store.append_event(item)
 
     def test_event_id_conflict_is_rejected(self):
@@ -106,12 +106,12 @@ class JournalStoreTests(unittest.TestCase):
                     state_version=True,
                 )
 
-    def test_atomic_command_rejects_coercible_event_version(self):
+    def test_atomic_command_rejects_noncanonical_event_version(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             item = event()
-            item["aggregate_version"] = "1"
-            with self.assertRaisesRegex(ValueError, "positive integer"):
+            item["aggregate_version"] = 1
+            with self.assertRaisesRegex(ValueError, "canonical integer sequence string"):
                 store.commit_command(
                     command_id="cmd-version",
                     idempotency_key="key-version",

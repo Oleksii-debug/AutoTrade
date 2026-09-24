@@ -369,6 +369,56 @@ class IndependentRiskTests(unittest.TestCase):
             )
 
 
+    def test_authority_margin_and_borrow_evidence_cannot_be_omitted(self):
+        common = dict(
+            state_version=7,
+            equity="1000",
+            positions={"ABC": "2"},
+            marks={"ABC": "100"},
+        )
+        with self.assertRaises(TypeError):
+            RiskContext.create(
+                **common,
+                capability_allowed=True,
+                borrow_available=True,
+            )
+        with self.assertRaises(TypeError):
+            RiskContext.create(
+                **common,
+                margin_headroom="0.50",
+                borrow_available=True,
+            )
+        with self.assertRaises(TypeError):
+            RiskContext.create(
+                **common,
+                margin_headroom="0.50",
+                capability_allowed=True,
+            )
+
+    def test_explicit_unknown_borrow_blocks_new_short_but_not_long(self):
+        unknown = context(borrow_available=None)
+        short = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="SELL", quantity="3", price="100",
+                expected_state_version=7,
+            ),
+            unknown,
+            policy(),
+        )
+        self.assertFalse(short.admitted)
+        failed = {rule.rule for rule in short.rules if not rule.passed}
+        self.assertIn("short_borrow", failed)
+
+        long = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            unknown,
+            policy(),
+        )
+        self.assertTrue(long.admitted)
+
     def test_configured_liquidity_participation_fails_closed_without_capacity(self):
         intent = RiskIntent.create(
             symbol="ABC", side="BUY", quantity="1", price="100",

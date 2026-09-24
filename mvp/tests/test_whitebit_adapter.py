@@ -111,6 +111,41 @@ def market_rules(
 
 
 class WhiteBitAdapterTests(unittest.TestCase):
+    def test_direct_intent_construction_cannot_bypass_provider_invariants(self):
+        with self.assertRaisesRegex(WhiteBitAdapterError, "exact decimal"):
+            WhiteBitOrderIntent(
+                instrument_version="BTC_USDT:v1",
+                product_family="SPOT",
+                market="BTC_USDT",
+                side="BUY",
+                order_type="LIMIT",
+                amount=0.01,
+                price=Decimal("40000"),
+            )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "reduce_only"):
+            WhiteBitOrderIntent(
+                instrument_version="BTC_USDT:v1",
+                product_family="SPOT",
+                market="BTC_USDT",
+                side="SELL",
+                order_type="MARKET",
+                amount=Decimal("0.01"),
+                reduce_only=True,
+            )
+        normalized = WhiteBitOrderIntent(
+            instrument_version=" BTC_USDT:v1 ",
+            product_family="spot",
+            market="btc_usdt",
+            side="buy",
+            order_type="limit",
+            amount="0.0100",
+            price="40000.25",
+        )
+        self.assertEqual(normalized.product_family, "SPOT")
+        self.assertEqual(normalized.market, "BTC_USDT")
+        self.assertEqual(normalized.side, "BUY")
+        self.assertEqual(normalized.amount, Decimal("0.0100"))
+
     def test_spot_limit_request_uses_exact_strings_and_dispatcher_client_id(self):
         intent = WhiteBitOrderIntent.create(
             instrument_version="BTC_USDT:v1",

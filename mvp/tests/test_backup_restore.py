@@ -25,6 +25,26 @@ from mvp.autotrade_mvp.reconciliation import reconcile_account
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
 
 
+FENCING_EVIDENCE = [
+    {
+        "artifact_id": "11111111-1111-4111-8111-111111111111",
+        "sha256": "sha256:" + "a" * 64,
+        "observed_at": "2026-09-24T19:58:00Z",
+        "rights_id": "recovery:fencing",
+    },
+    {
+        "artifact_id": "22222222-2222-4222-8222-222222222222",
+        "sha256": "sha256:" + "b" * 64,
+        "observed_at": "2026-09-24T19:59:00Z",
+        "rights_id": "recovery:provider-session",
+    },
+]
+
+
+def _fencing_evidence():
+    return [dict(item) for item in FENCING_EVIDENCE]
+
+
 def _artifact_store(root: Path) -> str:
     payload = b"immutable-evidence"
     digest = sha256(payload).hexdigest()
@@ -108,7 +128,7 @@ class BackupRestoreTests(unittest.TestCase):
                 restored,
                 controller=controller,
                 reconciliation=_reconciliation(),
-                fencing_evidence=["old-host:fenced", "provider-session:reconciled"],
+                fencing_evidence=_fencing_evidence(),
                 completed_at="2026-09-24T20:00:00Z",
             )
 
@@ -132,7 +152,7 @@ class BackupRestoreTests(unittest.TestCase):
                     restored,
                     controller=controller,
                     reconciliation=_reconciliation(complete=False),
-                    fencing_evidence=["old-host:fenced"],
+                    fencing_evidence=_fencing_evidence()[:1],
                     completed_at="2026-09-24T20:00:00Z",
                 )
             self.assertTrue(restore_requires_reconciliation(restored))
@@ -156,6 +176,55 @@ class BackupRestoreTests(unittest.TestCase):
                 )
             self.assertTrue(restore_requires_reconciliation(restored))
 
+    def test_arbitrary_string_is_not_fencing_evidence(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = RecoveryController()
+            controller.start("restored-host")
+            with self.assertRaisesRegex(BackupError, "canonical EvidenceRef"):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation=_reconciliation(),
+                    fencing_evidence=["old-host:fenced"],
+                    completed_at="2026-09-24T20:00:00Z",
+                )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_duplicate_or_future_fencing_evidence_never_clears_gate(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = RecoveryController()
+            controller.start("restored-host")
+
+            duplicate = _fencing_evidence()[:1] * 2
+            with self.assertRaisesRegex(BackupError, "unique"):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation=_reconciliation(),
+                    fencing_evidence=duplicate,
+                    completed_at="2026-09-24T20:00:00Z",
+                )
+
+            future = _fencing_evidence()[:1]
+            future[0]["observed_at"] = "2026-09-24T20:00:01Z"
+            with self.assertRaisesRegex(BackupError, "postdate"):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation=_reconciliation(),
+                    fencing_evidence=future,
+                    completed_at="2026-09-24T20:00:00Z",
+                )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
     def test_tampered_restore_completion_proof_fails_closed(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -168,7 +237,7 @@ class BackupRestoreTests(unittest.TestCase):
                 restored,
                 controller=controller,
                 reconciliation=_reconciliation(),
-                fencing_evidence=["old-host:fenced"],
+                fencing_evidence=_fencing_evidence()[:1],
                 completed_at="2026-09-24T20:00:00Z",
             )
             proof_path = restored / "RESTORE_RECONCILIATION_COMPLETE.json"

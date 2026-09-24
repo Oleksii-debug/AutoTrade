@@ -53,3 +53,7 @@ limitations are captured, and the resulting evidence is consumed by the canonica
 release qualification gate.
 
 No external broker/funds recovery guarantee is claimed.
+
+## Immutable evidence verification
+
+A scenario cannot qualify merely by carrying non-empty evidence-reference strings. Every scenario must be resolved by an independent immutable-evidence verifier before it can contribute a `PASS`. Missing, unreadable or rejected referents remain `INCONCLUSIVE`; any separate hard recovery failure still yields `FAIL`. Git and SHA-256 identities are accepted only in their canonical lowercase form and are never silently normalized.

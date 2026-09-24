@@ -17,7 +17,8 @@ from pathlib import Path, PurePosixPath
 import shutil
 import sqlite3
 import tempfile
-from typing import Any, Sequence
+from uuid import UUID
+from typing import Any, Mapping, Sequence
 
 from .diagnostics import build_diagnostic_snapshot
 from .persistence import JournalStore
@@ -496,12 +497,69 @@ def _read_restore_marker(destination_root: str | Path) -> dict[str, Any]:
     return payload
 
 
+def _normalize_fencing_evidence(
+    values: Sequence[Mapping[str, object]],
+) -> tuple[dict[str, str], ...]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise TypeError("fencing_evidence must be a sequence of canonical EvidenceRef objects")
+    allowed = {"artifact_id", "sha256", "source_uri", "observed_at", "rights_id"}
+    required = {"artifact_id", "sha256", "observed_at"}
+    normalized: list[dict[str, str]] = []
+    identities: set[tuple[str, str]] = set()
+    for index, value in enumerate(values):
+        if not isinstance(value, Mapping):
+            raise BackupError("fencing evidence must use canonical EvidenceRef objects")
+        keys = set(value)
+        if not required <= keys or not keys <= allowed:
+            raise BackupError("fencing evidence does not match canonical EvidenceRef")
+        try:
+            artifact_id = str(UUID(str(value["artifact_id"])))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise BackupError("fencing evidence artifact_id must be a UUID") from error
+        digest = value["sha256"]
+        if (
+            not isinstance(digest, str)
+            or not digest.startswith("sha256:")
+            or len(digest) != 71
+            or any(ch not in "0123456789abcdef" for ch in digest[7:])
+        ):
+            raise BackupError("fencing evidence sha256 must be canonical")
+        observed = value["observed_at"]
+        if not isinstance(observed, str) or not observed.endswith("Z"):
+            raise BackupError("fencing evidence observed_at must be UTC with Z")
+        try:
+            parsed = datetime.fromisoformat(observed.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise BackupError("fencing evidence observed_at must be an ISO timestamp") from error
+        if parsed.tzinfo is None:
+            raise BackupError("fencing evidence observed_at must include timezone")
+        item: dict[str, str] = {
+            "artifact_id": artifact_id,
+            "sha256": digest,
+            "observed_at": parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        for optional in ("source_uri", "rights_id"):
+            if optional in value:
+                optional_value = value[optional]
+                if not isinstance(optional_value, str) or not optional_value.strip():
+                    raise BackupError(f"fencing evidence {optional} must be non-empty")
+                item[optional] = optional_value.strip()
+        identity = (artifact_id, digest)
+        if identity in identities:
+            raise BackupError("unique old-sender fencing evidence is required")
+        identities.add(identity)
+        normalized.append(item)
+    if not normalized:
+        raise BackupError("unique old-sender fencing evidence is required")
+    return tuple(normalized)
+
+
 def complete_restore_reconciliation(
     destination_root: str | Path,
     *,
     controller: RecoveryController,
     reconciliation: ReconciliationResult,
-    fencing_evidence: Sequence[str],
+    fencing_evidence: Sequence[Mapping[str, object]],
     completed_at: str,
 ) -> dict[str, Any]:
     """Durably clear the restore gate only after reconciliation and sender fencing.
@@ -525,17 +583,7 @@ def complete_restore_reconciliation(
         raise TypeError("controller must be RecoveryController")
     if not isinstance(reconciliation, ReconciliationResult):
         raise TypeError("reconciliation must be ReconciliationResult")
-    if isinstance(fencing_evidence, (str, bytes)) or not isinstance(
-        fencing_evidence, Sequence
-    ):
-        raise TypeError("fencing_evidence must be a sequence of evidence references")
-    refs = tuple(
-        item.strip()
-        for item in fencing_evidence
-        if isinstance(item, str) and item.strip()
-    )
-    if not refs or len(refs) != len(set(refs)):
-        raise BackupError("unique old-sender fencing evidence is required")
+    refs = _normalize_fencing_evidence(fencing_evidence)
     if not isinstance(completed_at, str) or not completed_at.strip():
         raise BackupError("completed_at is required")
     try:
@@ -544,6 +592,12 @@ def complete_restore_reconciliation(
         raise BackupError("completed_at must be an ISO timestamp") from error
     if completed.tzinfo is None:
         raise BackupError("completed_at must include a timezone")
+    completed_utc = completed.astimezone(timezone.utc)
+    if any(
+        datetime.fromisoformat(item["observed_at"].replace("Z", "+00:00")) > completed_utc
+        for item in refs
+    ):
+        raise BackupError("fencing evidence cannot postdate restore completion")
 
     unresolved = tuple(
         item.attempt_id
@@ -572,10 +626,10 @@ def complete_restore_reconciliation(
     proof = {
         "schema_version": 1,
         "backup_manifest_sha256": marker["backup_manifest_sha256"],
-        "completed_at": completed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "completed_at": completed_utc.isoformat().replace("+00:00", "Z"),
         "owner_id": controller.owner.owner_id,
         "owner_epoch": controller.owner.epoch,
-        "fencing_evidence": list(refs),
+        "fencing_evidence": [dict(item) for item in refs],
         "matched_execution_ids": list(reconciliation.matched_execution_ids),
         "submission_resolutions": [
             {
@@ -634,6 +688,19 @@ def restore_requires_reconciliation(destination_root: str | Path) -> bool:
     if not proof.get("owner_id") or not isinstance(proof.get("owner_epoch"), int):
         return True
     if not isinstance(proof.get("fencing_evidence"), list) or not proof["fencing_evidence"]:
+        return True
+    try:
+        evidence = _normalize_fencing_evidence(proof["fencing_evidence"])
+        completed_at = proof.get("completed_at")
+        if not isinstance(completed_at, str) or not completed_at.endswith("Z"):
+            return True
+        completed = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        if any(
+            datetime.fromisoformat(item["observed_at"].replace("Z", "+00:00")) > completed
+            for item in evidence
+        ):
+            return True
+    except (BackupError, TypeError, ValueError):
         return True
     if proof.get("blocking_resources") != []:
         return True

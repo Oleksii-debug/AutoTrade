@@ -29,6 +29,19 @@ class HostCommandStateTests(unittest.TestCase):
         )
 
     @staticmethod
+    def reconciliation_evidence(
+        *,
+        artifact_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        observed_at="2026-09-24T18:00:00Z",
+    ):
+        return {
+            "artifact_id": artifact_id,
+            "sha256": digest,
+            "observed_at": observed_at,
+        }
+
+    @staticmethod
     def command(
         *,
         command_id="11111111-1111-1111-1111-111111111111",
@@ -206,9 +219,51 @@ class HostCommandStateTests(unittest.TestCase):
                 remaining_uncertainty=("still_unknown",),
             )
 
-        resolved = self.store.update_operation(accepted.operation_id, "SUCCEEDED")
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires new reconciliation evidence",
+        ):
+            self.store.update_operation(accepted.operation_id, "SUCCEEDED")
+
+        resolved = self.store.update_operation(
+            accepted.operation_id,
+            "SUCCEEDED",
+            evidence=(self.reconciliation_evidence(),),
+        )
         self.assertEqual(resolved.phase, "SUCCEEDED")
         self.assertEqual(resolved.remaining_uncertainty, ())
+        self.assertEqual(resolved.evidence, (self.reconciliation_evidence(),))
+
+    def test_unknown_resolution_rejects_reused_or_malformed_evidence(self):
+        accepted = self.store.submit(self.command())
+        prior = self.reconciliation_evidence(
+            artifact_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        self.store.update_operation(
+            accepted.operation_id,
+            "UNKNOWN",
+            remaining_uncertainty=("provider_outcome_unresolved",),
+            evidence=(prior,),
+        )
+        with self.assertRaisesRegex(ValueError, "requires new reconciliation evidence"):
+            self.store.update_operation(
+                accepted.operation_id,
+                "FAILED",
+                evidence=(prior,),
+            )
+        with self.assertRaisesRegex(ValueError, "artifact_id"):
+            self.store.update_operation(
+                accepted.operation_id,
+                "FAILED",
+                evidence=(
+                    {
+                        "artifact_id": "",
+                        "sha256": "sha256:" + ("c" * 64),
+                        "observed_at": "2026-09-24T18:00:00Z",
+                    },
+                ),
+            )
 
     def test_unknown_requires_uncertainty_and_terminal_cannot_hide_it(self):
         accepted = self.store.submit(self.command())

@@ -31,6 +31,12 @@ FORBIDDEN_SUFFIXES = {
     ".jks",
     ".keystore",
 }
+WINDOWS_FORBIDDEN_CHARS = frozenset('<>:"\\|?*')
+WINDOWS_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{index}" for index in range(1, 10)}
+    | {f"LPT{index}" for index in range(1, 10)}
+)
 
 
 class BundleError(ValueError):
@@ -51,6 +57,29 @@ def _safe_relative(path: Path, root: Path) -> str:
     return posix
 
 
+def _windows_path_key(relative: str) -> str:
+    """Validate a portable Windows relative path and return its collision key."""
+
+    pure = PurePosixPath(relative)
+    if pure.is_absolute() or not pure.parts:
+        raise BundleError("bundle path must be a non-empty relative path")
+    normalized_parts: list[str] = []
+    for part in pure.parts:
+        if part in {"", ".", ".."}:
+            raise BundleError(f"unsafe Windows bundle path segment: {part!r}")
+        if part[-1] in {" ", "."}:
+            raise BundleError(
+                f"Windows bundle path cannot end a segment with space/dot: {relative}"
+            )
+        if any(ord(char) < 32 or char in WINDOWS_FORBIDDEN_CHARS for char in part):
+            raise BundleError(f"Windows-forbidden character in bundle path: {relative}")
+        device_name = part.split(".", 1)[0].upper()
+        if device_name in WINDOWS_RESERVED_NAMES:
+            raise BundleError(f"Windows-reserved device name in bundle path: {relative}")
+        normalized_parts.append(part.casefold())
+    return "/".join(normalized_parts)
+
+
 def _is_sensitive(path: Path) -> bool:
     name = path.name.lower()
     if name in FORBIDDEN_BASENAMES:
@@ -65,6 +94,7 @@ def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
     if not staging.is_dir():
         raise BundleError("staging must be an existing directory")
     collected: list[tuple[str, Path, bytes]] = []
+    windows_paths: dict[str, str] = {}
     for path in sorted(staging.rglob("*"), key=lambda item: item.as_posix()):
         if path.is_symlink():
             raise BundleError(f"symlinks are forbidden in bundles: {path}")
@@ -73,6 +103,14 @@ def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
         if not path.is_file():
             raise BundleError(f"unsupported filesystem entry: {path}")
         relative = _safe_relative(path, staging)
+        windows_key = _windows_path_key(relative)
+        prior = windows_paths.get(windows_key)
+        if prior is not None and prior != relative:
+            raise BundleError(
+                "Windows case-insensitive path collision in bundle: "
+                f"{prior} vs {relative}"
+            )
+        windows_paths[windows_key] = relative
         if _is_sensitive(PurePosixPath(relative)):
             raise BundleError(f"sensitive path is forbidden in bundles: {relative}")
         collected.append((relative, path, path.read_bytes()))

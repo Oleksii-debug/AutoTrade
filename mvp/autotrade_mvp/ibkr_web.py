@@ -16,6 +16,7 @@ from typing import Mapping
 import re
 
 from .capabilities import CapabilitySnapshot
+from .reconciliation import ProviderFillEvidence
 
 
 class IbkrWebAdapterError(ValueError):
@@ -335,3 +336,171 @@ class IbkrAbsenceEvidence:
         ):
             return "PROVEN_ABSENT"
         return "INCONCLUSIVE"
+
+
+@dataclass(frozen=True)
+class IbkrSubmissionOutcome:
+    """Provider response classification; acknowledgement is never a fill."""
+
+    status: str
+    provider_order_id: str | None = None
+    provider_order_status: str | None = None
+    reply_id: str | None = None
+    messages: tuple[str, ...] = ()
+    message_ids: tuple[str, ...] = ()
+    rejection_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.status not in {"ACKNOWLEDGED", "REPLY_REQUIRED", "REJECTED"}:
+            raise IbkrWebAdapterError("unsupported submission outcome")
+        if self.status == "ACKNOWLEDGED":
+            if self.provider_order_id is None or self.provider_order_status is None:
+                raise IbkrWebAdapterError("acknowledgement requires provider order identity and status")
+            if self.reply_id is not None or self.rejection_reason is not None:
+                raise IbkrWebAdapterError("acknowledgement cannot also be reply/rejection")
+        elif self.status == "REPLY_REQUIRED":
+            if self.reply_id is None or not self.messages:
+                raise IbkrWebAdapterError("reply-required outcome needs reply id and message")
+            if self.provider_order_id is not None or self.rejection_reason is not None:
+                raise IbkrWebAdapterError("reply-required outcome is not an order acknowledgement")
+        else:
+            if self.rejection_reason is None:
+                raise IbkrWebAdapterError("rejected outcome requires a provider reason")
+            if self.provider_order_id is not None or self.reply_id is not None:
+                raise IbkrWebAdapterError("rejected outcome cannot carry live order/reply identity")
+
+    @property
+    def proves_fill(self) -> bool:
+        return False
+
+    @property
+    def retry_same_economic_action(self) -> bool:
+        # A provider response exists after an outbound request. Reconciliation or
+        # explicit reply handling is safer than blind resubmission.
+        return False
+
+
+def _single_submission_item(payload: object) -> Mapping[str, object]:
+    if isinstance(payload, Mapping):
+        return payload
+    if isinstance(payload, (list, tuple)):
+        if len(payload) != 1 or not isinstance(payload[0], Mapping):
+            raise IbkrWebAdapterError(
+                "single-order adapter requires exactly one provider response object"
+            )
+        return payload[0]
+    raise TypeError("submission response must be an object or one-item sequence")
+
+
+def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
+    """Classify the documented ACK / reply-message / explicit-error shapes.
+
+    A reply message is not an acknowledgement and must never be auto-confirmed.
+    Unknown shapes fail closed instead of being guessed into a terminal state.
+    """
+
+    item = _single_submission_item(payload)
+    has_order = item.get("order_id") not in {None, ""}
+    has_reply = item.get("id") not in {None, ""} and item.get("message") not in {None, ""}
+    has_error = item.get("error") not in {None, ""}
+
+    if sum(bool(value) for value in (has_order, has_reply, has_error)) != 1:
+        raise IbkrWebAdapterError("submission response shape is ambiguous or unsupported")
+
+    if has_order:
+        return IbkrSubmissionOutcome(
+            status="ACKNOWLEDGED",
+            provider_order_id=_text(str(item["order_id"]), name="order_id"),
+            provider_order_status=_text(
+                str(item.get("order_status", "")),
+                name="order_status",
+            ),
+        )
+
+    if has_reply:
+        raw_messages = item["message"]
+        if isinstance(raw_messages, (str, bytes)) or not isinstance(raw_messages, (list, tuple)):
+            raise IbkrWebAdapterError("reply message must be a sequence of strings")
+        messages = tuple(_text(str(value), name="reply message") for value in raw_messages)
+        raw_ids = item.get("messageIds", ())
+        if isinstance(raw_ids, (str, bytes)) or not isinstance(raw_ids, (list, tuple)):
+            raise IbkrWebAdapterError("messageIds must be a sequence when present")
+        message_ids = tuple(_text(str(value), name="messageId") for value in raw_ids)
+        suppressed = item.get("isSuppressed")
+        if suppressed is not None and type(suppressed) is not bool:
+            raise IbkrWebAdapterError("isSuppressed must be boolean when present")
+        return IbkrSubmissionOutcome(
+            status="REPLY_REQUIRED",
+            reply_id=_text(str(item["id"]), name="reply id"),
+            messages=messages,
+            message_ids=message_ids,
+        )
+
+    return IbkrSubmissionOutcome(
+        status="REJECTED",
+        rejection_reason=_text(str(item["error"]), name="error"),
+    )
+
+
+@dataclass(frozen=True)
+class IbkrReplyRequest:
+    endpoint: str
+    body: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
+
+
+def prepare_reply_confirmation(
+    outcome: IbkrSubmissionOutcome,
+    *,
+    explicit_authorization: bool,
+) -> IbkrReplyRequest:
+    """Prepare, but never send, the economically consequential second request.
+
+    The returned request must still cross the normal durable GuardedDispatcher
+    final barrier. This adapter never enables provider-wide warning suppression.
+    """
+
+    if not isinstance(outcome, IbkrSubmissionOutcome):
+        raise TypeError("outcome must be IbkrSubmissionOutcome")
+    if type(explicit_authorization) is not bool:
+        raise TypeError("explicit_authorization must be boolean")
+    if outcome.status != "REPLY_REQUIRED":
+        raise IbkrWebAdapterError("only a reply-required outcome can be confirmed")
+    if not explicit_authorization:
+        raise IbkrWebAdapterError("IBKR reply requires explicit authorization")
+    return IbkrReplyRequest(
+        endpoint=f"/iserver/reply/{outcome.reply_id}",
+        body={"confirmed": True},
+    )
+
+
+def execution_to_reconciliation_fill(
+    execution: IbkrExecutionEvidence,
+    *,
+    client_order_id: str | None,
+    instrument: str,
+    fee_amount,
+    fee_currency: str,
+    trade_time: str,
+) -> ProviderFillEvidence:
+    """Bind unique IBKR execution identity into canonical account truth.
+
+    Fee and trade-time evidence are explicit inputs because an execution row
+    must not invent commission or timestamp evidence that was not observed.
+    """
+
+    if not isinstance(execution, IbkrExecutionEvidence):
+        raise TypeError("execution must be IbkrExecutionEvidence")
+    client_id = None if client_order_id is None else validate_coid(client_order_id)
+    return ProviderFillEvidence.create(
+        provider_execution_id=execution.execution_id,
+        client_order_id=client_id,
+        instrument=_text(instrument, name="instrument"),
+        quantity=execution.quantity,
+        price=execution.price,
+        fee_amount=_decimal(fee_amount, name="fee_amount"),
+        fee_currency=_text(fee_currency, name="fee_currency"),
+        trade_time=_text(trade_time, name="trade_time"),
+    )

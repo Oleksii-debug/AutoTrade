@@ -84,9 +84,11 @@ class SpecialistDagTests(unittest.TestCase):
             spec("clone2", "same-source"),
             spec("independent", "independent-source"),
         ]
+        plan = plan_specialists(specs, available_inputs=(), total_budget="3")
         result = aggregate_specialists(
             specs,
             [run("clone1", "1"), run("clone2", "1"), run("independent", "-1")],
+            plan=plan,
             decision_deadline=NOW,
         )
         self.assertEqual(result.score, Decimal("0"))
@@ -95,6 +97,7 @@ class SpecialistDagTests(unittest.TestCase):
 
     def test_late_and_over_budget_results_are_rejected(self):
         specs = [spec("late", "a"), spec("costly", "b", cost="1"), spec("ok", "c")]
+        plan = plan_specialists(specs, available_inputs=(), total_budget="3")
         result = aggregate_specialists(
             specs,
             [
@@ -102,6 +105,7 @@ class SpecialistDagTests(unittest.TestCase):
                 run("costly", "1", cost="2"),
                 run("ok", "-0.5"),
             ],
+            plan=plan,
             decision_deadline=NOW,
         )
         self.assertEqual(result.direction, "SHORT")
@@ -110,17 +114,78 @@ class SpecialistDagTests(unittest.TestCase):
 
     def test_blocking_critique_removes_affected_output(self):
         specs = [spec("a", "a"), spec("b", "b")]
+        plan = plan_specialists(specs, available_inputs=(), total_budget="2")
         result = aggregate_specialists(
             specs,
             [
                 run("a", "1", critique=("Future leakage detected",)),
                 run("b", "-0.4"),
             ],
+            plan=plan,
             decision_deadline=NOW,
             blocking_critique_terms=("future leakage",),
         )
         self.assertEqual(result.direction, "SHORT")
         self.assertIn(("a", "blocking_critique"), result.rejected_roles)
+
+    def test_aggregation_rejects_result_from_role_not_scheduled_by_plan(self):
+        specs = [
+            spec("a", "g1", cost="2", value="2"),
+            spec("b", "g2", cost="2", value="2"),
+        ]
+        plan = plan_specialists(specs, available_inputs=(), total_budget="2")
+        self.assertEqual(plan.scheduled_roles, ("a",))
+        result = aggregate_specialists(
+            specs,
+            [run("a", "0.5", cost="1"), run("b", "-1", cost="1")],
+            plan=plan,
+            decision_deadline=NOW,
+        )
+        self.assertEqual(result.accepted_roles, ("a",))
+        self.assertEqual(result.direction, "LONG")
+        self.assertIn(("b", "not_scheduled"), result.rejected_roles)
+        self.assertEqual(result.total_cost, Decimal("1"))
+
+    def test_aggregation_rejects_forged_plan_reservation(self):
+        specs = [spec("a", "g1", cost="2", value="2")]
+        forged = plan_specialists(specs, available_inputs=(), total_budget="2")
+        forged = forged.__class__(
+            scheduled_roles=forged.scheduled_roles,
+            skipped_roles=forged.skipped_roles,
+            reserved_cost=Decimal("0"),
+            available_inputs=forged.available_inputs,
+            total_budget=forged.total_budget,
+        )
+        with self.assertRaisesRegex(SpecialistDagError, "canonical planner output"):
+            aggregate_specialists(
+                specs,
+                [run("a", "1", cost="1")],
+                plan=forged,
+                decision_deadline=NOW,
+            )
+
+    def test_aggregation_rejects_forged_schedule_with_missing_required_input(self):
+        specs = [spec("research", "g1", cost="1", value="2", inputs=("news",))]
+        planned = plan_specialists(
+            specs,
+            available_inputs=(),
+            total_budget="1",
+        )
+        self.assertEqual(planned.scheduled_roles, ())
+        forged = planned.__class__(
+            scheduled_roles=("research",),
+            skipped_roles=(),
+            reserved_cost=Decimal("1"),
+            available_inputs=planned.available_inputs,
+            total_budget=planned.total_budget,
+        )
+        with self.assertRaisesRegex(SpecialistDagError, "canonical planner output"):
+            aggregate_specialists(
+                specs,
+                [run("research", "1", cost="1")],
+                plan=forged,
+                decision_deadline=NOW,
+            )
 
     def test_output_requires_evidence_and_rejects_binary_floats(self):
         with self.assertRaises(SpecialistDagError):

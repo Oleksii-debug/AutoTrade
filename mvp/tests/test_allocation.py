@@ -101,6 +101,12 @@ class AllocationTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             self.candidate(capital_requirement=0.2)
 
+    def test_capital_requirement_must_be_strictly_positive(self):
+        for invalid in ("0", "-0.01"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "capital_requirement_rate must be positive"):
+                    self.candidate(capital_requirement=invalid)
+
     def test_correlation_stress_caps_joint_exposure(self):
         result = allocate_targets(
             [

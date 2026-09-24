@@ -125,6 +125,29 @@ jobs:
             throw "Repeated probe output changed across clean process starts."
           }
 
+          $restartState = Join-Path $env:RUNNER_TEMP "autotrade-lean-callback-state.json"
+          if (Test-Path $restartState) {
+            Remove-Item $restartState -Force
+          }
+          $checkpoint = @(& dotnet run --project $project --configuration Release --no-build "-p:LeanRoot=$env:LEAN_ROOT" -- --write-restart-state $restartState)
+          if ($LASTEXITCODE -ne 0) {
+            throw "LEAN restart checkpoint process failed."
+          }
+          $checkpointText = ($checkpoint -join [Environment]::NewLine).Trim()
+          if ($checkpointText -ne "WP02_LEAN_RESTART_CHECKPOINT_WRITTEN" -or !(Test-Path $restartState)) {
+            throw "LEAN restart checkpoint evidence was not created: $checkpointText"
+          }
+
+          $resume = @(& dotnet run --project $project --configuration Release --no-build "-p:LeanRoot=$env:LEAN_ROOT" -- --resume-restart-state $restartState)
+          if ($LASTEXITCODE -ne 0) {
+            throw "LEAN restart resume process failed."
+          }
+          $resumeText = ($resume -join [Environment]::NewLine).Trim()
+          if ($resumeText -ne "WP02_LEAN_RESTART_RESUME_PASS") {
+            throw "LEAN restart resume probe returned unexpected output: $resumeText"
+          }
+          Remove-Item $restartState -Force
+
           $autoTradeTrackedChanges = @(git status --porcelain --untracked-files=no)
           if ($autoTradeTrackedChanges.Count -ne 0) {
             throw "LEAN adoption probe mutated tracked AutoTrade source."
@@ -171,6 +194,7 @@ jobs:
             runner_os = $env:RUNNER_OS
             dotnet_version = (dotnet --version).Trim()
             probe_result = "PASS"
+            restart_callback_identity_probe = "PASS"
             dependency_asset_manifest_sha256 = "sha256:$assetManifestHash"
           }
           $evidence |

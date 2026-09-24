@@ -21,7 +21,12 @@ The probe checks:
 - explicit UTC time;
 - deterministic equity symbol construction;
 - rejection of exponent notation, non-canonical decimal text, zero quantity,
-  non-positive price and ambiguous time.
+  non-positive price and ambiguous time;
+- acknowledgement versus economic-fill distinction, partial/final fill visibility,
+  duplicate callback identity, conflicting repeated identity and arrival-time regression;
+- clean-process restart of diagnostic callback identity state, proving that an identical
+  callback remains duplicate, conflicting economics remain visible, and the prior
+  arrival-time boundary survives restart.
 
 The seam never authenticates, opens a network session, creates brokerage
 credentials, or submits an order. A constructed `MarketOrder` is only an
@@ -29,6 +34,11 @@ in-memory compatibility object.
 
 This does not prove full WP-02, provider qualification, restart/reconciliation
 correctness, packaging, performance, economic edge, or live trading safety.
-The remaining WP-02 path still includes engine embedding, event
-ordering/callback characterization, shutdown/restart behavior, guarded
-brokerage isolation, and exact dependency/notice composition under WP-03.
+The restart probe is deliberately diagnostic state only: it is not the AutoTrade
+journal, order projection, account truth or reconciliation authority. Full shutdown
+and restart reconciliation still requires the canonical persistence/reconciliation
+spine and provider evidence.
+
+The remaining WP-02 path still includes fuller engine embedding, shutdown/restart
+reconciliation, packaging, guarded brokerage isolation, and exact dependency/notice
+composition under WP-03.

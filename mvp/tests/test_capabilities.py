@@ -56,7 +56,9 @@ def claim(
         evidence_ref={
             "artifact_id": f"33333333-3333-4333-8333-33333333333{len(source) % 10}",
             "sha256": "sha256:" + "a" * 64,
-            "observed_at": "2026-09-24T15:59:00Z",
+            "observed_at": observed_at.astimezone(timezone.utc).isoformat().replace(
+                "+00:00", "Z"
+            ),
         },
     )
 
@@ -368,6 +370,35 @@ class CapabilityFoundationTests(unittest.TestCase):
         self.assertEqual(payload["supported_order_types"], ["LIMIT", "MARKET"])
         self.assertEqual(payload["observed_at"], "2026-09-24T16:00:00Z")
         self.assertEqual(len(payload["evidence"]), 4)
+
+
+    def test_old_evidence_cannot_be_relabelled_as_fresh_claim(self):
+        original = claim(
+            "ACCOUNT",
+            observed_at=NOW - timedelta(minutes=20),
+            expires_at=NOW + timedelta(minutes=10),
+        )
+        with self.assertRaisesRegex(
+            CapabilityError, "must match claim observed_at"
+        ):
+            CapabilityClaim(
+                source=original.source,
+                provider_id=original.provider_id,
+                account_id=original.account_id,
+                entity_id=original.entity_id,
+                environment=original.environment,
+                instrument_version=original.instrument_version,
+                observed_at=NOW,
+                expires_at=NOW + timedelta(minutes=10),
+                supported_order_types=original.supported_order_types,
+                time_in_force=original.time_in_force,
+                permission_scopes=original.permission_scopes,
+                position_mode=original.position_mode,
+                native_protection=original.native_protection,
+                rate_limit_policy_id=original.rate_limit_policy_id,
+                data_entitlements=original.data_entitlements,
+                evidence_ref=original.evidence_ref,
+            )
 
 
 if __name__ == "__main__":

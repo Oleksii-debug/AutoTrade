@@ -174,6 +174,40 @@ class ModelGatewayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exact decimal"):
             request("local", budget=1.0)
 
+    def test_boolean_flags_and_latency_aliases_fail_closed(self):
+        with self.assertRaises(TypeError):
+            ModelDescriptor(
+                model_id="bad-remote",
+                provider_id="provider",
+                revision="r1",
+                remote=1,
+                estimated_cost=Decimal("0"),
+                latency_ms=10,
+                quality_score=Decimal("0.5"),
+            )
+        with self.assertRaises(ValueError):
+            ModelDescriptor(
+                model_id="bad-latency",
+                provider_id="provider",
+                revision="r1",
+                remote=False,
+                estimated_cost=Decimal("0"),
+                latency_ms=True,
+                quality_score=Decimal("0.5"),
+            )
+        with self.assertRaises(TypeError):
+            RoutingPolicy("ZERO", maximum_cost=Decimal("0"))
+        with self.assertRaises(TypeError):
+            RoutingPolicy(RoutingMode.ZERO, allow_remote=1, maximum_cost=Decimal("0"))
+        with self.assertRaises(TypeError):
+            ModelRequest(
+                request_id="bad-privacy",
+                allowed_model_ids=(),
+                privacy_remote_allowed=1,
+                budget_remaining=Decimal("0"),
+                deadline_utc=NOW + timedelta(minutes=1),
+            )
+
     def test_duplicate_descriptor_is_rejected(self):
         with self.assertRaises(ValueError):
             route_model(

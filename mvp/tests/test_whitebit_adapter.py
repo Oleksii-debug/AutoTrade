@@ -15,6 +15,7 @@ from mvp.autotrade_mvp.whitebit import (
     WhiteBitOrderIntent,
     WhiteBitPageEvidence,
     absence_evidence_from_coverages,
+    collateral_balance_request,
     decode_whitebit_json,
     execution_history_coverage,
     open_order_coverage,
@@ -26,12 +27,15 @@ from mvp.autotrade_mvp.whitebit import (
     paged_order_history_request,
     parse_execution_deal,
     parse_execution_history,
+    parse_collateral_balances,
     parse_hedge_mode,
     parse_open_position,
     parse_open_positions,
     parse_order_snapshot,
     prepare_order_request,
     redact_whitebit_debug,
+    provider_collateral_borrow,
+    provider_collateral_cash,
     sign_private_request,
     signed_position_quantities,
     validate_client_order_id,
@@ -687,6 +691,83 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertTrue(parse_hedge_mode({"hedgeMode": True}))
         with self.assertRaisesRegex(WhiteBitAdapterError, "hedgeMode"):
             parse_hedge_mode({"hedgeMode": "true"})
+
+    def test_collateral_balance_keeps_borrow_capacity_out_of_cash_truth(self):
+        observations = parse_collateral_balances(
+            [
+                {
+                    "asset": "BTC",
+                    "balance": "0.5",
+                    "borrow": "0.1",
+                    "availableWithoutBorrow": "0.4",
+                    "availableWithBorrow": "123.456",
+                },
+                {
+                    "asset": "USDT",
+                    "balance": "1000",
+                    "borrow": "25",
+                    "availableWithoutBorrow": "975",
+                    "availableWithBorrow": "5000",
+                },
+            ]
+        )
+        cash = provider_collateral_cash(observations)
+        liabilities = provider_collateral_borrow(observations)
+        self.assertEqual(cash["BTC"], Decimal("0.5"))
+        self.assertEqual(cash["USDT"], Decimal("1000"))
+        self.assertEqual(liabilities["BTC"], Decimal("0.1"))
+        self.assertEqual(liabilities["USDT"], Decimal("25"))
+        self.assertNotEqual(
+            cash["USDT"],
+            observations[1].available_with_borrow,
+        )
+
+    def test_collateral_balance_duplicate_conflict_fails_closed(self):
+        first = {
+            "asset": "BTC",
+            "balance": "0.5",
+            "borrow": "0",
+            "availableWithoutBorrow": "0.5",
+            "availableWithBorrow": "123.456",
+        }
+        self.assertEqual(
+            len(parse_collateral_balances([first, dict(first)])),
+            1,
+        )
+        conflict = dict(first)
+        conflict["borrow"] = "0.01"
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "conflicting balance",
+        ):
+            parse_collateral_balances([first, conflict])
+
+    def test_collateral_balance_rejects_impossible_borrow_capacity(self):
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "cannot be below",
+        ):
+            parse_collateral_balances(
+                [
+                    {
+                        "asset": "BTC",
+                        "balance": "0.5",
+                        "borrow": "0",
+                        "availableWithoutBorrow": "0.5",
+                        "availableWithBorrow": "0.4",
+                    }
+                ]
+            )
+
+    def test_collateral_balance_request_is_network_free_and_filterable(self):
+        all_assets = collateral_balance_request()
+        one_asset = collateral_balance_request(asset="btc")
+        self.assertEqual(
+            all_assets.endpoint,
+            "/api/v4/collateral-account/balance-summary",
+        )
+        self.assertEqual(dict(all_assets.body), {})
+        self.assertEqual(dict(one_asset.body), {"ticker": "BTC"})
 
     def test_private_signer_uses_exact_body_and_caller_owned_nonce(self):
         nonce = 1_790_280_000_123

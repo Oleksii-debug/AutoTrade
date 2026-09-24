@@ -89,6 +89,21 @@ class ScientificQualificationTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             ScientificQualificationInput(H, H, H, complete_gates(), "NONE", False, "false")
 
+    def test_qualification_identity_binds_exact_gate_evidence(self):
+        baseline = qualify_scientific_learning(evidence())
+        changed = list(complete_gates())
+        changed[0] = QualificationGate(
+            "protocol",
+            "PASS",
+            ("sha256:" + "b" * 64,),
+            H,
+            H,
+            H,
+        )
+        revised = qualify_scientific_learning(evidence(changed))
+        self.assertEqual(baseline.status, revised.status)
+        self.assertNotEqual(baseline.qualification_id, revised.qualification_id)
+
 
 if __name__ == "__main__":
     unittest.main()

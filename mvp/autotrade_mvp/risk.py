@@ -182,6 +182,7 @@ class RiskPolicy:
     allowed_actions: tuple[str, ...] | None = None
     require_settlement_evidence: bool = False
     require_option_exercise_evidence: bool = False
+    min_futures_delivery_headroom_seconds: Decimal | None = None
 
     @classmethod
     def create(
@@ -207,6 +208,7 @@ class RiskPolicy:
         allowed_actions: Sequence[str] | None = None,
         require_settlement_evidence: bool = False,
         require_option_exercise_evidence: bool = False,
+        min_futures_delivery_headroom_seconds=None,
     ) -> "RiskPolicy":
         values = {
             "max_abs_position": _positive(max_abs_position, name="max_abs_position"),
@@ -266,6 +268,15 @@ class RiskPolicy:
             raise TypeError("require_settlement_evidence must be a boolean")
         if not isinstance(require_option_exercise_evidence, bool):
             raise TypeError("require_option_exercise_evidence must be a boolean")
+        delivery_headroom = (
+            None
+            if min_futures_delivery_headroom_seconds is None
+            else _positive(
+                min_futures_delivery_headroom_seconds,
+                name="min_futures_delivery_headroom_seconds",
+                allow_zero=True,
+            )
+        )
         return cls(
             **values,
             **optional_limits,
@@ -274,6 +285,7 @@ class RiskPolicy:
             allowed_actions=normalized_allowed_actions,
             require_settlement_evidence=require_settlement_evidence,
             require_option_exercise_evidence=require_option_exercise_evidence,
+            min_futures_delivery_headroom_seconds=delivery_headroom,
         )
 
 
@@ -303,6 +315,7 @@ class RiskContext:
     option_deliverable_verified: bool | None = None
     option_exercise_cash_required: Decimal | None = None
     option_exercise_cash_available: Decimal | None = None
+    futures_delivery_headroom_seconds: Mapping[str, Decimal] | None = None
 
     @classmethod
     def create(
@@ -332,6 +345,7 @@ class RiskContext:
         option_deliverable_verified: bool | None = None,
         option_exercise_cash_required=None,
         option_exercise_cash_available=None,
+        futures_delivery_headroom_seconds: Mapping[str, object] | None = None,
     ) -> "RiskContext":
         if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
@@ -428,6 +442,14 @@ class RiskContext:
                 allow_zero=True,
             )
         )
+        normalized_delivery_headroom = _normalize_mapping(
+            futures_delivery_headroom_seconds or {},
+            name="futures_delivery_headroom_seconds",
+            parser=lambda value, key: _decimal(
+                value,
+                name=f"futures delivery headroom {key}",
+            ),
+        )
         if not isinstance(stress_scenarios, Sequence) or isinstance(
             stress_scenarios,
             (str, bytes),
@@ -487,6 +509,7 @@ class RiskContext:
             option_deliverable_verified=option_deliverable_verified,
             option_exercise_cash_required=normalized_exercise_required,
             option_exercise_cash_available=normalized_exercise_available,
+            futures_delivery_headroom_seconds=normalized_delivery_headroom,
         )
 
 
@@ -918,6 +941,33 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         True,
         "new or increased short exposure requires affirmative borrow evidence",
     )
+
+    if (
+        policy.min_futures_delivery_headroom_seconds is not None
+        and intent.instrument_type == "FUTURE"
+    ):
+        delivery_headroom = (context.futures_delivery_headroom_seconds or {}).get(
+            intent.symbol
+        )
+        delivery_ok = protective_reduction or (
+            delivery_headroom is not None
+            and delivery_headroom >= policy.min_futures_delivery_headroom_seconds
+        )
+        add(
+            "futures_delivery_cutoff",
+            delivery_ok,
+            (
+                "RISK_REDUCTION"
+                if protective_reduction
+                else (
+                    delivery_headroom
+                    if delivery_headroom is not None
+                    else "UNKNOWN"
+                )
+            ),
+            policy.min_futures_delivery_headroom_seconds,
+            "new futures risk requires sufficient evidenced delivery headroom",
+        )
 
     reduce_only_ok = not intent.reduce_only or reduces_absolute_exposure
     add(

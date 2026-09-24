@@ -26,6 +26,7 @@ def policy(**overrides):
         allowed_actions=None,
         require_settlement_evidence=False,
         require_option_exercise_evidence=False,
+        min_futures_delivery_headroom_seconds=None,
     )
     values.update(overrides)
     return RiskPolicy.create(**values)
@@ -761,6 +762,56 @@ class IndependentRiskTests(unittest.TestCase):
             context(option_deliverable_verified="true")
         with self.assertRaises(TypeError):
             policy(require_option_exercise_evidence="true")
+
+    def test_future_new_risk_requires_delivery_headroom_evidence(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7, instrument_type="FUTURE",
+        )
+        missing = evaluate_risk(
+            intent,
+            context(futures_delivery_headroom_seconds={}),
+            policy(min_futures_delivery_headroom_seconds="3600"),
+        )
+        too_close = evaluate_risk(
+            intent,
+            context(futures_delivery_headroom_seconds={"ABC": "3599.9"}),
+            policy(min_futures_delivery_headroom_seconds="3600"),
+        )
+        self.assertEqual(
+            next(x for x in missing.rules if x.rule == "futures_delivery_cutoff").observed,
+            "UNKNOWN",
+        )
+        self.assertFalse(
+            next(x for x in too_close.rules if x.rule == "futures_delivery_cutoff").passed
+        )
+
+    def test_future_reduce_only_can_flatten_inside_delivery_cutoff(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="SELL", quantity="2", price="100",
+                expected_state_version=7, reduce_only=True,
+                action="FLATTEN", instrument_type="FUTURE",
+            ),
+            context(
+                positions={"ABC": "2"},
+                futures_delivery_headroom_seconds={"ABC": "-10"},
+                stress_scenarios=(),
+            ),
+            policy(
+                min_futures_delivery_headroom_seconds="3600",
+                allowed_actions=("FLATTEN",),
+            ),
+        )
+        rule = next(x for x in decision.rules if x.rule == "futures_delivery_cutoff")
+        self.assertTrue(rule.passed)
+        self.assertEqual(rule.observed, "RISK_REDUCTION")
+
+    def test_future_delivery_headroom_rejects_binary_float(self):
+        with self.assertRaises(TypeError):
+            context(futures_delivery_headroom_seconds={"ABC": 3600.0})
+        with self.assertRaises(TypeError):
+            policy(min_futures_delivery_headroom_seconds=3600.0)
 
 
 if __name__ == "__main__":

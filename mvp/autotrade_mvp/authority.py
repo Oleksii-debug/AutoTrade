@@ -102,6 +102,11 @@ class Confirmation:
     confirmation_id: str
     policy_id: str
     intent_hash: str
+    account_id: str
+    environment: str
+    instrument: str
+    action: str
+    notional: Decimal
     expires_at: str
 
 
@@ -173,16 +178,29 @@ class AuthorityService:
         confirmation_id: str,
         policy_id: str,
         intent_hash: str,
+        account_id: str,
+        environment: str,
+        instrument: str,
+        action: str,
+        notional,
         expires_at: str,
     ) -> bool:
         cid = _text(confirmation_id, name="confirmation_id")
         pid = _text(policy_id, name="policy_id")
         if pid not in self._policies:
             raise KeyError(pid)
+        confirmation_notional = _decimal(notional, name="notional")
+        if confirmation_notional < 0:
+            raise ValueError("notional must be non-negative")
         confirmation = Confirmation(
             confirmation_id=cid,
             policy_id=pid,
             intent_hash=_text(intent_hash, name="intent_hash"),
+            account_id=_text(account_id, name="account_id"),
+            environment=_text(environment, name="environment").upper(),
+            instrument=_text(instrument, name="instrument"),
+            action=_text(action, name="action").upper(),
+            notional=confirmation_notional,
             expires_at=expires_at,
         )
         _instant(expires_at, name="expires_at")
@@ -294,6 +312,14 @@ class AuthorityService:
                     outcome, failure_reason = "REJECTED", "confirmation_policy_mismatch"
                 elif confirmation.intent_hash != ihash:
                     outcome, failure_reason = "REJECTED", "confirmation_intent_mismatch"
+                elif (
+                    confirmation.account_id != account
+                    or confirmation.environment != env
+                    or confirmation.instrument != symbol
+                    or confirmation.action != normalized_action
+                    or confirmation.notional != amount
+                ):
+                    outcome, failure_reason = "REJECTED", "confirmation_scope_mismatch"
                 elif _instant(now, name="now") >= _instant(confirmation.expires_at, name="confirmation.expires_at"):
                     outcome, failure_reason = "REJECTED", "confirmation_expired"
                 else:

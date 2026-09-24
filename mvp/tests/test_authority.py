@@ -27,6 +27,11 @@ class AuthorityTests(unittest.TestCase):
             confirmation_id="c1",
             policy_id="p1",
             intent_hash="hash-a",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument="ABC",
+            action="ORDER.SUBMIT",
+            notional="100",
             expires_at="2026-09-24T23:00:00Z",
         )
         rejected = service.admit(
@@ -56,6 +61,58 @@ class AuthorityTests(unittest.TestCase):
             confirmation_id="c1",
         )
         self.assertEqual(reused.reason, "confirmation_already_used")
+
+    def test_confirmation_is_bound_to_exact_financial_scope(self):
+        variants = (
+            dict(account_id="other", environment="PAPER", instrument="ABC", action="ORDER.SUBMIT", notional="100"),
+            dict(account_id="paper-1", environment="SIMULATION", instrument="ABC", action="ORDER.SUBMIT", notional="100"),
+            dict(account_id="paper-1", environment="PAPER", instrument="XYZ", action="ORDER.SUBMIT", notional="100"),
+            dict(account_id="paper-1", environment="PAPER", instrument="ABC", action="ORDER.CANCEL", notional="100"),
+            dict(account_id="paper-1", environment="PAPER", instrument="ABC", action="ORDER.SUBMIT", notional="101"),
+        )
+        for index, confirmation_scope in enumerate(variants):
+            with self.subTest(confirmation_scope=confirmation_scope):
+                service = AuthorityService()
+                service.register_policy(policy())
+                service.add_confirmation(
+                    confirmation_id=f"scope-{index}",
+                    policy_id="p1",
+                    intent_hash="same-hash",
+                    expires_at="2026-09-24T23:00:00Z",
+                    **confirmation_scope,
+                )
+                result = service.admit(
+                    admission_id=f"admission-{index}",
+                    policy_id="p1",
+                    intent_hash="same-hash",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    instrument="ABC",
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    state_version=1,
+                    risk_admitted=True,
+                    now="2026-09-24T18:00:00Z",
+                    confirmation_id=f"scope-{index}",
+                )
+                self.assertEqual(result.outcome, "REJECTED")
+                self.assertEqual(result.reason, "confirmation_scope_mismatch")
+
+    def test_confirmation_rejects_negative_notional(self):
+        service = AuthorityService()
+        service.register_policy(policy())
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            service.add_confirmation(
+                confirmation_id="negative",
+                policy_id="p1",
+                intent_hash="h",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument="ABC",
+                action="ORDER.SUBMIT",
+                notional="-1",
+                expires_at="2026-09-24T23:00:00Z",
+            )
 
     def test_policy_expiry_and_revocation_fail_dispatch_barrier(self):
         service = AuthorityService()
@@ -238,6 +295,11 @@ class AuthorityTests(unittest.TestCase):
             confirmation_id="c1",
             policy_id="p1",
             intent_hash="h1",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument="ABC",
+            action="ORDER.SUBMIT",
+            notional="100",
             expires_at="2026-09-24T23:00:00Z",
         )
         kwargs = dict(

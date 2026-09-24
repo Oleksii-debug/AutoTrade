@@ -182,6 +182,30 @@ class OptionLifecycleTests(unittest.TestCase):
         self.assertEqual(exercise_gate(known, at(17)), "EXERCISE_NOT_YET_OPEN")
         self.assertEqual(exercise_gate(known, at(18)), "OPEN")
 
+    def test_american_holder_exercise_also_requires_explicit_window_start(self):
+        unknown = self._physical("CALL")
+        self.assertEqual(
+            exercise_gate(unknown, at(10)),
+            "EXERCISE_SCHEDULE_UNKNOWN",
+        )
+        with self.assertRaisesRegex(OptionError, "SCHEDULE_UNKNOWN"):
+            require_holder_exercise_open(unknown, at(10))
+
+        known = OptionContract(
+            instrument="OPT:AMERICAN:KNOWN",
+            right="CALL",
+            strike=Decimal("50"),
+            multiplier=Decimal("100"),
+            settlement_currency="USD",
+            settlement_method="CASH",
+            exercise_style="AMERICAN",
+            exercise_opens_at=at(8),
+            exercise_cutoff=at(19),
+            expiry=at(20),
+        )
+        self.assertEqual(exercise_gate(known, at(7)), "EXERCISE_NOT_YET_OPEN")
+        self.assertEqual(exercise_gate(known, at(8)), "OPEN")
+
     def test_invalid_exercise_style_is_rejected(self):
         with self.assertRaises(OptionError):
             OptionContract(

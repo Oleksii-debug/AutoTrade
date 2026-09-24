@@ -224,8 +224,8 @@ class ExperienceMemory:
         cutoff = _time(information_cutoff, name="information_cutoff")
         if not isinstance(granted_permissions, set):
             raise TypeError("granted_permissions must be a set")
-        query = "SELECT * FROM episodes WHERE information_cutoff <= ?"
-        args: list[Any] = [cutoff.isoformat()]
+        query = "SELECT * FROM episodes WHERE information_cutoff <= ? AND decision_time <= ?"
+        args: list[Any] = [cutoff.isoformat(), cutoff.isoformat()]
         for column, value in (
             ("task", task),
             ("regime", regime),

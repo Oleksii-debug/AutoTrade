@@ -192,6 +192,38 @@ class CorporateSettlementTests(unittest.TestCase):
                 payload={"numerator": 2, " numerator ": 3, "denominator": 1},
             )
 
+    def test_direct_equity_state_construction_cannot_bypass_exactness_or_borrow_invariants(self):
+        with self.assertRaises(TypeError):
+            EquityState(
+                symbol="ABC",
+                quantity=1.0,
+                total_basis=Decimal("100"),
+                settled_cash=Decimal("1000"),
+                unsettled_cash=Decimal("0"),
+                currency="USD",
+            )
+        with self.assertRaisesRegex(ValueError, "cannot exceed"):
+            EquityState(
+                symbol="ABC",
+                quantity=Decimal("-1"),
+                total_basis=Decimal("100"),
+                settled_cash=Decimal("1000"),
+                unsettled_cash=Decimal("0"),
+                currency="USD",
+                borrowed_quantity=Decimal("1"),
+                recalled_quantity=Decimal("2"),
+            )
+
+    def test_direct_corporate_event_construction_cannot_bypass_exact_payload(self):
+        with self.assertRaisesRegex(TypeError, "exact decimal"):
+            CorporateEvent(
+                event_id="direct-float",
+                kind="cash_dividend",
+                effective_date=date(2026, 1, 2),
+                source_revision="r1",
+                payload={"per_share": 0.1},
+            )
+
     def test_corporate_event_rejects_binary_float_economics(self):
         with self.assertRaisesRegex(TypeError, "exact decimal"):
             CorporateEvent.create(

@@ -16,6 +16,9 @@ import json
 import os
 from pathlib import Path
 from typing import Iterable
+from uuid import NAMESPACE_URL, uuid5
+
+from .persistence import JournalStore, payload_digest
 
 
 MONEY_QUANTUM = Decimal("0.00000001")
@@ -72,6 +75,64 @@ def handle_restart_recovery(state_dir: str | Path, initial_cash: Decimal) -> tup
 
 def handle_learning_evidence(evidence: dict, evidence_path: Path, evidence_ids: set, evidence_records: dict) -> bool:
     return _append_evidence(evidence_path, evidence)
+
+
+def _utc_z(value: str) -> str:
+    if value.endswith("Z"):
+        return value
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError("Timestamp must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _event_uuid(kind: str, key: str) -> str:
+    return str(uuid5(NAMESPACE_URL, f"https://events.autotrade.local/{kind}/{key}"))
+
+
+def handle_journal_event(root: Path, symbol: str, evidence: dict) -> None:
+    store = JournalStore(root / "journal.sqlite3")
+    event_id = _event_uuid("simulation-episode", evidence["evidence_id"])
+    existing = store.get_event(event_id)
+    aggregate_version = (
+        existing["aggregate_version"]
+        if existing is not None
+        else store.next_aggregate_version("simulation_portfolio", symbol)
+    )
+    timestamp = _utc_z(evidence["recorded_at"])
+    payload = {
+        "evidence_id": evidence["evidence_id"],
+        "input_hash": evidence["input_hash"],
+        "decision": evidence["decision"],
+        "decision_reason": evidence["decision_reason"],
+        "risk_outcome": evidence["risk_outcome"],
+        "order_id": evidence["order_id"],
+        "fill_id": evidence["fill_id"],
+        "cash": evidence["cash"],
+        "position": evidence["position"],
+        "equity": evidence["equity"],
+        "reconciled": evidence["reconciled"],
+    }
+    envelope = {
+        "event_id": event_id,
+        "event_type": "SimulationEpisodeRecorded",
+        "schema_version": "1.0.0",
+        "aggregate_type": "simulation_portfolio",
+        "aggregate_id": symbol,
+        "aggregate_version": str(aggregate_version),
+        "host_id": "local-mvp",
+        "owner_epoch": "1",
+        "environment": "SIMULATION",
+        "occurred_at": timestamp,
+        "observed_at": timestamp,
+        "committed_at": timestamp,
+        "correlation_id": _event_uuid("correlation", evidence["evidence_id"]),
+        "causation_id": None,
+        "payload": payload,
+        "payload_hash": payload_digest(payload),
+        "evidence_refs": [],
+    }
+    store.append_event(envelope, outbox_topic="autotrade.simulation.events")
 
 
 def _stable_hash(payload: object) -> str:
@@ -436,6 +497,9 @@ def run_vertical_slice(
     # The checkpoint is committed before the append-only evidence row. If the
     # process stops here, replay repairs the missing row on the next run.
     handle_learning_evidence(evidence, evidence_path, evidence_ids, evidence_records)
+    # Journal/outbox comes after checkpoint and append-only evidence. An
+    # interrupted write is repaired by deterministic replay on the next run.
+    handle_journal_event(root, symbol, evidence)
     if not verify_replay(root):
         raise ValueError("Learning evidence does not replay against checkpoint")
     return RunResult(

@@ -148,6 +148,58 @@ class IbkrWebOrderIntent:
     manual_indicator: bool | None = None
     ext_operator: str | None = None
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.contract, IbkrContractIdentity):
+            raise TypeError("contract must be IbkrContractIdentity")
+        side = _text(self.side, name="side").upper()
+        order = _text(self.order_type, name="order_type").upper()
+        tif = _text(self.time_in_force, name="time_in_force").upper()
+        if side not in _SIDES:
+            raise IbkrWebAdapterError("side must be BUY or SELL")
+        if order not in _ORDER_TYPES:
+            raise IbkrWebAdapterError("unsupported normalized order type")
+        if tif not in _TIFS:
+            raise IbkrWebAdapterError("unsupported time_in_force")
+        quantity = _decimal(self.quantity, name="quantity", positive=True)
+        limit = None if self.limit_price is None else _decimal(
+            self.limit_price, name="limit_price", positive=True
+        )
+        stop = None if self.stop_price is None else _decimal(
+            self.stop_price, name="stop_price", positive=True
+        )
+        if order in {"LIMIT", "STOP_LIMIT"} and limit is None:
+            raise IbkrWebAdapterError("limit_price is required for limit-style orders")
+        if order not in {"LIMIT", "STOP_LIMIT"} and limit is not None:
+            raise IbkrWebAdapterError("limit_price is not valid for this order type")
+        if order in {"STOP", "STOP_LIMIT"} and stop is None:
+            raise IbkrWebAdapterError("stop_price is required for stop orders")
+        if order not in {"STOP", "STOP_LIMIT"} and stop is not None:
+            raise IbkrWebAdapterError("stop_price is not valid for this order type")
+        if type(self.regulatory_manual_indicator_required) is not bool:
+            raise IbkrWebAdapterError(
+                "regulatory_manual_indicator_required must be boolean"
+            )
+        if self.manual_indicator is not None and type(self.manual_indicator) is not bool:
+            raise IbkrWebAdapterError("manual_indicator must be boolean when present")
+        if self.regulatory_manual_indicator_required and self.manual_indicator is None:
+            raise IbkrWebAdapterError(
+                "manual_indicator is required by evidenced instrument regulation"
+            )
+        operator = None if self.ext_operator is None else _text(
+            self.ext_operator, name="ext_operator"
+        )
+        object.__setattr__(
+            self, "instrument_version", _text(self.instrument_version, name="instrument_version")
+        )
+        object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
+        object.__setattr__(self, "side", side)
+        object.__setattr__(self, "order_type", order)
+        object.__setattr__(self, "time_in_force", tif)
+        object.__setattr__(self, "quantity", quantity)
+        object.__setattr__(self, "limit_price", limit)
+        object.__setattr__(self, "stop_price", stop)
+        object.__setattr__(self, "ext_operator", operator)
+
     @classmethod
     def create(
         cls,

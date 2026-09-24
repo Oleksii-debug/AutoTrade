@@ -68,6 +68,7 @@ class RetentionPolicy:
     protected_regimes: tuple[str, ...]
     recent_regimes: tuple[str, ...]
     max_protected_degradation: Decimal
+    max_recent_degradation: Decimal
     min_recent_improvement: Decimal
     min_observations_per_regime: int
     require_complete_labels: bool
@@ -81,6 +82,7 @@ class RetentionPolicy:
         protected_regimes,
         recent_regimes,
         max_protected_degradation,
+        max_recent_degradation="0",
         min_recent_improvement,
         min_observations_per_regime: int,
         require_complete_labels: bool = True,
@@ -106,6 +108,7 @@ class RetentionPolicy:
             protected_regimes=protected,
             recent_regimes=recent,
             max_protected_degradation=_non_negative(max_protected_degradation, name="max_protected_degradation"),
+            max_recent_degradation=_non_negative(max_recent_degradation, name="max_recent_degradation"),
             min_recent_improvement=_decimal(min_recent_improvement, name="min_recent_improvement"),
             min_observations_per_regime=min_observations_per_regime,
             require_complete_labels=require_complete_labels,
@@ -170,6 +173,9 @@ def evaluate_retention(
             local_reasons.append("protected-regime degradation exceeds tolerance")
         if recent:
             recent_deltas.append(delta)
+            if delta < -policy.max_recent_degradation:
+                passed = False
+                local_reasons.append("recent-regime degradation exceeds tolerance")
 
         decisions.append(
             RegimeDecision(

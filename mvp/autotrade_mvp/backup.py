@@ -879,6 +879,84 @@ def _normalize_fencing_evidence(
     return tuple(normalized)
 
 
+
+def _validate_reconciliation_completion_rows(
+    resolutions: object,
+    matched_execution_ids: object,
+) -> None:
+    """Validate durable reconciliation proof identities without trusting its hash alone."""
+
+    if not isinstance(matched_execution_ids, list):
+        raise BackupError("matched execution proof must be a list")
+    matched: set[str] = set()
+    for value in matched_execution_ids:
+        identity = _text(value, name="matched execution id")
+        if identity != value or identity in matched:
+            raise BackupError("matched execution identities must be unique canonical strings")
+        matched.add(identity)
+
+    if not isinstance(resolutions, list):
+        raise BackupError("submission resolution proof must be a list")
+    seen_attempts: set[str] = set()
+    seen_clients: set[str] = set()
+    seen_executions: set[str] = set()
+    seen_orders: set[str] = set()
+    allowed = {"PROVEN_ABSENT", "OBSERVED_EXECUTION", "OBSERVED_WORKING_ORDER"}
+    required_keys = {
+        "attempt_id",
+        "client_order_id",
+        "outcome",
+        "provider_execution_ids",
+        "provider_order_ids",
+    }
+    for item in resolutions:
+        if not isinstance(item, dict) or set(item) != required_keys:
+            raise BackupError("submission resolution proof structure is invalid")
+        attempt_id = _text(item["attempt_id"], name="attempt_id")
+        client_order_id = _text(item["client_order_id"], name="client_order_id")
+        if attempt_id != item["attempt_id"] or client_order_id != item["client_order_id"]:
+            raise BackupError("submission identities must be canonical strings")
+        if attempt_id in seen_attempts or client_order_id in seen_clients:
+            raise BackupError("submission resolution identities must be unique")
+        seen_attempts.add(attempt_id)
+        seen_clients.add(client_order_id)
+
+        outcome = item["outcome"]
+        if outcome not in allowed:
+            raise BackupError("submission resolution outcome is not canonical")
+        execution_ids = item["provider_execution_ids"]
+        order_ids = item["provider_order_ids"]
+        if not isinstance(execution_ids, list) or not isinstance(order_ids, list):
+            raise BackupError("provider identity proof fields must be lists")
+        for values, seen, label in (
+            (execution_ids, seen_executions, "provider execution"),
+            (order_ids, seen_orders, "provider order"),
+        ):
+            local: set[str] = set()
+            for value in values:
+                identity = _text(value, name=f"{label} identity")
+                if identity != value or identity in local or identity in seen:
+                    raise BackupError(f"{label} identities must be globally unique")
+                local.add(identity)
+                seen.add(identity)
+
+        if outcome == "PROVEN_ABSENT" and (execution_ids or order_ids):
+            raise BackupError("PROVEN_ABSENT cannot carry provider execution/order identities")
+        if outcome == "OBSERVED_EXECUTION":
+            if not execution_ids:
+                raise BackupError("OBSERVED_EXECUTION requires provider execution identity")
+            if any(value not in matched for value in execution_ids):
+                raise BackupError(
+                    "observed execution must be present in matched execution proof"
+                )
+        if outcome == "OBSERVED_WORKING_ORDER":
+            if not order_ids:
+                raise BackupError("OBSERVED_WORKING_ORDER requires provider order identity")
+            if execution_ids:
+                raise BackupError(
+                    "OBSERVED_WORKING_ORDER cannot simultaneously claim execution"
+                )
+
 def complete_restore_reconciliation(
     destination_root: str | Path,
     *,
@@ -989,6 +1067,12 @@ def complete_restore_reconciliation(
             }
         )
 
+    matched_execution_ids = list(reconciliation.matched_execution_ids)
+    _validate_reconciliation_completion_rows(
+        resolution_proof,
+        matched_execution_ids,
+    )
+
     new_owner_id = expected_new_owner.owner_id
     expected_new_epoch = expected_new_owner.epoch
     if controller.owner == source_owner:
@@ -1033,7 +1117,7 @@ def complete_restore_reconciliation(
         "owner_id": transferred.owner_id,
         "owner_epoch": transferred.epoch,
         "fencing_evidence": [dict(item) for item in refs],
-        "matched_execution_ids": list(reconciliation.matched_execution_ids),
+        "matched_execution_ids": matched_execution_ids,
         "submission_resolutions": resolution_proof,
         "blocking_resources": list(reconciliation.blocking_resources),
     }
@@ -1136,30 +1220,11 @@ def restore_requires_reconciliation(destination_root: str | Path) -> bool:
         return True
     if proof.get("blocking_resources") != []:
         return True
-    resolutions = proof.get("submission_resolutions")
-    if not isinstance(resolutions, list):
+    try:
+        _validate_reconciliation_completion_rows(
+            proof.get("submission_resolutions"),
+            proof.get("matched_execution_ids"),
+        )
+    except (BackupError, TypeError, ValueError):
         return True
-    for item in resolutions:
-        if not isinstance(item, dict):
-            return True
-        outcome = item.get("outcome")
-        if outcome not in {
-            "PROVEN_ABSENT",
-            "OBSERVED_EXECUTION",
-            "OBSERVED_WORKING_ORDER",
-        }:
-            return True
-        execution_ids = item.get("provider_execution_ids")
-        provider_order_ids = item.get("provider_order_ids")
-        for values in (execution_ids, provider_order_ids):
-            if (
-                not isinstance(values, list)
-                or any(not isinstance(value, str) or not value for value in values)
-                or len(values) != len(set(values))
-            ):
-                return True
-        if outcome == "OBSERVED_EXECUTION" and not execution_ids:
-            return True
-        if outcome == "OBSERVED_WORKING_ORDER" and not provider_order_ids:
-            return True
     return False

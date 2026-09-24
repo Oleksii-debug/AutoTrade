@@ -18,6 +18,7 @@ class AllocationTests(unittest.TestCase):
             "max_total_cost": "50",
             "max_stress_loss": "500",
             "max_iterations": 64,
+            "require_adverse_stress_evidence": False,
         }
         values.update(overrides)
         return AllocationPolicy.create(**values)
@@ -32,6 +33,7 @@ class AllocationTests(unittest.TestCase):
         capital_requirement="1",
         min_notional="0",
         fee_floor="0",
+        max_executable_notional=None,
     ):
         return AllocationCandidate.create(
             symbol=symbol,
@@ -42,6 +44,7 @@ class AllocationTests(unittest.TestCase):
             capital_requirement_rate=capital_requirement,
             min_notional=min_notional,
             fee_floor=fee_floor,
+            max_executable_notional=max_executable_notional,
         )
 
     def test_funded_request_is_accepted_without_scaling(self):
@@ -283,6 +286,71 @@ class AllocationTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
         self.assertEqual(result.scale, Decimal("0"))
+
+    def test_default_policy_requires_adverse_stress_evidence(self):
+        policy = self.policy(require_adverse_stress_evidence=True)
+        result = allocate_targets([self.candidate()], policy)
+        self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+        self.assertIn("no stress scenarios were supplied", result.reason)
+
+    def test_required_stress_must_be_adverse_for_requested_direction(self):
+        policy = self.policy(require_adverse_stress_evidence=True)
+        short = self.candidate("SHORT", desired="-500")
+        wrong_direction = allocate_targets(
+            [short],
+            policy,
+            stress_scenarios={"down_only": {"SHORT": "-0.20"}},
+        )
+        self.assertEqual(wrong_direction.status, "NO_INCREASE_FALLBACK")
+        self.assertIn("SHORT", wrong_direction.reason)
+
+        covered = allocate_targets(
+            [short],
+            policy,
+            stress_scenarios={"short_squeeze": {"SHORT": "0.20"}},
+        )
+        self.assertEqual(covered.status, "ALLOCATED")
+        self.assertGreater(covered.worst_stress_loss, Decimal("0"))
+
+    def test_liquidity_capacity_caps_requested_target_without_increasing_risk(self):
+        result = allocate_targets(
+            [
+                self.candidate(
+                    desired="500",
+                    price="10",
+                    lot="1",
+                    max_executable_notional="120",
+                )
+            ],
+            self.policy(),
+        )
+        self.assertEqual(result.status, "ALLOCATED")
+        self.assertEqual(result.targets[0].quantity, Decimal("12"))
+        self.assertEqual(result.targets[0].notional, Decimal("120"))
+
+    def test_liquidity_capacity_below_minimum_notional_falls_back_to_cash(self):
+        result = allocate_targets(
+            [
+                self.candidate(
+                    desired="500",
+                    price="10",
+                    lot="1",
+                    min_notional="100",
+                    max_executable_notional="90",
+                )
+            ],
+            self.policy(),
+        )
+        self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.targets[0].notional, Decimal("0"))
+
+    def test_liquidity_capacity_rejects_binary_float(self):
+        with self.assertRaises(TypeError):
+            self.candidate(max_executable_notional=100.0)
+
+    def test_stress_requirement_flag_must_be_boolean(self):
+        with self.assertRaises(TypeError):
+            self.policy(require_adverse_stress_evidence="yes")
 
     def test_duplicate_symbols_are_rejected(self):
         with self.assertRaises(ValueError):

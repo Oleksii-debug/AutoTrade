@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import re
 from types import MappingProxyType
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -134,6 +135,129 @@ class CapabilityClaim:
 
 
 @dataclass(frozen=True)
+class EvidenceVerification:
+    """Result of resolving one capability claim to immutable evidence."""
+
+    valid: bool
+    conflicted: bool = False
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        if self.valid and self.conflicted:
+            raise CapabilityError("evidence cannot be both valid and conflicted")
+
+
+def artifact_store_evidence_verifier(
+    store: object,
+) -> Callable[[CapabilityClaim], EvidenceVerification]:
+    """Bind capability claims to the canonical immutable artifact store.
+
+    The adapter relies only on the existing store public load_manifest and
+    read_bytes methods so capability authority does not create a second
+    evidence repository.
+    """
+
+    def verify(claim: CapabilityClaim) -> EvidenceVerification:
+        artifact_id = str(claim.evidence_ref["artifact_id"])
+        expected_digest = str(claim.evidence_ref["sha256"])
+        try:
+            load_manifest = getattr(store, "load_manifest")
+            read_bytes = getattr(store, "read_bytes")
+            manifest = load_manifest(artifact_id)
+            payload = read_bytes(artifact_id)
+        except Exception:
+            return EvidenceVerification(
+                valid=False,
+                reason="evidence artifact is missing, unreadable, or corrupt",
+            )
+
+        if type(manifest) is not dict or not isinstance(payload, bytes):
+            return EvidenceVerification(
+                valid=False,
+                conflicted=True,
+                reason="evidence artifact has an unsupported representation",
+            )
+
+        actual_digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+        if (
+            manifest.get("artifact_id") != artifact_id
+            or manifest.get("sha256") != expected_digest
+            or actual_digest != expected_digest
+        ):
+            return EvidenceVerification(
+                valid=False,
+                conflicted=True,
+                reason="evidence artifact identity or digest does not match the claim",
+            )
+
+        metadata = manifest.get("metadata")
+        if type(metadata) is not dict:
+            return EvidenceVerification(
+                valid=False,
+                conflicted=True,
+                reason="evidence artifact metadata is missing",
+            )
+
+        expected_metadata = {
+            "artifact_kind": "CAPABILITY_EVIDENCE",
+            "schema_version": 1,
+            "capability_source": claim.source,
+            "producer_type": claim.source,
+            "provider_id": claim.provider_id,
+            "account_id": claim.account_id,
+            "entity_id": claim.entity_id,
+            "environment": claim.environment,
+            "instrument_version": claim.instrument_version,
+            "observed_at": claim.evidence_ref["observed_at"],
+        }
+        if any(metadata.get(key) != value for key, value in expected_metadata.items()):
+            return EvidenceVerification(
+                valid=False,
+                conflicted=True,
+                reason="evidence artifact semantics or financial identity do not match the claim",
+            )
+        if not isinstance(metadata.get("producer_id"), str) or not metadata["producer_id"].strip():
+            return EvidenceVerification(
+                valid=False,
+                conflicted=True,
+                reason="evidence artifact producer identity is missing",
+            )
+        if (
+            not isinstance(metadata.get("evidence_version"), str)
+            or not metadata["evidence_version"].strip()
+        ):
+            return EvidenceVerification(
+                valid=False,
+                conflicted=True,
+                reason="evidence artifact version is missing",
+            )
+
+        source_uri = claim.evidence_ref.get("source_uri")
+        if source_uri is not None:
+            source_refs = manifest.get("source_refs")
+            if not isinstance(source_refs, list) or source_uri not in source_refs:
+                return EvidenceVerification(
+                    valid=False,
+                    conflicted=True,
+                    reason="evidence artifact provenance does not contain the claimed source URI",
+                )
+
+        rights_id = claim.evidence_ref.get("rights_id")
+        if rights_id is not None:
+            rights = manifest.get("rights")
+            if type(rights) is not dict or rights.get("rights_id") != rights_id:
+                return EvidenceVerification(
+                    valid=False,
+                    conflicted=True,
+                    reason="evidence artifact rights identity does not match the claim",
+                )
+
+        return EvidenceVerification(valid=True)
+
+    return verify
+
+
+@dataclass(frozen=True)
 class CapabilitySnapshot:
     snapshot_id: str
     provider_id: str
@@ -228,6 +352,7 @@ def derive_capability_snapshot(
     claims: Iterable[CapabilityClaim],
     observed_at: datetime,
     required_sources: frozenset[str] = SOURCES,
+    evidence_verifier: Callable[[CapabilityClaim], EvidenceVerification] | None = None,
 ) -> CapabilitySnapshot:
     point = _instant(observed_at, "observed_at")
     records = tuple(claims)
@@ -270,15 +395,48 @@ def derive_capability_snapshot(
         if any(claim.source == source and claim.expires_at <= point for claim in records)
     )
 
-    order_types = _intersection(live, "supported_order_types")
-    tif = _intersection(live, "time_in_force")
-    scopes = _intersection(live, "permission_scopes")
-    protection = _intersection(live, "native_protection")
-    entitlements = _intersection(live, "data_entitlements")
-    position_modes = {claim.position_mode for claim in live}
-    rate_policies = {claim.rate_limit_policy_id for claim in live}
+    evidence_results: tuple[EvidenceVerification, ...]
+    if evidence_verifier is None:
+        evidence_results = tuple(
+            EvidenceVerification(
+                valid=False,
+                reason="immutable evidence verifier is required",
+            )
+            for _ in live
+        )
+    else:
+        verified_results: list[EvidenceVerification] = []
+        for claim in live:
+            try:
+                result = evidence_verifier(claim)
+            except Exception:
+                result = EvidenceVerification(
+                    valid=False,
+                    reason="immutable evidence verification failed",
+                )
+            if not isinstance(result, EvidenceVerification):
+                raise TypeError("evidence_verifier must return EvidenceVerification")
+            verified_results.append(result)
+        evidence_results = tuple(verified_results)
 
-    set_conflict = bool(live) and (not order_types or not tif or not scopes)
+    verified_live = tuple(
+        claim
+        for claim, result in zip(live, evidence_results, strict=True)
+        if result.valid
+    )
+    verified_sources = frozenset(claim.source for claim in verified_live)
+    evidence_missing_sources = required - verified_sources
+    evidence_conflict = any(result.conflicted for result in evidence_results)
+
+    order_types = _intersection(verified_live, "supported_order_types")
+    tif = _intersection(verified_live, "time_in_force")
+    scopes = _intersection(verified_live, "permission_scopes")
+    protection = _intersection(verified_live, "native_protection")
+    entitlements = _intersection(verified_live, "data_entitlements")
+    position_modes = {claim.position_mode for claim in verified_live}
+    rate_policies = {claim.rate_limit_policy_id for claim in verified_live}
+
+    set_conflict = bool(verified_live) and (not order_types or not tif or not scopes)
     scalar_conflict = len(position_modes) > 1 or len(rate_policies) > 1
 
     if missing_sources:
@@ -287,6 +445,10 @@ def derive_capability_snapshot(
         status = "CONFLICTED"
     elif expired_sources:
         status = "EXPIRED"
+    elif evidence_conflict:
+        status = "CONFLICTED"
+    elif evidence_missing_sources:
+        status = "UNKNOWN"
     elif set_conflict or scalar_conflict:
         status = "CONFLICTED"
     else:
@@ -311,7 +473,7 @@ def derive_capability_snapshot(
         data_entitlements=entitlements,
         evidence=tuple(claim.evidence_ref for claim in records),
         status=status,
-        sources=live_sources,
+        sources=verified_sources,
     )
 
 

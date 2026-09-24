@@ -105,12 +105,18 @@ class HostCommandStore:
         self,
         *,
         session_validator: Callable[[str, str], bool],
+        action_authorizer: Callable[[str, str, str, Mapping[str, object]], bool],
         max_events: int = 100,
         now: Callable[[], str] | None = None,
     ) -> None:
+        if not callable(session_validator):
+            raise TypeError("session_validator must be callable")
+        if not callable(action_authorizer):
+            raise TypeError("action_authorizer must be callable")
         if max_events < 1:
             raise ValueError("max_events must be positive")
         self._session_validator = session_validator
+        self._action_authorizer = action_authorizer
         self._max_events = max_events
         self._now = now or (
             lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -209,6 +215,18 @@ class HostCommandStore:
                 status="REJECTED",
                 state_version=str(self.state_version),
                 reason_codes=("unsupported_action",),
+            )
+            self._idempotency[idempotency_key] = (digest, result)
+            self._commands[command_id] = digest
+            return result
+
+        payload = command["payload"]
+        if not self._action_authorizer(session, actor, action, payload):
+            result = CommandResult(
+                command_id=command_id,
+                status="REJECTED",
+                state_version=str(self.state_version),
+                reason_codes=("action_not_authorized",),
             )
             self._idempotency[idempotency_key] = (digest, result)
             self._commands[command_id] = digest

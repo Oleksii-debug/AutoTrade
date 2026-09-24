@@ -241,6 +241,7 @@ class ArtifactStore:
 
     def read_bytes(self, artifact_id: str) -> bytes:
         manifest = self.load_manifest(artifact_id)
+        _verify_manifest_integrity(manifest, required=True)
         return self._verify_manifest_object(manifest).read_bytes()
 
     def export(self, artifact_id: str, destination: str | Path) -> Path:

@@ -26,9 +26,11 @@ authorization and must still cross AutoTrade's normal durable guarded send
 barrier.
 
 Unique execution identity is carried into the canonical
-`ProviderFillEvidence`. Fee amount, fee currency and trade time must be supplied
-from separately observed evidence; the adapter does not manufacture them from an
-order acknowledgement or order-status summary.
+`ProviderFillEvidence`. The provider `permId` must be a positive integer and
+an execution is rejected if its account differs from the reconciliation account,
+so evidence cannot drift across accounts. Fee amount, fee currency and trade time
+must be supplied from separately observed evidence; the adapter does not
+manufacture them from an order acknowledgement or order-status summary.
 
 ## Current official references
 

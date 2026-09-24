@@ -17,6 +17,7 @@ class ModelRoutingTests(unittest.TestCase):
             model="small",
             locality="local",
             allowed_data_classes=frozenset({"public", "private"}),
+            expected_latency_ms=20,
         )
         self.remote = ModelRoute(
             route_id="remote-a",
@@ -26,6 +27,7 @@ class ModelRoutingTests(unittest.TestCase):
             input_cost_per_million=Decimal("2"),
             output_cost_per_million=Decimal("8"),
             allowed_data_classes=frozenset({"public"}),
+            expected_latency_ms=500,
         )
 
     def test_zero_mode_never_selects_model(self):
@@ -46,6 +48,7 @@ class ModelRoutingTests(unittest.TestCase):
         )
         self.assertTrue(decision.execute)
         self.assertEqual(decision.route_id, "local-a")
+        self.assertEqual(decision.locality, "local")
 
     def test_private_data_does_not_leak_to_remote(self):
         decision = select_route(
@@ -73,14 +76,18 @@ class ModelRoutingTests(unittest.TestCase):
             input_cost_per_million=Decimal("1"),
             output_cost_per_million=Decimal("1"),
             allowed_data_classes=frozenset({"public"}),
+            expected_latency_ms=100,
         )
         decision = select_route(
             [self.remote, remote_b],
             RoutingPolicy(mode="dynamic", max_request_cost=Decimal("1"), allow_remote=True),
-            RouteRequest("public", 1000, 1000),
+            RouteRequest("public", 1000, 1000, deadline_ms=250),
         )
         self.assertEqual(decision.route_id, "remote-b")
         self.assertEqual(decision.estimated_cost, Decimal("0.002"))
+        self.assertEqual(decision.provider, "remote")
+        self.assertEqual(decision.model, "other")
+        self.assertEqual(decision.deadline_ms, 250)
 
     def test_allowlist_rejects_unlisted_route(self):
         decision = select_route(
@@ -107,6 +114,24 @@ class ModelRoutingTests(unittest.TestCase):
         )
         self.assertTrue(decision.execute)
         self.assertEqual(decision.route_id, "remote-a")
+
+    def test_deadline_blocks_too_slow_route(self):
+        decision = select_route(
+            [self.remote],
+            RoutingPolicy(mode="dynamic", max_request_cost=Decimal("1"), allow_remote=True),
+            RouteRequest("public", 1000, 1000, deadline_ms=100),
+        )
+        self.assertFalse(decision.execute)
+        self.assertIn("deadline", decision.reason)
+
+    def test_cancelled_request_never_routes(self):
+        decision = select_route(
+            [self.local],
+            RoutingPolicy(mode="local", max_request_cost=Decimal("1")),
+            RouteRequest("public", 100, 100, cancelled=True),
+        )
+        self.assertFalse(decision.execute)
+        self.assertEqual(decision.reason, "request cancelled")
 
     def test_negative_token_estimate_is_rejected(self):
         with self.assertRaises(ValueError):

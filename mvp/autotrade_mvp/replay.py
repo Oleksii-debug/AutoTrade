@@ -133,6 +133,14 @@ class CausalReplay:
         restored_clock = _instant(checkpoint.clock, field="clock")
         if restored_clock < start:
             raise ReplayError("checkpoint clock precedes requested start")
+        causally_visible = sum(
+            _instant(event.available_at, field="available_at") <= restored_clock
+            for event in self._events
+        )
+        if checkpoint.cursor > causally_visible:
+            raise ReplayError(
+                "checkpoint cursor consumes events unavailable at checkpoint clock"
+            )
         self._cursor = checkpoint.cursor
         self._clock = restored_clock
 

@@ -179,12 +179,12 @@ def build_diagnostic_snapshot(state_dir: str | Path) -> DiagnosticSnapshot:
         raise ValueError("Checkpoint and learning evidence do not describe the same episodes")
     checkpoint_records = checkpoint.get("evidence_records")
     if not isinstance(checkpoint_records, dict) or checkpoint_records != evidence_by_id:
-        raise ValueError("Checkpoint evidence records do not match durable learning evidence")
+        raise ValueError("Checkpoint evidence records mismatch durable learning evidence")
 
     journal_path = root / "journal.sqlite3"
     if not journal_path.is_file():
         raise ValueError("Durable journal is missing")
-    store = JournalStore(journal_path)
+    store = JournalStore(journal_path, read_only=True)
     events = store.load_events("simulation_portfolio", symbol)
 
     traces: list[DecisionTrace] = []

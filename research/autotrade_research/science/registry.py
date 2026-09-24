@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -91,7 +92,7 @@ class ScientificRegistry:
         return con
 
     def _init(self) -> None:
-        with self._connect() as con:
+        with closing(self._connect()) as con, con:
             con.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS protocols(
@@ -150,7 +151,7 @@ class ScientificRegistry:
         canonical = _canonical(payload)
         digest = _hash(payload)
         created = _now()
-        with self._connect() as con:
+        with closing(self._connect()) as con, con:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute("SELECT * FROM protocols WHERE protocol_id=?", (identifier,)).fetchone()
             if row is not None:
@@ -181,7 +182,7 @@ class ScientificRegistry:
         identifier = _id(trial_id)
         canonical = _canonical(payload)
         digest = _hash(payload)
-        with self._connect() as con:
+        with closing(self._connect()) as con, con:
             con.execute("BEGIN IMMEDIATE")
             owner = con.execute("SELECT payload_json FROM protocols WHERE protocol_id=?", (protocol,)).fetchone()
             if owner is None:
@@ -207,7 +208,7 @@ class ScientificRegistry:
         holdout = _text(holdout_id, "holdout_id")
         why = _text(purpose, "purpose")
         access_id = _id()
-        with self._connect() as con:
+        with closing(self._connect()) as con, con:
             con.execute("BEGIN IMMEDIATE")
             if con.execute("SELECT 1 FROM protocols WHERE protocol_id=?", (protocol,)).fetchone() is None:
                 raise KeyError(protocol)
@@ -221,7 +222,7 @@ class ScientificRegistry:
     def holdout_access_count(self, protocol_id: str, holdout_id: str) -> int:
         protocol = _id(protocol_id)
         holdout = _text(holdout_id, "holdout_id")
-        with self._connect() as con:
+        with closing(self._connect()) as con, con:
             return int(
                 con.execute(
                     "SELECT COUNT(*) FROM holdout_access WHERE protocol_id=? AND holdout_id=?",
@@ -244,7 +245,7 @@ class ScientificRegistry:
         identifier = _id(evaluation_id)
         canonical = _canonical(result)
         result_hash = _hash(result)
-        with self._connect() as con:
+        with closing(self._connect()) as con, con:
             con.execute("BEGIN IMMEDIATE")
             p = con.execute("SELECT * FROM protocols WHERE protocol_id=?", (protocol,)).fetchone()
             if p is None:
@@ -275,7 +276,7 @@ class ScientificRegistry:
 
     def completeness(self, protocol_id: str) -> dict[str, Any]:
         protocol = _id(protocol_id)
-        with self._connect() as con:
+        with closing(self._connect()) as con, con:
             p = con.execute("SELECT payload_json FROM protocols WHERE protocol_id=?", (protocol,)).fetchone()
             if p is None:
                 raise KeyError(protocol)

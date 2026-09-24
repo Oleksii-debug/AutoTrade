@@ -1,4 +1,6 @@
+from pathlib import Path
 from tempfile import TemporaryDirectory
+import sqlite3
 import unittest
 
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
@@ -33,6 +35,22 @@ class JournalStoreTests(unittest.TestCase):
             self.assertTrue(store.mark_outbox_delivered(pending[0]["outbox_id"]))
             self.assertFalse(store.mark_outbox_delivered(pending[0]["outbox_id"]))
             self.assertEqual(store.pending_outbox(), [])
+
+    def test_read_only_store_preserves_journal_bytes_and_rejects_writes(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            writer = JournalStore(path)
+            writer.append_event(event(), outbox_topic="events")
+
+            journal_path = Path(path)
+            before = journal_path.read_bytes()
+            reader = JournalStore(path, read_only=True)
+            self.assertEqual(len(reader.load_events("account", "paper-1")), 1)
+            self.assertEqual(len(reader.pending_outbox()), 1)
+            self.assertEqual(journal_path.read_bytes(), before)
+
+            with self.assertRaises(sqlite3.OperationalError):
+                reader.append_event(event("evt-ro", 2))
 
     def test_payload_tamper_and_version_gap_fail_closed(self):
         with TemporaryDirectory() as directory:

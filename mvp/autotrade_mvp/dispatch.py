@@ -363,40 +363,39 @@ class GuardedDispatcher:
             )
             return DispatchOutcome("UNKNOWN", client_order_id, None, "provider_guard_contract_violation")
 
+        sent_payload = {"client_order_id": client_order_id, "response": response}
         try:
+            canonical_json(sent_payload)
+        except (TypeError, ValueError) as error:
             self._append(
                 attempt_id=attempt_id,
-                event_type="SubmissionSent",
+                event_type="SubmissionUnknown",
                 version=3,
-                payload={"client_order_id": client_order_id, "response": response},
+                payload={
+                    "client_order_id": client_order_id,
+                    "reason": (
+                        "provider_response_not_serializable:"
+                        + type(error).__name__
+                    ),
+                },
                 now=barrier_now,
             )
-        except Exception as persistence_error:
-            # The outbound request has already crossed the final barrier.
-            # Never make this state safe to retry merely because the provider
-            # response could not be journaled.
-            try:
-                self._append(
-                    attempt_id=attempt_id,
-                    event_type="SubmissionUnknown",
-                    version=3,
-                    payload={
-                        "client_order_id": client_order_id,
-                        "reason": (
-                            "sent_response_persistence_failed:"
-                            + type(persistence_error).__name__
-                        ),
-                    },
-                    now=barrier_now,
-                )
-            except Exception:
-                # A durable SubmissionSending row already exists. Recovery will
-                # convert that state to UNKNOWN without another outbound send.
-                raise persistence_error
             return DispatchOutcome(
                 "UNKNOWN",
                 client_order_id,
                 None,
-                "sent_response_persistence_failed",
+                "provider_response_not_serializable",
             )
+
+        # Once SubmissionSending is durable, failure to persist the terminal
+        # provider response is a process/storage failure, not evidence of an
+        # external outcome. Propagate it. Restart recovery will convert the
+        # durable sending state to UNKNOWN without another outbound request.
+        self._append(
+            attempt_id=attempt_id,
+            event_type="SubmissionSent",
+            version=3,
+            payload=sent_payload,
+            now=barrier_now,
+        )
         return DispatchOutcome("SENT", client_order_id, response, "sent_confirmed")

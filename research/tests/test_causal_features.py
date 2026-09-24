@@ -85,6 +85,8 @@ class CausalFeatureTests(unittest.TestCase):
                 scale=Decimal("0"),
                 fit_cutoff=BASE,
                 fit_input_ids=("o1",),
+                fit_feature_names=("x",),
+                fit_source_revisions=("r1",),
                 provenance_hash="sha256:" + "a" * 64,
             )
         with self.assertRaisesRegex(ValueError, "canonical SHA-256"):
@@ -93,6 +95,8 @@ class CausalFeatureTests(unittest.TestCase):
                 scale=Decimal("1"),
                 fit_cutoff=BASE,
                 fit_input_ids=("o1",),
+                fit_feature_names=("x",),
+                fit_source_revisions=("r1",),
                 provenance_hash="bad",
             )
         with self.assertRaisesRegex(ValueError, "timezone-aware"):
@@ -101,6 +105,19 @@ class CausalFeatureTests(unittest.TestCase):
                 scale=Decimal("1"),
                 fit_cutoff=datetime(2026, 1, 1),
                 fit_input_ids=("o1",),
+                fit_feature_names=("x",),
+                fit_source_revisions=("r1",),
+                provenance_hash="sha256:" + "a" * 64,
+            )
+
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            Normalizer(
+                mean=Decimal("0"),
+                scale=Decimal("1"),
+                fit_cutoff=BASE,
+                fit_input_ids=("o1",),
+                fit_feature_names=("x",),
+                fit_source_revisions=("r1",),
                 provenance_hash="sha256:" + "a" * 64,
             )
 
@@ -135,6 +152,8 @@ class CausalFeatureTests(unittest.TestCase):
         first = fit_normalizer(points, fit_cutoff=BASE + timedelta(days=1))
         second = fit_normalizer(points, fit_cutoff=BASE + timedelta(days=1))
         self.assertEqual(first.provenance_hash, second.provenance_hash)
+        self.assertEqual(first.fit_feature_names, ("x", "x"))
+        self.assertEqual(first.fit_source_revisions, ("r1", "r2"))
         self.assertEqual(first.transform("3"), Decimal("1"))
 
     def test_delayed_label_cannot_enter_training_early(self):

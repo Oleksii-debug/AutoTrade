@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 import sqlite3
 
 from research.autotrade_research.science.registry import ScientificRegistry
@@ -21,6 +22,16 @@ def _text(value: str, *, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
+
+
+_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _digest(value: str, *, name: str) -> str:
+    normalized = _text(value, name=name).lower()
+    if _SHA256.fullmatch(normalized) is None:
+        raise ValueError(f"{name} must be a canonical sha256 digest")
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -51,7 +62,7 @@ class CandidateApproval:
             raise TypeError("retention_passed and risk_passed must be boolean")
         return cls(
             candidate_id=_text(candidate_id, name="candidate_id"),
-            artifact_hash=_text(artifact_hash, name="artifact_hash"),
+            artifact_hash=_digest(artifact_hash, name="artifact_hash"),
             evidence_id=_text(evidence_id, name="evidence_id"),
             evidence_valid_until=_time(evidence_valid_until, name="evidence_valid_until"),
             evaluation_status=status,
@@ -59,9 +70,9 @@ class CandidateApproval:
             risk_passed=risk_passed,
             authority_scope_id=_text(authority_scope_id, name="authority_scope_id"),
             protocol_id=_text(protocol_id, name="protocol_id"),
-            protocol_hash=_text(protocol_hash, name="protocol_hash"),
+            protocol_hash=_digest(protocol_hash, name="protocol_hash"),
             evaluation_id=_text(evaluation_id, name="evaluation_id"),
-            evaluation_result_hash=_text(
+            evaluation_result_hash=_digest(
                 evaluation_result_hash, name="evaluation_result_hash"
             ),
         )
@@ -149,7 +160,7 @@ class ChampionRegistry:
             raise ValueError("candidate retention gate has not passed")
         if not approval.risk_passed:
             raise ValueError("candidate risk gate has not passed")
-        if current > approval.evidence_valid_until:
+        if current >= approval.evidence_valid_until:
             raise ValueError("candidate evidence has expired")
         self.scientific_registry.verify_candidate_promotion_evidence(
             evaluation_id=approval.evaluation_id,

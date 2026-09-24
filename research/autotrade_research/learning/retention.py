@@ -109,7 +109,7 @@ class RetentionPolicy:
             recent_regimes=recent,
             max_protected_degradation=_non_negative(max_protected_degradation, name="max_protected_degradation"),
             max_recent_degradation=_non_negative(max_recent_degradation, name="max_recent_degradation"),
-            min_recent_improvement=_decimal(min_recent_improvement, name="min_recent_improvement"),
+            min_recent_improvement=_non_negative(min_recent_improvement, name="min_recent_improvement"),
             min_observations_per_regime=min_observations_per_regime,
             require_complete_labels=require_complete_labels,
             independent_science_gate_passed=independent_science_gate_passed,

@@ -57,12 +57,15 @@ class GateProfile:
         ):
             if not isinstance(value, bool):
                 raise TypeError(f"{name} must be boolean")
+        practical_effect = _decimal(minimum_net_advantage, name="minimum_net_advantage")
+        if practical_effect < 0:
+            raise ValueError("minimum_net_advantage must be non-negative")
         adverse_cost_limit = _decimal(max_adverse_cost_loss, name="max_adverse_cost_loss")
         if adverse_cost_limit < 0:
             raise ValueError("max_adverse_cost_loss must be non-negative")
         return cls(
             profile_id=profile_id.strip(),
-            minimum_net_advantage=_decimal(minimum_net_advantage, name="minimum_net_advantage"),
+            minimum_net_advantage=practical_effect,
             max_drawdown=drawdown,
             max_adverse_cost_loss=adverse_cost_limit,
             min_power=power,

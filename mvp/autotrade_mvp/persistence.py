@@ -10,7 +10,7 @@ from typing import Any
 
 
 def canonical_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 
 def payload_digest(value: Any) -> str:
@@ -305,3 +305,178 @@ class JournalStore:
             )
             connection.commit()
         return result, True
+
+    def commit_command(
+        self,
+        *,
+        command_id: str,
+        idempotency_key: str,
+        request: Any,
+        result: Any,
+        state_version: int,
+        events: list[tuple[dict[str, Any], str | None]],
+    ) -> tuple[Any, bool, tuple[AppendResult, ...]]:
+        """Atomically commit command dedupe, ordered events and their outbox rows."""
+
+        self._require_text(command_id, "command_id")
+        self._require_text(idempotency_key, "idempotency_key")
+        if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
+            raise ValueError("state_version must be a non-negative integer")
+        if not events:
+            raise ValueError("At least one event is required")
+
+        request_hash = payload_digest(request)
+        result_json = canonical_json(result)
+        prepared: list[dict[str, Any]] = []
+        seen_event_ids: set[str] = set()
+
+        for envelope, outbox_topic in events:
+            if not isinstance(envelope, dict):
+                raise ValueError("Each event envelope must be an object")
+            event_id = self._require_text(envelope.get("event_id"), "event_id")
+            if event_id in seen_event_ids:
+                raise ValueError("event_id is duplicated within the transaction")
+            seen_event_ids.add(event_id)
+            event_type = self._require_text(envelope.get("event_type"), "event_type")
+            aggregate_type = self._require_text(envelope.get("aggregate_type"), "aggregate_type")
+            aggregate_id = self._require_text(envelope.get("aggregate_id"), "aggregate_id")
+            aggregate_version = envelope.get("aggregate_version")
+            if (
+                not isinstance(aggregate_version, int)
+                or isinstance(aggregate_version, bool)
+                or aggregate_version <= 0
+            ):
+                raise ValueError("aggregate_version must be a positive integer")
+            payload = envelope.get("payload")
+            payload_json = canonical_json(payload)
+            supplied_hash = envelope.get("payload_hash")
+            if supplied_hash != payload_digest(payload):
+                raise ValueError("payload_hash does not match payload")
+            committed_at = self._require_text(envelope.get("committed_at"), "committed_at")
+            if outbox_topic is not None:
+                self._require_text(outbox_topic, "outbox_topic")
+            prepared.append(
+                {
+                    "event_id": event_id,
+                    "event_type": event_type,
+                    "aggregate_type": aggregate_type,
+                    "aggregate_id": aggregate_id,
+                    "aggregate_version": aggregate_version,
+                    "payload_json": payload_json,
+                    "payload_hash": supplied_hash,
+                    "committed_at": committed_at,
+                    "outbox_topic": outbox_topic,
+                    "outbox_payload": canonical_json(envelope),
+                }
+            )
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    "SELECT * FROM command_dedupe WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                if existing is not None:
+                    if existing["request_hash"] != request_hash:
+                        raise ValueError(
+                            "idempotency_key was already used for a different request"
+                        )
+                    connection.commit()
+                    return json.loads(existing["result_json"]), False, ()
+
+                if connection.execute(
+                    "SELECT 1 FROM command_dedupe WHERE command_id = ?",
+                    (command_id,),
+                ).fetchone() is not None:
+                    raise ValueError("command_id already exists with another idempotency key")
+
+                next_versions: dict[tuple[str, str], int] = {}
+                for item in prepared:
+                    if connection.execute(
+                        "SELECT 1 FROM events WHERE event_id = ?",
+                        (item["event_id"],),
+                    ).fetchone() is not None:
+                        raise ValueError("event_id already exists for another command")
+                    key = (item["aggregate_type"], item["aggregate_id"])
+                    if key not in next_versions:
+                        current = connection.execute(
+                            "SELECT MAX(aggregate_version) FROM events "
+                            "WHERE aggregate_type = ? AND aggregate_id = ?",
+                            key,
+                        ).fetchone()[0]
+                        next_versions[key] = 1 if current is None else int(current) + 1
+                    expected_version = next_versions[key]
+                    if item["aggregate_version"] != expected_version:
+                        raise ValueError(
+                            f"aggregate_version must be {expected_version} "
+                            f"for {item['aggregate_type']}/{item['aggregate_id']}"
+                        )
+                    next_versions[key] += 1
+
+                connection.execute(
+                    """
+                    INSERT INTO command_dedupe(
+                        command_id, idempotency_key, request_hash, result_json,
+                        state_version, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        command_id,
+                        idempotency_key,
+                        request_hash,
+                        result_json,
+                        state_version,
+                        self._now(),
+                    ),
+                )
+
+                appended: list[AppendResult] = []
+                for item in prepared:
+                    connection.execute(
+                        """
+                        INSERT INTO events(
+                            event_id, event_type, aggregate_type, aggregate_id,
+                            aggregate_version, payload_json, payload_hash, committed_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            item["event_id"],
+                            item["event_type"],
+                            item["aggregate_type"],
+                            item["aggregate_id"],
+                            item["aggregate_version"],
+                            item["payload_json"],
+                            item["payload_hash"],
+                            item["committed_at"],
+                        ),
+                    )
+                    if item["outbox_topic"] is not None:
+                        outbox_id = "outbox-" + sha256(
+                            item["event_id"].encode("utf-8")
+                        ).hexdigest()[:32]
+                        connection.execute(
+                            """
+                            INSERT INTO outbox(
+                                outbox_id, event_id, topic, payload_json, created_at
+                            ) VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (
+                                outbox_id,
+                                item["event_id"],
+                                item["outbox_topic"],
+                                item["outbox_payload"],
+                                self._now(),
+                            ),
+                        )
+                    appended.append(
+                        AppendResult(
+                            item["event_id"], item["aggregate_version"], True
+                        )
+                    )
+
+                connection.commit()
+                return result, True, tuple(appended)
+            except Exception:
+                connection.rollback()
+                raise

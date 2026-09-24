@@ -123,6 +123,33 @@ class HostCommandStateTests(unittest.TestCase):
         self.assertEqual(store.state_version, 1)
         self.assertEqual(store.cursor, 1)
 
+    def test_revocation_blocks_new_command_but_exact_retry_stays_idempotent(self):
+        authorization = {"allowed": True}
+        store = HostCommandStore(
+            session_validator=lambda session, actor: (session, actor) in self.sessions,
+            action_authorizer=lambda session, actor, action, payload: authorization["allowed"],
+            now=lambda: "2026-09-24T18:00:00Z",
+        )
+        command = self.command()
+        accepted = store.submit(command)
+        self.assertEqual(accepted.status, "ACCEPTED")
+        self.assertEqual(store.cursor, 1)
+
+        authorization["allowed"] = False
+        self.assertEqual(store.submit(command), accepted)
+        self.assertEqual(store.cursor, 1)
+        denied = store.submit(
+            self.command(
+                command_id="66666666-6666-6666-6666-666666666666",
+                key="key-after-revocation",
+                version="1",
+            )
+        )
+        self.assertEqual(denied.status, "REJECTED")
+        self.assertEqual(denied.reason_codes, ("action_not_authorized",))
+        self.assertEqual(store.state_version, 1)
+        self.assertEqual(store.cursor, 1)
+
     def test_action_authorizer_is_mandatory_callable(self):
         with self.assertRaisesRegex(TypeError, "action_authorizer must be callable"):
             HostCommandStore(

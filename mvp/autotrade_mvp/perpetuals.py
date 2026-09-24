@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from hashlib import sha256
 import json
 from typing import Literal
@@ -45,6 +46,18 @@ def _utc(value: datetime, name: str) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _fraction(value: Decimal) -> Fraction:
+    sign, digits, exponent = value.as_tuple()
+    integer = 0
+    for digit in digits:
+        integer = integer * 10 + digit
+    if sign:
+        integer = -integer
+    if exponent >= 0:
+        return Fraction(integer * (10**exponent), 1)
+    return Fraction(integer, 10 ** (-exponent))
+
+
 @dataclass(frozen=True)
 class PerpetualContract:
     instrument_id: str
@@ -52,6 +65,7 @@ class PerpetualContract:
     collateral_currency: str
     multiplier: Decimal
     payoff: Literal["LINEAR", "INVERSE"] = "LINEAR"
+    face_currency: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "instrument_id", _text(self.instrument_id, "instrument_id"))
@@ -68,6 +82,12 @@ class PerpetualContract:
         object.__setattr__(self, "multiplier", _decimal(self.multiplier, "multiplier", positive=True))
         if self.payoff not in {"LINEAR", "INVERSE"}:
             raise PerpetualError("payoff must be LINEAR or INVERSE")
+        if self.face_currency is not None:
+            object.__setattr__(
+                self,
+                "face_currency",
+                _text(self.face_currency, "face_currency"),
+            )
 
 
 @dataclass(frozen=True)
@@ -177,6 +197,92 @@ def linear_notional(
     contract_multiplier = _decimal(multiplier, "multiplier", positive=True)
     mark = _decimal(price, "price", positive=True)
     return contracts * contract_multiplier * mark
+
+
+def inverse_perpetual_pnl_exact(
+    *,
+    contract: PerpetualContract,
+    signed_contracts: Decimal | str | int,
+    entry_price: Decimal | str | int,
+    exit_price: Decimal | str | int,
+) -> Fraction:
+    """Return exact inverse-contract P&L in settlement units.
+
+    For inverse contracts the multiplier is an amount of face_currency per
+    contract. Explicit face_currency evidence is required so a linear
+    multiplier cannot silently be interpreted as inverse face value.
+    """
+
+    if contract.payoff != "INVERSE":
+        raise PerpetualError("inverse_perpetual_pnl_exact requires an INVERSE contract")
+    if contract.face_currency is None:
+        raise PerpetualError("inverse contract requires explicit face_currency qualification")
+    contracts = _decimal(signed_contracts, "signed_contracts")
+    face = _decimal(contract.multiplier, "multiplier", positive=True)
+    entry = _decimal(entry_price, "entry_price", positive=True)
+    exit_value = _decimal(exit_price, "exit_price", positive=True)
+    return (
+        _fraction(contracts)
+        * _fraction(face)
+        * (Fraction(1, 1) / _fraction(entry) - Fraction(1, 1) / _fraction(exit_value))
+    )
+
+
+def inverse_funding_cashflow_exact(
+    *,
+    contract: PerpetualContract,
+    signed_contracts: Decimal | str | int,
+    funding_rate: Decimal | str | int,
+    snapshot: MarketSnapshot,
+    convention: FundingConvention,
+    at: datetime,
+) -> tuple[str, Fraction]:
+    """Return exact inverse funding cashflow in settlement currency."""
+
+    if contract.payoff != "INVERSE":
+        raise PerpetualError("inverse_funding_cashflow_exact requires an INVERSE contract")
+    if contract.face_currency is None:
+        raise PerpetualError("inverse contract requires explicit face_currency qualification")
+    snapshot.require_valid(at)
+    contracts = _decimal(signed_contracts, "signed_contracts")
+    rate = _decimal(funding_rate, "funding_rate")
+    basis = snapshot.mark_price if convention.price_basis == "MARK" else snapshot.index_price
+    position_value = (
+        _fraction(contracts)
+        * _fraction(contract.multiplier)
+        / _fraction(basis)
+    )
+    raw = position_value * _fraction(rate)
+    cashflow = -raw if convention.positive_rate_effect == "LONG_PAYS" else raw
+    return contract.settlement_currency, cashflow
+
+
+def inverse_stressed_loss_exact(
+    *,
+    contract: PerpetualContract,
+    signed_contracts: Decimal | str | int,
+    mark_price: Decimal | str | int,
+    adverse_move_fraction: Decimal | str | int,
+) -> Fraction:
+    """Return exact positive loss for an adverse inverse-contract price move."""
+
+    if contract.payoff != "INVERSE":
+        raise PerpetualError("inverse_stressed_loss_exact requires an INVERSE contract")
+    contracts = _decimal(signed_contracts, "signed_contracts")
+    if contracts == 0:
+        return Fraction(0, 1)
+    mark = _decimal(mark_price, "mark_price", positive=True)
+    move = _decimal(adverse_move_fraction, "adverse_move_fraction", positive=True)
+    if move >= 1:
+        raise PerpetualError("adverse_move_fraction must be below one")
+    exit_price = mark * (Decimal("1") - move if contracts > 0 else Decimal("1") + move)
+    pnl = inverse_perpetual_pnl_exact(
+        contract=contract,
+        signed_contracts=contracts,
+        entry_price=mark,
+        exit_price=exit_price,
+    )
+    return -pnl if pnl < 0 else Fraction(0, 1)
 
 
 def funding_cashflow(

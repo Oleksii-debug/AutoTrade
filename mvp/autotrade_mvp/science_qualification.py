@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+from typing import Callable
 
 
 _VALID_STATUS = {"PASS", "FAIL", "INCONCLUSIVE"}
@@ -25,6 +26,8 @@ _REQUIRED_GATES = (
     "uncertainty",
     "forward_evidence",
 )
+
+GateEvidenceVerifier = Callable[["QualificationGate"], bool]
 
 
 def _sha256_identity(value: str, name: str) -> str:
@@ -107,16 +110,24 @@ class ScientificQualificationResult:
     release_or_trading_authority: bool = False
 
 
-def qualify_scientific_learning(evidence: ScientificQualificationInput) -> ScientificQualificationResult:
-    """Audit scientific evidence without creating financial or release authority."""
+def qualify_scientific_learning(
+    evidence: ScientificQualificationInput,
+    *,
+    evidence_verifier: GateEvidenceVerifier | None = None,
+) -> ScientificQualificationResult:
+    """Audit independently verified scientific evidence without authority expansion."""
+    if not isinstance(evidence, ScientificQualificationInput):
+        raise TypeError("evidence must be ScientificQualificationInput")
     by_id = {gate.gate_id: gate for gate in evidence.gates}
     checks: list[tuple[str, str]] = []
     reasons: list[str] = []
+    effective_status: dict[str, str] = {}
 
     for gate_id in _REQUIRED_GATES:
         gate = by_id.get(gate_id)
         if gate is None:
             checks.append((gate_id, "INCONCLUSIVE"))
+            effective_status[gate_id] = "INCONCLUSIVE"
             reasons.append("SCIENCE.MISSING_GATE:" + gate_id)
             continue
         binding_ok = (
@@ -126,9 +137,27 @@ def qualify_scientific_learning(evidence: ScientificQualificationInput) -> Scien
         )
         if not binding_ok:
             checks.append((gate_id, "FAIL"))
+            effective_status[gate_id] = "FAIL"
             reasons.append("SCIENCE.EVIDENCE_BINDING_MISMATCH:" + gate_id)
             continue
+
+        verified = False
+        if evidence_verifier is not None:
+            try:
+                verification = evidence_verifier(gate)
+            except Exception:
+                verification = False
+            if not isinstance(verification, bool):
+                verification = False
+            verified = verification
+        if not verified:
+            checks.append((gate_id, "INCONCLUSIVE"))
+            effective_status[gate_id] = "INCONCLUSIVE"
+            reasons.append("SCIENCE.EVIDENCE_UNVERIFIED:" + gate_id)
+            continue
+
         checks.append((gate_id, gate.status))
+        effective_status[gate_id] = gate.status
         if gate.status == "FAIL":
             reasons.extend(gate.reason_codes or ("SCIENCE.GATE_FAILED:" + gate_id,))
         elif gate.status == "INCONCLUSIVE":
@@ -146,17 +175,19 @@ def qualify_scientific_learning(evidence: ScientificQualificationInput) -> Scien
     else:
         checks.append(("routing_causality", "PASS"))
 
-    forward = by_id.get("forward_evidence")
     claim_ok = True
-    if evidence.economic_claim == "ECONOMIC_EDGE_QUALIFIED" and (forward is None or forward.status != "PASS"):
+    if (
+        evidence.economic_claim == "ECONOMIC_EDGE_QUALIFIED"
+        and effective_status.get("forward_evidence") != "PASS"
+    ):
         claim_ok = False
         reasons.append("SCIENCE.CLAIM_EXCEEDS_EVIDENCE")
-    if evidence.economic_claim == "RESEARCH_CANDIDATE":
-        protocol = by_id.get("protocol")
-        leakage = by_id.get("leakage")
-        if protocol is None or leakage is None or protocol.status != "PASS" or leakage.status != "PASS":
-            claim_ok = False
-            reasons.append("SCIENCE.CLAIM_EXCEEDS_EVIDENCE")
+    if evidence.economic_claim == "RESEARCH_CANDIDATE" and (
+        effective_status.get("protocol") != "PASS"
+        or effective_status.get("leakage") != "PASS"
+    ):
+        claim_ok = False
+        reasons.append("SCIENCE.CLAIM_EXCEEDS_EVIDENCE")
     checks.append(("economic_claim", "PASS" if claim_ok else "FAIL"))
 
     has_fail = any(status == "FAIL" for _, status in checks)

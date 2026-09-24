@@ -2,7 +2,7 @@
   "schema_version": "1.0.0",
   "repository": "Oleksii-debug/AutoTrade",
   "objective": "TIME_TO_WHOLE_FINISHED_AUTOTRADE",
-  "mode": "BOOTSTRAP_SINGLE_WRITER",
+  "mode": "PARALLEL_ISOLATED_WORKTREES",
   "baseline_date": "2026-09-22",
   "product_spec": "docs/product/AutoTrade_Final_Product_Specification_EN.docx",
   "engineering_master": "docs/engineering/00_AUTOTRADE_MASTER_ENGINEERING_SPEC.md",

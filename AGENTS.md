@@ -4,7 +4,7 @@ Objective: TIME_TO_WHOLE_FINISHED_AUTOTRADE.
 
 Read `control/INDEX.json` before work.
 
-Current mode: `BOOTSTRAP_SINGLE_WRITER`. Read-only research may be concurrent. Concurrent source mutation is not allowed until the atomic semantic claim path is enabled and qualified.
+Current mode: `PARALLEL_ISOLATED_WORKTREES`. Five autonomous developers may change the full product code surface concurrently only in their own isolated worktrees. No worker commits, merges, touches secrets, or performs live trading; integration remains a separate verified action.
 
 Hard rules:
 - provider reconciliation + durable journal establish financial truth;

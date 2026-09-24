@@ -20,6 +20,7 @@ class RegistryWriteUnconfirmed(RuntimeError):
 
 class GitRegistryStore:
     REF = "refs/heads/control/registry"
+    FETCH_REF = "refs/autotrade-cache/control-registry"
 
     def __init__(self, cache: Path, remote: str):
         self.cache = Path(cache)
@@ -29,17 +30,26 @@ class GitRegistryStore:
 
     def _git(self, *args: str, data: str | None = None) -> str:
         completed = subprocess.run(
-            ["git", "-C", str(self.cache), *args], input=data,
-            text=True, encoding="utf-8", capture_output=True, timeout=60,
+            ["git", "-C", str(self.cache), *args],
+            # `text=True` translates LF to CRLF on Windows.  That corrupts
+            # Git plumbing input such as `mktree` records, turning a filename
+            # like registry.json into registry.json\\r.  Git object input is
+            # always UTF-8 bytes with literal LF delimiters.
+            input=data.encode("utf-8") if data is not None else None,
+            text=False, capture_output=True, timeout=60,
         )
         if completed.returncode:
             # Avoid leaking credentials embedded in remote URLs through git stderr.
             raise RegistryWriteUnconfirmed("Git registry operation failed; refresh and reconcile")
-        return completed.stdout.strip()
+        return completed.stdout.decode("utf-8").strip()
 
     def read(self) -> tuple[str, dict, str]:
-        self._git("fetch", "--no-tags", self.remote, self.REF)
-        head = self._git("rev-parse", "FETCH_HEAD")
+        # FETCH_HEAD is mutable process state and a rejected `git push` can
+        # leave it pointing at a local object in a bare cache on Windows.
+        # Fetch into a dedicated private ref instead, so every read resolves
+        # the advertised remote registry head deterministically.
+        self._git("fetch", "--no-tags", self.remote, f"{self.REF}:{self.FETCH_REF}")
+        head = self._git("rev-parse", self.FETCH_REF)
         state = json.loads(self._git("show", f"{head}:registry.json"))
         _validate_registry(state)
         log = self._git("show", f"{head}:transitions.ndjson")

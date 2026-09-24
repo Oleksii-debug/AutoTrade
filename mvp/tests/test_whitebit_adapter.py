@@ -8,7 +8,14 @@ from mvp.autotrade_mvp.whitebit import (
     WhiteBitAbsenceEvidence,
     WhiteBitAdapterError,
     WhiteBitOrderIntent,
+    WhiteBitPageEvidence,
+    execution_history_coverage,
+    open_order_coverage,
+    order_history_coverage,
     order_lookup_requests,
+    paged_execution_history_request,
+    paged_open_orders_request,
+    paged_order_history_request,
     parse_execution_deal,
     parse_execution_history,
     parse_order_snapshot,
@@ -365,6 +372,71 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertEqual([item.surface for item in requests], ["OPEN_ORDERS", "ORDER_HISTORY"])
         self.assertEqual(requests[0].body["clientOrderId"], "at-lookup-1")
         self.assertNotEqual(requests[0].endpoint, requests[1].endpoint)
+
+    def test_history_pagination_requires_short_final_page(self):
+        coverage = order_history_coverage()
+        coverage.add_page(
+            WhiteBitPageEvidence(offset=0, limit=500, record_count=500)
+        )
+        self.assertFalse(coverage.complete)
+        self.assertEqual(coverage.next_offset, 500)
+        coverage.add_page(
+            WhiteBitPageEvidence(offset=500, limit=500, record_count=7)
+        )
+        self.assertTrue(coverage.complete)
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "already complete",
+        ):
+            coverage.add_page(
+                WhiteBitPageEvidence(offset=1000, limit=500, record_count=0)
+            )
+
+    def test_pagination_gap_or_wrong_surface_limit_fails_closed(self):
+        coverage = execution_history_coverage()
+        coverage.add_page(
+            WhiteBitPageEvidence(offset=0, limit=50, record_count=50)
+        )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "pagination gap"):
+            coverage.add_page(
+                WhiteBitPageEvidence(offset=75, limit=50, record_count=0)
+            )
+
+        open_coverage = open_order_coverage()
+        with self.assertRaisesRegex(WhiteBitAdapterError, "cannot exceed 100"):
+            open_coverage.add_page(
+                WhiteBitPageEvidence(offset=0, limit=101, record_count=0)
+            )
+
+    def test_provider_page_builders_preserve_surface_and_time_bounds(self):
+        order_history = paged_order_history_request(
+            start_unix=1_700_000_000,
+            end_unix=1_700_000_000 + 31 * 24 * 60 * 60,
+            offset=0,
+            limit=500,
+            market="btc_usdt",
+        )
+        self.assertEqual(order_history.surface, "ORDER_HISTORY")
+        self.assertEqual(order_history.body["limit"], 500)
+
+        execution_history = paged_execution_history_request(
+            start_unix=1_700_000_000,
+            end_unix=1_700_000_100,
+            offset=0,
+            limit=500,
+        )
+        self.assertEqual(execution_history.surface, "EXECUTIONS")
+
+        active = paged_open_orders_request(offset=0, limit=100)
+        self.assertEqual(active.surface, "OPEN_ORDERS")
+        self.assertNotIn("market", active.body)
+
+        with self.assertRaisesRegex(WhiteBitAdapterError, "31 days"):
+            paged_order_history_request(
+                start_unix=1_700_000_000,
+                end_unix=1_700_000_000 + 31 * 24 * 60 * 60 + 1,
+                offset=0,
+            )
 
     def test_one_or_two_empty_order_surfaces_do_not_prove_absence(self):
         evidence = WhiteBitAbsenceEvidence(

@@ -1,5 +1,6 @@
 import unittest
 
+from mvp.autotrade_mvp.host_api import HostCommandStore
 from mvp.autotrade_mvp.security import SecurityBoundary
 
 
@@ -204,6 +205,28 @@ class SecurityBoundaryTests(unittest.TestCase):
                 role="OWNER",
                 origin="https://local.autotrade.invalid",
             )
+
+    def test_host_validator_binds_bearer_session_to_exact_actor(self):
+        store = HostCommandStore(session_validator=self.boundary.validate_host_session)
+        command = {
+            "command_id": "11111111-1111-1111-1111-111111111111",
+            "expected_state_version": "0",
+            "idempotency_key": "security-integration",
+            "actor": "owner",
+            "session": self.owner.token,
+            "action": "BLOCK_NEW_EXPOSURE",
+            "payload": {},
+        }
+        self.assertEqual(store.submit(command).status, "ACCEPTED")
+
+        forged = dict(command)
+        forged["command_id"] = "22222222-2222-2222-2222-222222222222"
+        forged["idempotency_key"] = "security-forged"
+        forged["expected_state_version"] = "1"
+        forged["actor"] = "someone-else"
+        with self.assertRaises(PermissionError):
+            store.submit(forged)
+        self.assertEqual(store.state_version, 1)
 
     def test_revoked_session_cannot_be_reused(self):
         token = self.owner.token

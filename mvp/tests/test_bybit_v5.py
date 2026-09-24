@@ -250,6 +250,94 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(fill.fee_amount, Decimal("1.23"))
         self.assertEqual(fill.trade_time, "2026-09-24T20:00:00.123Z")
 
+    def test_documented_linear_execution_requires_qualified_fee_currency(self):
+        response = {
+            "retCode": 0,
+            "result": {
+                "category": "linear",
+                "list": [
+                    {
+                        "execId": "e0cbe81d-0f18-5866-9415-cf319b5dab3b",
+                        "orderLinkId": "",
+                        "symbol": "ETHPERP",
+                        "execQty": "0.1",
+                        "execPrice": "1190.15",
+                        "execFee": "0.071409",
+                        "feeCurrency": "",
+                        "extraFees": "",
+                        "execTime": "1672282722429",
+                    }
+                ],
+            },
+        }
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "fee currency is unresolved",
+        ):
+            parse_executions(
+                response,
+                instrument_versions={"ETHPERP": "ETHPERP@v1"},
+            )
+
+        fills = parse_executions(
+            response,
+            instrument_versions={"ETHPERP": "ETHPERP@v1"},
+            qualified_fee_currencies={"ETHPERP@v1": "USDT"},
+        )
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0].fee_amount, Decimal("0.071409"))
+        self.assertEqual(fills[0].fee_currency, "USDT")
+
+    def test_nonempty_extra_fees_cannot_silently_disappear(self):
+        response = {
+            "retCode": 0,
+            "result": {
+                "category": "spot",
+                "list": [
+                    {
+                        "execId": "exec-extra-fee",
+                        "orderLinkId": "",
+                        "symbol": "BTCUSDT",
+                        "execQty": "0.01",
+                        "execPrice": "65000",
+                        "execFee": "0.5",
+                        "feeCurrency": "USDT",
+                        "extraFees": '[{"feeType":"tax","subFeeType":"regional"}]',
+                        "execTime": "1790280000000",
+                    }
+                ],
+            },
+        }
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "extraFees",
+        ):
+            parse_executions(
+                response,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+    def test_empty_extra_fee_shapes_remain_economically_complete(self):
+        for extra_fees in (None, "", [], {}):
+            with self.subTest(extra_fees=extra_fees):
+                row = {
+                    "execId": f"exec-{repr(extra_fees)}",
+                    "orderLinkId": "",
+                    "symbol": "BTCUSDT",
+                    "execQty": "0.01",
+                    "execPrice": "65000",
+                    "execFee": "0.5",
+                    "feeCurrency": "USDT",
+                    "execTime": "1790280000000",
+                }
+                if extra_fees is not None:
+                    row["extraFees"] = extra_fees
+                fills = parse_executions(
+                    {"retCode": 0, "result": {"list": [row]}},
+                    instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                )
+                self.assertEqual(fills[0].fee_currency, "USDT")
+
     def test_execution_conflict_and_unknown_symbol_fail_closed(self):
         conflict = {
             "retCode": 0,

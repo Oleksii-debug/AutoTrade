@@ -9,6 +9,7 @@ external-transfer credentials.
 from __future__ import annotations
 
 from base64 import b64decode, b64encode
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from hashlib import sha256
 import json
@@ -54,6 +55,35 @@ def _scope_entropy(
     return sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).digest()
+
+
+@contextmanager
+def _exclusive_file_lock(path: Path):
+    """Serialize vault mutations across processes sharing one credential file."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as stream:
+        if stream.tell() == 0:
+            stream.write(b"\\0")
+            stream.flush()
+        stream.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 class DpapiCurrentUserProtector:
@@ -180,10 +210,12 @@ class ProtectedCredentialVault:
             raise TypeError("protector must implement protect and unprotect")
         self._protector = protector
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
-            self._write({"version": self.FORMAT_VERSION, "records": {}})
-        else:
-            self._load()
+        self.lock_path = self.path.with_name(self.path.name + ".lock")
+        with _exclusive_file_lock(self.lock_path):
+            if not self.path.exists():
+                self._write({"version": self.FORMAT_VERSION, "records": {}})
+            else:
+                self._load()
 
     def _load(self) -> dict[str, object]:
         try:
@@ -301,38 +333,39 @@ class ProtectedCredentialVault:
             if handle_id is not None
             else "cred_" + uuid4().hex
         )
-        state = self._load()
-        records = state["records"]
-        if hid in records:
-            raise SecretVaultError("handle_id already exists")
-        generation = 1
-        entropy = _scope_entropy(
-            handle_id=hid,
-            owner_identity=owner,
-            account_id=account,
-            provider=normalized_provider,
-            purpose=normalized_purpose,
-            generation=generation,
-        )
-        ciphertext = self._protector.protect(
-            secret_value.encode("utf-8"),
-            entropy=entropy,
-        )
-        handle = PersistentCredentialHandle(
-            handle_id=hid,
-            account_id=account,
-            provider=normalized_provider,
-            purpose=normalized_purpose,
-            generation=generation,
-        )
-        records[hid] = {
-            "handle": asdict(handle),
-            "owner_identity": owner,
-            "ciphertext": b64encode(ciphertext).decode("ascii"),
-            "active": True,
-        }
-        self._write(state)
-        return handle
+        with _exclusive_file_lock(self.lock_path):
+            state = self._load()
+            records = state["records"]
+            if hid in records:
+                raise SecretVaultError("handle_id already exists")
+            generation = 1
+            entropy = _scope_entropy(
+                handle_id=hid,
+                owner_identity=owner,
+                account_id=account,
+                provider=normalized_provider,
+                purpose=normalized_purpose,
+                generation=generation,
+            )
+            ciphertext = self._protector.protect(
+                secret_value.encode("utf-8"),
+                entropy=entropy,
+            )
+            handle = PersistentCredentialHandle(
+                handle_id=hid,
+                account_id=account,
+                provider=normalized_provider,
+                purpose=normalized_purpose,
+                generation=generation,
+            )
+            records[hid] = {
+                "handle": asdict(handle),
+                "owner_identity": owner,
+                "ciphertext": b64encode(ciphertext).decode("ascii"),
+                "active": True,
+            }
+            self._write(state)
+            return handle
 
     def describe(self, handle_id: str) -> dict[str, object]:
         hid = _text(handle_id, name="handle_id")
@@ -410,39 +443,40 @@ class ProtectedCredentialVault:
         if not isinstance(new_secret_value, str) or not new_secret_value:
             raise SecretVaultError("new_secret_value must not be empty")
         owner = _text(execution_identity, name="execution_identity")
-        state = self._load()
-        record = state["records"].get(handle.handle_id)
-        if record is None or record["active"] is not True:
-            raise PermissionError("Credential is unavailable")
-        current = self._handle(record)
-        if current != handle:
-            raise PermissionError("Credential handle generation is stale")
-        if record["owner_identity"] != owner:
-            raise PermissionError("Secret identity mismatch")
-        next_handle = PersistentCredentialHandle(
-            handle_id=current.handle_id,
-            account_id=current.account_id,
-            provider=current.provider,
-            purpose=current.purpose,
-            generation=current.generation + 1,
-        )
-        entropy = _scope_entropy(
-            handle_id=next_handle.handle_id,
-            owner_identity=owner,
-            account_id=next_handle.account_id,
-            provider=next_handle.provider,
-            purpose=next_handle.purpose,
-            generation=next_handle.generation,
-        )
-        record["handle"] = asdict(next_handle)
-        record["ciphertext"] = b64encode(
-            self._protector.protect(
-                new_secret_value.encode("utf-8"),
-                entropy=entropy,
+        with _exclusive_file_lock(self.lock_path):
+            state = self._load()
+            record = state["records"].get(handle.handle_id)
+            if record is None or record["active"] is not True:
+                raise PermissionError("Credential is unavailable")
+            current = self._handle(record)
+            if current != handle:
+                raise PermissionError("Credential handle generation is stale")
+            if record["owner_identity"] != owner:
+                raise PermissionError("Secret identity mismatch")
+            next_handle = PersistentCredentialHandle(
+                handle_id=current.handle_id,
+                account_id=current.account_id,
+                provider=current.provider,
+                purpose=current.purpose,
+                generation=current.generation + 1,
             )
-        ).decode("ascii")
-        self._write(state)
-        return next_handle
+            entropy = _scope_entropy(
+                handle_id=next_handle.handle_id,
+                owner_identity=owner,
+                account_id=next_handle.account_id,
+                provider=next_handle.provider,
+                purpose=next_handle.purpose,
+                generation=next_handle.generation,
+            )
+            record["handle"] = asdict(next_handle)
+            record["ciphertext"] = b64encode(
+                self._protector.protect(
+                    new_secret_value.encode("utf-8"),
+                    entropy=entropy,
+                )
+            ).decode("ascii")
+            self._write(state)
+            return next_handle
 
     def revoke(
         self,
@@ -453,15 +487,16 @@ class ProtectedCredentialVault:
         if not isinstance(handle, PersistentCredentialHandle):
             raise TypeError("handle must be a PersistentCredentialHandle")
         owner = _text(execution_identity, name="execution_identity")
-        state = self._load()
-        record = state["records"].get(handle.handle_id)
-        if record is None or record["active"] is not True:
-            raise PermissionError("Credential is unavailable")
-        current = self._handle(record)
-        if current != handle:
-            raise PermissionError("Credential handle generation is stale")
-        if record["owner_identity"] != owner:
-            raise PermissionError("Secret identity mismatch")
-        record["active"] = False
-        record["ciphertext"] = b64encode(os.urandom(32)).decode("ascii")
-        self._write(state)
+        with _exclusive_file_lock(self.lock_path):
+            state = self._load()
+            record = state["records"].get(handle.handle_id)
+            if record is None or record["active"] is not True:
+                raise PermissionError("Credential is unavailable")
+            current = self._handle(record)
+            if current != handle:
+                raise PermissionError("Credential handle generation is stale")
+            if record["owner_identity"] != owner:
+                raise PermissionError("Secret identity mismatch")
+            record["active"] = False
+            record["ciphertext"] = b64encode(os.urandom(32)).decode("ascii")
+            self._write(state)

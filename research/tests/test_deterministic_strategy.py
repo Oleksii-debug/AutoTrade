@@ -131,6 +131,33 @@ class DeterministicStrategyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different observation content"):
             strategy.ingest(conflicting, simulation_time=conflicting.available_at)
 
+    def test_snapshot_remembers_evicted_event_id_for_restart_idempotency(self):
+        strategy = ReturnThresholdBaseline(lookback=2, threshold="0.01", proposal_quantity="1")
+        first, second, third = obs(0, "100"), obs(1, "101"), obs(2, "102")
+        for item in (first, second, third):
+            strategy.ingest(item, simulation_time=item.available_at)
+
+        restored = ReturnThresholdBaseline.restore(strategy.snapshot())
+        self.assertFalse(restored.ingest(first, simulation_time=third.available_at))
+        proposal = restored.propose(symbol="AAA", decision_time=third.available_at)
+        self.assertEqual(proposal.evidence_event_ids, ("event-1", "event-2"))
+
+    def test_snapshot_remembers_evicted_event_fingerprint(self):
+        strategy = ReturnThresholdBaseline(lookback=2, threshold="0.01", proposal_quantity="1")
+        first, second, third = obs(0, "100"), obs(1, "101"), obs(2, "102")
+        for item in (first, second, third):
+            strategy.ingest(item, simulation_time=item.available_at)
+
+        restored = ReturnThresholdBaseline.restore(strategy.snapshot())
+        conflicting = CausalObservation.create(
+            event_id=first.event_id,
+            symbol=first.symbol,
+            available_at=first.available_at,
+            price="999",
+        )
+        with self.assertRaisesRegex(ValueError, "different observation content"):
+            restored.ingest(conflicting, simulation_time=third.available_at)
+
     def test_out_of_order_availability_is_rejected(self):
         strategy = ReturnThresholdBaseline(lookback=2, threshold="0.01", proposal_quantity="1")
         later = obs(2, "102")

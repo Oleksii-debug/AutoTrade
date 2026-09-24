@@ -319,7 +319,9 @@ class OrderProjection:
         filled = self.filled_quantity(intent.intent_id)
         remaining = max(intent.ordered_quantity - filled, Decimal("0"))
         overfill = max(filled - intent.ordered_quantity, Decimal("0"))
-        if intent.rejected:
+        if intent.rejected and filled > 0:
+            state = "REJECTED_WITH_OVERFILL" if overfill > 0 else "REJECTED_WITH_FILL"
+        elif intent.rejected:
             state = "REJECTED"
         elif overfill > 0:
             state = "OVERFILLED_AFTER_CANCEL" if intent.cancel_confirmed else "OVERFILLED"

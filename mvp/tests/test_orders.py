@@ -152,6 +152,21 @@ class OrderProjectionTests(unittest.TestCase):
             )
 
 
+    def test_fill_after_rejection_is_preserved_as_explicit_anomaly(self):
+        book = OrderProjection()
+        book.register_intent(intent_id="i1", side="BUY", quantity="1")
+        book.reject("i1")
+        book.observe_fill(
+            fill_id="f1", provider_execution_id="exec-1", intent_id="i1",
+            side="BUY", quantity="0.5", price="100",
+        )
+        state = book.snapshot("i1")
+        self.assertTrue(state.rejected)
+        self.assertEqual(state.filled_quantity, Decimal("0.5"))
+        self.assertEqual(state.remaining_quantity, Decimal("0.5"))
+        self.assertEqual(state.operational_state, "REJECTED_WITH_FILL")
+
+
     def test_provider_overfill_is_explicit_not_silently_clamped(self):
         book = OrderProjection()
         book.register_intent(intent_id="i1", side="BUY", quantity="1")

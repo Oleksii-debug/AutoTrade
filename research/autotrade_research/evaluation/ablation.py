@@ -11,7 +11,9 @@ from typing import Iterable
 
 
 def _decimal(value: Decimal | int | str | float, field: str) -> Decimal:
-    number = Decimal(str(value))
+    if isinstance(value, (bool, float)):
+        raise ValueError(f"{field} must use exact decimal input")
+    number = Decimal(value)
     if not number.is_finite():
         raise ValueError(f"{field} must be finite")
     return number
@@ -81,8 +83,14 @@ class AblationPair:
         return self.full.met_deadline == self.ablated.met_deadline
 
     @property
+    def utility_comparable(self) -> bool:
+        """Utility is decision-relevant only when both variants met the deadline."""
+
+        return self.full.met_deadline and self.ablated.met_deadline
+
+    @property
     def utility_delta(self) -> Decimal | None:
-        if not self.deadline_comparable:
+        if not self.utility_comparable:
             return None
         return self.full.utility - self.ablated.utility
 
@@ -101,6 +109,7 @@ class AblationSummary:
     total_pairs: int
     comparable_pairs: int
     deadline_mismatch_pairs: int
+    both_deadline_miss_pairs: int
     full_deadline_misses: int
     ablated_deadline_misses: int
     mean_utility_delta: Decimal | None
@@ -114,7 +123,14 @@ def summarize_ablation(target_component: str, pairs: Iterable[AblationPair]) -> 
     if any(pair.target_component != target_component for pair in selected):
         raise ValueError("all pairs must target the requested component")
 
-    comparable = [pair for pair in selected if pair.deadline_comparable]
+    seen_cases: set[tuple[str, str]] = set()
+    for pair in selected:
+        case_key = (pair.full.case_id, pair.full.input_fingerprint)
+        if case_key in seen_cases:
+            raise ValueError("duplicate matched ablation case")
+        seen_cases.add(case_key)
+
+    comparable = [pair for pair in selected if pair.utility_comparable]
     utility_deltas = [pair.utility_delta for pair in comparable]
     concrete_utility = [value for value in utility_deltas if value is not None]
 
@@ -134,6 +150,10 @@ def summarize_ablation(target_component: str, pairs: Iterable[AblationPair]) -> 
         total_pairs=len(selected),
         comparable_pairs=len(comparable),
         deadline_mismatch_pairs=sum(not pair.deadline_comparable for pair in selected),
+        both_deadline_miss_pairs=sum(
+            not pair.full.met_deadline and not pair.ablated.met_deadline
+            for pair in selected
+        ),
         full_deadline_misses=sum(not pair.full.met_deadline for pair in selected),
         ablated_deadline_misses=sum(not pair.ablated.met_deadline for pair in selected),
         mean_utility_delta=mean_utility,

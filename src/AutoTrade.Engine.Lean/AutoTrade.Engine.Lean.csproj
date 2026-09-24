@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>AutoTrade.Engine.Lean</AssemblyName>
+    <RootNamespace>AutoTrade.Engine.Lean</RootNamespace>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <Target Name="RequireApprovedLeanCheckout"
+          BeforeTargets="ResolveProjectReferences"
+          Condition="'$(LeanRoot)' == '' Or !Exists('$(LeanRoot)/Common/QuantConnect.csproj')">
+    <Error Text="LeanRoot must point to the exact approved LEAN checkout containing Common/QuantConnect.csproj." />
+  </Target>
+
+  <ItemGroup Condition="'$(LeanRoot)' != ''">
+    <ProjectReference Include="$(LeanRoot)/Common/QuantConnect.csproj" />
+  </ItemGroup>
+</Project>

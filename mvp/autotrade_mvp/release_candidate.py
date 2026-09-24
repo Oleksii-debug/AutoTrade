@@ -253,6 +253,11 @@ def freeze_release_candidate(
             reasons.append(f"evidence_failed:{artifact.role}")
         elif artifact.evidence_status == "INCONCLUSIVE":
             reasons.append(f"evidence_inconclusive:{artifact.role}")
+        if (
+            artifact.role not in _SIGNED_BINARY_ROLES
+            and artifact.signature_status in {"MISSING", "INVALID"}
+        ):
+            reasons.append(f"signature_status_unresolved:{artifact.role}")
 
     for role in sorted(_SIGNED_BINARY_ROLES):
         artifact = by_role.get(role)

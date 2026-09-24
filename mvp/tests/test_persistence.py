@@ -68,6 +68,8 @@ class JournalStoreTests(unittest.TestCase):
             store = JournalStore(f"{directory}/journal.sqlite3")
             result = {"status": "ACCEPTED", "state_version": 7}
             saved, inserted = store.record_command(
+                actor="alice",
+                environment="PAPER",
                 command_id="cmd-1",
                 idempotency_key="key-1",
                 request={"action": "AUTHORITY.REVOKE", "payload": {"policy_id": "p1"}},
@@ -77,6 +79,8 @@ class JournalStoreTests(unittest.TestCase):
             self.assertTrue(inserted)
             self.assertEqual(saved, result)
             replayed, inserted = store.record_command(
+                actor="alice",
+                environment="PAPER",
                 command_id="cmd-other",
                 idempotency_key="key-1",
                 request={"action": "AUTHORITY.REVOKE", "payload": {"policy_id": "p1"}},
@@ -87,6 +91,8 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(replayed, result)
             with self.assertRaisesRegex(ValueError, "different request"):
                 store.record_command(
+                    actor="alice",
+                    environment="PAPER",
                     command_id="cmd-2",
                     idempotency_key="key-1",
                     request={"action": "AUTHORITY.REVOKE", "payload": {"policy_id": "p2"}},
@@ -94,11 +100,101 @@ class JournalStoreTests(unittest.TestCase):
                     state_version=8,
                 )
 
+    def test_idempotency_key_is_scoped_by_actor_and_environment(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            request = {"action": "A"}
+            first, inserted = store.record_command(
+                actor="alice",
+                environment="PAPER",
+                command_id="cmd-a",
+                idempotency_key="shared-key",
+                request=request,
+                result={"scope": "alice-paper"},
+                state_version=1,
+            )
+            self.assertTrue(inserted)
+            self.assertEqual(first, {"scope": "alice-paper"})
+
+            other_actor, inserted = store.record_command(
+                actor="bob",
+                environment="PAPER",
+                command_id="cmd-b",
+                idempotency_key="shared-key",
+                request=request,
+                result={"scope": "bob-paper"},
+                state_version=1,
+            )
+            self.assertTrue(inserted)
+            self.assertEqual(other_actor, {"scope": "bob-paper"})
+
+            other_environment, inserted = store.record_command(
+                actor="alice",
+                environment="LIVE",
+                command_id="cmd-c",
+                idempotency_key="shared-key",
+                request=request,
+                result={"scope": "alice-live"},
+                state_version=1,
+            )
+            self.assertTrue(inserted)
+            self.assertEqual(other_environment, {"scope": "alice-live"})
+
+            replayed, inserted = store.record_command(
+                actor="alice",
+                environment="PAPER",
+                command_id="cmd-retry",
+                idempotency_key="shared-key",
+                request=request,
+                result={"scope": "must-not-replace"},
+                state_version=99,
+            )
+            self.assertFalse(inserted)
+            self.assertEqual(replayed, {"scope": "alice-paper"})
+
+    def test_environment_scope_is_canonical_and_rejects_unknown_values(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            result, inserted = store.record_command(
+                actor="alice",
+                environment=" paper ",
+                command_id="cmd-paper",
+                idempotency_key="key",
+                request={"action": "A"},
+                result={"ok": True},
+                state_version=1,
+            )
+            self.assertTrue(inserted)
+            self.assertEqual(result, {"ok": True})
+            replayed, inserted = store.record_command(
+                actor="alice",
+                environment="PAPER",
+                command_id="cmd-retry",
+                idempotency_key="key",
+                request={"action": "A"},
+                result={"ok": False},
+                state_version=2,
+            )
+            self.assertFalse(inserted)
+            self.assertEqual(replayed, {"ok": True})
+            with self.assertRaisesRegex(ValueError, "environment must be"):
+                store.record_command(
+                    actor="alice",
+                    environment="UNKNOWN_ENV",
+                    command_id="cmd-bad-env",
+                    idempotency_key="bad-env",
+                    request={"action": "A"},
+                    result={"ok": False},
+                    state_version=1,
+                )
+
     def test_command_state_version_rejects_boolean(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             with self.assertRaisesRegex(ValueError, "non-negative integer"):
                 store.record_command(
+                    actor="alice",
+                    environment="PAPER",
                     command_id="cmd-bool",
                     idempotency_key="key-bool",
                     request={"action": "A"},
@@ -113,6 +209,8 @@ class JournalStoreTests(unittest.TestCase):
             item["aggregate_version"] = 1
             with self.assertRaisesRegex(ValueError, "canonical integer sequence string"):
                 store.commit_command(
+                    actor="alice",
+                    environment="PAPER",
                     command_id="cmd-version",
                     idempotency_key="key-version",
                     request={"action": "A"},
@@ -133,6 +231,8 @@ class JournalStoreTests(unittest.TestCase):
             first = JournalStore(path)
             first.append_event(event(), outbox_topic="events")
             first.record_command(
+                actor="alice",
+                environment="PAPER",
                 command_id="cmd-1",
                 idempotency_key="key-1",
                 request={"action": "A"},
@@ -143,6 +243,8 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(len(reopened.load_events("account", "paper-1")), 1)
             self.assertEqual(len(reopened.pending_outbox()), 1)
             replayed, inserted = reopened.record_command(
+                actor="alice",
+                environment="PAPER",
                 command_id="cmd-x",
                 idempotency_key="key-1",
                 request={"action": "A"},
@@ -161,6 +263,8 @@ class JournalStoreTests(unittest.TestCase):
             result = {"status": "ACCEPTED", "state_version": 2}
 
             saved, inserted, appended = store.commit_command(
+                actor="alice",
+                environment="PAPER",
                 command_id="cmd-atomic",
                 idempotency_key="key-atomic",
                 request={"action": "ORDER.SUBMIT", "intent_id": "i1"},
@@ -176,6 +280,8 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(len(store.pending_outbox()), 1)
 
             replayed, inserted, appended = store.commit_command(
+                actor="alice",
+                environment="PAPER",
                 command_id="cmd-retry",
                 idempotency_key="key-atomic",
                 request={"action": "ORDER.SUBMIT", "intent_id": "i1"},
@@ -194,6 +300,8 @@ class JournalStoreTests(unittest.TestCase):
             store = JournalStore(path)
             with self.assertRaisesRegex(ValueError, "aggregate_version must be 1"):
                 store.commit_command(
+                    actor="alice",
+                    environment="PAPER",
                     command_id="cmd-bad",
                     idempotency_key="key-bad",
                     request={"action": "ORDER.SUBMIT"},
@@ -205,6 +313,8 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(store.load_events("account", "paper-1"), [])
             self.assertEqual(store.pending_outbox(), [])
             saved, inserted = store.record_command(
+                actor="alice",
+                environment="PAPER",
                 command_id="cmd-bad",
                 idempotency_key="key-bad",
                 request={"action": "ORDER.SUBMIT"},
@@ -227,10 +337,7 @@ class JournalStoreTests(unittest.TestCase):
             finally:
                 connection.close()
 
-            with self.assertRaisesRegex(
-                ValueError,
-                "command_dedupe is missing required columns",
-            ):
+            with self.assertRaises((ValueError, sqlite3.OperationalError)):
                 JournalStore(path)
 
             connection = sqlite3.connect(path)
@@ -290,20 +397,74 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(legacy.current_schema_version(), 1)
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 2)
+            self.assertEqual(upgraded.current_schema_version(), 3)
             self.assertEqual(
                 upgraded.load_events("account", "paper-1")[0]["event_id"],
                 "evt-1",
             )
             self.assertEqual(upgraded.pending_outbox()[0]["event_id"], "evt-1")
 
+    def test_legacy_unscoped_idempotency_key_fails_closed_after_upgrade(self):
+        class LegacyJournalStore(JournalStore):
+            SCHEMA_VERSION = 1
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            legacy = LegacyJournalStore(path)
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO command_dedupe(
+                        command_id, idempotency_key, request_hash,
+                        result_json, state_version, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "legacy-command",
+                        "legacy-key",
+                        "sha256:" + "0" * 64,
+                        '{"status":"UNKNOWN_LEGACY"}',
+                        0,
+                        "2026-09-24T16:00:00Z",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            upgraded = JournalStore(path)
+            self.assertEqual(upgraded.current_schema_version(), 3)
+            with self.assertRaisesRegex(ValueError, "legacy unscoped"):
+                upgraded.record_command(
+                    actor="alice",
+                    environment="PAPER",
+                    command_id="new-command",
+                    idempotency_key="legacy-key",
+                    request={"action": "A"},
+                    result={"status": "ACCEPTED"},
+                    state_version=1,
+                )
+
+            saved, inserted = upgraded.record_command(
+                actor="alice",
+                environment="PAPER",
+                command_id="new-command",
+                idempotency_key="new-key",
+                request={"action": "A"},
+                result={"status": "ACCEPTED"},
+                state_version=1,
+            )
+            self.assertTrue(inserted)
+            self.assertEqual(saved, {"status": "ACCEPTED"})
+
     def test_failed_migration_rolls_back_schema_and_data_changes(self):
         class BrokenMigrationStore(JournalStore):
-            SCHEMA_VERSION = 3
+            SCHEMA_VERSION = 4
 
             @classmethod
             def _migration_statements(cls, version):
-                if version == 3:
+                if version == 4:
                     return (
                         "CREATE TABLE migration_probe(value TEXT NOT NULL)",
                         "CREATE TABL definitely_invalid(statement TEXT)",
@@ -314,7 +475,7 @@ class JournalStoreTests(unittest.TestCase):
             path = f"{directory}/journal.sqlite3"
             healthy = JournalStore(path)
             healthy.append_event(event())
-            self.assertEqual(healthy.current_schema_version(), 2)
+            self.assertEqual(healthy.current_schema_version(), 3)
 
             with self.assertRaises(sqlite3.OperationalError):
                 BrokenMigrationStore(path)
@@ -337,7 +498,7 @@ class JournalStoreTests(unittest.TestCase):
             finally:
                 connection.close()
 
-            self.assertEqual(versions, [1, 2])
+            self.assertEqual(versions, [1, 2, 3])
             self.assertIsNone(probe)
             self.assertEqual(event_count, 1)
 

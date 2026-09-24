@@ -97,7 +97,11 @@ class SupplyChainEvidence:
     sbom_hash: str
     provenance_hash: str
     dependency_lock_hash: str
+    sbom_reviewed_for_release_sha: str
+    provenance_reviewed_for_release_sha: str
+    dependency_lock_reviewed_for_release_sha: str
     distributed_component_ids: tuple[str, ...]
+    sbom_component_ids: tuple[str, ...]
     components: tuple[ComponentEvidence, ...]
     model_data_rights: tuple[ModelDataRightsEvidence, ...]
 
@@ -107,8 +111,16 @@ class SupplyChainEvidence:
         _sha256(self.sbom_hash, "sbom_hash")
         _sha256(self.provenance_hash, "provenance_hash")
         _sha256(self.dependency_lock_hash, "dependency_lock_hash")
+        _git_sha(self.sbom_reviewed_for_release_sha, "sbom_reviewed_for_release_sha")
+        _git_sha(self.provenance_reviewed_for_release_sha, "provenance_reviewed_for_release_sha")
+        _git_sha(
+            self.dependency_lock_reviewed_for_release_sha,
+            "dependency_lock_reviewed_for_release_sha",
+        )
         if not isinstance(self.distributed_component_ids, tuple):
             raise TypeError("distributed_component_ids must be a tuple")
+        if not isinstance(self.sbom_component_ids, tuple):
+            raise TypeError("sbom_component_ids must be a tuple")
         if not isinstance(self.components, tuple) or any(
             not isinstance(item, ComponentEvidence) for item in self.components
         ):
@@ -119,8 +131,12 @@ class SupplyChainEvidence:
             raise TypeError("model_data_rights must be a tuple of ModelDataRightsEvidence")
         if any(not isinstance(item, str) or not item.strip() for item in self.distributed_component_ids):
             raise ValueError("distributed component inventory contains an invalid id")
+        if any(not isinstance(item, str) or not item.strip() for item in self.sbom_component_ids):
+            raise ValueError("SBOM component inventory contains an invalid id")
         if len(self.distributed_component_ids) != len(set(self.distributed_component_ids)):
             raise ValueError("distributed component inventory contains duplicates")
+        if len(self.sbom_component_ids) != len(set(self.sbom_component_ids)):
+            raise ValueError("SBOM component inventory contains duplicates")
         ids = [item.component_id for item in self.components]
         if len(ids) != len(set(ids)):
             raise ValueError("component evidence contains duplicate ids")
@@ -150,13 +166,27 @@ def qualify_supply_chain(evidence: SupplyChainEvidence) -> SupplyChainQualificat
     exact_head = evidence.release_commit_sha == evidence.built_from_commit_sha
     record("exact_release_head", _PASS if exact_head else _FAIL, "SUPPLY_CHAIN.BUILD_SHA_MISMATCH")
 
+    for name, reviewed_sha in (
+        ("sbom", evidence.sbom_reviewed_for_release_sha),
+        ("provenance", evidence.provenance_reviewed_for_release_sha),
+        ("dependency_lock", evidence.dependency_lock_reviewed_for_release_sha),
+    ):
+        bound = reviewed_sha == evidence.release_commit_sha
+        record(
+            name + ":release_binding",
+            _PASS if bound else _FAIL,
+            "SUPPLY_CHAIN.STALE_" + name.upper() + "_REVIEW",
+        )
+
     by_id = {item.component_id: item for item in evidence.components}
     inventory = set(evidence.distributed_component_ids)
-    missing = sorted(inventory - set(by_id))
-    extras = sorted(set(by_id) - inventory)
+    sbom_inventory = set(evidence.sbom_component_ids)
+    component_inventory = set(by_id)
     record(
         "sbom_inventory",
-        _PASS if not missing and not extras else _FAIL,
+        _PASS
+        if sbom_inventory == inventory and component_inventory == inventory
+        else _FAIL,
         "SUPPLY_CHAIN.SBOM_INVENTORY_MISMATCH",
     )
 
@@ -203,7 +233,11 @@ def qualify_supply_chain(evidence: SupplyChainEvidence) -> SupplyChainQualificat
             "sbom": evidence.sbom_hash,
             "provenance": evidence.provenance_hash,
             "lock": evidence.dependency_lock_hash,
+            "sbom_reviewed_for_release_sha": evidence.sbom_reviewed_for_release_sha,
+            "provenance_reviewed_for_release_sha": evidence.provenance_reviewed_for_release_sha,
+            "dependency_lock_reviewed_for_release_sha": evidence.dependency_lock_reviewed_for_release_sha,
             "distributed_component_ids": sorted(evidence.distributed_component_ids),
+            "sbom_component_ids": sorted(evidence.sbom_component_ids),
             "components": [
                 {
                     "component_id": item.component_id,

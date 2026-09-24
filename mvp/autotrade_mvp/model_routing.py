@@ -1,8 +1,8 @@
 """Deterministic, privacy-aware model routing with explicit cost budgets.
 
-This module is intentionally provider-neutral. It never expands authority, never
-routes restricted data to an ineligible remote model, and always supports a
-zero-model result.
+This module is provider-neutral. It never expands trading authority, never
+routes restricted data to an ineligible remote model, and always supports an
+explicit no-model outcome.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ class ModelRoute:
     input_cost_per_million: Decimal = Decimal("0")
     output_cost_per_million: Decimal = Decimal("0")
     allowed_data_classes: frozenset[str] = frozenset({"public"})
+    expected_latency_ms: int | None = None
     enabled: bool = True
 
     def __post_init__(self) -> None:
@@ -31,8 +32,10 @@ class ModelRoute:
             raise ValueError("locality must be local or remote")
         if self.input_cost_per_million < 0 or self.output_cost_per_million < 0:
             raise ValueError("model costs cannot be negative")
-        if not self.route_id:
-            raise ValueError("route_id is required")
+        if self.expected_latency_ms is not None and self.expected_latency_ms < 0:
+            raise ValueError("expected_latency_ms cannot be negative")
+        if not self.route_id or not self.provider or not self.model:
+            raise ValueError("route_id, provider and model are required")
 
 
 @dataclass(frozen=True)
@@ -57,20 +60,43 @@ class RouteRequest:
     data_class: str
     input_tokens: int
     output_tokens: int
+    deadline_ms: int | None = None
+    cancelled: bool = False
 
     def __post_init__(self) -> None:
         if not self.data_class:
             raise ValueError("data_class is required")
         if self.input_tokens < 0 or self.output_tokens < 0:
             raise ValueError("token estimates cannot be negative")
+        if self.deadline_ms is not None and self.deadline_ms < 0:
+            raise ValueError("deadline_ms cannot be negative")
+        if not isinstance(self.cancelled, bool):
+            raise TypeError("cancelled must be a boolean")
 
 
 @dataclass(frozen=True)
 class RoutingDecision:
     route_id: str | None
+    provider: str | None
+    model: str | None
+    locality: str | None
     estimated_cost: Decimal
+    deadline_ms: int | None
     execute: bool
     reason: str
+
+
+def _no_route(request: RouteRequest, reason: str) -> RoutingDecision:
+    return RoutingDecision(
+        route_id=None,
+        provider=None,
+        model=None,
+        locality=None,
+        estimated_cost=Decimal("0"),
+        deadline_ms=request.deadline_ms,
+        execute=False,
+        reason=reason,
+    )
 
 
 def _estimated_cost(route: ModelRoute, request: RouteRequest) -> Decimal:
@@ -81,11 +107,7 @@ def _estimated_cost(route: ModelRoute, request: RouteRequest) -> Decimal:
     )
 
 
-def _eligible(
-    route: ModelRoute,
-    request: RouteRequest,
-    policy: RoutingPolicy,
-) -> bool:
+def _eligible(route: ModelRoute, request: RouteRequest, policy: RoutingPolicy) -> bool:
     if not route.enabled:
         return False
     if request.data_class not in route.allowed_data_classes:
@@ -98,6 +120,12 @@ def _eligible(
         return False
     if policy.mode == "allowlist" and route.route_id not in policy.allowed_route_ids:
         return False
+    if (
+        request.deadline_ms is not None
+        and route.expected_latency_ms is not None
+        and route.expected_latency_ms > request.deadline_ms
+    ):
+        return False
     return True
 
 
@@ -106,10 +134,12 @@ def select_route(
     policy: RoutingPolicy,
     request: RouteRequest,
 ) -> RoutingDecision:
-    """Select one eligible route or return an explicit zero-model decision."""
+    """Select one eligible route or return an explicit no-model decision."""
 
+    if request.cancelled:
+        return _no_route(request, "request cancelled")
     if policy.mode == "zero":
-        return RoutingDecision(None, Decimal("0"), False, "zero-model policy")
+        return _no_route(request, "zero-model policy")
 
     candidates: list[tuple[Decimal, str, ModelRoute]] = []
     for route in routes:
@@ -121,11 +151,22 @@ def select_route(
         candidates.append((cost, route.route_id, route))
 
     if not candidates:
-        return RoutingDecision(None, Decimal("0"), False, "no eligible route within policy and budget")
+        return _no_route(request, "no eligible route within privacy, deadline and budget policy")
 
     if policy.mode == "fixed":
         cost, _, route = candidates[0]
-        return RoutingDecision(route.route_id, cost, True, "fixed eligible route")
+        reason = "fixed eligible route"
+    else:
+        cost, _, route = min(candidates, key=lambda item: (item[0], item[1]))
+        reason = "lowest-cost eligible route"
 
-    cost, _, route = min(candidates, key=lambda item: (item[0], item[1]))
-    return RoutingDecision(route.route_id, cost, True, "lowest-cost eligible route")
+    return RoutingDecision(
+        route_id=route.route_id,
+        provider=route.provider,
+        model=route.model,
+        locality=route.locality,
+        estimated_cost=cost,
+        deadline_ms=request.deadline_ms,
+        execute=True,
+        reason=reason,
+    )

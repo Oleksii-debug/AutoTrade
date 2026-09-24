@@ -15,6 +15,12 @@ from research.autotrade_research.artifacts.store import ArtifactStore
 NOW = datetime(2026, 9, 24, 16, 0, tzinfo=timezone.utc)
 SNAPSHOT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 SOURCES = ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+PRODUCER_TYPES = {
+    "DOCUMENTED": "PROVIDER_DOCUMENTATION",
+    "API": "PROVIDER_API",
+    "ACCOUNT": "ACCOUNT_CAPABILITY",
+    "INSTRUMENT": "INSTRUMENT_CAPABILITY",
+}
 
 
 def _claim(source: str, evidence_ref: dict[str, object], *, expires_at=None) -> CapabilityClaim:
@@ -63,7 +69,7 @@ def _publish(store: ArtifactStore, source: str, *, account_id="paper-account") -
             "artifact_kind": "CAPABILITY_EVIDENCE",
             "schema_version": 1,
             "capability_source": source,
-            "producer_type": source,
+            "producer_type": PRODUCER_TYPES[source],
             "producer_id": f"fixture-{source.lower()}",
             "evidence_version": "1",
             "provider_id": "simulated",
@@ -106,6 +112,7 @@ class CapabilityArtifactEvidenceTests(unittest.TestCase):
             )
             self.assertEqual(snapshot.status, "UNKNOWN")
             self.assertEqual(snapshot.sources, frozenset())
+            self.assertEqual(snapshot.evidence, ())
 
     def test_existing_artifact_digest_mismatch_is_conflicted(self):
         with TemporaryDirectory() as directory:
@@ -148,6 +155,7 @@ class CapabilityArtifactEvidenceTests(unittest.TestCase):
             )
             self.assertEqual(current.status, "VERIFIED")
             self.assertEqual(current.sources, frozenset(SOURCES))
+            self.assertEqual(len(current.evidence), 4)
             self.assertTrue(
                 current.admits(
                     at=NOW,

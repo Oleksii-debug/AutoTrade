@@ -7,11 +7,16 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
+import re
 from typing import Iterable, Mapping, Sequence
 
 
 def _time(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
         raise ValueError(f"{name} must be timezone-aware")
     return value.astimezone(timezone.utc)
 
@@ -42,6 +47,18 @@ class SourceValue:
     available_at: datetime
     value: Decimal
     source_revision: str
+
+    def __post_init__(self) -> None:
+        event = _time(self.event_time, name="event_time")
+        available = _time(self.available_at, name="available_at")
+        if available < event:
+            raise ValueError("available_at cannot precede event_time")
+        object.__setattr__(self, "observation_id", _text(self.observation_id, name="observation_id"))
+        object.__setattr__(self, "symbol", _text(self.symbol, name="symbol"))
+        object.__setattr__(self, "event_time", event)
+        object.__setattr__(self, "available_at", available)
+        object.__setattr__(self, "value", _decimal(self.value, name="value"))
+        object.__setattr__(self, "source_revision", _text(self.source_revision, name="source_revision"))
 
     @classmethod
     def create(
@@ -77,6 +94,24 @@ class FeaturePoint:
     source_revisions: tuple[str, ...]
     feature_name: str
 
+    def __post_init__(self) -> None:
+        if isinstance(self.input_ids, (str, bytes)) or not self.input_ids:
+            raise ValueError("input_ids must be a non-empty sequence")
+        if isinstance(self.source_revisions, (str, bytes)) or not self.source_revisions:
+            raise ValueError("source_revisions must be a non-empty sequence")
+        input_ids = tuple(_text(value, name="input_id") for value in self.input_ids)
+        revisions = tuple(
+            _text(value, name="source_revision") for value in self.source_revisions
+        )
+        if len(input_ids) != len(revisions):
+            raise ValueError("input_ids and source_revisions must have equal length")
+        object.__setattr__(self, "symbol", _text(self.symbol, name="symbol"))
+        object.__setattr__(self, "decision_time", _time(self.decision_time, name="decision_time"))
+        object.__setattr__(self, "value", _decimal(self.value, name="value"))
+        object.__setattr__(self, "input_ids", input_ids)
+        object.__setattr__(self, "source_revisions", revisions)
+        object.__setattr__(self, "feature_name", _text(self.feature_name, name="feature_name"))
+
 
 @dataclass(frozen=True)
 class LabelPoint:
@@ -86,6 +121,17 @@ class LabelPoint:
     value: Decimal
     source_revision: str
 
+    def __post_init__(self) -> None:
+        anchor = _time(self.anchor_time, name="anchor_time")
+        available = _time(self.label_available_at, name="label_available_at")
+        if available <= anchor:
+            raise ValueError("label_available_at must be after anchor_time")
+        object.__setattr__(self, "symbol", _text(self.symbol, name="symbol"))
+        object.__setattr__(self, "anchor_time", anchor)
+        object.__setattr__(self, "label_available_at", available)
+        object.__setattr__(self, "value", _decimal(self.value, name="value"))
+        object.__setattr__(self, "source_revision", _text(self.source_revision, name="source_revision"))
+
 
 @dataclass(frozen=True)
 class Normalizer:
@@ -94,6 +140,23 @@ class Normalizer:
     fit_cutoff: datetime
     fit_input_ids: tuple[str, ...]
     provenance_hash: str
+
+    def __post_init__(self) -> None:
+        mean = _decimal(self.mean, name="mean")
+        scale = _decimal(self.scale, name="scale")
+        if scale <= 0:
+            raise ValueError("scale must be positive")
+        if isinstance(self.fit_input_ids, (str, bytes)) or not self.fit_input_ids:
+            raise ValueError("fit_input_ids must be a non-empty sequence")
+        ids = tuple(_text(value, name="fit_input_id") for value in self.fit_input_ids)
+        digest = _text(self.provenance_hash, name="provenance_hash")
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+            raise ValueError("provenance_hash must be a canonical SHA-256 digest")
+        object.__setattr__(self, "mean", mean)
+        object.__setattr__(self, "scale", scale)
+        object.__setattr__(self, "fit_cutoff", _time(self.fit_cutoff, name="fit_cutoff"))
+        object.__setattr__(self, "fit_input_ids", ids)
+        object.__setattr__(self, "provenance_hash", digest)
 
     def transform(self, value) -> Decimal:
         item = _decimal(value, name="value")

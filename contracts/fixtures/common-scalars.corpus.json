@@ -164,6 +164,24 @@
       "type": "UnitId",
       "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
       "expected": false
+    },
+    {
+      "name": "decimal-json-number",
+      "type": "Decimal",
+      "value": 1.25,
+      "expected": false
+    },
+    {
+      "name": "sequence-json-number",
+      "type": "Sequence",
+      "value": 1,
+      "expected": false
+    },
+    {
+      "name": "digest-json-null",
+      "type": "Digest",
+      "value": null,
+      "expected": false
     }
   ]
 }

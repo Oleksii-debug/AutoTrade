@@ -85,6 +85,18 @@ class ExperienceMemory:
                     ON tombstones(episode_id, created_at);
                 """
             )
+            correction_columns = {
+                row["name"]
+                for row in con.execute("PRAGMA table_info(corrections)").fetchall()
+            }
+            if "available_at" not in correction_columns:
+                con.execute("ALTER TABLE corrections ADD COLUMN available_at TEXT")
+            con.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_corrections_causal
+                    ON corrections(episode_id, available_at, created_at, correction_id)
+                """
+            )
 
     @contextmanager
     def _connect(self):
@@ -176,15 +188,25 @@ class ExperienceMemory:
         episode_id: str,
         *,
         payload: dict[str, Any],
+        available_at: datetime | None = None,
         correction_id: str | None = None,
     ) -> tuple[str, bool]:
         episode = _identifier(episode_id)
+        availability = _time(
+            available_at or datetime.now(timezone.utc),
+            name="available_at",
+        )
         if not isinstance(payload, dict) or not payload:
             raise ValueError("correction payload must be non-empty")
         if "supersedes_fields" not in payload or not isinstance(payload["supersedes_fields"], list):
             raise ValueError("correction must declare supersedes_fields")
         identifier = _identifier(correction_id)
-        digest = _hash(payload)
+        digest = _hash(
+            {
+                "available_at": availability.isoformat(),
+                "payload": payload,
+            }
+        )
         canonical = _canonical(payload)
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -192,12 +214,29 @@ class ExperienceMemory:
                 raise KeyError(episode)
             existing = con.execute("SELECT * FROM corrections WHERE correction_id=?", (identifier,)).fetchone()
             if existing is not None:
-                if existing["episode_id"] != episode or existing["correction_hash"] != digest:
+                existing_availability = existing["available_at"] or existing["created_at"]
+                same = (
+                    existing["episode_id"] == episode
+                    and existing["correction_hash"] == digest
+                    and existing_availability == availability.isoformat()
+                )
+                if not same:
                     raise MemoryConflict("correction identity conflict")
                 return identifier, False
             con.execute(
-                "INSERT INTO corrections(correction_id,episode_id,correction_hash,payload_json,created_at) VALUES(?,?,?,?,?)",
-                (identifier, episode, digest, canonical, datetime.now(timezone.utc).isoformat()),
+                """
+                INSERT INTO corrections(
+                    correction_id,episode_id,correction_hash,payload_json,created_at,available_at
+                ) VALUES(?,?,?,?,?,?)
+                """,
+                (
+                    identifier,
+                    episode,
+                    digest,
+                    canonical,
+                    datetime.now(timezone.utc).isoformat(),
+                    availability.isoformat(),
+                ),
             )
             con.commit()
         return identifier, True
@@ -258,8 +297,13 @@ class ExperienceMemory:
                 if tombstones and not include_tombstoned:
                     continue
                 corrections = con.execute(
-                    "SELECT * FROM corrections WHERE episode_id=? ORDER BY created_at,correction_id",
-                    (row["episode_id"],),
+                    """
+                    SELECT * FROM corrections
+                    WHERE episode_id=?
+                      AND COALESCE(available_at, created_at) <= ?
+                    ORDER BY COALESCE(available_at, created_at), created_at, correction_id
+                    """,
+                    (row["episode_id"], cutoff.isoformat()),
                 ).fetchall()
                 results.append(
                     {

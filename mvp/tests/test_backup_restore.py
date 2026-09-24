@@ -1,3 +1,4 @@
+from contextlib import closing
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -131,11 +132,12 @@ class BackupRestoreTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             state, artifacts = self._build_sources(root)
-            with sqlite3.connect(state / "journal.sqlite3") as connection:
+            with closing(sqlite3.connect(state / "journal.sqlite3")) as connection:
                 connection.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (99, "2026-09-24T00:00:00Z"),
                 )
+                connection.commit()
             with self.assertRaises(BackupCompatibilityError):
                 create_backup(state, artifacts, root / "backup")
 

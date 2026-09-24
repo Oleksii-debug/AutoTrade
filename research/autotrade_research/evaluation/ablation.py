@@ -34,16 +34,27 @@ class AblationOutcome:
     components: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not self.case_id or not self.input_fingerprint:
-            raise ValueError("case_id and input_fingerprint are required")
+        if not isinstance(self.case_id, str) or not self.case_id.strip():
+            raise ValueError("case_id must be a non-empty string")
+        if not isinstance(self.input_fingerprint, str) or not self.input_fingerprint.strip():
+            raise ValueError("input_fingerprint must be a non-empty string")
         if self.variant not in {"FULL", "ABLATED"}:
             raise ValueError("variant must be FULL or ABLATED")
+        if (
+            not isinstance(self.elapsed_ms, int)
+            or isinstance(self.elapsed_ms, bool)
+            or not isinstance(self.deadline_ms, int)
+            or isinstance(self.deadline_ms, bool)
+        ):
+            raise TypeError("elapsed_ms and deadline_ms must be integers")
         if self.elapsed_ms < 0 or self.deadline_ms <= 0:
             raise ValueError("elapsed_ms must be non-negative and deadline_ms positive")
+        if not isinstance(self.components, tuple):
+            raise TypeError("components must be an immutable tuple")
+        if any(not isinstance(item, str) or not item.strip() for item in self.components):
+            raise ValueError("component identities must be non-empty strings")
         if len(self.components) != len(set(self.components)):
             raise ValueError("components must use deduplicated canonical identities")
-        if any(not item for item in self.components):
-            raise ValueError("component identities must be non-empty")
         object.__setattr__(self, "utility", _decimal(self.utility, "utility"))
         cost = _decimal(self.cost, "cost")
         if cost < 0:

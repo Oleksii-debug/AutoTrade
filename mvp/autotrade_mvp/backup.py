@@ -18,6 +18,7 @@ import sqlite3
 import tempfile
 from typing import Any
 
+from .diagnostics import build_diagnostic_snapshot
 from .persistence import JournalStore
 
 
@@ -268,11 +269,22 @@ def create_backup(
             if not source.is_file() or _sha256_file(source) != expected_digest:
                 raise BackupError("Source changed before backup commit")
 
+        if (stage / "state" / "checkpoint.json").is_file() and (
+            stage / "state" / "learning-evidence.jsonl"
+        ).is_file():
+            try:
+                build_diagnostic_snapshot(stage / "state")
+            except ValueError as error:
+                raise BackupIntegrityError(
+                    "Runtime state, journal and evidence are not one consistent snapshot"
+                ) from error
+
         manifest = {
             "schema_version": BACKUP_SCHEMA_VERSION,
             "created_at": _utc_now(),
             "journal_schema_version": journal_schema,
             "reconciliation_required_after_restore": True,
+            "runtime_consistency_check": "DURABLE_TRACE_RECONSTRUCTION",
             "files": sorted(entries, key=lambda item: item["path"]),
         }
         manifest_bytes = _canonical_json(manifest)
@@ -313,6 +325,8 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
         raise BackupCompatibilityError("Unsupported backed-up journal schema version")
     if manifest.get("reconciliation_required_after_restore") is not True:
         raise BackupIntegrityError("Restore reconciliation gate is missing")
+    if manifest.get("runtime_consistency_check") != "DURABLE_TRACE_RECONSTRUCTION":
+        raise BackupIntegrityError("Runtime consistency evidence is missing")
     entries = manifest.get("files")
     if not isinstance(entries, list) or not entries:
         raise BackupIntegrityError("Backup file inventory is empty")

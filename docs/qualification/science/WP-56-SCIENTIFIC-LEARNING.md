@@ -23,3 +23,7 @@ The implementation was exercised together with the existing science tests. The f
 `python -m pytest -q tests/Science/test_science.py tests/Science/test_science_qualification.py`
 
 Result in the local candidate environment after evidence-binding hardening: 17 passed. Exact-head CI on this GitHub branch remains required before integration.
+
+## Immutable evidence requirement
+
+A gate status is not trusted merely because its hash has valid syntax. A whole-science `PASS` requires an independent immutable-evidence verifier for every required gate. Missing, unreadable, mismatched, or unverifiable gate evidence is `INCONCLUSIVE`; it cannot qualify an economic-edge claim. The verifier supplies evidence only and never grants release or trading authority.

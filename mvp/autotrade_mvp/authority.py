@@ -39,6 +39,10 @@ def _instant(value: str, *, name: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _instant_text(value: str, *, name: str) -> str:
+    return _instant(value, name=name).isoformat().replace("+00:00", "Z")
+
+
 @dataclass(frozen=True)
 class AuthorityPolicy:
     policy_id: str
@@ -88,8 +92,8 @@ class AuthorityPolicy:
         notional = _decimal(self.max_notional, name="max_notional")
         if notional <= 0:
             raise ValueError("max_notional must be positive")
-        valid_from = _text(self.valid_from, name="valid_from")
-        expires_at = _text(self.expires_at, name="expires_at")
+        valid_from = _instant_text(self.valid_from, name="valid_from")
+        expires_at = _instant_text(self.expires_at, name="expires_at")
         if _instant(valid_from, name="valid_from") >= _instant(
             expires_at, name="expires_at"
         ):
@@ -221,8 +225,10 @@ class AuthorityService:
         pid = _text(policy_id, name="policy_id")
         if pid not in self._policies:
             raise KeyError(pid)
-        normalized = (_text(reason, name="reason"), revoked_at)
-        _instant(revoked_at, name="revoked_at")
+        normalized = (
+            _text(reason, name="reason"),
+            _instant_text(revoked_at, name="revoked_at"),
+        )
         existing = self._revocations.get(pid)
         if existing is not None:
             if existing != normalized:
@@ -261,9 +267,8 @@ class AuthorityService:
             instrument=_text(instrument, name="instrument"),
             action=_text(action, name="action").upper(),
             notional=confirmation_notional,
-            expires_at=expires_at,
+            expires_at=_instant_text(expires_at, name="expires_at"),
         )
-        _instant(expires_at, name="expires_at")
         existing = self._confirmations.get(cid)
         if existing is not None:
             if existing != confirmation:
@@ -400,7 +405,7 @@ class AuthorityService:
             state_version=state_version,
             authority_epoch=self._epoch,
             outcome=outcome,
-            admitted_at=now,
+            admitted_at=_instant_text(now, name="now"),
             confirmation_id=used_confirmation,
             reason=failure_reason,
             request_fingerprint=request_fingerprint,

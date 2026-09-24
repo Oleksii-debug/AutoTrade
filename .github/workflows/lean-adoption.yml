@@ -87,3 +87,48 @@ jobs:
             --project tests/Integration/LeanAdoption/LeanAdoptionProbe.csproj `
             --configuration Release `
             "-p:LeanRoot=$env:LEAN_ROOT"
+
+
+      - name: Write exact-head adoption evidence
+        shell: pwsh
+        working-directory: autotrade
+        env:
+          LEAN_ROOT: ${{ github.workspace }}/lean
+        run: |
+          $evidenceDir = "artifacts/lean-adoption"
+          New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
+          $assetRows = Get-ChildItem -Path $env:LEAN_ROOT -Filter project.assets.json -Recurse |
+            Sort-Object FullName |
+            ForEach-Object {
+              $relative = [IO.Path]::GetRelativePath($env:LEAN_ROOT, $_.FullName)
+              $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
+              "$hash  $relative"
+            }
+          $assetManifest = Join-Path $evidenceDir "lean-project-assets-sha256.txt"
+          $assetRows | Set-Content -Encoding utf8 $assetManifest
+          $assetManifestHash = (Get-FileHash -Algorithm SHA256 $assetManifest).Hash.ToLowerInvariant()
+          $actualSource = (git rev-parse HEAD).Trim()
+          if ($actualSource -ne $env:AUTOTRADE_SOURCE_SHA) {
+            throw "AutoTrade checkout mismatch: expected $env:AUTOTRADE_SOURCE_SHA, got $actualSource"
+          }
+          $evidence = [ordered]@{
+            schema_version = "1.0.0"
+            source_sha = $actualSource
+            lean_revision = $env:LEAN_REVISION
+            lean_tree = $env:LEAN_TREE
+            lean_license_blob = $env:LEAN_LICENSE_BLOB
+            runner_os = $env:RUNNER_OS
+            dotnet_version = (dotnet --version).Trim()
+            probe_result = "PASS"
+            dependency_asset_manifest_sha256 = "sha256:$assetManifestHash"
+          }
+          $evidence |
+            ConvertTo-Json -Depth 4 |
+            Set-Content -Encoding utf8 (Join-Path $evidenceDir "evidence.json")
+
+      - name: Upload exact-head adoption evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: lean-adoption-evidence-${{ runner.os }}
+          path: autotrade/artifacts/lean-adoption/*
+          if-no-files-found: error

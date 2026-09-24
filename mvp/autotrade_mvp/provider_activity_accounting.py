@@ -168,6 +168,20 @@ def book_external_provider_cash_activity(
         )
     if activity.currency is None:
         raise ValueError("external cash activity requires currency")
+    linked_fields = {
+        "instrument": activity.instrument,
+        "client_order_id": activity.client_order_id,
+        "provider_order_id": activity.provider_order_id,
+        "provider_execution_id": activity.provider_execution_id,
+    }
+    present_links = tuple(
+        name for name, value in linked_fields.items() if value is not None
+    )
+    if present_links:
+        raise ValueError(
+            "external cash activity must not discard trading linkage: "
+            + ", ".join(present_links)
+        )
 
     value = _decimal(amount, name="amount")
     if value == 0:

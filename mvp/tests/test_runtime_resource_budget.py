@@ -24,7 +24,6 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
     def spec(self, **overrides):
         values = dict(
             scenario_id="declared-host-load-a",
-            spec_digest=self.spec().digest,
             release_sha=RELEASE_SHA,
             configuration_hash=CONFIG_HASH,
             host_fingerprint=HOST_HASH,
@@ -41,6 +40,7 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
     def observation(self, **overrides):
         values = dict(
             scenario_id="declared-host-load-a",
+            spec_digest=self.spec().digest,
             release_sha=RELEASE_SHA,
             configuration_hash=CONFIG_HASH,
             host_fingerprint=HOST_HASH,

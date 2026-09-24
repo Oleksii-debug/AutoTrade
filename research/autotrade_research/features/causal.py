@@ -106,21 +106,26 @@ def _latest_known_vintages(
     symbol: str,
     cutoff: datetime,
 ) -> tuple[SourceValue, ...]:
-    latest_by_event_time: dict[datetime, SourceValue] = {}
+    candidates_by_event_time: dict[datetime, list[SourceValue]] = {}
     for item in observations:
         if item.symbol != symbol or item.available_at > cutoff:
             continue
-        current = latest_by_event_time.get(item.event_time)
-        if current is None or (
-            item.available_at,
-            item.source_revision,
-            item.observation_id,
-        ) > (
-            current.available_at,
-            current.source_revision,
-            current.observation_id,
-        ):
-            latest_by_event_time[item.event_time] = item
+        candidates_by_event_time.setdefault(item.event_time, []).append(item)
+
+    latest_by_event_time: dict[datetime, SourceValue] = {}
+    for event_time, candidates in candidates_by_event_time.items():
+        latest_available_at = max(item.available_at for item in candidates)
+        latest = [item for item in candidates if item.available_at == latest_available_at]
+        distinct_truth = {(item.source_revision, item.value) for item in latest}
+        if len(distinct_truth) > 1:
+            raise ValueError(
+                "ambiguous simultaneously available revisions for "
+                f"{symbol} at {event_time.isoformat()}"
+            )
+        latest_by_event_time[event_time] = min(
+            latest,
+            key=lambda item: item.observation_id,
+        )
     return tuple(
         sorted(
             latest_by_event_time.values(),
@@ -267,17 +272,31 @@ def require_universe_members(
     decision_time: datetime,
 ) -> Mapping[str, SourceValue]:
     cutoff = _time(decision_time, name="decision_time")
-    latest: dict[str, SourceValue] = {}
+    by_symbol: dict[str, list[SourceValue]] = {}
     for item in observations:
-        if item.available_at > cutoff:
-            continue
-        current = latest.get(item.symbol)
-        if current is None or (item.event_time, item.available_at, item.observation_id) > (
-            current.event_time,
-            current.available_at,
-            current.observation_id,
-        ):
-            latest[item.symbol] = item
+        if item.available_at <= cutoff:
+            by_symbol.setdefault(item.symbol, []).append(item)
+
+    latest: dict[str, SourceValue] = {}
+    for symbol, items in by_symbol.items():
+        latest_event_time = max(item.event_time for item in items)
+        event_items = [item for item in items if item.event_time == latest_event_time]
+        latest_available_at = max(item.available_at for item in event_items)
+        contemporaneous = [
+            item for item in event_items if item.available_at == latest_available_at
+        ]
+        distinct_truth = {
+            (item.source_revision, item.value) for item in contemporaneous
+        }
+        if len(distinct_truth) > 1:
+            raise ValueError(
+                "ambiguous simultaneously available revisions for "
+                f"{symbol} at {latest_event_time.isoformat()}"
+            )
+        latest[symbol] = min(
+            contemporaneous,
+            key=lambda item: item.observation_id,
+        )
     missing = [symbol for symbol in required_symbols if symbol not in latest]
     if missing:
         raise ValueError("missing required universe members: " + ", ".join(sorted(missing)))

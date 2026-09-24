@@ -43,6 +43,7 @@ class AllocationCandidate:
     price: Decimal
     lot_size: Decimal
     cost_rate: Decimal = Decimal("0")
+    capital_requirement_rate: Decimal = Decimal("1")
 
     @classmethod
     def create(
@@ -53,6 +54,7 @@ class AllocationCandidate:
         price,
         lot_size,
         cost_rate=0,
+        capital_requirement_rate=1,
     ) -> "AllocationCandidate":
         return cls(
             symbol=_text(symbol, name="symbol"),
@@ -60,6 +62,11 @@ class AllocationCandidate:
             price=_positive(price, name="price"),
             lot_size=_positive(lot_size, name="lot_size"),
             cost_rate=_positive(cost_rate, name="cost_rate", allow_zero=True),
+            capital_requirement_rate=_positive(
+                capital_requirement_rate,
+                name="capital_requirement_rate",
+                allow_zero=True,
+            ),
         )
 
 
@@ -140,6 +147,7 @@ def _evaluate(
     targets: list[AllocationTarget] = []
     notionals: dict[str, Decimal] = {}
     total_cost = Decimal("0")
+    capital_required = Decimal("0")
 
     for candidate in candidates:
         scaled = candidate.desired_notional * scale
@@ -148,6 +156,7 @@ def _evaluate(
         cost = abs(notional) * candidate.cost_rate
         notionals[candidate.symbol] = notional
         total_cost += cost
+        capital_required += abs(notional) * candidate.capital_requirement_rate
         targets.append(
             AllocationTarget(
                 symbol=candidate.symbol,
@@ -159,10 +168,10 @@ def _evaluate(
 
     gross = sum((abs(value) for value in notionals.values()), Decimal("0"))
     net = abs(sum(notionals.values(), Decimal("0")))
-    cash_required = (
-        sum((max(value, Decimal("0")) for value in notionals.values()), Decimal("0"))
-        + total_cost
-    )
+    # Short-sale proceeds are never treated as spendable capital. Each
+    # candidate must declare an explicit capital/margin requirement; the
+    # conservative default is 100% of absolute notional.
+    cash_required = capital_required + total_cost
 
     worst_stress_loss = Decimal("0")
     for scenario in stress_scenarios.values():

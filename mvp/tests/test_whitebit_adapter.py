@@ -30,7 +30,9 @@ from mvp.autotrade_mvp.whitebit import (
     paged_order_history_request,
     parse_execution_deal,
     parse_execution_history,
+    parse_fee_schedule,
     parse_collateral_balances,
+    parse_funding_page,
     parse_hedge_mode,
     parse_spot_balances,
     parse_open_position,
@@ -487,7 +489,7 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertEqual(deal.provider_execution_id, "123")
         self.assertEqual(deal.provider_order_id, "456")
         self.assertEqual(deal.role, "TAKER")
-        self.assertEqual(deal.trade_time, "2020-06-27T07:38:59.123456Z")
+        self.assertEqual(deal.trade_time, "2020-06-27T04:58:59.123456Z")
         fill = deal.to_reconciliation_fill()
         self.assertEqual(fill.provider_execution_id, "123")
         self.assertEqual(fill.quantity, Decimal("0.001"))

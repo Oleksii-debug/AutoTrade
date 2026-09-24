@@ -71,6 +71,32 @@ class DeterministicStrategyTests(unittest.TestCase):
         self.assertTrue(strategy.ingest(item, simulation_time=item.available_at))
         self.assertFalse(strategy.ingest(item, simulation_time=item.available_at))
 
+    def test_duplicate_event_id_with_changed_price_fails_closed(self):
+        strategy = ReturnThresholdBaseline(lookback=2, threshold="0.01", proposal_quantity="1")
+        original = obs(0, "100")
+        conflicting = CausalObservation.create(
+            event_id=original.event_id,
+            symbol=original.symbol,
+            available_at=original.available_at,
+            price="101",
+        )
+        strategy.ingest(original, simulation_time=original.available_at)
+        with self.assertRaisesRegex(ValueError, "different observation content"):
+            strategy.ingest(conflicting, simulation_time=conflicting.available_at)
+
+    def test_duplicate_event_id_cannot_move_between_symbols(self):
+        strategy = ReturnThresholdBaseline(lookback=2, threshold="0.01", proposal_quantity="1")
+        original = obs(0, "100")
+        conflicting = CausalObservation.create(
+            event_id=original.event_id,
+            symbol="BBB",
+            available_at=original.available_at,
+            price=original.price,
+        )
+        strategy.ingest(original, simulation_time=original.available_at)
+        with self.assertRaisesRegex(ValueError, "different observation content"):
+            strategy.ingest(conflicting, simulation_time=conflicting.available_at)
+
     def test_out_of_order_availability_is_rejected(self):
         strategy = ReturnThresholdBaseline(lookback=2, threshold="0.01", proposal_quantity="1")
         later = obs(2, "102")

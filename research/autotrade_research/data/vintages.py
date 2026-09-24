@@ -137,6 +137,8 @@ def point_in_time_market_events(
         available = _utc(event.get("available_at"), "available_at")
         source_at = _utc(event.get("source_event_at"), "source_event_at")
         ingested = _utc(event.get("ingested_at"), "ingested_at")
+        if available < source_at:
+            raise HistoricalDataError("available_at cannot precede source_event_at")
         if ingested < available:
             raise HistoricalDataError("ingested_at cannot precede evidenced available_at")
         raw_evidence = _evidence(event.get("raw_evidence_ref"))
@@ -317,6 +319,14 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
         raise HistoricalDataError("source_evidence must be non-empty")
     evidence = [_evidence(item) for item in source_evidence]
 
+    created_at = _utc(manifest["created_at"], "created_at")
+    latest_evidence_at = max(
+        _utc(item["observed_at"], "source evidence observed_at")
+        for item in evidence
+    )
+    if created_at < latest_evidence_at:
+        raise HistoricalDataError("created_at cannot precede source evidence observation")
+
     for name in (
         "coverage",
         "availability_policy",
@@ -369,7 +379,7 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "rights": rights,
         "missingness_report": missingness,
         "source_evidence": evidence,
-        "created_at": _utc_text(_utc(manifest["created_at"], "created_at")),
+        "created_at": _utc_text(created_at),
     }
 
 

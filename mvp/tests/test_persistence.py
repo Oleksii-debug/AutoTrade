@@ -215,6 +215,34 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(saved, {"status": "RETRY"})
 
 
+    def test_partial_preexisting_table_cannot_be_misclassified_as_migrated_schema(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "CREATE TABLE command_dedupe(command_id TEXT PRIMARY KEY)"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "command_dedupe is missing required columns",
+            ):
+                JournalStore(path)
+
+            connection = sqlite3.connect(path)
+            try:
+                migration_table = connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'schema_migrations'"
+                ).fetchone()
+            finally:
+                connection.close()
+            self.assertIsNone(migration_table)
+
     def test_v1_database_upgrades_atomically_without_losing_events(self):
         class LegacyJournalStore(JournalStore):
             SCHEMA_VERSION = 1

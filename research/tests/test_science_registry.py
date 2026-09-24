@@ -60,6 +60,14 @@ class ScientificRegistryTests(unittest.TestCase):
             with self.assertRaises(ProtocolViolation):
                 store.register_protocol(value)
 
+    def test_present_but_empty_required_field_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            value = protocol()
+            value["primary_metrics"] = []
+            with self.assertRaisesRegex(ProtocolViolation, "cannot be empty"):
+                store.register_protocol(value)
+
     def test_failed_and_discarded_trials_are_preserved(self):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")

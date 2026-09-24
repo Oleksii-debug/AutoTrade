@@ -24,7 +24,10 @@ foreach (var item in root.GetProperty("cases").EnumerateArray())
 {
     var name = item.GetProperty("name").GetString() ?? "";
     var kind = item.GetProperty("type").GetString() ?? "";
-    var value = item.GetProperty("value").GetString();
+    var valueElement = item.GetProperty("value");
+    var value = valueElement.ValueKind == JsonValueKind.String
+        ? valueElement.GetString()
+        : null;
     var expected = item.GetProperty("expected").GetBoolean();
     if (!names.Add(name))
     {

@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>AutoTrade.Engine.Lean.AdoptionTests</AssemblyName>
+    <RootNamespace>AutoTrade.Engine.Lean.AdoptionTests</RootNamespace>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../src/AutoTrade.Engine.Lean/AutoTrade.Engine.Lean.csproj" />
+  </ItemGroup>
+</Project>

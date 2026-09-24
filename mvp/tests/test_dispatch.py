@@ -3,6 +3,7 @@ import unittest
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.recovery import RecoveryController
 
 
 class SimulatedProcessDeath(BaseException):
@@ -304,6 +305,65 @@ class DispatchTests(unittest.TestCase):
                 ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
             )
 
+
+
+    def test_owner_transfer_during_provider_wait_blocks_stale_sender(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            recovery = RecoveryController()
+            owner = recovery.start("host-a")
+            recovery.record_reconciliation(consistent=True)
+            dispatcher = GuardedDispatcher(
+                store,
+                owner_token=owner.owner_id,
+                owner_epoch=owner.epoch,
+            )
+            outbound = 0
+
+            def authority(intent_hash, current_time):
+                return True, "allowed"
+
+            def transport(client_id, request, final_guard):
+                nonlocal outbound
+                recovery.transfer_owner(
+                    new_owner_id="host-b",
+                    old_sender_fenced=True,
+                    reconciled=True,
+                )
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            result = dispatcher.dispatch(
+                attempt_id="fenced-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+                sender_check=recovery.validate_sender,
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "sender_fence_rejected:PermissionError")
+            self.assertEqual(outbound, 0)
+            events = store.load_events("submission_attempt", "fenced-a1")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+            self.assertEqual(events[-1]["payload"]["owner_epoch"], 1)
+
+    def test_owner_epoch_must_be_positive_integer(self):
+        with TemporaryDirectory() as directory:
+            with self.assertRaises(ValueError):
+                GuardedDispatcher(
+                    self.store(directory),
+                    owner_token="host-a",
+                    owner_epoch=0,
+                )
 
 
 if __name__ == "__main__":

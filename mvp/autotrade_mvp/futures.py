@@ -91,6 +91,31 @@ class FuturesContract:
 
 
 @dataclass(frozen=True)
+class InverseVariationMarginState:
+    """Exact inverse-futures state between explicit settlement boundaries."""
+
+    contract: FuturesContract
+    signed_contracts: Decimal
+    last_settlement_price: Decimal
+    cumulative_variation_margin: Fraction = Fraction(0, 1)
+
+    def __post_init__(self) -> None:
+        if self.contract.payoff != "INVERSE":
+            raise FuturesError("inverse variation-margin state requires INVERSE futures")
+        contracts = _decimal(self.signed_contracts, "signed_contracts")
+        if contracts == 0:
+            raise FuturesError("signed_contracts must be non-zero")
+        object.__setattr__(self, "signed_contracts", contracts)
+        object.__setattr__(
+            self,
+            "last_settlement_price",
+            _decimal(self.last_settlement_price, "last_settlement_price", positive=True),
+        )
+        if not isinstance(self.cumulative_variation_margin, Fraction):
+            raise FuturesError("cumulative inverse variation margin must be an exact Fraction")
+
+
+@dataclass(frozen=True)
 class VariationMarginState:
     contract: FuturesContract
     signed_contracts: Decimal
@@ -198,6 +223,43 @@ def apply_variation_margin(
             cumulative_variation_margin=state.cumulative_variation_margin + amount,
         ),
         amount,
+    )
+
+
+def apply_inverse_variation_margin(
+    state: InverseVariationMarginState,
+    settlement_price: Decimal | str | int,
+) -> tuple[InverseVariationMarginState, Fraction]:
+    """Apply one inverse settlement step without premature decimal rounding."""
+
+    price = _decimal(settlement_price, "settlement_price", positive=True)
+    amount = inverse_futures_pnl_exact(
+        signed_contracts=state.signed_contracts,
+        contract_quote_value=state.contract.multiplier,
+        entry_price=state.last_settlement_price,
+        exit_price=price,
+    )
+    return (
+        replace(
+            state,
+            last_settlement_price=price,
+            cumulative_variation_margin=state.cumulative_variation_margin + amount,
+        ),
+        amount,
+    )
+
+
+def unrealized_inverse_after_variation(
+    state: InverseVariationMarginState,
+    mark_price: Decimal | str | int,
+) -> Fraction:
+    """Return exact inverse mark P&L from the last settled price."""
+
+    return inverse_futures_pnl_exact(
+        signed_contracts=state.signed_contracts,
+        contract_quote_value=state.contract.multiplier,
+        entry_price=state.last_settlement_price,
+        exit_price=mark_price,
     )
 
 

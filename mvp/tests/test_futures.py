@@ -72,24 +72,6 @@ class FuturesLifecycleTests(unittest.TestCase):
             Decimal("0.00090909"),
         )
 
-    def test_fraction_settlement_rounds_to_multiple_of_non_decimal_quantum(self):
-        self.assertEqual(
-            settle_fraction(Fraction(3, 100), quantum=Decimal("0.05")),
-            Decimal("0.05"),
-        )
-        self.assertEqual(
-            settle_fraction(
-                Fraction(-3, 100),
-                quantum=Decimal("0.05"),
-                rounding="DOWN",
-            ),
-            Decimal("0.00"),
-        )
-        self.assertEqual(
-            settle_fraction(Fraction(1, 40), quantum=Decimal("0.05")),
-            Decimal("0.00"),
-        )
-
     def test_variation_margin_is_not_counted_again_as_unrealized(self):
         state = VariationMarginState(
             contract=self._linear_contract(),

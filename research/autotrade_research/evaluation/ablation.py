@@ -11,9 +11,7 @@ from typing import Iterable
 
 
 def _decimal(value: Decimal | int | str | float, field: str) -> Decimal:
-    if isinstance(value, (bool, float)):
-        raise ValueError(f"{field} must use exact decimal input")
-    number = Decimal(value)
+    number = Decimal(str(value))
     if not number.is_finite():
         raise ValueError(f"{field} must be finite")
     return number

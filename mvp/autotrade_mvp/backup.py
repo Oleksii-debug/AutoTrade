@@ -922,9 +922,13 @@ def complete_restore_reconciliation(
         owner_id=marker["source_owner_id"],
         epoch=marker["source_owner_epoch"],
     )
-    if controller.owner != source_owner:
+    expected_new_owner = OwnerFence(
+        owner_id=refs[0]["new_owner_id"],
+        epoch=refs[0]["new_owner_epoch"],
+    )
+    if controller.owner not in {source_owner, expected_new_owner}:
         raise BackupError(
-            "Recovery controller must restore the exact source owner fence before transfer"
+            "Recovery controller owner does not match the source or evidenced restored owner"
         )
 
     unresolved = tuple(
@@ -943,7 +947,7 @@ def complete_restore_reconciliation(
         or not controller.storage_writable
         or not controller.clock_trusted
     ):
-        raise BackupError("Recovery controller is not READY before ownership transfer")
+        raise BackupError("Recovery controller is not READY before ownership finalization")
 
     resolution_proof: list[dict[str, Any]] = []
     allowed_resolution_outcomes = {
@@ -985,18 +989,38 @@ def complete_restore_reconciliation(
             }
         )
 
-    new_owner_id = refs[0]["new_owner_id"]
-    expected_new_epoch = refs[0]["new_owner_epoch"]
-    transferred = controller.transfer_owner(
-        new_owner_id=new_owner_id,
-        old_sender_fenced=True,
-        reconciled=True,
-    )
-    if transferred.epoch != expected_new_epoch:
-        raise BackupError("Recovery owner epoch does not match fencing attestation")
-    controller.record_reconciliation(consistent=True, uncertainty=unresolved)
+    new_owner_id = expected_new_owner.owner_id
+    expected_new_epoch = expected_new_owner.epoch
+    if controller.owner == source_owner:
+        transferred = controller.transfer_owner(
+            new_owner_id=new_owner_id,
+            old_sender_fenced=True,
+            reconciled=True,
+        )
+        if transferred != expected_new_owner:
+            raise BackupError("Recovery owner transition does not match fencing attestation")
+        controller.record_reconciliation(consistent=True, uncertainty=unresolved)
+    else:
+        # A prior attempt may have crashed after the new owner fence was
+        # persisted but before the completion marker was committed.  Resuming
+        # that exact evidenced owner is safe; advancing the epoch again is not.
+        transferred = controller.owner
+        if transferred != expected_new_owner:
+            raise BackupError("Durable recovery owner does not match fencing attestation")
+
     if controller.state is not HostState.READY or not controller.provider_reconciled:
         raise BackupError("Recovery controller is not READY after ownership transfer")
+
+    durable_owner_path = root / "state" / "owner-fence.json"
+    controller.persist_owner_fence(durable_owner_path)
+    try:
+        durable_owner = RecoveryController.load_owner_fence(durable_owner_path)
+    except ValueError as error:
+        raise BackupIntegrityError("Persisted restored owner fence is invalid") from error
+    if durable_owner != expected_new_owner:
+        raise BackupIntegrityError(
+            "Persisted restored owner fence does not match fencing attestation"
+        )
 
     proof = {
         "schema_version": 2,
@@ -1060,6 +1084,16 @@ def restore_requires_reconciliation(destination_root: str | Path) -> bool:
         not proof.get("owner_id")
         or type(proof.get("owner_epoch")) is not int
         or proof["owner_epoch"] < 1
+    ):
+        return True
+    durable_owner_path = root / "state" / "owner-fence.json"
+    try:
+        durable_owner = RecoveryController.load_owner_fence(durable_owner_path)
+    except ValueError:
+        return True
+    if (
+        durable_owner.owner_id != proof["owner_id"]
+        or durable_owner.epoch != proof["owner_epoch"]
     ):
         return True
     if (

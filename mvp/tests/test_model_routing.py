@@ -4,10 +4,12 @@ import unittest
 from mvp.autotrade_mvp.model_routing import (
     ModelBudgetConflict,
     ModelBudgetLedger,
+    ModelCallObservation,
     ModelDescriptor,
     ModelRoutingError,
     ModelRoutingPolicy,
     ModelTask,
+    record_model_call,
     route_model,
 )
 
@@ -361,6 +363,179 @@ class ModelRoutingTests(unittest.TestCase):
             policy(mode="FIXED", allowed=("a", "b"))
         with self.assertRaisesRegex(ModelRoutingError, "cannot contain"):
             policy(mode="ZERO_LLM", allowed=("a",))
+
+
+    def test_post_call_record_binds_actual_identity_latency_billing_and_schema(self):
+        budget = ModelBudgetLedger(ceiling="1")
+        decision = route_model(
+            policy=policy(deadline=100),
+            task=task(),
+            models=[model(revision="rev-1")],
+            budget=budget,
+        )
+        observation = ModelCallObservation.create(
+            reservation_id=decision.reservation_id,
+            model_id=decision.model_id,
+            provider=decision.provider,
+            model_name=decision.model_name,
+            revision="rev-1",
+            provider_call_id="provider-call-1",
+            elapsed_ms=80,
+            actual_input_tokens=100,
+            actual_output_tokens=40,
+            billed_cost="0.00017",
+            output_schema_valid=True,
+            evidence_sha256=HASH_C,
+        )
+        record = record_model_call(
+            decision=decision,
+            observation=observation,
+            budget=budget,
+        )
+        self.assertTrue(record.deadline_met)
+        self.assertTrue(record.output_schema_valid)
+        self.assertTrue(record.usable)
+        self.assertEqual(record.billing_status, "FINAL")
+        self.assertEqual(record.cost, Decimal("0.00017"))
+        self.assertEqual(budget.snapshot().incurred, Decimal("0.00017"))
+        self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+        self.assertFalse(record.authorizes_trading)
+
+    def test_deadline_miss_is_retained_as_unusable_negative_evidence(self):
+        budget = ModelBudgetLedger(ceiling="1")
+        decision = route_model(
+            policy=policy(deadline=50),
+            task=task(),
+            models=[model(latency=40)],
+            budget=budget,
+        )
+        observation = ModelCallObservation.create(
+            reservation_id=decision.reservation_id,
+            model_id=decision.model_id,
+            provider=decision.provider,
+            model_name=decision.model_name,
+            revision=decision.revision,
+            provider_call_id="provider-call-late",
+            elapsed_ms=51,
+            actual_input_tokens=100,
+            actual_output_tokens=20,
+            billed_cost=None,
+            output_schema_valid=True,
+            evidence_sha256=HASH_C,
+        )
+        record = record_model_call(
+            decision=decision,
+            observation=observation,
+            budget=budget,
+        )
+        self.assertFalse(record.deadline_met)
+        self.assertFalse(record.usable)
+        self.assertEqual(record.billing_status, "ESTIMATED_UNBILLED")
+        self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+        self.assertEqual(
+            budget.snapshot().estimated_unbilled,
+            decision.estimated_cost,
+        )
+
+    def test_schema_invalid_result_is_recorded_but_never_usable(self):
+        budget = ModelBudgetLedger(ceiling="1")
+        decision = route_model(
+            policy=policy(),
+            task=task(),
+            models=[model()],
+            budget=budget,
+        )
+        observation = ModelCallObservation.create(
+            reservation_id=decision.reservation_id,
+            model_id=decision.model_id,
+            provider=decision.provider,
+            model_name=decision.model_name,
+            revision=decision.revision,
+            provider_call_id="provider-call-invalid-schema",
+            elapsed_ms=10,
+            actual_input_tokens=100,
+            actual_output_tokens=10,
+            billed_cost="0.00012",
+            output_schema_valid=False,
+            evidence_sha256=HASH_C,
+        )
+        record = record_model_call(
+            decision=decision,
+            observation=observation,
+            budget=budget,
+        )
+        self.assertTrue(record.deadline_met)
+        self.assertFalse(record.output_schema_valid)
+        self.assertFalse(record.usable)
+        self.assertEqual(budget.snapshot().incurred, Decimal("0.00012"))
+
+    def test_actual_identity_mismatch_fails_before_budget_mutation(self):
+        budget = ModelBudgetLedger(ceiling="1")
+        decision = route_model(
+            policy=policy(),
+            task=task(),
+            models=[model()],
+            budget=budget,
+        )
+        before = budget.snapshot()
+        observation = ModelCallObservation.create(
+            reservation_id=decision.reservation_id,
+            model_id="different-model",
+            provider=decision.provider,
+            model_name=decision.model_name,
+            revision=decision.revision,
+            provider_call_id="provider-call-mismatch",
+            elapsed_ms=10,
+            actual_input_tokens=100,
+            actual_output_tokens=10,
+            billed_cost="0.1",
+            output_schema_valid=True,
+            evidence_sha256=HASH_C,
+        )
+        with self.assertRaisesRegex(ModelRoutingError, "model_id"):
+            record_model_call(
+                decision=decision,
+                observation=observation,
+                budget=budget,
+            )
+        self.assertEqual(budget.snapshot(), before)
+
+    def test_provider_reported_revision_resolves_unknown_revision_limitation(self):
+        budget = ModelBudgetLedger(ceiling="1")
+        decision = route_model(
+            policy=policy(),
+            task=task(),
+            models=[model(revision=None)],
+            budget=budget,
+        )
+        self.assertIn(
+            "UNKNOWN_MODEL_REVISION",
+            decision.reproducibility_limitations,
+        )
+        observation = ModelCallObservation.create(
+            reservation_id=decision.reservation_id,
+            model_id=decision.model_id,
+            provider=decision.provider,
+            model_name=decision.model_name,
+            revision="provider-reported-rev",
+            provider_call_id="provider-call-revision",
+            elapsed_ms=10,
+            actual_input_tokens=100,
+            actual_output_tokens=10,
+            billed_cost="0.00012",
+            output_schema_valid=True,
+            evidence_sha256=HASH_C,
+        )
+        record = record_model_call(
+            decision=decision,
+            observation=observation,
+            budget=budget,
+        )
+        self.assertEqual(record.actual_revision, "provider-reported-rev")
+        self.assertNotIn(
+            "UNKNOWN_MODEL_REVISION",
+            record.reproducibility_limitations,
+        )
 
     def test_budget_identity_conflicts_fail_closed(self):
         budget = ModelBudgetLedger(ceiling="1")

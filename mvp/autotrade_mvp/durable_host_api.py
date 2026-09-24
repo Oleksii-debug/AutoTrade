@@ -37,6 +37,7 @@ class JournalBackedHostCommandStore:
         journal: JournalStore,
         *,
         session_validator: Callable[[str, str], bool],
+        action_authorizer: Callable[[str, str, str, Mapping[str, object]], bool],
         max_events: int = 100,
         now: Callable[[], str] | None = None,
     ) -> None:
@@ -44,10 +45,13 @@ class JournalBackedHostCommandStore:
             raise TypeError("journal must be a JournalStore")
         if not callable(session_validator):
             raise TypeError("session_validator must be callable")
+        if not callable(action_authorizer):
+            raise TypeError("action_authorizer must be callable")
         if not isinstance(max_events, int) or isinstance(max_events, bool) or max_events < 1:
             raise ValueError("max_events must be positive")
         self._journal = journal
         self._session_validator = session_validator
+        self._action_authorizer = action_authorizer
         self._max_events = max_events
         self._now = now or (
             lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -170,6 +174,31 @@ class JournalBackedHostCommandStore:
                 status="REJECTED",
                 state_version=str(current),
                 reason_codes=("unsupported_action",),
+            )
+            try:
+                stored, _ = self._journal.record_command(
+                    command_id=command_id,
+                    idempotency_key=idempotency_key,
+                    request=dict(command),
+                    result=self._result_dict(rejected),
+                    state_version=current,
+                )
+            except ValueError as error:
+                return CommandResult(
+                    command_id=command_id,
+                    status="CONFLICT",
+                    state_version=str(current),
+                    reason_codes=(self._conflict_reason(error),),
+                )
+            return self._command_result(stored)
+
+        payload = command["payload"]
+        if not self._action_authorizer(session, actor, action, payload):
+            rejected = CommandResult(
+                command_id=command_id,
+                status="REJECTED",
+                state_version=str(current),
+                reason_codes=("action_not_authorized",),
             )
             try:
                 stored, _ = self._journal.record_command(

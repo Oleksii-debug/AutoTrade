@@ -7,7 +7,7 @@ model-dependent and deliberately outside this deterministic settlement layer.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Iterable, Literal, Mapping
 
@@ -387,6 +387,7 @@ class OptionRiskEvidence:
     market_as_of: datetime
     calculated_at: datetime
     expires_at: datetime
+    maximum_market_age: timedelta
     delta: Decimal
     gamma: Decimal
     vega: Decimal
@@ -412,6 +413,13 @@ class OptionRiskEvidence:
             raise OptionError("market_as_of cannot be after calculated_at")
         if expires <= calculated:
             raise OptionError("risk evidence must expire after calculation")
+        if (
+            not isinstance(self.maximum_market_age, timedelta)
+            or self.maximum_market_age <= timedelta(0)
+        ):
+            raise OptionError("maximum_market_age must be a positive timedelta")
+        if calculated - market > self.maximum_market_age:
+            raise OptionError("market evidence is stale at calculation")
         object.__setattr__(self, "market_as_of", market)
         object.__setattr__(self, "calculated_at", calculated)
         object.__setattr__(self, "expires_at", expires)
@@ -455,3 +463,5 @@ def require_current_option_risk(
         raise OptionError("option risk evidence is from the future")
     if point >= evidence.expires_at:
         raise OptionError("option risk evidence is stale")
+    if point - evidence.market_as_of > evidence.maximum_market_age:
+        raise OptionError("option risk market evidence is stale")

@@ -36,6 +36,7 @@ class OperationResult:
     phase: str
     started_at: str
     updated_at: str
+    state_version: str
     affected_refs: tuple[str, ...] = ()
     evidence: tuple[Mapping[str, object], ...] = ()
     remaining_uncertainty: tuple[str, ...] = ()
@@ -210,6 +211,7 @@ class HostCommandStore:
             phase="QUEUED",
             started_at=now,
             updated_at=now,
+            state_version=str(self.state_version),
             remaining_uncertainty=("financial_outcome_not_completed",),
         )
         self._operations[operation_id] = operation
@@ -272,6 +274,7 @@ class HostCommandStore:
             phase=phase,
             started_at=current.started_at,
             updated_at=self._now(),
+            state_version=str(self.state_version),
             affected_refs=normalized_refs,
             evidence=normalized_evidence,
             remaining_uncertainty=normalized_uncertainty,

@@ -307,6 +307,90 @@ class DispatchTests(unittest.TestCase):
 
 
 
+    def test_initial_authority_string_false_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(store, owner_token="owner")
+            outbound = 0
+
+            def transport(*_args):
+                nonlocal outbound
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            result = dispatcher.dispatch(
+                attempt_id="bad-authority-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _hash, _now: ("false", "malformed"),
+                transport_send=transport,
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "authority_check_invalid_allowed")
+            self.assertEqual(outbound, 0)
+            events = store.load_events("submission_attempt", "bad-authority-a1")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+
+    def test_final_authority_malformed_result_blocks_before_outbound(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(store, owner_token="owner")
+            calls = 0
+            outbound = 0
+
+            def authority(_hash, _now):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return True, "allowed"
+                return True, ""
+
+            def transport(_client_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            result = dispatcher.dispatch(
+                attempt_id="bad-final-authority-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "authority_check_invalid_reason")
+            self.assertEqual(outbound, 0)
+
+    def test_authority_result_shape_must_be_exact_pair(self):
+        with TemporaryDirectory() as directory:
+            result = GuardedDispatcher(
+                self.store(directory),
+                owner_token="owner",
+            ).dispatch(
+                attempt_id="bad-authority-shape-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _hash, _now: [True, "allowed"],
+                transport_send=lambda *_args: self.fail("transport must not run"),
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "authority_check_invalid_result")
+
     def test_owner_transfer_during_provider_wait_blocks_stale_sender(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)

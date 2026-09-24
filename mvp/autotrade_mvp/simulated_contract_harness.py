@@ -102,7 +102,12 @@ class SubmissionDirective:
             raise ValueError("persist_unknown is valid only for UNKNOWN")
         object.__setattr__(self, "reason_code", _text(self.reason_code, name="reason_code"))
         if self.history_visible_at is not None:
-            _instant(self.history_visible_at, name="history_visible_at")
+            canonical = (
+                _instant(self.history_visible_at, name="history_visible_at")
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+            object.__setattr__(self, "history_visible_at", canonical)
 
 
 def _freeze_stream_value(value: object) -> object:
@@ -227,6 +232,10 @@ class SimulatedProviderContractHarness:
         host_time = _instant(request["now"], name="now")
         provider_time = _instant(request.get("provider_now", request["now"]), name="provider_now")
         self.clock_guard.require_safe(host_time=host_time, provider_time=provider_time)
+        fill_immediately = request.get("fill_immediately", True)
+        if type(fill_immediately) is not bool:
+            raise TypeError("fill_immediately must be boolean")
+        canonical_now = host_time.isoformat().replace("+00:00", "Z")
         quota_amount = _decimal(quota_cost, name="quota_cost")
         self.quota.acquire(quota_amount, purpose=purpose)
 
@@ -238,9 +247,7 @@ class SimulatedProviderContractHarness:
         except BaseException:
             self.quota.release(quota_amount)
             raise
-        self._submission_started_at[cid] = (
-            host_time.isoformat().replace("+00:00", "Z")
-        )
+        self._submission_started_at[cid] = canonical_now
         self.provider.outbound_request_count += 1
 
         directive = self._submission_directives.get(
@@ -255,21 +262,21 @@ class SimulatedProviderContractHarness:
                 side=request["side"],
                 quantity=request["quantity"],
                 price=request["price"],
-                now=request["now"],
-                fill_immediately=request.get("fill_immediately", True),
+                now=canonical_now,
+                fill_immediately=fill_immediately,
             )
 
         core = {
             "attempt_id": request["attempt_id"],
             "client_order_id": cid,
-            "provider_received_at": request["now"],
+            "provider_received_at": canonical_now,
             "outcome": directive.outcome,
             "reason_codes": [directive.reason_code],
         }
         if directive.outcome == "REJECTED":
             return {
                 **core,
-                "evidence": [_evidence("rejection", cid, request["now"], core)],
+                "evidence": [_evidence("rejection", cid, canonical_now, core)],
                 "retry_disposition": "NEVER",
                 "reconciliation_required": False,
             }
@@ -283,12 +290,12 @@ class SimulatedProviderContractHarness:
                 side=request["side"],
                 quantity=request["quantity"],
                 price=request["price"],
-                now=request["now"],
-                fill_immediately=request.get("fill_immediately", True),
+                now=canonical_now,
+                fill_immediately=fill_immediately,
             )
         return {
             **core,
-            "evidence": [_evidence("unknown", cid, request["now"], core)],
+            "evidence": [_evidence("unknown", cid, canonical_now, core)],
             "retry_disposition": "NEVER",
             "reconciliation_required": True,
         }

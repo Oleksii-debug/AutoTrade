@@ -10,8 +10,13 @@ from decimal import Decimal
 from typing import Iterable
 
 
-def _decimal(value: Decimal | int | str | float, field: str) -> Decimal:
-    number = Decimal(str(value))
+def _decimal(value: Decimal | int | str, field: str) -> Decimal:
+    if isinstance(value, bool) or isinstance(value, float):
+        raise TypeError(f"{field} must use Decimal, string or integer input")
+    try:
+        number = value if isinstance(value, Decimal) else Decimal(value)
+    except Exception as error:
+        raise ValueError(f"{field} must be a finite decimal") from error
     if not number.is_finite():
         raise ValueError(f"{field} must be finite")
     return number

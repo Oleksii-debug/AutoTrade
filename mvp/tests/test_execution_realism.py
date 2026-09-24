@@ -148,6 +148,29 @@ class ExecutionRealismTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "NO_FILL")
 
+    def test_negative_execution_paths_preserve_evidence_availability(self):
+        cases = (
+            (
+                order(order_type="STOP_LIMIT", stop_price="110", limit_price="100"),
+                top(),
+                "NO_FILL",
+            ),
+            (
+                order(order_type="LIMIT", limit_price="100"),
+                top(ask="101"),
+                "NO_FILL",
+            ),
+        )
+        for simulated_order, observation, expected_status in cases:
+            with self.subTest(expected_status=expected_status):
+                result = simulate_execution(simulated_order, observation, model())
+                self.assertEqual(result.status, expected_status)
+                self.assertEqual(
+                    result.evidence_available_at,
+                    observation.available_at,
+                )
+                self.assertIsNone(result.trade_time)
+
     def test_bar_stop_limit_does_not_choose_favorable_same_bar_ordering(self):
         result = simulate_execution(
             order(

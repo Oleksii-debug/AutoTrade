@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
@@ -12,6 +12,7 @@ from typing import Mapping, Sequence
 _REQUIRED_ABSENCE_SURFACES = frozenset(
     {"OPEN_ORDERS", "ORDER_HISTORY", "EXECUTIONS", "ACTIVITIES"}
 )
+_RECONCILIATION_AUTHORITY = object()
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -267,6 +268,17 @@ class ReconciliationResult:
     submission_resolutions: tuple[SubmissionResolution, ...]
     blocking_resources: tuple[str, ...]
     reasons: tuple[str, ...]
+    _authority_marker: object = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        if self._authority_marker is not _RECONCILIATION_AUTHORITY:
+            raise TypeError(
+                "ReconciliationResult can only be created by canonical reconcile_account"
+            )
 
     @property
     def blocks_new_risk(self) -> bool:
@@ -651,4 +663,5 @@ def reconcile_account(
         submission_resolutions=tuple(resolutions),
         blocking_resources=tuple(sorted(blocking)),
         reasons=tuple(reasons),
+        _authority_marker=_RECONCILIATION_AUTHORITY,
     )

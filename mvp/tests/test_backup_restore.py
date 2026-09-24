@@ -69,6 +69,8 @@ class BackupRestoreTests(unittest.TestCase):
             manifest = verify_backup(backup)
             self.assertEqual(manifest["schema_version"], BACKUP_SCHEMA_VERSION)
             self.assertTrue(manifest["reconciliation_required_after_restore"])
+            self.assertFalse((backup / "state" / "journal.sqlite3-wal").exists())
+            self.assertFalse((backup / "state" / "journal.sqlite3-shm").exists())
 
             restored = restore_backup(backup, root / "restored")
             self.assertTrue(restore_requires_reconciliation(restored))

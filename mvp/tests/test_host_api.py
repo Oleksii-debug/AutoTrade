@@ -21,6 +21,9 @@ class HostCommandStateTests(unittest.TestCase):
         self.sessions = {("session-a", "alice"), ("session-b", "bob")}
         self.store = HostCommandStore(
             session_validator=lambda session, actor: (session, actor) in self.sessions,
+            action_authorizer=lambda session, actor, action, payload: (
+                (session, actor) in self.sessions
+            ),
             max_events=3,
             now=lambda: "2026-09-24T18:00:00Z",
         )
@@ -91,6 +94,41 @@ class HostCommandStateTests(unittest.TestCase):
         self.assertEqual(stale.status, "CONFLICT")
         self.assertIn("stale_state_version", stale.reason_codes)
         self.assertEqual(stale.state_version, "1")
+
+    def test_authenticated_session_still_requires_action_authorization(self):
+        store = HostCommandStore(
+            session_validator=lambda session, actor: (session, actor) in self.sessions,
+            action_authorizer=lambda session, actor, action, payload: (
+                actor == "alice"
+                and action == "BLOCK_NEW_EXPOSURE"
+                and payload.get("scope") == "paper"
+            ),
+            now=lambda: "2026-09-24T18:00:00Z",
+        )
+        denied = store.submit(self.command(payload={"scope": "live"}))
+        self.assertEqual(denied.status, "REJECTED")
+        self.assertEqual(denied.reason_codes, ("action_not_authorized",))
+        self.assertEqual(store.state_version, 0)
+        self.assertEqual(store.cursor, 0)
+        self.assertEqual(store.submit(self.command(payload={"scope": "live"})), denied)
+
+        allowed = store.submit(
+            self.command(
+                command_id="55555555-5555-5555-5555-555555555555",
+                key="key-authorized",
+                payload={"scope": "paper"},
+            )
+        )
+        self.assertEqual(allowed.status, "ACCEPTED")
+        self.assertEqual(store.state_version, 1)
+        self.assertEqual(store.cursor, 1)
+
+    def test_action_authorizer_is_mandatory_callable(self):
+        with self.assertRaisesRegex(TypeError, "action_authorizer must be callable"):
+            HostCommandStore(
+                session_validator=lambda session, actor: True,
+                action_authorizer=None,
+            )
 
     def test_unsupported_action_is_rejected_without_state_mutation(self):
         command = self.command(action="ARBITRARY_PROVIDER_COMMAND")

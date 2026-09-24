@@ -50,9 +50,27 @@ def protocol():
     }
 
 
-def approval(science, candidate="candidate-a", valid_days=1, status="PASS", *, contaminate=False):
+def approval(
+    science,
+    candidate="candidate-a",
+    valid_days=1,
+    status="PASS",
+    *,
+    contaminate=False,
+    record_trial=True,
+):
     registered = science.register_protocol(protocol())
     valid_until = BASE + timedelta(days=valid_days)
+    if record_trial:
+        science.record_trial(
+            registered.protocol_id,
+            status="COMPLETED",
+            payload={
+                "candidate_id": candidate,
+                "artifact_hash": digest(candidate),
+            },
+        )
+    trial_state = science.completeness(registered.protocol_id)
     result = {
         "candidate_id": candidate,
         "artifact_hash": digest(candidate),
@@ -65,6 +83,8 @@ def approval(science, candidate="candidate-a", valid_days=1, status="PASS", *, c
         "causal_audit_passed": True,
         "financial_invariants_passed": True,
         "trial_log_complete": True,
+        "recorded_trial_count": trial_state["recorded_trials"],
+        "trial_budget": trial_state["trial_budget"],
     }
     if contaminate:
         science.record_holdout_access(
@@ -225,6 +245,84 @@ class ChampionRegistryTests(unittest.TestCase):
             with self.assertRaisesRegex(ProtocolViolation, "untouched"):
                 registry.promote(
                     contaminated,
+                    expected_generation=0,
+                    now=BASE,
+                    open_position_count=0,
+                    existing_position_policy=None,
+                )
+
+    def test_self_asserted_trial_log_without_registered_trial_cannot_promote(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            candidate = approval(science, record_trial=False)
+            with self.assertRaisesRegex(ProtocolViolation, "registered trial"):
+                registry.promote(
+                    candidate,
+                    expected_generation=0,
+                    now=BASE,
+                    open_position_count=0,
+                    existing_position_policy=None,
+                )
+
+    def test_completed_trial_must_be_bound_to_exact_candidate_artifact(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registered = science.register_protocol(protocol())
+            science.record_trial(
+                registered.protocol_id,
+                status="COMPLETED",
+                payload={
+                    "candidate_id": "other-candidate",
+                    "artifact_hash": digest("other-candidate"),
+                },
+            )
+            valid_until = BASE + timedelta(days=1)
+            trial_state = science.completeness(registered.protocol_id)
+            result = {
+                "candidate_id": "candidate-a",
+                "artifact_hash": digest("candidate-a"),
+                "evaluation_status": "PASS",
+                "retention_passed": True,
+                "risk_passed": True,
+                "authority_scope_id": "paper-scope",
+                "evidence_valid_until": valid_until.isoformat(),
+                "reproducible": True,
+                "causal_audit_passed": True,
+                "financial_invariants_passed": True,
+                "trial_log_complete": True,
+                "recorded_trial_count": trial_state["recorded_trials"],
+                "trial_budget": trial_state["trial_budget"],
+            }
+            locked = science.register_evaluation(
+                registered.protocol_id,
+                holdout_id="holdout-a",
+                result=result,
+            )
+            candidate = CandidateApproval.create(
+                candidate_id="candidate-a",
+                artifact_hash=digest("candidate-a"),
+                evidence_id="evidence:candidate-a",
+                evidence_valid_until=valid_until,
+                evaluation_status="PASS",
+                retention_passed=True,
+                risk_passed=True,
+                authority_scope_id="paper-scope",
+                protocol_id=registered.protocol_id,
+                protocol_hash=registered.protocol_hash,
+                evaluation_id=locked["evaluation_id"],
+                evaluation_result_hash=locked["result_hash"],
+            )
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            with self.assertRaisesRegex(ProtocolViolation, "bound to candidate_id"):
+                registry.promote(
+                    candidate,
                     expected_generation=0,
                     now=BASE,
                     open_position_count=0,

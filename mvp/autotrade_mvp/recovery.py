@@ -43,7 +43,7 @@ class OutboundAttempt:
     owner_epoch: int
     phase: SendPhase = SendPhase.CREATED
     provider_order_id: str | None = None
-    provider_execution_id: str | None = None
+    provider_execution_ids: list[str] = field(default_factory=list)
     evidence: list[str] = field(default_factory=list)
 
     def persist(self) -> None:
@@ -68,14 +68,21 @@ class OutboundAttempt:
         self.provider_order_id = provider_order_id
         self.evidence.append(evidence_ref)
 
-    def observe_execution(self, provider_execution_id: str, evidence_ref: str) -> None:
-        if self.phase not in {SendPhase.SENT_UNKNOWN, SendPhase.ACKNOWLEDGED}:
+    def observe_execution(self, provider_execution_id: str, evidence_ref: str) -> bool:
+        if self.phase not in {
+            SendPhase.SENT_UNKNOWN,
+            SendPhase.ACKNOWLEDGED,
+            SendPhase.EXECUTION_OBSERVED,
+        }:
             raise ValueError("Execution observation requires a sent or acknowledged attempt")
         if not provider_execution_id or not evidence_ref:
             raise ValueError("Provider execution and evidence are required")
+        if provider_execution_id in self.provider_execution_ids:
+            return False
         self.phase = SendPhase.EXECUTION_OBSERVED
-        self.provider_execution_id = provider_execution_id
+        self.provider_execution_ids.append(provider_execution_id)
         self.evidence.append(evidence_ref)
+        return True
 
     def reject(self, evidence_ref: str) -> None:
         if self.phase is not SendPhase.SENT_UNKNOWN:

@@ -174,10 +174,17 @@ class SimulatedProviderContractHarness:
         host_time = _instant(request["now"], name="now")
         provider_time = _instant(request.get("provider_now", request["now"]), name="provider_now")
         self.clock_guard.require_safe(host_time=host_time, provider_time=provider_time)
-        self.quota.acquire(quota_cost, purpose=purpose)
+        quota_amount = _decimal(quota_cost, name="quota_cost")
+        self.quota.acquire(quota_amount, purpose=purpose)
 
         # No transport effect is allowed before the final authority/revocation guard.
-        final_guard()
+        # A rejected final guard did not consume provider quota because no request
+        # crossed the transport boundary.
+        try:
+            final_guard()
+        except BaseException:
+            self.quota.release(quota_amount)
+            raise
         self.provider.outbound_request_count += 1
 
         directive = self._submission_directives.get(

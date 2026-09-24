@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_EVEN
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_EVEN, localcontext
 from fractions import Fraction
 from typing import Literal
 
@@ -170,7 +170,14 @@ def settle_fraction(
         raise FuturesError("unsupported rounding policy")
     numerator = Decimal(value.numerator)
     denominator = Decimal(value.denominator)
-    return (numerator / denominator).quantize(step, rounding=mode)
+    decimal_places = max(0, -step.as_tuple().exponent)
+    precision = max(
+        50,
+        len(str(abs(value.numerator))) + len(str(abs(value.denominator))) + decimal_places + 12,
+    )
+    with localcontext() as context:
+        context.prec = precision
+        return (numerator / denominator).quantize(step, rounding=mode)
 
 
 def apply_variation_margin(

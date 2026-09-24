@@ -126,17 +126,21 @@ def point_in_time_market_events(
 
     point = _utc(cutoff, "cutoff")
     selected: dict[str, tuple[int, bytes, dict[str, Any]]] = {}
-    visible_revisions: dict[str, dict[int, tuple[datetime, bytes]]] = {}
+    visible_revisions: dict[
+        str,
+        dict[int, tuple[datetime, datetime, str, bytes]],
+    ] = {}
     for raw in events:
         if not isinstance(raw, Mapping):
             raise HistoricalDataError("market event must be an object")
         event = dict(raw)
         event_id = _uuid(event.get("event_id"), "event_id")
-        _text(event.get("instrument_version"), "instrument_version")
+        instrument_version = _text(event.get("instrument_version"), "instrument_version")
         revision = _sequence(event.get("revision"), "revision")
         available = _utc(event.get("available_at"), "available_at")
         source_at = _utc(event.get("source_event_at"), "source_event_at")
         ingested = _utc(event.get("ingested_at"), "ingested_at")
+        _text(event.get("availability_basis"), "availability_basis")
         if available < source_at:
             raise HistoricalDataError("available_at cannot precede source_event_at")
         if ingested < available:
@@ -152,15 +156,27 @@ def point_in_time_market_events(
         history = visible_revisions.setdefault(event_id, {})
         same_revision = history.get(revision)
         if same_revision is not None:
-            if same_revision[1] != canonical:
+            if same_revision[3] != canonical:
                 raise HistoricalConflict("same event revision has conflicting bytes")
         else:
-            for other_revision, (other_available, _) in history.items():
+            for other_revision, (
+                other_available,
+                other_source_at,
+                other_instrument_version,
+                _,
+            ) in history.items():
+                if source_at != other_source_at or instrument_version != other_instrument_version:
+                    raise HistoricalConflict("event revision changed source identity metadata")
                 if revision > other_revision and available < other_available:
                     raise HistoricalConflict("higher event revision cannot backdate availability")
                 if revision < other_revision and available > other_available:
                     raise HistoricalConflict("higher event revision cannot predate lower revision availability")
-            history[revision] = (available, canonical)
+            history[revision] = (
+                available,
+                source_at,
+                instrument_version,
+                canonical,
+            )
 
         previous = selected.get(event_id)
         if previous is None or revision > previous[0]:
@@ -171,8 +187,10 @@ def point_in_time_market_events(
     rows = [item[2] for item in selected.values()]
     rows.sort(
         key=lambda row: (
+            _utc(row["available_at"], "available_at"),
             _utc(row["source_event_at"], "source_event_at"),
             row["event_id"],
+            _sequence(row["revision"], "revision"),
         )
     )
     return tuple(rows)

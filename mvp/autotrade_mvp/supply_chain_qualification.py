@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+from typing import Callable
 
 
 _PASS = "PASS"
@@ -145,6 +146,9 @@ class SupplyChainEvidence:
             raise ValueError("model/data rights evidence contains duplicate ids")
 
 
+SupplyChainEvidenceVerifier = Callable[[SupplyChainEvidence], bool]
+
+
 @dataclass(frozen=True)
 class SupplyChainQualification:
     qualification_id: str
@@ -154,7 +158,13 @@ class SupplyChainQualification:
     release_authority: bool = False
 
 
-def qualify_supply_chain(evidence: SupplyChainEvidence) -> SupplyChainQualification:
+def qualify_supply_chain(
+    evidence: SupplyChainEvidence,
+    *,
+    evidence_verifier: SupplyChainEvidenceVerifier | None = None,
+) -> SupplyChainQualification:
+    if not isinstance(evidence, SupplyChainEvidence):
+        raise TypeError("evidence must be SupplyChainEvidence")
     checks: list[tuple[str, str]] = []
     reasons: list[str] = []
 
@@ -162,6 +172,19 @@ def qualify_supply_chain(evidence: SupplyChainEvidence) -> SupplyChainQualificat
         checks.append((name, status))
         if reason and status != _PASS:
             reasons.append(reason)
+
+    externally_verified = False
+    if evidence_verifier is not None:
+        try:
+            verification = evidence_verifier(evidence)
+        except Exception:
+            verification = False
+        externally_verified = isinstance(verification, bool) and verification
+    record(
+        "immutable_evidence_bundle",
+        _PASS if externally_verified else _INCONCLUSIVE,
+        "SUPPLY_CHAIN.EVIDENCE_UNVERIFIED",
+    )
 
     exact_head = evidence.release_commit_sha == evidence.built_from_commit_sha
     record("exact_release_head", _PASS if exact_head else _FAIL, "SUPPLY_CHAIN.BUILD_SHA_MISMATCH")

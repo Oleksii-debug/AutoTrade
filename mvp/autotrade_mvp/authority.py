@@ -362,6 +362,4 @@ class AuthorityService:
             confirmation = self._confirmations[record.confirmation_id]
             if _instant(now, name="now") >= _instant(confirmation.expires_at, name="confirmation.expires_at"):
                 return False, "confirmation_expired"
-        if record.authority_epoch != self._epoch:
-            return False, "authority_epoch_changed"
         return True, "allowed"

@@ -67,12 +67,20 @@ class ReconciliationJournalTests(unittest.TestCase):
                 reconciliation_id="acct-1",
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
+
+                owner_epoch=7,
+
+                environment="PAPER",
             )
             second = record_reconciliation_checkpoint(
                 store,
                 reconciliation_id="acct-1",
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
+
+                owner_epoch=7,
+
+                environment="PAPER",
             )
 
             self.assertEqual(first["event_id"], second["event_id"])
@@ -96,6 +104,8 @@ class ReconciliationJournalTests(unittest.TestCase):
                 latest["payload"]["blocking_resources"],
                 ["CASH:USD"],
             )
+            self.assertEqual(latest["owner_epoch"], "7")
+            self.assertEqual(latest["environment"], "PAPER")
 
     def test_changed_checkpoint_appends_new_version(self):
         with TemporaryDirectory() as directory:
@@ -105,12 +115,20 @@ class ReconciliationJournalTests(unittest.TestCase):
                 reconciliation_id="acct-1",
                 result=reconciliation(provider_cash={"USD": "899.50"}),
                 observed_at="2026-09-24T19:00:00Z",
+
+                owner_epoch=7,
+
+                environment="PAPER",
             )
             record_reconciliation_checkpoint(
                 store,
                 reconciliation_id="acct-1",
                 result=reconciliation(),
                 observed_at="2026-09-24T19:01:00Z",
+
+                owner_epoch=7,
+
+                environment="PAPER",
             )
             events = store.load_events("account_reconciliation", "acct-1")
             self.assertEqual(
@@ -175,6 +193,10 @@ class ReconciliationJournalTests(unittest.TestCase):
                 reconciliation_id="acct-observed",
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
+
+                owner_epoch=7,
+
+                environment="PAPER",
             )
             resolution = checkpoint["payload"]["submission_resolutions"][0]
             self.assertEqual(resolution["outcome"], "OBSERVED_EXECUTION")
@@ -199,6 +221,10 @@ class ReconciliationJournalTests(unittest.TestCase):
                 reconciliation_id="acct-1",
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
+
+                owner_epoch=7,
+
+                environment="PAPER",
             )
             self.assertEqual(
                 unresolved_attempt_ids_from_checkpoint(checkpoint),

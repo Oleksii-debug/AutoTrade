@@ -135,6 +135,15 @@ class ScientificRegistry:
         missing = sorted(REQUIRED_PROTOCOL_FIELDS - set(payload))
         if missing:
             raise ProtocolViolation("missing required protocol fields: " + ", ".join(missing))
+        empty = sorted(
+            name
+            for name in REQUIRED_PROTOCOL_FIELDS
+            if payload.get(name) is None
+            or (isinstance(payload.get(name), str) and not payload[name].strip())
+            or (isinstance(payload.get(name), (list, tuple, dict, set)) and not payload[name])
+        )
+        if empty:
+            raise ProtocolViolation("required protocol fields cannot be empty: " + ", ".join(empty))
         if not isinstance(payload.get("trial_budget"), int) or isinstance(payload.get("trial_budget"), bool) or payload["trial_budget"] < 1:
             raise ProtocolViolation("trial_budget must be a positive integer")
         identifier = _id(protocol_id)

@@ -55,6 +55,20 @@ class EvaluationGateTests(unittest.TestCase):
     def test_adverse_cost_stress_can_fail_good_base_result(self):
         self.assertEqual(evaluate_gates(profile(), evidence(adverse_cost_loss="0.10")).status, "FAIL")
 
+    def test_negative_adverse_cost_loss_cannot_create_a_false_pass(self):
+        with self.assertRaisesRegex(ValueError, "adverse_cost_loss must be non-negative"):
+            evidence(adverse_cost_loss="-0.01")
+
+    def test_negative_adverse_cost_limit_is_invalid_protocol(self):
+        with self.assertRaisesRegex(ValueError, "max_adverse_cost_loss must be non-negative"):
+            GateProfile.create(
+                profile_id="bad-gate",
+                minimum_net_advantage="0.01",
+                max_drawdown="0.10",
+                max_adverse_cost_loss="-0.03",
+                min_power="0.80",
+            )
+
     def test_profile_changed_after_result_fails(self):
         self.assertEqual(
             evaluate_gates(profile(), evidence(profile_unchanged_after_results=False)).status,

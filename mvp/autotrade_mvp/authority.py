@@ -510,12 +510,77 @@ class AuthorityService:
                 )
                 if record.policy_id not in self._policies:
                     raise AuthorityConflict("durable admission references missing policy")
-                if record.authority_epoch > self._epoch:
-                    raise AuthorityConflict("durable admission authority epoch is from the future")
+                policy = self._policies[record.policy_id]
+                if record.authority_epoch != self._epoch:
+                    raise AuthorityConflict(
+                        "durable admission authority epoch does not match replay state"
+                    )
+                if record.outcome == "ADMITTED":
+                    active, _ = self._policy_active(policy, record.admitted_at)
+                    scope_valid = (
+                        active
+                        and record.account_id == policy.account_id
+                        and record.environment in policy.environments
+                        and record.instrument_version in policy.instruments
+                        and record.action in policy.actions
+                        and record.notional <= policy.max_notional
+                        and (not policy.protection_only or record.risk_reducing)
+                    )
+                    if not scope_valid:
+                        raise AuthorityConflict(
+                            "durable admitted record violates policy scope"
+                        )
+                    if not policy.autonomous and record.confirmation_id is None:
+                        raise AuthorityConflict(
+                            "durable admitted record is missing required confirmation"
+                        )
+                    request_payload = {
+                        "policy_id": record.policy_id,
+                        "intent_hash": record.intent_hash,
+                        "account_id": record.account_id,
+                        "environment": record.environment,
+                        "instrument_id": record.instrument_version.instrument_id,
+                        "instrument_version": record.instrument_version.version,
+                        "action": record.action,
+                        "notional": str(record.notional),
+                        "state_version": record.state_version,
+                        "risk_admitted": True,
+                        "confirmation_id": record.confirmation_id,
+                        "risk_reducing": record.risk_reducing,
+                    }
+                    expected_fingerprint = sha256(
+                        json.dumps(
+                            request_payload,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    if record.request_fingerprint != expected_fingerprint:
+                        raise AuthorityConflict(
+                            "durable admitted record fingerprint is inconsistent"
+                        )
                 if record.confirmation_id is not None:
                     if record.confirmation_id not in self._confirmations:
                         raise AuthorityConflict(
                             "durable admission references missing confirmation"
+                        )
+                    confirmation = self._confirmations[record.confirmation_id]
+                    if (
+                        confirmation.policy_id != record.policy_id
+                        or confirmation.intent_hash != record.intent_hash
+                        or confirmation.account_id != record.account_id
+                        or confirmation.environment != record.environment
+                        or confirmation.instrument_version != record.instrument_version
+                        or confirmation.action != record.action
+                        or confirmation.notional != record.notional
+                        or _instant(record.admitted_at, name="admitted_at")
+                        >= _instant(
+                            confirmation.expires_at,
+                            name="confirmation.expires_at",
+                        )
+                    ):
+                        raise AuthorityConflict(
+                            "durable admission does not match confirmation scope"
                         )
                     if record.confirmation_id in self._used_confirmations:
                         raise AuthorityConflict(

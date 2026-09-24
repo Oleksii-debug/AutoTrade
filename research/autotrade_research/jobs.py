@@ -112,6 +112,7 @@ def _verify_external_resolution_artifact(
     job_id: str,
     generation: int,
     verdict: str,
+    output_refs: list[str],
 ) -> bool:
     if not _verify_artifact_ref(artifact_store, evidence_ref):
         return False
@@ -131,6 +132,8 @@ def _verify_external_resolution_artifact(
         "generation": generation,
         "verdict": verdict,
     }
+    if verdict == "PROVEN_SUCCEEDED":
+        expected["output_refs"] = output_refs
     metadata = manifest.get("metadata")
     if not isinstance(metadata, dict) or any(
         metadata.get(key) != value for key, value in expected.items()
@@ -491,13 +494,15 @@ class ResearchJobStore:
         if normalized_verdict != "PROVEN_SUCCEEDED" and raw_outputs:
             raise ValueError("output_refs are valid only for PROVEN_SUCCEEDED")
         outputs = (
-            [
+            sorted(
                 _require_immutable_artifact_ref(value, "output_ref")
                 for value in raw_outputs
-            ]
+            )
             if normalized_verdict == "PROVEN_SUCCEEDED"
             else []
         )
+        if len(outputs) != len(set(outputs)):
+            raise ValueError("output_refs must not contain duplicates")
 
         current = _utc(now or datetime.now(timezone.utc))
         semantic_resolution = {
@@ -549,6 +554,7 @@ class ResearchJobStore:
                 job_id=identifier,
                 generation=generation,
                 verdict=normalized_verdict,
+                output_refs=outputs,
             ):
                 connection.rollback()
                 raise JobConflictError(

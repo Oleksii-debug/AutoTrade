@@ -31,6 +31,9 @@ FORBIDDEN_SUFFIXES = {
     ".jks",
     ".keystore",
 }
+FORBIDDEN_PREFIXES = (
+    ".env.",
+)
 
 
 class BundleError(ValueError):
@@ -54,6 +57,8 @@ def _safe_relative(path: Path, root: Path) -> str:
 def _is_sensitive(path: Path) -> bool:
     name = path.name.lower()
     if name in FORBIDDEN_BASENAMES:
+        return True
+    if any(name.startswith(prefix) for prefix in FORBIDDEN_PREFIXES):
         return True
     if path.suffix.lower() in FORBIDDEN_SUFFIXES:
         return True
@@ -218,11 +223,19 @@ def build_bundle(
 
     digest = sha256(output.read_bytes()).hexdigest()
     hash_path = output.with_suffix(output.suffix + ".sha256")
-    hash_path.write_text(
-        f"{digest}  {output.name}\n",
-        encoding="utf-8",
-        newline="\n",
-    )
+    hash_temporary = hash_path.with_name(hash_path.name + ".tmp")
+    if hash_temporary.exists():
+        hash_temporary.unlink()
+    try:
+        hash_temporary.write_text(
+            f"{digest}  {output.name}\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        hash_temporary.replace(hash_path)
+    finally:
+        if hash_temporary.exists():
+            hash_temporary.unlink()
     return {
         "output": str(output),
         "sha256": digest,

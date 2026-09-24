@@ -139,6 +139,26 @@ class SimulatedProviderContractHarnessTests(unittest.TestCase):
         )
         self.assertEqual(provider.outbound_request_count, 2)
 
+    def test_final_guard_rejection_does_not_consume_unsent_provider_quota(self):
+        provider = SimulatedProvider()
+        harness = SimulatedProviderContractHarness(
+            provider,
+            quota_capacity="2",
+            recovery_quota_reserve="1",
+        )
+
+        def blocked():
+            raise PermissionError("authority revoked")
+
+        with self.assertRaises(PermissionError):
+            harness.transport_send("blocked", request(), blocked, purpose="TRADING")
+        self.assertEqual(provider.outbound_request_count, 0)
+        self.assertEqual(harness.quota.used, Decimal("0"))
+
+        harness.transport_send("allowed", request(), lambda: None, purpose="TRADING")
+        self.assertEqual(provider.outbound_request_count, 1)
+        self.assertEqual(harness.quota.used, Decimal("1"))
+
     def test_clock_skew_blocks_before_final_guard_and_transport(self):
         provider = SimulatedProvider()
         harness = SimulatedProviderContractHarness(

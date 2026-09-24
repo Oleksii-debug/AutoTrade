@@ -171,6 +171,32 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
             "original-secret",
         )
 
+    def test_revocation_requires_actual_decryption_under_current_identity(self):
+        handle = self.register(secret="original-secret")
+        before = self.path.read_bytes()
+        foreign = ProtectedCredentialVault(
+            self.path,
+            protector=CannotDecryptProtector(),
+        )
+
+        with self.assertRaisesRegex(PermissionError, "cannot be decrypted"):
+            foreign.revoke(
+                handle,
+                execution_identity="windows-user-1",
+            )
+
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(
+            self.vault.resolve(
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                purpose="TRADE",
+            ),
+            "original-secret",
+        )
+
     def test_revocation_erases_ciphertext_and_fails_closed_after_restart(self):
         handle = self.register()
         before = json.loads(self.path.read_text(encoding="utf-8"))

@@ -27,3 +27,12 @@ Boundary:
 - provider adapters must supply qualified provider execution/revision evidence;
 - accounting, reconciliation and dispatch remain separate authorities;
 - no live trading authority is enabled.
+
+
+## Pending cancel is not terminal cancellation
+
+The canonical projection now separates `request_cancel()` from provider-confirmed `confirm_cancel()`. A pending request keeps the unfilled remainder economically live and exposes `CANCEL_REQUESTED` / `PARTIALLY_FILLED_CANCEL_REQUESTED`; fills and overfills observed while cancellation is pending remain explicit. Only confirmation produces `CANCELLED` / `PARTIALLY_FILLED_CANCELLED`.
+
+The legacy `cancel()` entry point remains only as a compatibility alias for confirmed cancellation evidence. Callers that merely sent a cancel request must use `request_cancel()`; treating send/acknowledgement as confirmed terminal cancellation would violate this contract.
+
+This converges the useful late-fill/rejection semantics previously explored in PR #154 into the single `order_projection.py` authority. No order send, cancel transport, accounting or reconciliation authority is added here.

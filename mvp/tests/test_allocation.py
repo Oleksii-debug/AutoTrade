@@ -213,6 +213,16 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result.status, "ALLOCATED")
         self.assertLessEqual(result.estimated_cost, Decimal("20"))
 
+    def test_zero_desired_targets_are_explicit_cash_fallback_not_allocated(self):
+        result = allocate_targets(
+            [self.candidate("ZERO", desired="0", price="10", lot="1")],
+            self.policy(),
+        )
+        self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.scale, Decimal("0"))
+        self.assertEqual(result.gross_notional, Decimal("0"))
+        self.assertEqual(result.targets[0].quantity, Decimal("0"))
+
     def test_minimum_notional_never_proposes_an_unexecutable_small_trade(self):
         result = allocate_targets(
             [self.candidate(desired="40", price="10", lot="1", min_notional="50")],

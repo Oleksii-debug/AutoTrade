@@ -153,11 +153,36 @@ class SpecialistDagTests(unittest.TestCase):
             scheduled_roles=forged.scheduled_roles,
             skipped_roles=forged.skipped_roles,
             reserved_cost=Decimal("0"),
+            available_inputs=forged.available_inputs,
+            total_budget=forged.total_budget,
         )
-        with self.assertRaisesRegex(SpecialistDagError, "reserved cost"):
+        with self.assertRaisesRegex(SpecialistDagError, "canonical planner output"):
             aggregate_specialists(
                 specs,
                 [run("a", "1", cost="1")],
+                plan=forged,
+                decision_deadline=NOW,
+            )
+
+    def test_aggregation_rejects_forged_schedule_with_missing_required_input(self):
+        specs = [spec("research", "g1", cost="1", value="2", inputs=("news",))]
+        planned = plan_specialists(
+            specs,
+            available_inputs=(),
+            total_budget="1",
+        )
+        self.assertEqual(planned.scheduled_roles, ())
+        forged = planned.__class__(
+            scheduled_roles=("research",),
+            skipped_roles=(),
+            reserved_cost=Decimal("1"),
+            available_inputs=planned.available_inputs,
+            total_budget=planned.total_budget,
+        )
+        with self.assertRaisesRegex(SpecialistDagError, "canonical planner output"):
+            aggregate_specialists(
+                specs,
+                [run("research", "1", cost="1")],
                 plan=forged,
                 decision_deadline=NOW,
             )

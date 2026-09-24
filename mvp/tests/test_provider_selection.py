@@ -4,6 +4,7 @@ from uuid import uuid5, NAMESPACE_URL
 
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
+    EvidenceVerification,
     derive_capability_snapshot,
 )
 from mvp.autotrade_mvp.provider_core import (
@@ -53,6 +54,7 @@ def capability(provider: str, *, environment="PAPER", order_types=("LIMIT", "MAR
         snapshot_id=str(uuid5(NAMESPACE_URL, f"snapshot:{provider}:{environment}")),
         claims=claims,
         observed_at=NOW,
+        evidence_verifier=lambda claim: EvidenceVerification(valid=True),
     )
 
 
@@ -160,6 +162,10 @@ class ProviderSelectionTests(unittest.TestCase):
     def test_candidate_requires_actual_hex_code_sha_shape(self):
         with self.assertRaisesRegex(ValueError, "hex SHA"):
             candidate("BYBIT", "SPOT", code_sha="build-label")
+
+    def test_adapter_code_sha_requires_canonical_lowercase_hex(self):
+        with self.assertRaisesRegex(ValueError, "lowercase"):
+            candidate("BYBIT", "SPOT", code_sha="A" * 40)
 
     def test_live_never_inherits_nonlive_qualification(self):
         live = candidate("BYBIT", "SPOT", environment="LIVE")

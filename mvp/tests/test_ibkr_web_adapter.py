@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.ibkr_web import (
     execution_to_reconciliation_fill,
     parse_cancel_response,
     parse_order_submission_response,
+    parse_web_api_trades,
     prepare_normalized_order,
     prepare_reply_confirmation,
 )
@@ -416,6 +417,90 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertEqual(fill.fee_currency, "USD")
 
 
+
+    def test_web_api_trades_use_execution_identity_coid_and_explicit_fee_currency(self):
+        rows = [
+            {
+                "execution_id": "0001.123.01",
+                "order_ref": "at-ibkr-1",
+                "account": "U1234567",
+                "conid": 265598,
+                "size": Decimal("0.5"),
+                "price": "220.10",
+                "commission": "-0.35",
+                "trade_time": "2026-09-24T20:00:01Z",
+            }
+        ]
+        fills = parse_web_api_trades(
+            [rows[0], dict(rows[0])],
+            expected_account_id="U1234567",
+            instrument_versions_by_conid={265598: "AAPL-CONID-265598:v1"},
+            fee_currency_by_execution_id={"0001.123.01": "USD"},
+        )
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0].provider_execution_id, "0001.123.01")
+        self.assertEqual(fills[0].client_order_id, "at-ibkr-1")
+        self.assertEqual(fills[0].quantity, Decimal("0.5"))
+        self.assertEqual(fills[0].fee_amount, Decimal("-0.35"))
+
+    def test_web_api_trade_rejects_cross_account_unknown_conid_and_missing_fee_currency(self):
+        row = {
+            "execution_id": "exec-1",
+            "order_ref": "at-ibkr-1",
+            "account": "U1234567",
+            "conid": 265598,
+            "size": "1",
+            "price": "100",
+            "commission": "0.25",
+            "trade_time": "2026-09-24T20:00:01Z",
+        }
+        with self.assertRaisesRegex(IbkrWebAdapterError, "account"):
+            parse_web_api_trades(
+                [row],
+                expected_account_id="OTHER",
+                instrument_versions_by_conid={265598: "AAPL:v1"},
+                fee_currency_by_execution_id={"exec-1": "USD"},
+            )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "unmapped IBKR conid"):
+            parse_web_api_trades(
+                [row],
+                expected_account_id="U1234567",
+                instrument_versions_by_conid={},
+                fee_currency_by_execution_id={"exec-1": "USD"},
+            )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "fee currency"):
+            parse_web_api_trades(
+                [row],
+                expected_account_id="U1234567",
+                instrument_versions_by_conid={265598: "AAPL:v1"},
+                fee_currency_by_execution_id={},
+            )
+
+    def test_web_api_trade_rejects_binary_float_economics_and_conflicting_execution_id(self):
+        base = {
+            "execution_id": "exec-1",
+            "order_ref": "at-ibkr-1",
+            "account": "U1234567",
+            "conid": 265598,
+            "size": "1",
+            "price": "100",
+            "commission": "0.25",
+            "trade_time": "2026-09-24T20:00:01Z",
+        }
+        with self.assertRaisesRegex(IbkrWebAdapterError, "exact decimal"):
+            parse_web_api_trades(
+                [dict(base, size=1.0)],
+                expected_account_id="U1234567",
+                instrument_versions_by_conid={265598: "AAPL:v1"},
+                fee_currency_by_execution_id={"exec-1": "USD"},
+            )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "conflicting"):
+            parse_web_api_trades(
+                [base, dict(base, size="2")],
+                expected_account_id="U1234567",
+                instrument_versions_by_conid={265598: "AAPL:v1"},
+                fee_currency_by_execution_id={"exec-1": "USD"},
+            )
 
     def test_execution_cannot_cross_account_boundary_during_reconciliation(self):
         execution = IbkrExecutionEvidence.create(

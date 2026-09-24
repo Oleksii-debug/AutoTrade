@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import re
@@ -19,6 +19,7 @@ class CapabilityError(ValueError):
 SOURCES = frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"})
 ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 STATUSES = frozenset({"VERIFIED", "UNKNOWN", "CONFLICTED", "EXPIRED"})
+_CAPABILITY_SNAPSHOT_AUTHORITY = object()
 
 
 def _text(value: str, field: str) -> str:
@@ -131,7 +132,16 @@ class CapabilityClaim:
             "rate_limit_policy_id",
             _text(self.rate_limit_policy_id, "rate_limit_policy_id"),
         )
-        object.__setattr__(self, "evidence_ref", _freeze_evidence(self.evidence_ref))
+        evidence = _freeze_evidence(self.evidence_ref)
+        evidence_observed = _instant(
+            datetime.fromisoformat(str(evidence["observed_at"])[:-1] + "+00:00"),
+            "evidence observed_at",
+        )
+        if evidence_observed > observed:
+            raise CapabilityError(
+                "evidence observed_at cannot be later than claim observed_at"
+            )
+        object.__setattr__(self, "evidence_ref", evidence)
 
 
 @dataclass(frozen=True)
@@ -297,8 +307,13 @@ class CapabilitySnapshot:
     evidence: tuple[Mapping[str, object], ...]
     status: str
     sources: frozenset[str]
+    _authority_marker: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if self._authority_marker is not _CAPABILITY_SNAPSHOT_AUTHORITY:
+            raise CapabilityError(
+                "CapabilitySnapshot can only be created by derive_capability_snapshot"
+            )
         try:
             UUID(self.snapshot_id)
         except (ValueError, TypeError, AttributeError) as error:
@@ -494,6 +509,7 @@ def derive_capability_snapshot(
         evidence=tuple(claim.evidence_ref for claim in verified_live),
         status=status,
         sources=verified_sources,
+        _authority_marker=_CAPABILITY_SNAPSHOT_AUTHORITY,
     )
 
 

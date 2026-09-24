@@ -80,6 +80,14 @@ class ScientificQualificationTests(unittest.TestCase):
     def test_exact_hash_identity_required(self):
         with self.assertRaises(ValueError):
             ScientificQualificationInput("candidate", H, H, complete_gates(), "NONE")
+        with self.assertRaises(ValueError):
+            ScientificQualificationInput("sha256:" + "A" * 64, H, H, complete_gates(), "NONE")
+
+    def test_control_flags_require_actual_booleans(self):
+        with self.assertRaises(TypeError):
+            ScientificQualificationInput(H, H, H, complete_gates(), "NONE", 1, False)
+        with self.assertRaises(TypeError):
+            ScientificQualificationInput(H, H, H, complete_gates(), "NONE", False, "false")
 
 
 if __name__ == "__main__":

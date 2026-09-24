@@ -124,6 +124,64 @@ class AuthorityTests(unittest.TestCase):
                 expires_at="2026-09-24T23:00:00Z",
             )
 
+    def test_authority_timestamps_have_one_immutable_utc_identity(self):
+        service = AuthorityService()
+        first = policy(
+            policy_id="time-policy",
+            valid_from="2026-09-24T02:00:00+02:00",
+            expires_at="2026-09-25T02:00:00+02:00",
+        )
+        equivalent = policy(
+            policy_id="time-policy",
+            valid_from="2026-09-24T00:00:00Z",
+            expires_at="2026-09-25T00:00:00Z",
+        )
+        self.assertEqual(first.valid_from, "2026-09-24T00:00:00Z")
+        self.assertEqual(first.expires_at, "2026-09-25T00:00:00Z")
+        self.assertTrue(service.register_policy(first))
+        self.assertFalse(service.register_policy(equivalent))
+
+        self.assertTrue(
+            service.revoke_policy(
+                "time-policy",
+                reason="manual",
+                revoked_at="2026-09-24T14:00:00+02:00",
+            )
+        )
+        self.assertFalse(
+            service.revoke_policy(
+                "time-policy",
+                reason="manual",
+                revoked_at="2026-09-24T12:00:00Z",
+            )
+        )
+
+    def test_confirmation_expiry_is_canonicalized_for_idempotency(self):
+        service = AuthorityService()
+        service.register_policy(policy())
+        first = dict(
+            confirmation_id="confirm-time",
+            policy_id="p1",
+            intent_hash="intent-hash",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument="ABC",
+            action="ORDER.SUBMIT",
+            notional="100",
+        )
+        self.assertTrue(
+            service.add_confirmation(
+                **first,
+                expires_at="2026-09-24T22:00:00+02:00",
+            )
+        )
+        self.assertFalse(
+            service.add_confirmation(
+                **first,
+                expires_at="2026-09-24T20:00:00Z",
+            )
+        )
+
     def test_future_policy_is_rejected_until_valid_from(self):
         service = AuthorityService()
         service.register_policy(policy(

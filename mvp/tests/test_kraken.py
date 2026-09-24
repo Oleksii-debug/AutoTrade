@@ -259,6 +259,28 @@ class KrakenAdapterTests(unittest.TestCase):
         self.assertEqual(fills[0].fee_currency, "USD")
         self.assertEqual(fills[0].trade_time, "2026-09-24T20:00:00.125000Z")
 
+    def test_spot_trade_timestamp_refuses_silent_sub_microsecond_truncation(self):
+        response = {
+            "error": [],
+            "result": {
+                "trades": {
+                    "T-too-precise": {
+                        "ordertxid": "O1",
+                        "pair": "XBTUSD",
+                        "time": "1790280000.1234567",
+                        "price": "65000",
+                        "vol": "0.1",
+                        "fee": "1",
+                    }
+                }
+            },
+        }
+        with self.assertRaisesRegex(ProviderCoreError, "finer than one microsecond"):
+            parse_spot_trades(
+                response,
+                instrument_versions={"XBTUSD": ("XBTUSD@v1", "USD")},
+            )
+
     def test_absence_evidence_defaults_fail_closed(self):
         evidence = coverage_evidence(
             surface="EXECUTIONS",

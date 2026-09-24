@@ -127,6 +127,8 @@ class RecoveryController:
         if self.provider_reconciled:
             self.reason_codes.discard("startup_reconciliation_required")
             self.reason_codes.discard("provider_uncertainty")
+            if "financial_event_gap" in self.reason_codes:
+                self.last_financial_event_sequence = None
             self.reason_codes.discard("financial_event_gap")
         else:
             self.reason_codes.add("provider_uncertainty")

@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -174,6 +175,28 @@ class ArtifactStoreTests(unittest.TestCase):
                     rights={"storage": False, "export": False},
                 )
             self.assertEqual(store.audit().objects, 0)
+
+
+    def test_publish_and_export_sync_parent_directory_after_replace(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            with patch(
+                "autotrade_research.artifacts.store.sync_parent_directory"
+            ) as sync:
+                store.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=b"durable",
+                    media_type="text/plain",
+                    rights={"storage": True, "export": True},
+                )
+                digest = hashlib.sha256(b"durable").hexdigest()
+                sync.assert_any_call(store._object_path(digest))
+
+                target = Path(directory) / "out" / "durable.txt"
+                store.export(artifact_id, target)
+                sync.assert_any_call(target)
+                self.assertEqual(target.read_bytes(), b"durable")
 
 
 if __name__ == "__main__":

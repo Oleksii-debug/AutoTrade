@@ -174,6 +174,27 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         with self.assertRaisesRegex(ReleaseCandidateError, "NOT_APPLICABLE"):
             artifact("HOST", signature_status="NOT_APPLICABLE")
 
+    def test_direct_artifact_construction_cannot_bypass_digest_validation(self):
+        with self.assertRaisesRegex(ReleaseCandidateError, "canonical sha256"):
+            ReleaseArtifactEvidence(
+                role="HOST",
+                artifact_sha256="not-a-digest",
+                source_sha=SOURCE,
+                signature_status="VERIFIED",
+                evidence_status="PASS",
+            )
+
+    def test_direct_candidate_construction_cannot_bypass_source_validation(self):
+        with self.assertRaisesRegex(ReleaseCandidateError, "git SHA"):
+            ReleaseCandidateInput(
+                release_id="unsafe-direct",
+                source_sha="main",
+                baseline_hash=BASELINE,
+                schema_contract_hash=CONTRACTS,
+                artifacts=self.candidate().artifacts,
+                unresolved_blockers=(),
+            )
+
     def test_manifest_hash_changes_when_evidence_hash_changes(self):
         original = freeze_release_candidate(self.candidate())
         artifacts = list(self.candidate().artifacts)

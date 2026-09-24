@@ -61,6 +61,7 @@ def policy(
     max_total_cost="1",
     deadline=1000,
     fallback="NO_TRADE",
+    fallback_evidence=None,
 ):
     return ModelRoutingPolicy.create(
         policy_id="policy-1",
@@ -72,6 +73,7 @@ def policy(
         max_output_tokens=500,
         deadline_ms=deadline,
         fallback=fallback,
+        deterministic_fallback_evidence_sha256=fallback_evidence,
     )
 
 
@@ -90,7 +92,12 @@ class ModelRoutingTests(unittest.TestCase):
     def test_zero_llm_never_selects_or_reserves_model(self):
         budget = ModelBudgetLedger(ceiling="10")
         decision = route_model(
-            policy=policy(mode="ZERO_LLM", allowed=(), fallback="DETERMINISTIC"),
+            policy=policy(
+                mode="ZERO_LLM",
+                allowed=(),
+                fallback="DETERMINISTIC",
+                fallback_evidence=HASH_A,
+            ),
             task=task(),
             models=[model()],
             budget=budget,
@@ -98,6 +105,7 @@ class ModelRoutingTests(unittest.TestCase):
         self.assertEqual(decision.outcome, "DETERMINISTIC")
         self.assertEqual(decision.reason, "zero_llm_policy")
         self.assertIsNone(decision.model_id)
+        self.assertEqual(decision.fallback_evidence_sha256, HASH_A)
         self.assertFalse(decision.authorizes_trading)
         self.assertEqual(budget.snapshot().reserved, Decimal("0"))
 
@@ -336,6 +344,17 @@ class ModelRoutingTests(unittest.TestCase):
                 measured_quality="0.5",
                 quality_evidence_sha256=HASH_B,
             )
+
+    def test_deterministic_fallback_requires_immutable_qualification_evidence(self):
+        with self.assertRaisesRegex(ModelRoutingError, "qualification evidence"):
+            policy(
+                mode="ZERO_LLM",
+                allowed=(),
+                fallback="DETERMINISTIC",
+                fallback_evidence=None,
+            )
+        with self.assertRaisesRegex(ModelRoutingError, "NO_TRADE"):
+            policy(fallback="NO_TRADE", fallback_evidence=HASH_A)
 
     def test_fixed_and_zero_llm_policy_shapes_are_strict(self):
         with self.assertRaisesRegex(ModelRoutingError, "exactly one"):

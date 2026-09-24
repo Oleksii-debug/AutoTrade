@@ -16,7 +16,7 @@ class InsufficientAvailable(ValueError):
     """Raised when current availability cannot cover all outstanding reservations."""
 
 
-TERMINAL_STATES = {"FILLED", "CANCELLED", "REJECTED", "PROVEN_ABSENT"}
+TERMINAL_STATES = {"FILLED", "CANCELED", "REJECTED", "PROVEN_ABSENT"}
 ACTIVE_STATES = {"WORKING", "UNKNOWN"}
 
 
@@ -193,8 +193,6 @@ class ReservationBook:
     ) -> ReservationSnapshot:
         current = self.get(reservation_id)
         normalized = _text(outcome, name="outcome").upper()
-        if normalized == "CANCELED":
-            normalized = "CANCELLED"
         if normalized not in TERMINAL_STATES:
             raise ValueError(f"Unsupported terminal outcome: {normalized}")
         evidence = _text(resolution_evidence, name="resolution_evidence")

@@ -166,16 +166,12 @@ class OrderProjection:
         filled = self.filled_quantity
         if self._oco_violation:
             return "OCO_VIOLATION"
-        if filled > self.requested_quantity:
-            return "OVERFILLED"
         if self.cancelled:
-            if filled == self.requested_quantity:
-                return "FILLED_AFTER_CANCEL"
             return "PARTIALLY_FILLED_CANCELLED" if filled > 0 else "CANCELLED"
         if self.rejected:
-            if filled == self.requested_quantity:
-                return "FILLED_AFTER_REJECT"
-            return "PARTIALLY_FILLED_AFTER_REJECT" if filled > 0 else "REJECTED"
+            return "FILLED_AFTER_REJECT" if filled > 0 else "REJECTED"
+        if filled > self.requested_quantity:
+            return "OVERFILLED"
         if filled == self.requested_quantity:
             return "FILLED"
         if filled > 0:
@@ -185,17 +181,6 @@ class OrderProjection:
         if self.submission_state == "UNKNOWN":
             return "UNKNOWN"
         return "PENDING"
-
-    @property
-    def economic_terminal_outcome(self) -> str | None:
-        state = self.state
-        if state in {"FILLED", "FILLED_AFTER_CANCEL", "FILLED_AFTER_REJECT"}:
-            return "FILLED"
-        if state in {"CANCELLED", "PARTIALLY_FILLED_CANCELLED"}:
-            return "CANCELLED"
-        if state in {"REJECTED", "PARTIALLY_FILLED_AFTER_REJECT"}:
-            return "REJECTED"
-        return None
 
     def snapshot(self) -> OrderSnapshot:
         return OrderSnapshot(

@@ -13,28 +13,11 @@ from .persistence import JournalStore, canonical_json, payload_digest
 
 
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
-SenderCheck = Callable[[str, int], None]
 TransportSend = Callable[[str, Mapping[str, Any], Callable[[], None]], Any]
 
 
 class DispatchBlocked(RuntimeError):
     """Raised inside a provider wrapper when the final send barrier rejects."""
-
-
-def _authority_decision(
-    authority_check: AuthorityCheck,
-    intent_hash: str,
-    now: str,
-) -> tuple[bool, str]:
-    result = authority_check(intent_hash, now)
-    if not isinstance(result, tuple) or len(result) != 2:
-        return False, "authority_check_invalid_result"
-    allowed, reason = result
-    if not isinstance(allowed, bool):
-        return False, "authority_check_invalid_allowed"
-    if not isinstance(reason, str) or not reason.strip():
-        return False, "authority_check_invalid_reason"
-    return allowed, reason.strip()
 
 
 @dataclass(frozen=True)
@@ -79,7 +62,6 @@ def _envelope(
     version: int,
     payload: dict[str, Any],
     now: str,
-    owner_epoch: int,
 ) -> dict[str, Any]:
     timestamp = _instant(now).isoformat().replace("+00:00", "Z")
     return {
@@ -90,7 +72,7 @@ def _envelope(
         "aggregate_id": attempt_id,
         "aggregate_version": str(version),
         "host_id": "local-mvp",
-        "owner_epoch": str(owner_epoch),
+        "owner_epoch": "1",
         "environment": "SIMULATION",
         "occurred_at": timestamp,
         "observed_at": timestamp,
@@ -116,14 +98,10 @@ class GuardedDispatcher:
         store: JournalStore,
         *,
         owner_token: str | None = None,
-        owner_epoch: int = 1,
         prepared_lease_seconds: int = 60,
     ):
         self.store = store
         self.owner_token = owner_token or str(uuid4())
-        if not isinstance(owner_epoch, int) or isinstance(owner_epoch, bool) or owner_epoch < 1:
-            raise ValueError("owner_epoch must be a positive integer")
-        self.owner_epoch = owner_epoch
         if not isinstance(prepared_lease_seconds, int) or isinstance(prepared_lease_seconds, bool) or prepared_lease_seconds < 1:
             raise ValueError("prepared_lease_seconds must be a positive integer")
         self.prepared_lease_seconds = prepared_lease_seconds
@@ -147,7 +125,6 @@ class GuardedDispatcher:
                 version=version,
                 payload=payload,
                 now=now,
-                owner_epoch=self.owner_epoch,
             ),
             outbox_topic="autotrade.submission.events",
         )
@@ -222,7 +199,6 @@ class GuardedDispatcher:
         transport_send: TransportSend,
         client_id_max_length: int = 32,
         final_barrier_clock: Callable[[], str] | None = None,
-        sender_check: SenderCheck | None = None,
     ) -> DispatchOutcome:
         for value, name in (
             (attempt_id, "attempt_id"),
@@ -268,7 +244,6 @@ class GuardedDispatcher:
             "request_hash": request_hash,
             "client_order_id": client_order_id,
             "owner_token": self.owner_token,
-            "owner_epoch": self.owner_epoch,
             "prepared_at": _instant(now).isoformat().replace("+00:00", "Z"),
         }
         prepared = self._append(
@@ -285,7 +260,7 @@ class GuardedDispatcher:
                 now=now,
             )
 
-        allowed, reason = _authority_decision(authority_check, intent_hash, now)
+        allowed, reason = authority_check(intent_hash, now)
         if not allowed:
             self._append(
                 attempt_id=attempt_id,
@@ -320,29 +295,7 @@ class GuardedDispatcher:
                         now=barrier_now,
                     )
                     raise DispatchBlocked("final_barrier_clock_moved_backwards")
-            if sender_check is not None:
-                try:
-                    sender_check(self.owner_token, self.owner_epoch)
-                except Exception as error:
-                    barrier_reason = f"sender_fence_rejected:{type(error).__name__}"
-                    self._append(
-                        attempt_id=attempt_id,
-                        event_type="SubmissionBlocked",
-                        version=2,
-                        payload={
-                            "client_order_id": client_order_id,
-                            "reason": barrier_reason,
-                            "owner_token": self.owner_token,
-                            "owner_epoch": self.owner_epoch,
-                        },
-                        now=barrier_now,
-                    )
-                    raise DispatchBlocked(barrier_reason) from error
-            allowed_now, barrier_reason = _authority_decision(
-                authority_check,
-                intent_hash,
-                barrier_now,
-            )
+            allowed_now, barrier_reason = authority_check(intent_hash, barrier_now)
             if not allowed_now:
                 self._append(
                     attempt_id=attempt_id,
@@ -359,7 +312,6 @@ class GuardedDispatcher:
                 payload={
                     "client_order_id": client_order_id,
                     "owner_token": self.owner_token,
-                    "owner_epoch": self.owner_epoch,
                     "reason": "final_send_barrier_passed",
                 },
                 now=barrier_now,

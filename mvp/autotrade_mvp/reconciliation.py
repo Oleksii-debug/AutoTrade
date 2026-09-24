@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
@@ -12,7 +12,6 @@ from typing import Mapping, Sequence
 _REQUIRED_ABSENCE_SURFACES = frozenset(
     {"OPEN_ORDERS", "ORDER_HISTORY", "EXECUTIONS", "ACTIVITIES"}
 )
-_RECONCILIATION_AUTHORITY = object()
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -113,35 +112,11 @@ class SnapshotConsistencyEvidence:
     @property
     def consistent(self) -> bool:
         if self.mode == "ATOMIC":
-            return True
+            return not self.sequence_gap_detected
         return (
             self.buffered_stream_events
             and self.replay_complete
             and not self.sequence_gap_detected
-        )
-
-
-@dataclass(frozen=True)
-class LocalWorkingOrderEvidence:
-    client_order_id: str
-    instrument: str
-    remaining_quantity: Decimal
-
-    @classmethod
-    def create(
-        cls,
-        *,
-        client_order_id: str,
-        instrument: str,
-        remaining_quantity,
-    ) -> "LocalWorkingOrderEvidence":
-        remaining = _decimal(remaining_quantity, name="remaining_quantity")
-        if remaining <= 0:
-            raise ValueError("remaining_quantity must be positive")
-        return cls(
-            client_order_id=_text(client_order_id, name="client_order_id"),
-            instrument=_text(instrument, name="instrument"),
-            remaining_quantity=remaining,
         )
 
 
@@ -151,6 +126,31 @@ class ProviderWorkingOrderEvidence:
     client_order_id: str | None
     instrument: str
     remaining_quantity: Decimal
+
+    def __post_init__(self) -> None:
+        remaining = _decimal(self.remaining_quantity, name="remaining_quantity")
+        if remaining <= 0:
+            raise ValueError("remaining_quantity must be positive")
+        object.__setattr__(
+            self,
+            "provider_order_id",
+            _text(self.provider_order_id, name="provider_order_id"),
+        )
+        object.__setattr__(
+            self,
+            "client_order_id",
+            (
+                _text(self.client_order_id, name="client_order_id")
+                if self.client_order_id is not None
+                else None
+            ),
+        )
+        object.__setattr__(
+            self,
+            "instrument",
+            _text(self.instrument, name="instrument"),
+        )
+        object.__setattr__(self, "remaining_quantity", remaining)
 
     @classmethod
     def create(
@@ -186,6 +186,41 @@ class ProviderFillEvidence:
     fee_amount: Decimal
     fee_currency: str
     trade_time: str
+
+    def __post_init__(self) -> None:
+        quantity = _decimal(self.quantity, name="quantity")
+        price = _decimal(self.price, name="price")
+        fee_amount = _decimal(self.fee_amount, name="fee_amount")
+        if quantity <= 0 or price <= 0:
+            raise ValueError("quantity and price must be positive")
+        _instant(self.trade_time, name="trade_time")
+        object.__setattr__(
+            self,
+            "provider_execution_id",
+            _text(self.provider_execution_id, name="provider_execution_id"),
+        )
+        object.__setattr__(
+            self,
+            "client_order_id",
+            (
+                _text(self.client_order_id, name="client_order_id")
+                if self.client_order_id is not None
+                else None
+            ),
+        )
+        object.__setattr__(
+            self,
+            "instrument",
+            _text(self.instrument, name="instrument"),
+        )
+        object.__setattr__(self, "quantity", quantity)
+        object.__setattr__(self, "price", price)
+        object.__setattr__(self, "fee_amount", fee_amount)
+        object.__setattr__(
+            self,
+            "fee_currency",
+            _text(self.fee_currency, name="fee_currency").upper(),
+        )
 
     @classmethod
     def create(
@@ -230,6 +265,19 @@ class UnknownSubmission:
     client_order_id: str
     started_at: str
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "attempt_id",
+            _text(self.attempt_id, name="attempt_id"),
+        )
+        object.__setattr__(
+            self,
+            "client_order_id",
+            _text(self.client_order_id, name="client_order_id"),
+        )
+        _instant(self.started_at, name="started_at")
+
     @classmethod
     def create(
         cls, *, attempt_id: str, client_order_id: str, started_at: str
@@ -248,7 +296,6 @@ class SubmissionResolution:
     client_order_id: str
     outcome: str
     evidence_reason: str
-    provider_execution_ids: tuple[str, ...] = ()
     provider_order_ids: tuple[str, ...] = ()
 
 
@@ -261,24 +308,12 @@ class ReconciliationResult:
     matched_working_client_order_ids: tuple[str, ...]
     unexpected_working_provider_order_ids: tuple[str, ...]
     missing_local_working_client_order_ids: tuple[str, ...]
-    mismatched_working_client_order_ids: tuple[str, ...]
     snapshot_consistent: bool
     cash_differences: Mapping[str, Decimal]
     position_differences: Mapping[str, Decimal]
     submission_resolutions: tuple[SubmissionResolution, ...]
     blocking_resources: tuple[str, ...]
     reasons: tuple[str, ...]
-    _authority_marker: object = field(
-        default=None,
-        repr=False,
-        compare=False,
-    )
-
-    def __post_init__(self) -> None:
-        if self._authority_marker is not _RECONCILIATION_AUTHORITY:
-            raise TypeError(
-                "ReconciliationResult can only be created by canonical reconcile_account"
-            )
 
     @property
     def blocks_new_risk(self) -> bool:
@@ -292,8 +327,13 @@ def _amount_map(
         raise TypeError(f"{name} must be a mapping")
     result: dict[str, Decimal] = {}
     for key, value in values.items():
-        result[_text(str(key), name=f"{name} key")] = _decimal(
-            value, name=f"{name}[{key}]"
+        if not isinstance(key, str):
+            raise TypeError(f"{name} keys must be strings")
+        normalized_key = _text(key, name=f"{name} key")
+        if normalized_key in result:
+            raise ValueError(f"{name} keys must be unique after normalization")
+        result[normalized_key] = _decimal(
+            value, name=f"{name}[{normalized_key}]"
         )
     return result
 
@@ -335,7 +375,6 @@ def reconcile_account(
     local_execution_ids: Sequence[str],
     provider_fills: Sequence[ProviderFillEvidence],
     local_working_client_order_ids: Sequence[str] = (),
-    local_working_orders: Sequence[LocalWorkingOrderEvidence] = (),
     provider_working_orders: Sequence[ProviderWorkingOrderEvidence] = (),
     snapshot_consistency: SnapshotConsistencyEvidence | None = None,
     unknown_submissions: Sequence[UnknownSubmission] = (),
@@ -385,7 +424,6 @@ def reconcile_account(
 
     provider_by_id: dict[str, ProviderFillEvidence] = {}
     provider_client_ids: set[str] = set()
-    provider_execution_ids_by_client: dict[str, set[str]] = {}
     for fill in provider_fills:
         if not isinstance(fill, ProviderFillEvidence):
             raise TypeError("provider_fills must contain ProviderFillEvidence")
@@ -396,9 +434,6 @@ def reconcile_account(
         provider_by_id[fill.provider_execution_id] = fill
         if fill.client_order_id is not None:
             provider_client_ids.add(fill.client_order_id)
-            provider_execution_ids_by_client.setdefault(fill.client_order_id, set()).add(
-                fill.provider_execution_id
-            )
 
     provider_ids = set(provider_by_id)
     local_id_set = set(local_ids)
@@ -412,19 +447,6 @@ def reconcile_account(
     )
     if len(local_working_ids) != len(set(local_working_ids)):
         raise ValueError("local_working_client_order_ids must be unique")
-
-    local_working_by_client_id: dict[str, LocalWorkingOrderEvidence] = {}
-    for order in local_working_orders:
-        if not isinstance(order, LocalWorkingOrderEvidence):
-            raise TypeError(
-                "local_working_orders must contain LocalWorkingOrderEvidence"
-            )
-        existing = local_working_by_client_id.get(order.client_order_id)
-        if existing is not None and existing != order:
-            raise ValueError(
-                "local client order id has conflicting working-order observations"
-            )
-        local_working_by_client_id[order.client_order_id] = order
 
     provider_working_by_id: dict[str, ProviderWorkingOrderEvidence] = {}
     provider_working_by_client_id: dict[str, ProviderWorkingOrderEvidence] = {}
@@ -447,29 +469,11 @@ def reconcile_account(
                 )
             provider_working_by_client_id[order.client_order_id] = order
 
-    local_working_set = set(local_working_ids) | set(local_working_by_client_id)
+    local_working_set = set(local_working_ids)
     provider_working_client_ids = set(provider_working_by_client_id)
-    candidate_matched_working = local_working_set & provider_working_client_ids
-    mismatched_working: list[str] = []
-    matched_working_values: list[str] = []
-    for client_order_id in sorted(candidate_matched_working):
-        local_detail = local_working_by_client_id.get(client_order_id)
-        provider_detail = provider_working_by_client_id[client_order_id]
-        if local_detail is None:
-            # Identity proves that an ambiguous send reached the provider, so it
-            # prevents blind resend, but it is not enough to prove current open
-            # exposure.  Exact instrument and remaining quantity are required
-            # before the account can become READY.
-            mismatched_working.append(client_order_id)
-        elif (
-            local_detail.instrument != provider_detail.instrument
-            or local_detail.remaining_quantity != provider_detail.remaining_quantity
-        ):
-            mismatched_working.append(client_order_id)
-        else:
-            matched_working_values.append(client_order_id)
-    matched_working = tuple(matched_working_values)
-    mismatched_working_ids = tuple(mismatched_working)
+    matched_working = tuple(
+        sorted(local_working_set & provider_working_client_ids)
+    )
     missing_local_working = tuple(
         sorted(local_working_set - provider_working_client_ids)
     )
@@ -488,8 +492,23 @@ def reconcile_account(
         raise TypeError(
             "snapshot_consistency must be SnapshotConsistencyEvidence"
         )
+    snapshot_window_covered = False
+    if snapshot_consistency is not None:
+        snapshot_started = _instant(
+            snapshot_consistency.query_started_at,
+            name="snapshot_consistency.query_started_at",
+        )
+        snapshot_completed = _instant(
+            snapshot_consistency.query_completed_at,
+            name="snapshot_consistency.query_completed_at",
+        )
+        snapshot_window_covered = (
+            start <= snapshot_started <= snapshot_completed <= end
+        )
     snapshot_is_consistent = bool(
-        snapshot_consistency is not None and snapshot_consistency.consistent
+        snapshot_consistency is not None
+        and snapshot_consistency.consistent
+        and snapshot_window_covered
     )
 
     cash_differences: dict[str, Decimal] = {}
@@ -524,20 +543,17 @@ def reconcile_account(
         submission_time = _instant(
             submission.started_at, name="unknown_submission.started_at"
         )
-        matched_provider_execution_ids = tuple(
-            sorted(provider_execution_ids_by_client.get(submission.client_order_id, set()))
-        )
-        matched_provider_order = provider_working_by_client_id.get(
+        provider_working = provider_working_by_client_id.get(
             submission.client_order_id
         )
-        matched_provider_order_ids: tuple[str, ...] = ()
-        if matched_provider_execution_ids:
+        provider_order_ids: tuple[str, ...] = ()
+        if submission.client_order_id in provider_client_ids:
             outcome = "OBSERVED_EXECUTION"
             reason = "provider_activity_contains_client_order_id"
-        elif matched_provider_order is not None:
+        elif provider_working is not None:
             outcome = "OBSERVED_WORKING_ORDER"
             reason = "provider_working_orders_contains_client_order_id"
-            matched_provider_order_ids = (matched_provider_order.provider_order_id,)
+            provider_order_ids = (provider_working.provider_order_id,)
         elif (
             snapshot_is_consistent
             and pagination_complete
@@ -568,8 +584,7 @@ def reconcile_account(
                 client_order_id=submission.client_order_id,
                 outcome=outcome,
                 evidence_reason=reason,
-                provider_execution_ids=matched_provider_execution_ids,
-                provider_order_ids=matched_provider_order_ids,
+                provider_order_ids=provider_order_ids,
             )
         )
 
@@ -579,6 +594,10 @@ def reconcile_account(
         blocking.add("ACCOUNT")
         if snapshot_consistency is None:
             reasons.append("provider snapshot consistency is not evidenced")
+        elif not snapshot_window_covered:
+            reasons.append(
+                "provider snapshot query window is outside reconciliation coverage"
+            )
         elif snapshot_consistency.sequence_gap_detected:
             reasons.append("provider snapshot stream contains a sequence gap")
         else:
@@ -608,18 +627,6 @@ def reconcile_account(
         reasons.append(
             "local working orders are absent from provider working-order snapshot"
         )
-    if mismatched_working_ids:
-        for client_order_id in mismatched_working_ids:
-            local_order = local_working_by_client_id.get(client_order_id)
-            provider_order = provider_working_by_client_id[client_order_id]
-            if local_order is None:
-                blocking.add("ACCOUNT")
-            else:
-                blocking.add(f"INSTRUMENT:{local_order.instrument}")
-            blocking.add(f"INSTRUMENT:{provider_order.instrument}")
-        reasons.append(
-            "working-order instrument or remaining quantity is unverified or differs from local truth"
-        )
     for currency in cash_differences:
         blocking.add(f"CASH:{currency}")
     if cash_differences:
@@ -643,7 +650,6 @@ def reconcile_account(
         and not missing
         and not unexpected_working
         and not missing_local_working
-        and not mismatched_working_ids
         and not cash_differences
         and not position_differences
         and all(item.outcome != "UNKNOWN" for item in resolutions)
@@ -656,12 +662,10 @@ def reconcile_account(
         matched_working_client_order_ids=matched_working,
         unexpected_working_provider_order_ids=unexpected_working,
         missing_local_working_client_order_ids=missing_local_working,
-        mismatched_working_client_order_ids=mismatched_working_ids,
         snapshot_consistent=snapshot_is_consistent,
         cash_differences=MappingProxyType(cash_differences),
         position_differences=MappingProxyType(position_differences),
         submission_resolutions=tuple(resolutions),
         blocking_resources=tuple(sorted(blocking)),
         reasons=tuple(reasons),
-        _authority_marker=_RECONCILIATION_AUTHORITY,
     )

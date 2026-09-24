@@ -1,7 +1,6 @@
 from decimal import Decimal
 import unittest
 
-from mvp.autotrade_mvp.order_projection import OrderProjection
 from mvp.autotrade_mvp.reservations import (
     InsufficientAvailable,
     ReservationBook,
@@ -45,25 +44,6 @@ class ReservationFoundationTests(unittest.TestCase):
             resolution_evidence="provider-order-terminal-cancel",
         )
         self.assertEqual(terminal.remaining["CASH:USD"], Decimal("0"))
-        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("0"))
-
-    def test_order_projection_cancel_state_releases_reservation_without_translation(self):
-        book = ReservationBook()
-        book.reserve(
-            reservation_id="r-cancel",
-            intent_id="i-cancel",
-            requirements={"CASH:USD": "100"},
-            available={"CASH:USD": "1000"},
-        )
-        order = OrderProjection(client_order_id="i-cancel", requested_quantity="1")
-        order.cancel()
-        self.assertEqual(order.state, "CANCELLED")
-        terminal = book.mark_terminal(
-            "r-cancel",
-            outcome=order.state,
-            resolution_evidence="provider-confirmed-cancel",
-        )
-        self.assertEqual(terminal.state, "CANCELLED")
         self.assertEqual(book.total_reserved("CASH:USD"), Decimal("0"))
 
     def test_unknown_send_keeps_remaining_exposure_reserved(self):

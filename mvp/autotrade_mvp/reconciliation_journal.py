@@ -60,9 +60,6 @@ def reconciliation_payload(
         "missing_local_working_client_order_ids": list(
             result.missing_local_working_client_order_ids
         ),
-        "mismatched_working_client_order_ids": list(
-            result.mismatched_working_client_order_ids
-        ),
         "cash_differences": _decimal_map(result.cash_differences),
         "position_differences": _decimal_map(result.position_differences),
         "submission_resolutions": [
@@ -71,7 +68,6 @@ def reconciliation_payload(
                 "client_order_id": item.client_order_id,
                 "outcome": item.outcome,
                 "evidence_reason": item.evidence_reason,
-                "provider_execution_ids": list(item.provider_execution_ids),
                 "provider_order_ids": list(item.provider_order_ids),
             }
             for item in result.submission_resolutions
@@ -87,27 +83,15 @@ def record_reconciliation_checkpoint(
     reconciliation_id: str,
     result: ReconciliationResult,
     observed_at: str,
-    owner_epoch: int,
-    environment: str,
 ) -> dict[str, Any]:
     """Persist one exact reconciliation outcome, idempotently for retries."""
 
     if not isinstance(store, JournalStore):
         raise TypeError("store must be JournalStore")
     rid = _text(reconciliation_id, name="reconciliation_id")
-    if not isinstance(owner_epoch, int) or isinstance(owner_epoch, bool) or owner_epoch < 1:
-        raise ValueError("owner_epoch must be a positive integer")
-    normalized_environment = _text(environment, name="environment").upper()
-    if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
-        raise ValueError("environment is unsupported")
     payload = reconciliation_payload(result, observed_at=observed_at)
     existing = store.load_events("account_reconciliation", rid)
-    if (
-        existing
-        and existing[-1]["payload"] == payload
-        and existing[-1].get("owner_epoch") == str(owner_epoch)
-        and existing[-1].get("environment") == normalized_environment
-    ):
+    if existing and existing[-1]["payload"] == payload:
         return existing[-1]
 
     version = store.next_aggregate_version("account_reconciliation", rid)
@@ -126,8 +110,8 @@ def record_reconciliation_checkpoint(
         "aggregate_id": rid,
         "aggregate_version": str(version),
         "host_id": "local-mvp",
-        "owner_epoch": str(owner_epoch),
-        "environment": normalized_environment,
+        "owner_epoch": "1",
+        "environment": "SIMULATION",
         "occurred_at": payload["observed_at"],
         "observed_at": payload["observed_at"],
         "committed_at": payload["observed_at"],

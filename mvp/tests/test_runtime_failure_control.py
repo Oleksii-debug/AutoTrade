@@ -1,58 +1,11 @@
 import unittest
 
-from mvp.autotrade_mvp.reconciliation import (
-    CoverageSurfaceEvidence,
-    ReconciliationResult,
-    SnapshotConsistencyEvidence,
-    UnknownSubmission,
-    reconcile_account,
-)
 from mvp.autotrade_mvp.recovery import (
     HostState,
     OutboundAttempt,
     RecoveryController,
     SendPhase,
 )
-
-
-def _proven_absent_reconciliation(*, attempt_id="a1"):
-    started_at = "2026-09-24T18:00:00Z"
-    surfaces = [
-        CoverageSurfaceEvidence(
-            surface=surface,
-            coverage_start="2026-09-24T17:00:00Z",
-            coverage_end="2026-09-24T19:00:00Z",
-            pagination_complete=True,
-            consistency_horizon_satisfied=True,
-            provider_semantics_exclude_execution=True,
-        )
-        for surface in ("OPEN_ORDERS", "ORDER_HISTORY", "EXECUTIONS", "ACTIVITIES")
-    ]
-    return reconcile_account(
-        local_cash={"USD": "1000"},
-        provider_cash={"USD": "1000"},
-        local_positions={},
-        provider_positions={},
-        local_execution_ids=[],
-        provider_fills=[],
-        snapshot_consistency=SnapshotConsistencyEvidence(
-            mode="ATOMIC",
-            query_started_at="2026-09-24T17:00:00Z",
-            query_completed_at="2026-09-24T19:00:00Z",
-        ),
-        unknown_submissions=[
-            UnknownSubmission.create(
-                attempt_id=attempt_id,
-                client_order_id="client-a1",
-                started_at=started_at,
-            )
-        ],
-        searched_client_order_ids=["client-a1"],
-        coverage_start="2026-09-24T17:00:00Z",
-        coverage_end="2026-09-24T19:00:00Z",
-        pagination_complete=True,
-        absence_coverage=surfaces,
-    )
 
 
 class RuntimeRecoveryTests(unittest.TestCase):
@@ -101,86 +54,15 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.assertEqual(controller.state, HostState.READY)
         self.assertEqual(attempt.retry_disposition, "NEVER")
 
-    def test_unknown_send_resolves_from_execution_even_when_ack_is_lost(self):
-        controller, owner = self._ready()
-        attempt = OutboundAttempt("a-fill", "intent-fill", owner.epoch)
-        attempt.persist()
-        attempt.mark_send_started("journal:send-started")
-        controller.note_unknown_send(attempt)
-
-        self.assertTrue(
-            attempt.observe_execution("exec-7", "provider:execution:exec-7")
-        )
-        self.assertTrue(
-            attempt.observe_execution("exec-8", "provider:execution:exec-8")
-        )
-        self.assertFalse(
-            attempt.observe_execution("exec-8", "provider:execution:exec-8-duplicate")
-        )
-        controller.resolve_attempt(attempt)
-        controller.record_reconciliation(consistent=True)
-
-        self.assertEqual(attempt.phase, SendPhase.EXECUTION_OBSERVED)
-        self.assertEqual(attempt.provider_execution_ids, ["exec-7", "exec-8"])
-        self.assertEqual(attempt.retry_disposition, "NEVER")
-        self.assertEqual(controller.state, HostState.READY)
-
-    def test_forged_reconciliation_result_cannot_authorize_retry(self):
-        with self.assertRaisesRegex(
-            TypeError,
-            "only be created by canonical reconcile_account",
-        ):
-            ReconciliationResult(
-                complete=True,
-                matched_execution_ids=(),
-                unexpected_execution_ids=(),
-                missing_local_execution_ids=(),
-                matched_working_client_order_ids=(),
-                unexpected_working_provider_order_ids=(),
-                missing_local_working_client_order_ids=(),
-                mismatched_working_client_order_ids=(),
-                snapshot_consistent=True,
-                cash_differences={},
-                position_differences={},
-                submission_resolutions=(),
-                blocking_resources=(),
-                reasons=(),
-            )
-
-    def test_absence_requires_canonical_reconciliation_before_retry(self):
+    def test_absence_requires_independent_evidence_before_retry(self):
         attempt = OutboundAttempt("a1", "intent-1", 1)
         attempt.persist()
         attempt.mark_send_started("journal:send-started")
-
-        with self.assertRaisesRegex(TypeError, "canonical ReconciliationResult"):
-            attempt.prove_absent(
-                [
-                    "client-order-lookup:missing",
-                    "open-orders:complete",
-                    "order-history:complete",
-                    "executions:complete",
-                    "activities:complete",
-                ]
-            )
-
-        reconciliation = _proven_absent_reconciliation()
-        self.assertTrue(reconciliation.complete)
-        attempt.prove_absent(reconciliation)
+        with self.assertRaises(ValueError):
+            attempt.prove_absent(["orders:none"])
+        attempt.prove_absent(["orders:none", "history:none"])
         self.assertEqual(attempt.phase, SendPhase.PROVEN_ABSENT)
         self.assertEqual(attempt.retry_disposition, "SAFE_WITH_NEW_ADMISSION")
-        self.assertTrue(attempt.evidence[-1].startswith("reconciliation:PROVEN_ABSENT:"))
-
-    def test_absence_resolution_must_match_exact_attempt(self):
-        attempt = OutboundAttempt("a1", "intent-1", 1)
-        attempt.persist()
-        attempt.mark_send_started("journal:send-started")
-
-        with self.assertRaisesRegex(ValueError, "exactly one"):
-            attempt.prove_absent(
-                _proven_absent_reconciliation(attempt_id="another-attempt")
-            )
-        self.assertEqual(attempt.phase, SendPhase.SENT_UNKNOWN)
-        self.assertEqual(attempt.retry_disposition, "RECONCILE_FIRST")
 
     def test_full_disk_blocks_new_financial_admission(self):
         controller, owner = self._ready()

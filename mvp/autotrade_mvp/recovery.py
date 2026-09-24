@@ -11,8 +11,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Iterable
 
-from .reconciliation import ReconciliationResult
-
 
 class HostState(str, Enum):
     STOPPED = "STOPPED"
@@ -27,7 +25,6 @@ class SendPhase(str, Enum):
     DURABLE = "DURABLE"
     SENT_UNKNOWN = "SENT_UNKNOWN"
     ACKNOWLEDGED = "ACKNOWLEDGED"
-    EXECUTION_OBSERVED = "EXECUTION_OBSERVED"
     REJECTED = "REJECTED"
     PROVEN_ABSENT = "PROVEN_ABSENT"
 
@@ -45,7 +42,6 @@ class OutboundAttempt:
     owner_epoch: int
     phase: SendPhase = SendPhase.CREATED
     provider_order_id: str | None = None
-    provider_execution_ids: list[str] = field(default_factory=list)
     evidence: list[str] = field(default_factory=list)
 
     def persist(self) -> None:
@@ -70,22 +66,6 @@ class OutboundAttempt:
         self.provider_order_id = provider_order_id
         self.evidence.append(evidence_ref)
 
-    def observe_execution(self, provider_execution_id: str, evidence_ref: str) -> bool:
-        if self.phase not in {
-            SendPhase.SENT_UNKNOWN,
-            SendPhase.ACKNOWLEDGED,
-            SendPhase.EXECUTION_OBSERVED,
-        }:
-            raise ValueError("Execution observation requires a sent or acknowledged attempt")
-        if not provider_execution_id or not evidence_ref:
-            raise ValueError("Provider execution and evidence are required")
-        if provider_execution_id in self.provider_execution_ids:
-            return False
-        self.phase = SendPhase.EXECUTION_OBSERVED
-        self.provider_execution_ids.append(provider_execution_id)
-        self.evidence.append(evidence_ref)
-        return True
-
     def reject(self, evidence_ref: str) -> None:
         if self.phase is not SendPhase.SENT_UNKNOWN:
             raise ValueError("Rejection requires an uncertain sent attempt")
@@ -94,41 +74,14 @@ class OutboundAttempt:
         self.phase = SendPhase.REJECTED
         self.evidence.append(evidence_ref)
 
-    def prove_absent(self, reconciliation: ReconciliationResult) -> None:
-        """Resolve SENT_UNKNOWN only from the canonical reconciliation authority."""
-
+    def prove_absent(self, evidence_refs: Iterable[str]) -> None:
         if self.phase is not SendPhase.SENT_UNKNOWN:
             raise ValueError("Absence proof requires an uncertain sent attempt")
-        if not isinstance(reconciliation, ReconciliationResult):
-            raise TypeError("Absence proof requires a canonical ReconciliationResult")
-        if not reconciliation.complete or reconciliation.blocks_new_risk:
-            raise ValueError("Absence proof requires complete unblocked reconciliation")
-        matches = [
-            item
-            for item in reconciliation.submission_resolutions
-            if item.attempt_id == self.attempt_id
-        ]
-        if len(matches) != 1:
-            raise ValueError(
-                "Absence proof requires exactly one reconciliation resolution "
-                "for this attempt"
-            )
-        resolution = matches[0]
-        if resolution.outcome != "PROVEN_ABSENT":
-            raise ValueError(
-                "Reconciliation did not prove this submission attempt absent"
-            )
-        if resolution.provider_execution_ids or resolution.provider_order_ids:
-            raise ValueError(
-                "PROVEN_ABSENT cannot carry provider order or execution identities"
-            )
+        refs = [item for item in evidence_refs if item]
+        if len(refs) < 2:
+            raise ValueError("Absence proof requires independent evidence")
         self.phase = SendPhase.PROVEN_ABSENT
-        self.evidence.append(
-            "reconciliation:"
-            + resolution.outcome
-            + ":"
-            + resolution.evidence_reason
-        )
+        self.evidence.extend(refs)
 
     @property
     def retry_disposition(self) -> str:
@@ -202,7 +155,6 @@ class RecoveryController:
     def resolve_attempt(self, attempt: OutboundAttempt) -> None:
         if attempt.phase not in {
             SendPhase.ACKNOWLEDGED,
-            SendPhase.EXECUTION_OBSERVED,
             SendPhase.REJECTED,
             SendPhase.PROVEN_ABSENT,
         }:

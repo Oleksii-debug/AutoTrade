@@ -171,6 +171,53 @@ class IndependentRiskTests(unittest.TestCase):
                 policy(),
             )
 
+    def test_missing_stress_scenarios_block_nonzero_exposure(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(stress_scenarios=()),
+            policy(),
+        )
+        failed = {rule.rule for rule in decision.rules if not rule.passed}
+        self.assertIn("stress_coverage", failed)
+        self.assertIn("stress_loss", failed)
+        self.assertFalse(decision.admitted)
+
+    def test_incomplete_stress_scenario_cannot_hide_existing_position_risk(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(
+                positions={"ABC": "2", "XYZ": "3"},
+                stress_scenarios=({"ABC": "-0.10"},),
+            ),
+            policy(),
+        )
+        failed = {rule.rule for rule in decision.rules if not rule.passed}
+        self.assertIn("stress_coverage", failed)
+        stress_rule = next(rule for rule in decision.rules if rule.rule == "stress_coverage")
+        self.assertEqual(stress_rule.observed, "XYZ")
+        self.assertFalse(decision.admitted)
+
+    def test_flat_portfolio_does_not_require_artificial_stress_scenario(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7, reduce_only=True,
+            ),
+            context(
+                positions={"ABC": "-1"},
+                stress_scenarios=(),
+            ),
+            policy(),
+        )
+        coverage = next(rule for rule in decision.rules if rule.rule == "stress_coverage")
+        self.assertTrue(coverage.passed)
+
     def test_float_inputs_are_rejected(self):
         with self.assertRaises(TypeError):
             RiskPolicy.create(

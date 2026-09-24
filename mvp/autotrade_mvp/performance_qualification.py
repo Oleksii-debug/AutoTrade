@@ -26,6 +26,23 @@ def _positive_int(value: int, *, name: str, allow_zero: bool = False) -> int:
     return value
 
 
+def _git_sha(value: str, *, name: str) -> str:
+    if not isinstance(value, str) or len(value) != 40 or any(
+        char not in "0123456789abcdef" for char in value.lower()
+    ):
+        raise RuntimeBudgetError(f"{name} must be a 40-hex commit SHA")
+    return value.lower()
+
+
+def _sha256_identity(value: str, *, name: str) -> str:
+    if not isinstance(value, str) or not value.startswith("sha256:"):
+        raise RuntimeBudgetError(f"{name} must use sha256:<64 hex>")
+    digest = value[7:]
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest.lower()):
+        raise RuntimeBudgetError(f"{name} must use sha256:<64 hex>")
+    return "sha256:" + digest.lower()
+
+
 def _series(values: Sequence[int], *, name: str) -> tuple[int, ...]:
     if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
         raise RuntimeBudgetError(f"{name} must be a sequence")
@@ -49,6 +66,9 @@ def nearest_rank_percentile(values: Sequence[int], percentile: int) -> int:
 @dataclass(frozen=True)
 class RuntimeBudgetSpec:
     scenario_id: str
+    release_sha: str
+    configuration_hash: str
+    host_fingerprint: str
     strategy_horizon_us: int
     max_p95_financial_latency_us: int
     max_financial_staleness_us: int
@@ -60,6 +80,17 @@ class RuntimeBudgetSpec:
         if not isinstance(self.scenario_id, str) or not self.scenario_id.strip():
             raise RuntimeBudgetError("scenario_id is required")
         object.__setattr__(self, "scenario_id", self.scenario_id.strip())
+        object.__setattr__(self, "release_sha", _git_sha(self.release_sha, name="release_sha"))
+        object.__setattr__(
+            self,
+            "configuration_hash",
+            _sha256_identity(self.configuration_hash, name="configuration_hash"),
+        )
+        object.__setattr__(
+            self,
+            "host_fingerprint",
+            _sha256_identity(self.host_fingerprint, name="host_fingerprint"),
+        )
         for field in (
             "strategy_horizon_us",
             "max_p95_financial_latency_us",
@@ -90,6 +121,9 @@ class RuntimeBudgetSpec:
 @dataclass(frozen=True)
 class RuntimeLoadObservation:
     scenario_id: str
+    release_sha: str
+    configuration_hash: str
+    host_fingerprint: str
     expected_financial_events: int
     recovered_financial_events: int
     financial_latency_us: tuple[int, ...]
@@ -102,6 +136,9 @@ class RuntimeLoadObservation:
         cls,
         *,
         scenario_id: str,
+        release_sha: str,
+        configuration_hash: str,
+        host_fingerprint: str,
         expected_financial_events: int,
         recovered_financial_events: int,
         financial_latency_us: Sequence[int],
@@ -121,6 +158,11 @@ class RuntimeLoadObservation:
             raise RuntimeBudgetError("recovered_financial_events cannot exceed expected")
         return cls(
             scenario_id=scenario_id.strip(),
+            release_sha=_git_sha(release_sha, name="release_sha"),
+            configuration_hash=_sha256_identity(
+                configuration_hash, name="configuration_hash"
+            ),
+            host_fingerprint=_sha256_identity(host_fingerprint, name="host_fingerprint"),
             expected_financial_events=expected,
             recovered_financial_events=recovered,
             financial_latency_us=_series(financial_latency_us, name="financial_latency_us"),
@@ -161,6 +203,12 @@ def evaluate_runtime_budget(
         raise TypeError("observation must be RuntimeLoadObservation")
     if spec.scenario_id != observation.scenario_id:
         raise RuntimeBudgetError("observation belongs to another declared scenario")
+    if spec.release_sha != observation.release_sha:
+        raise RuntimeBudgetError("observation belongs to another release SHA")
+    if spec.configuration_hash != observation.configuration_hash:
+        raise RuntimeBudgetError("observation belongs to another configuration")
+    if spec.host_fingerprint != observation.host_fingerprint:
+        raise RuntimeBudgetError("observation belongs to another host")
 
     reasons: list[str] = []
     metrics: dict[str, int] = {

@@ -134,7 +134,12 @@ class SpecialistDagTests(unittest.TestCase):
                 completed_at=NOW,
             )
         with self.assertRaises(SpecialistDagError):
-            spec("x", "g", cost=1.0)
+            SpecialistSpec(
+                role_id="x",
+                correlation_group="g",
+                max_cost=1.0,
+                expected_incremental_value=Decimal("1"),
+            )
 
     def test_marginal_value_accounts_for_incremental_cost(self):
         self.assertEqual(

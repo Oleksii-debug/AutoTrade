@@ -255,7 +255,7 @@ def prepare_order_request(
 @dataclass(frozen=True)
 class WhiteBitOrderSnapshot:
     provider_order_id: str
-    client_order_id: str
+    client_order_id: str | None
     market: str
     provider_status: str
     normalized_status: str
@@ -276,6 +276,8 @@ _PROVIDER_STATUSES = frozenset(
         "CANCELED",
         "CANCELED_TAKER_BAND",
         "AUTO_CANCELED_REDUCE_ONLY",
+        "AUTO_CANCELED_LIQUIDATION",
+        "CANCELED_STP",
     }
 )
 
@@ -284,7 +286,12 @@ def parse_order_snapshot(payload: Mapping[str, object]) -> WhiteBitOrderSnapshot
     if not isinstance(payload, Mapping):
         raise TypeError("payload must be a mapping")
     provider_order_id = _text(str(payload.get("orderId", "")), name="orderId")
-    client_order_id = validate_client_order_id(str(payload.get("clientOrderId", "")))
+    raw_client_order_id = payload.get("clientOrderId")
+    client_order_id = (
+        None
+        if raw_client_order_id in {None, ""}
+        else validate_client_order_id(str(raw_client_order_id))
+    )
     market = _text(str(payload.get("market", "")), name="market").upper()
     status = _text(str(payload.get("status", "")), name="status").upper()
     if status not in _PROVIDER_STATUSES:

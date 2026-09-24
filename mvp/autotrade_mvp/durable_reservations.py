@@ -33,6 +33,25 @@ def _text(value: str, *, name: str) -> str:
     return value.strip()
 
 
+
+def _immutable_evidence_ref(value: str) -> str:
+    reference = _text(value, name="resolution_evidence")
+    marker = "@sha256:"
+    if not reference.startswith("artifact:") or marker not in reference:
+        raise ValueError(
+            "resolution_evidence must bind an immutable artifact and SHA-256 digest"
+        )
+    artifact_id, digest = reference[len("artifact:"):].split(marker, 1)
+    if not artifact_id or any(ch.isspace() for ch in artifact_id):
+        raise ValueError("resolution_evidence artifact identity is invalid")
+    if len(digest) != 64 or any(
+        ch not in "0123456789abcdef" for ch in digest
+    ):
+        raise ValueError(
+            "resolution_evidence must use canonical lowercase SHA-256"
+        )
+    return reference
+
 def _decimal(value, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")
@@ -428,10 +447,7 @@ class DurableReservationBook:
         request = {
             "reservation_id": _text(reservation_id, name="reservation_id"),
             "outcome": _text(outcome, name="outcome").upper(),
-            "resolution_evidence": _text(
-                resolution_evidence,
-                name="resolution_evidence",
-            ),
+            "resolution_evidence": _immutable_evidence_ref(resolution_evidence),
         }
         return self._commit(
             command_id=command_id,

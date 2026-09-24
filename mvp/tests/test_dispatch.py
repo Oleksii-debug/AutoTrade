@@ -13,10 +13,183 @@ class DispatchTests(unittest.TestCase):
     def store(self, directory):
         return JournalStore(f"{directory}/journal.sqlite3")
 
+    def test_dispatch_scope_is_required_and_separates_client_ids(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            with self.assertRaises(TypeError):
+                GuardedDispatcher(store)
+            with self.assertRaises(ValueError):
+                GuardedDispatcher(store, environment="", account_id="acct")
+            with self.assertRaises(ValueError):
+                GuardedDispatcher(store, environment="PAPER", account_id="")
+
+        paper = stable_client_order_id(
+            "provider", "intent-1", environment="PAPER", account_id="acct-1"
+        )
+        live = stable_client_order_id(
+            "provider", "intent-1", environment="LIVE", account_id="acct-1"
+        )
+        other_account = stable_client_order_id(
+            "provider", "intent-1", environment="PAPER", account_id="acct-2"
+        )
+        self.assertNotEqual(paper, live)
+        self.assertNotEqual(paper, other_account)
+
+    def test_same_attempt_id_can_exist_independently_in_two_scopes(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            sends = []
+
+            def authority(intent_hash, now):
+                return True, "allowed"
+
+            def transport(client_id, request, final_guard):
+                final_guard()
+                sends.append(client_id)
+                return {"ok": True}
+
+            paper = GuardedDispatcher(
+                store, environment="PAPER", account_id="acct", owner_token="paper-owner"
+            )
+            live = GuardedDispatcher(
+                store, environment="LIVE", account_id="acct", owner_token="live-owner"
+            )
+            for dispatcher in (paper, live):
+                outcome = dispatcher.dispatch(
+                    attempt_id="same-attempt",
+                    intent_id="same-intent",
+                    intent_hash="hash",
+                    provider="provider",
+                    request={},
+                    now="2026-09-24T18:00:00Z",
+                    authority_check=authority,
+                    transport_send=transport,
+                )
+                self.assertEqual(outcome.status, "SENT")
+
+            self.assertEqual(len(sends), 2)
+            self.assertNotEqual(sends[0], sends[1])
+            paper_events = store.load_events(
+                "submission_attempt", "PAPER:acct:same-attempt"
+            )
+            live_events = store.load_events(
+                "submission_attempt", "LIVE:acct:same-attempt"
+            )
+            self.assertEqual(len(paper_events), 3)
+            self.assertEqual(len(live_events), 3)
+            self.assertTrue(all(event["environment"] == "PAPER" for event in paper_events))
+            self.assertTrue(all(event["environment"] == "LIVE" for event in live_events))
+
+    def test_live_dispatch_requires_sender_fence(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="LIVE",
+                account_id="acct",
+                owner_token="owner",
+                owner_epoch=7,
+            )
+            outbound = 0
+
+            def transport(client_id, request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-send"}
+
+            result = dispatcher.dispatch(
+                attempt_id="live-no-fence",
+                intent_id="i-live",
+                intent_hash="h-live",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda *_: (True, "allowed"),
+                transport_send=transport,
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "live_sender_fence_required")
+            self.assertEqual(outbound, 0)
+
+    def test_sender_fence_rejects_stale_owner_before_outbound(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="LIVE",
+                account_id="acct",
+                owner_token="stale-owner",
+                owner_epoch=7,
+            )
+            outbound = 0
+
+            def sender_check(owner_token, owner_epoch):
+                self.assertEqual(owner_token, "stale-owner")
+                self.assertEqual(owner_epoch, 7)
+                raise RuntimeError("owner fenced")
+
+            def transport(client_id, request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-send"}
+
+            result = dispatcher.dispatch(
+                attempt_id="live-stale",
+                intent_id="i-live",
+                intent_hash="h-live",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda *_: (True, "allowed"),
+                transport_send=transport,
+                sender_check=sender_check,
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertTrue(result.reason.startswith("sender_fence_rejected:"))
+            self.assertEqual(outbound, 0)
+            events = store.load_events(
+                "submission_attempt",
+                "LIVE:acct:live-stale",
+            )
+            self.assertEqual(events[-1]["owner_epoch"], "7")
+
+    def test_malformed_authority_result_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="acct",
+                owner_token="owner",
+            )
+            outbound = 0
+
+            def transport(client_id, request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-send"}
+
+            result = dispatcher.dispatch(
+                attempt_id="bad-authority",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda *_: True,
+                transport_send=transport,
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "authority_check_invalid_result")
+            self.assertEqual(outbound, 0)
+
     def test_success_uses_final_barrier_and_persists_three_states(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)
-            dispatcher = GuardedDispatcher(store, owner_token="owner")
+            dispatcher = GuardedDispatcher(store, environment="SIMULATION", account_id="acct", owner_token="owner")
             checks = []
             sends = []
 
@@ -37,7 +210,7 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(result.status, "SENT")
             self.assertEqual(len(checks), 2)
             self.assertEqual(len(sends), 1)
-            events = store.load_events("submission_attempt", "a1")
+            events = store.load_events("submission_attempt", "SIMULATION:acct:a1")
             self.assertEqual(
                 [event["event_type"] for event in events],
                 ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
@@ -45,7 +218,7 @@ class DispatchTests(unittest.TestCase):
 
     def test_revoke_during_provider_wait_blocks_before_outbound_request(self):
         with TemporaryDirectory() as directory:
-            dispatcher = GuardedDispatcher(self.store(directory), owner_token="owner")
+            dispatcher = GuardedDispatcher(self.store(directory), environment="SIMULATION", account_id="acct", owner_token="owner")
             calls = 0
             outbound = 0
 
@@ -72,7 +245,7 @@ class DispatchTests(unittest.TestCase):
     def test_timeout_after_outbound_becomes_unknown_and_never_blindly_retries(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)
-            dispatcher = GuardedDispatcher(store, owner_token="owner")
+            dispatcher = GuardedDispatcher(store, environment="SIMULATION", account_id="acct", owner_token="owner")
             outbound = 0
 
             def authority(intent_hash, now):
@@ -106,7 +279,7 @@ class DispatchTests(unittest.TestCase):
     def test_crash_after_send_before_terminal_record_recovers_unknown_without_resend(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)
-            dispatcher = GuardedDispatcher(store, owner_token="owner")
+            dispatcher = GuardedDispatcher(store, environment="SIMULATION", account_id="acct", owner_token="owner")
             real_append = store.append_event
             outbound = 0
 
@@ -135,7 +308,7 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(outbound, 1)
 
             store.append_event = real_append
-            recovered = GuardedDispatcher(store, owner_token="owner-2").dispatch(
+            recovered = GuardedDispatcher(store, environment="SIMULATION", account_id="acct", owner_token="owner-2").dispatch(
                 attempt_id="a1", intent_id="i1", intent_hash="h1",
                 provider="sim", request={}, now="2026-09-24T18:00:01Z",
                 authority_check=authority,
@@ -147,8 +320,8 @@ class DispatchTests(unittest.TestCase):
     def test_concurrent_retry_during_prepared_lease_does_not_send(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)
-            first = GuardedDispatcher(store, owner_token="owner-1", prepared_lease_seconds=60)
-            second = GuardedDispatcher(store, owner_token="owner-2", prepared_lease_seconds=60)
+            first = GuardedDispatcher(store, environment="SIMULATION", account_id="acct", owner_token="owner-1", prepared_lease_seconds=60)
+            second = GuardedDispatcher(store, environment="SIMULATION", account_id="acct", owner_token="owner-2", prepared_lease_seconds=60)
             nested = []
             outbound = 0
 
@@ -177,9 +350,9 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(outbound, 1)
 
     def test_stable_client_id_is_deterministic_and_bounded(self):
-        first = stable_client_order_id("Provider", "intent-1", max_length=20)
-        second = stable_client_order_id("Provider", "intent-1", max_length=20)
-        other = stable_client_order_id("Provider", "intent-2", max_length=20)
+        first = stable_client_order_id("Provider", "intent-1", environment="PAPER", account_id="acct-1", max_length=20)
+        second = stable_client_order_id("Provider", "intent-1", environment="PAPER", account_id="acct-1", max_length=20)
+        other = stable_client_order_id("Provider", "intent-2", environment="PAPER", account_id="acct-1", max_length=20)
         self.assertEqual(first, second)
         self.assertNotEqual(first, other)
         self.assertLessEqual(len(first), 20)
@@ -188,7 +361,7 @@ class DispatchTests(unittest.TestCase):
     def test_final_barrier_uses_fresh_time_and_blocks_expired_authority(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)
-            dispatcher = GuardedDispatcher(store, owner_token="owner")
+            dispatcher = GuardedDispatcher(store, environment="SIMULATION", account_id="acct", owner_token="owner")
             outbound = 0
             observed_times = []
 
@@ -224,7 +397,7 @@ class DispatchTests(unittest.TestCase):
                 observed_times,
                 ["2026-09-24T18:00:00Z", "2026-09-24T18:02:00Z"],
             )
-            events = store.load_events("submission_attempt", "expiry-a1")
+            events = store.load_events("submission_attempt", "SIMULATION:acct:expiry-a1")
             self.assertEqual(
                 [event["event_type"] for event in events],
                 ["SubmissionPrepared", "SubmissionBlocked"],
@@ -239,7 +412,7 @@ class DispatchTests(unittest.TestCase):
     def test_backward_final_clock_is_persistently_blocked(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)
-            dispatcher = GuardedDispatcher(store, owner_token="owner")
+            dispatcher = GuardedDispatcher(store, environment="SIMULATION", account_id="acct", owner_token="owner")
             outbound = 0
 
             def authority(intent_hash, current_time):
@@ -265,7 +438,7 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(result.status, "BLOCKED")
             self.assertEqual(result.reason, "final_barrier_clock_moved_backwards")
             self.assertEqual(outbound, 0)
-            events = store.load_events("submission_attempt", "clock-a1")
+            events = store.load_events("submission_attempt", "SIMULATION:acct:clock-a1")
             self.assertEqual(
                 [event["event_type"] for event in events],
                 ["SubmissionPrepared", "SubmissionBlocked"],
@@ -274,7 +447,7 @@ class DispatchTests(unittest.TestCase):
     def test_unserializable_provider_response_after_send_becomes_unknown(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)
-            dispatcher = GuardedDispatcher(store, owner_token="owner")
+            dispatcher = GuardedDispatcher(store, environment="SIMULATION", account_id="acct", owner_token="owner")
             outbound = 0
 
             def authority(intent_hash, current_time):
@@ -298,7 +471,7 @@ class DispatchTests(unittest.TestCase):
             )
             self.assertEqual(result.status, "UNKNOWN")
             self.assertEqual(outbound, 1)
-            events = store.load_events("submission_attempt", "response-a1")
+            events = store.load_events("submission_attempt", "SIMULATION:acct:response-a1")
             self.assertEqual(
                 [event["event_type"] for event in events],
                 ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],

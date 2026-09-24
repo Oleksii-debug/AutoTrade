@@ -4,10 +4,15 @@ from decimal import Decimal
 from mvp.autotrade_mvp.provider_core import ProviderCoreError
 from mvp.autotrade_mvp.whitebit_adapter import (
     WhiteBitCapabilitySnapshot,
+    WhiteBitHistoryCoverage,
+    WhiteBitHistoryPageEvidence,
     WhiteBitMarketRules,
     build_order_write_plan,
+    build_exact_client_order_lookup,
+    build_history_page_request,
     classify_whitebit_write,
     normalize_order_observation,
+    parse_market_rules,
     redact_whitebit_debug,
 )
 
@@ -269,6 +274,107 @@ class WhiteBitAdapterTests(unittest.TestCase):
         )
         self.assertEqual(rejected.status, "REJECTED")
         self.assertFalse(rejected.retry_same_economic_action)
+
+    def test_exact_client_lookup_does_not_smuggle_date_filters(self):
+        request = build_exact_client_order_lookup(
+            market="BTC_USDT",
+            client_order_id="at-exact-1",
+        )
+        self.assertTrue(request["single_order_lookup"])
+        self.assertEqual(
+            request["payload"],
+            {
+                "market": "BTC_USDT",
+                "clientOrderId": "at-exact-1",
+            },
+        )
+
+    def test_history_pagination_requires_a_short_final_page(self):
+        coverage = WhiteBitHistoryCoverage()
+        coverage.add_page(
+            WhiteBitHistoryPageEvidence(
+                offset=0,
+                limit=50,
+                record_count=50,
+            )
+        )
+        self.assertFalse(coverage.complete)
+        self.assertEqual(coverage.next_offset, 50)
+        coverage.add_page(
+            WhiteBitHistoryPageEvidence(
+                offset=50,
+                limit=50,
+                record_count=7,
+            )
+        )
+        self.assertTrue(coverage.complete)
+        with self.assertRaisesRegex(ProviderCoreError, "already complete"):
+            coverage.add_page(
+                WhiteBitHistoryPageEvidence(
+                    offset=100,
+                    limit=50,
+                    record_count=0,
+                )
+            )
+
+    def test_history_pagination_gap_fails_closed(self):
+        coverage = WhiteBitHistoryCoverage()
+        coverage.add_page(
+            WhiteBitHistoryPageEvidence(
+                offset=0,
+                limit=50,
+                record_count=50,
+            )
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "pagination gap"):
+            coverage.add_page(
+                WhiteBitHistoryPageEvidence(
+                    offset=75,
+                    limit=50,
+                    record_count=0,
+                )
+            )
+
+    def test_history_request_enforces_provider_window_and_limit(self):
+        request = build_history_page_request(
+            market="BTC_USDT",
+            start_unix=1_700_000_000,
+            end_unix=1_700_000_000 + 31 * 24 * 60 * 60,
+            offset=0,
+            limit=500,
+        )
+        self.assertFalse(request["single_order_lookup"])
+        self.assertEqual(request["payload"]["limit"], 500)
+        with self.assertRaisesRegex(ProviderCoreError, "31 days"):
+            build_history_page_request(
+                market="BTC_USDT",
+                start_unix=1_700_000_000,
+                end_unix=1_700_000_000 + 31 * 24 * 60 * 60 + 1,
+                offset=0,
+            )
+
+    def test_market_rule_metadata_is_exact_and_missing_fields_fail_closed(self):
+        parsed = parse_market_rules(
+            {
+                "name": "BTC_USDT",
+                "stepSize": "0.00001",
+                "tickSize": "0.01",
+                "minAmount": "0.0001",
+                "minTotal": "5",
+                "maxTotal": "100000",
+            }
+        )
+        self.assertEqual(parsed.amount_step, Decimal("0.00001"))
+        self.assertEqual(parsed.price_tick, Decimal("0.01"))
+        with self.assertRaisesRegex(ProviderCoreError, "missing required field"):
+            parse_market_rules(
+                {
+                    "name": "BTC_USDT",
+                    "stepSize": "0.00001",
+                    "minAmount": "0.0001",
+                    "minTotal": "5",
+                }
+            )
 
     def test_debug_redaction_covers_nested_auth_material(self):
         original = {

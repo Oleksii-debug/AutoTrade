@@ -471,9 +471,13 @@ class JournalStore:
     ) -> bool:
         """Persist only derived projection state; the event journal remains authoritative."""
 
-        self._require_text(projection_name, "projection_name")
-        self._require_text(aggregate_type, "aggregate_type")
-        self._require_text(aggregate_id, "aggregate_id")
+        projection_name = self._require_text(
+            projection_name, "projection_name"
+        )
+        aggregate_type = self._require_text(
+            aggregate_type, "aggregate_type"
+        )
+        aggregate_id = self._require_text(aggregate_id, "aggregate_id")
         if (
             not isinstance(aggregate_version, int)
             or isinstance(aggregate_version, bool)
@@ -556,9 +560,13 @@ class JournalStore:
         aggregate_type: str,
         aggregate_id: str,
     ) -> dict[str, Any] | None:
-        self._require_text(projection_name, "projection_name")
-        self._require_text(aggregate_type, "aggregate_type")
-        self._require_text(aggregate_id, "aggregate_id")
+        projection_name = self._require_text(
+            projection_name, "projection_name"
+        )
+        aggregate_type = self._require_text(
+            aggregate_type, "aggregate_type"
+        )
+        aggregate_id = self._require_text(aggregate_id, "aggregate_id")
         with self._connect() as connection:
             row = connection.execute(
                 """

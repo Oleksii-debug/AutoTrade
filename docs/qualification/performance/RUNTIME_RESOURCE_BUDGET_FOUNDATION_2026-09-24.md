@@ -7,6 +7,8 @@ Source branch: `work/wp65-runtime-resource-budget-20260924`
 
 This foundation adds a fail-closed evaluator for measured runtime-load evidence. It does not add another scheduler, admission authority, throttler, execution authority or trading policy.
 
+A declared scenario is immutable evidence input. Its complete normalized specification has a deterministic SHA-256 digest, and every observation must carry that exact digest.
+
 A declared scenario binds:
 
 - exact release commit SHA;
@@ -20,7 +22,7 @@ A declared scenario binds:
 
 An observation records the expected and recovered financial-event counts, latency and staleness samples, research interference and remaining reconnect backlog. A scenario cannot pass if any financial event is lost, reconnect backlog remains, measured bounds are exceeded, or the evidence sample is too small.
 
-The percentile implementation uses integer nearest-rank arithmetic. Performance evidence is never extrapolated from one scenario to another, another release commit, another configuration or another target host.
+The percentile implementation uses integer nearest-rank arithmetic. Performance evidence is never extrapolated from one scenario to another, another release commit, another configuration or another target host. Reusing the same scenario id after any budget/spec mutation also fails closed because the observation's spec digest no longer matches.
 
 ## Test evidence encoded in the repository
 
@@ -34,6 +36,7 @@ The percentile implementation uses integer nearest-rank arithmetic. Performance 
 - research/model interference above the declared budget;
 - insufficient samples as `INCONCLUSIVE`, never `PASS`;
 - scenario identity preventing evidence reuse across another workload;
+- immutable spec-digest binding preventing evidence reuse after threshold mutation under the same scenario id;
 - exact release/configuration/host binding preventing evidence reuse across another binary or target environment;
 - a real `JournalStore` burst probe that persists and reconstructs every financial probe event and its outbox row.
 

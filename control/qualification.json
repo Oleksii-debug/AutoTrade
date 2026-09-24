@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0.0",
   "baseline_date": "2026-09-22",
-  "evidence_as_of": "2026-09-24T16:21:04Z",
+  "evidence_as_of": "2026-09-24T16:27:13Z",
   "overall_status": "IMPLEMENTATION_IN_PROGRESS_SIMULATED_VERTICAL_SLICE_AVAILABLE",
   "gates": {
     "engineering_baseline": "RECONCILED_00_16_WITH_GENERATED_BANK_AND_EXPORT_VALIDATION",
@@ -22,9 +22,19 @@
     "command_surface": "IN_PROGRESS_MVP_CLI",
     "persistence": "IN_PROGRESS_SQLITE_JOURNAL_OUTBOX_AND_COMMAND_DEDUPE_PRIMITIVE",
     "artifact_store": "IN_PROGRESS_CONTENT_ADDRESSED_RIGHTS_AWARE_STORE",
-    "reservations": "IN_PROGRESS_CONSERVATIVE_WORKING_UNKNOWN_EXPOSURE_LEDGER"
+    "reservations": "IN_PROGRESS_CONSERVATIVE_WORKING_UNKNOWN_EXPOSURE_LEDGER",
+    "instrument_registry": "IN_PROGRESS_IMMUTABLE_VERSION_FOUNDATION",
+    "risk_admission": "IN_PROGRESS_DETERMINISTIC_SIMULATION_FOUNDATION",
+    "authority_admission": "IN_PROGRESS_CONFIRMATION_REVOCATION_IDEMPOTENCY_FOUNDATION",
+    "dispatch": "IN_PROGRESS_GUARDED_DURABLE_SIMULATED_SEND_FOUNDATION",
+    "observability": "IN_PROGRESS_DURABLE_TRACE_RECONSTRUCTION"
   },
   "evidence_notes": [
+    "Main commit 4d1e361893490eff2906468e8262283050d28bfd integrates immutable instrument-version registry primitives; provider metadata/lifecycle qualification remains open.",
+    "Main commits 05b0ce7506731b573fff3523a1684c7e1c0f22bb and 636cb18193b6e9905bbc5c01613f6ee6717451fe provide deterministic simulated risk admission with focused freshness, leverage, stress and borrow coverage; this is not complete portfolio/provider risk qualification.",
+    "Main commits a9d428d621ec35f18f909e7a333a4f4d5462710a through f1a084288bcf0689a7313de1b16d75ef65c23ef6 provide confirmation/revocation/expiry and idempotent authority-admission foundations; live account authority remains unqualified.",
+    "Main commits f8ef287d43516ed56f722d2cad5f366287bbafb8 and e8edfdd0fc081bf82acad9564f7d620f90427e2a add guarded durable simulated dispatch with revoke-race, timeout and crash-ambiguity coverage; no real-provider send seam is qualified.",
+    "Main commit 8c82628b9f6d8779fd225f59107f8ca75a39334c adds durable evidence/journal diagnostic reconstruction and secret-shaped-field redaction; production telemetry and NVDA qualification remain open.",
     "Main commits 7fb3b1a5628783f14f7fef56a9706152fa2a4517 and ed9c17e5d19a083af3b5de32e07b95d733e3a370 add exact multi-asset double-entry accounting, separate-unit balancing, third-currency fees/rebates, FX exchange, exact reversal and double-reversal protection.",
     "Main commits 92fdc65d06336dbbe0fb7514d64f7e2b65d786ce, 01a8ebe14284b7c87e064c3ae0a05e2ed94a9cf8 and f59d4d4b0ba72cca667519a54ec4c9e90b2e5e05 add conservative resource reservations and fail-closed terminal semantics for working/UNKNOWN exposure.",
     "Main commits 8227c224817820e8485bfbed25d568b139c3ff0e and 5f284ed82ac7413c49d34aa19ee04cce03b07200 implement a content-addressed rights-aware artifact store with integrity, export and orphan-recovery tests.",

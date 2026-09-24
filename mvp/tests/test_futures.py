@@ -113,6 +113,21 @@ class FuturesLifecycleTests(unittest.TestCase):
             Decimal("80"),
         )
 
+    def test_inverse_contract_rejects_wrong_settlement_currency_dimension(self):
+        with self.assertRaisesRegex(FuturesError, "settlement_currency must match"):
+            FuturesContract(
+                instrument="BTC-USD-INVERSE",
+                payoff="INVERSE",
+                multiplier=Decimal("1"),
+                quote_currency="USD",
+                settlement_currency="USDT",
+                price_base_currency="BTC",
+                last_trade_at=utc(30, 12),
+                delivery_cutoff=utc(30, 20),
+                expiry=utc(30, 23),
+                settlement_method="CASH",
+            )
+
     def test_inverse_variation_margin_remains_exact_until_settlement(self):
         contract = FuturesContract(
             instrument="BTC-USD-INVERSE",
@@ -120,6 +135,7 @@ class FuturesLifecycleTests(unittest.TestCase):
             multiplier=Decimal("1"),
             quote_currency="USD",
             settlement_currency="BTC",
+            price_base_currency="BTC",
             last_trade_at=utc(30, 20),
             delivery_cutoff=utc(30, 20),
             expiry=utc(30, 21),
@@ -162,6 +178,7 @@ class FuturesLifecycleTests(unittest.TestCase):
             multiplier=Decimal("1"),
             quote_currency="USD",
             settlement_currency="BTC",
+            price_base_currency="BTC",
             last_trade_at=utc(30, 20),
             delivery_cutoff=utc(30, 20),
             expiry=utc(30, 21),
@@ -191,6 +208,7 @@ class FuturesLifecycleTests(unittest.TestCase):
             multiplier=Decimal("1"),
             quote_currency="USD",
             settlement_currency="BTC",
+            price_base_currency="BTC",
             last_trade_at=utc(30, 20),
             delivery_cutoff=utc(30, 20),
             expiry=utc(30, 21),
@@ -213,6 +231,7 @@ class FuturesLifecycleTests(unittest.TestCase):
             multiplier=Decimal("1"),
             quote_currency="USD",
             settlement_currency="BTC",
+            price_base_currency="BTC",
             last_trade_at=utc(30, 20),
             delivery_cutoff=utc(30, 20),
             expiry=utc(30, 21),
@@ -249,6 +268,7 @@ class FuturesLifecycleTests(unittest.TestCase):
             multiplier=Decimal("1"),
             quote_currency="USD",
             settlement_currency="BTC",
+            price_base_currency="BTC",
             last_trade_at=utc(30, 20),
             delivery_cutoff=utc(30, 20),
             expiry=utc(30, 21),

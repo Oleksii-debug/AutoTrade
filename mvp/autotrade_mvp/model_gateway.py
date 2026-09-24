@@ -288,20 +288,23 @@ class BudgetLedger:
         self._ceiling = ceiling
         self._reserved: dict[str, Decimal] = {}
         self._incurred = Decimal("0")
-        self._estimated_unbilled = Decimal("0")
-        self._reconciled_bills: dict[str, Decimal] = {}
+        self._estimated_unbilled_by_request: dict[str, Decimal] = {}
+        self._settled_requests: set[str] = set()
+        self._reconciled_bills: dict[str, tuple[str, Decimal]] = {}
 
     def snapshot(self) -> BudgetSnapshot:
         return BudgetSnapshot(
             ceiling=self._ceiling,
             reserved=sum(self._reserved.values(), Decimal("0")),
             incurred=self._incurred,
-            estimated_unbilled=self._estimated_unbilled,
+            estimated_unbilled=sum(
+                self._estimated_unbilled_by_request.values(),
+                Decimal("0"),
+            ),
         )
 
     def reserve(self, request_id: str, amount: Decimal) -> None:
-        if not request_id:
-            raise ValueError("request_id is required")
+        request_id = _identifier(request_id, "request_id")
         amount = _exact_decimal(amount, "reservation")
         if amount < 0:
             raise ValueError("reservation cannot be negative")
@@ -315,6 +318,9 @@ class BudgetLedger:
         self._reserved[request_id] = amount
 
     def release(self, request_id: str) -> Decimal:
+        request_id = _identifier(request_id, "request_id")
+        if request_id in self._settled_requests:
+            raise ValueError("cannot release a request after the call boundary")
         return self._reserved.pop(request_id, Decimal("0"))
 
     def settle(
@@ -324,6 +330,7 @@ class BudgetLedger:
         incurred: Decimal,
         estimated_unbilled: Decimal = Decimal("0"),
     ) -> None:
+        request_id = _identifier(request_id, "request_id")
         incurred = _exact_decimal(incurred, "incurred cost")
         estimated_unbilled = _exact_decimal(
             estimated_unbilled,
@@ -338,22 +345,34 @@ class BudgetLedger:
             self._reserved[request_id] = reserved
             raise ValueError("settlement exceeds reserved ceiling")
         self._incurred += incurred
-        self._estimated_unbilled += estimated_unbilled
+        self._estimated_unbilled_by_request[request_id] = estimated_unbilled
+        self._settled_requests.add(request_id)
 
-    def reconcile_unbilled(self, *, billing_id: str, billed: Decimal) -> None:
-        if not isinstance(billing_id, str) or not billing_id.strip():
-            raise ValueError("billing_id is required")
-        identifier = billing_id.strip()
+    def reconcile_unbilled(
+        self,
+        *,
+        billing_id: str,
+        request_id: str,
+        billed: Decimal,
+    ) -> None:
+        identifier = _identifier(billing_id, "billing_id")
+        request = _identifier(request_id, "request_id")
         billed = _exact_decimal(billed, "billed cost")
         if billed < 0:
             raise ValueError("billed cost cannot be negative")
         prior = self._reconciled_bills.get(identifier)
         if prior is not None:
-            if prior != billed:
+            if prior != (request, billed):
                 raise ValueError("billing reconciliation conflict")
             return
-        if billed > self._estimated_unbilled:
-            raise ValueError("billed cost exceeds estimated unbilled amount")
-        self._estimated_unbilled -= billed
+        if request not in self._settled_requests:
+            raise ValueError("billing has no matching settled request")
+
+        # Provider billing is observed economic truth. It must not be discarded
+        # merely because the actual charge exceeded our prior estimate. Reduce
+        # only this request's remaining estimate, then record the full bill.
+        estimate = self._estimated_unbilled_by_request.get(request, Decimal("0"))
+        remaining_estimate = estimate - min(estimate, billed)
+        self._estimated_unbilled_by_request[request] = remaining_estimate
         self._incurred += billed
-        self._reconciled_bills[identifier] = billed
+        self._reconciled_bills[identifier] = (request, billed)

@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
+from types import MappingProxyType
 from typing import Any, Literal, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
@@ -104,11 +105,45 @@ class SubmissionDirective:
             _instant(self.history_visible_at, name="history_visible_at")
 
 
+def _freeze_stream_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {
+                _text(key, name="stream payload key"): _freeze_stream_value(item)
+                for key, item in value.items()
+            }
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_stream_value(item) for item in value)
+    return value
+
+
 @dataclass(frozen=True)
 class StreamEvent:
     sequence: int
     observed_at: str
     payload: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.sequence, int)
+            or isinstance(self.sequence, bool)
+            or self.sequence <= 0
+        ):
+            raise ValueError("sequence must be a positive integer")
+        if not isinstance(self.payload, Mapping):
+            raise TypeError("payload must be a mapping")
+        canonical_time = (
+            _instant(self.observed_at, name="observed_at")
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        object.__setattr__(self, "observed_at", canonical_time)
+        object.__setattr__(
+            self,
+            "payload",
+            _freeze_stream_value(self.payload),
+        )
 
 
 class SimulatedProviderContractHarness:

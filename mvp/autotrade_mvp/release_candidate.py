@@ -33,6 +33,7 @@ _REQUIRED_ROLES = frozenset(
         "API_COMPATIBILITY",
         "CLEAN_INSTALL",
         "LICENSE_NOTICES",
+        "RELEASE_QUALIFICATION",
     }
 )
 _SIGNED_BINARY_ROLES = frozenset({"HOST", "WEB", "DESKTOP", "WINDOWS_PACKAGE"})

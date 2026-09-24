@@ -15,6 +15,7 @@ def healthy(**overrides):
         "emergency_disk_reserve_available": True,
         "schema_compatible": True,
         "provider_authenticated": True,
+        "provider_reconciled": True,
         "market_data_fresh": True,
         "sender_ownership_proven": True,
         "old_sender_fenced": True,
@@ -51,6 +52,11 @@ class RuntimeReadinessTests(unittest.TestCase):
             ),
             ("schema_compatible", False, "schema_incompatible"),
             ("provider_authenticated", False, "provider_not_authenticated"),
+            (
+                "provider_reconciled",
+                False,
+                "provider_reconciliation_incomplete",
+            ),
             ("market_data_fresh", False, "market_data_stale"),
             (
                 "sender_ownership_proven",
@@ -72,6 +78,19 @@ class RuntimeReadinessTests(unittest.TestCase):
                 self.assertFalse(result.ready)
                 self.assertFalse(result.ready_for_new_exposure)
                 self.assertIn(code, result.blockers)
+
+    def test_startup_without_completed_provider_reconciliation_never_ready(self):
+        result = evaluate_readiness(
+            healthy(
+                provider_reconciled=False,
+                reconciliation_lag_seconds="0",
+                unresolved_external_uncertainty=False,
+                unknown_send_count=0,
+            )
+        )
+        self.assertFalse(result.ready)
+        self.assertFalse(result.ready_for_new_exposure)
+        self.assertIn("provider_reconciliation_incomplete", result.blockers)
 
     def test_clock_and_reconciliation_thresholds_are_exact(self):
         at_limits = evaluate_readiness(

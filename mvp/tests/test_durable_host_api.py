@@ -26,6 +26,19 @@ class JournalBackedHostApiTests(unittest.TestCase):
         )
 
     @staticmethod
+    def reconciliation_evidence(
+        *,
+        artifact_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        observed_at="2026-09-24T18:00:00Z",
+    ):
+        return {
+            "artifact_id": artifact_id,
+            "sha256": digest,
+            "observed_at": observed_at,
+        }
+
+    @staticmethod
     def command(
         *,
         command_id="11111111-1111-1111-1111-111111111111",
@@ -356,13 +369,79 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 remaining_uncertainty=("provider_outcome_unresolved",),
             )
 
-        resolved = restarted.update_operation(accepted.operation_id, "SUCCEEDED")
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires new reconciliation evidence",
+        ):
+            restarted.update_operation(accepted.operation_id, "SUCCEEDED")
+
+        resolution = self.reconciliation_evidence()
+        resolved = restarted.update_operation(
+            accepted.operation_id,
+            "SUCCEEDED",
+            evidence=(resolution,),
+        )
         self.assertEqual(resolved.phase, "SUCCEEDED")
         self.assertEqual(resolved.remaining_uncertainty, ())
+        self.assertEqual(resolved.evidence, (resolution,))
 
         final = self.store().get_operation(accepted.operation_id)
         self.assertEqual(final.phase, "SUCCEEDED")
         self.assertEqual(final.remaining_uncertainty, ())
+        self.assertEqual(final.evidence, (resolution,))
+
+    def test_restart_rejects_unknown_resolution_without_new_evidence(self):
+        store = self.store()
+        accepted = store.submit(self.command())
+        store.update_operation(
+            accepted.operation_id,
+            "UNKNOWN",
+            remaining_uncertainty=("provider_outcome_unresolved",),
+        )
+        journal = JournalStore(self.path)
+        payload = {
+            "operation_id": accepted.operation_id,
+            "phase": "SUCCEEDED",
+            "remaining_uncertainty": [],
+        }
+        journal.append_event(
+            {
+                "event_id": "forged-unknown-resolution-without-evidence",
+                "event_type": "OPERATION_UPDATED",
+                "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
+                "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                "aggregate_version": "3",
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+                "committed_at": "2026-09-24T18:00:01Z",
+            }
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires new reconciliation evidence",
+        ):
+            self.store().snapshot()
+
+    def test_unknown_resolution_rejects_reused_evidence_after_restart(self):
+        store = self.store()
+        accepted = store.submit(self.command())
+        prior = self.reconciliation_evidence(
+            artifact_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        store.update_operation(
+            accepted.operation_id,
+            "UNKNOWN",
+            remaining_uncertainty=("provider_outcome_unresolved",),
+            evidence=(prior,),
+        )
+        restarted = self.store()
+        with self.assertRaisesRegex(ValueError, "requires new reconciliation evidence"):
+            restarted.update_operation(
+                accepted.operation_id,
+                "FAILED",
+                evidence=(prior,),
+            )
 
     def test_unknown_requires_uncertainty_and_terminal_cannot_hide_it(self):
         store = self.store()

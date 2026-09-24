@@ -18,6 +18,10 @@ def activity(
     origin="EXTERNAL",
     currency="USD",
     occurred_at="2026-09-24T18:00:00Z",
+    instrument=None,
+    client_order_id=None,
+    provider_order_id=None,
+    provider_execution_id=None,
 ):
     return ProviderActivityEvidence.create(
         activity_id=activity_id,
@@ -25,6 +29,10 @@ def activity(
         origin=origin,
         occurred_at=occurred_at,
         currency=currency,
+        instrument=instrument,
+        client_order_id=client_order_id,
+        provider_order_id=provider_order_id,
+        provider_execution_id=provider_execution_id,
     )
 
 
@@ -177,6 +185,38 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                     observed_at="2026-09-24T18:05:00Z",
                 )
             self.assertEqual(store.load_events("economic_book", "ALPACA/acct"), [])
+
+    def test_external_cash_flow_rejects_trading_linkage_instead_of_dropping_it(self):
+        with TemporaryDirectory() as directory:
+            for field, value in (
+                ("instrument", "BTCUSD"),
+                ("client_order_id", "client-7"),
+                ("provider_order_id", "provider-7"),
+                ("provider_execution_id", "execution-7"),
+            ):
+                with self.subTest(field=field):
+                    store = JournalStore(
+                        Path(directory) / f"{field}.sqlite3"
+                    )
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "must not discard trading linkage",
+                    ):
+                        book_external_provider_cash_activity(
+                            store,
+                            provider_id="ALPACA",
+                            account_id="acct",
+                            activity=activity(
+                                activity_id=f"linked-{field}",
+                                **{field: value},
+                            ),
+                            amount="5",
+                            observed_at="2026-09-24T18:06:00Z",
+                        )
+                    self.assertEqual(
+                        store.load_events("economic_book", "ALPACA/acct"),
+                        [],
+                    )
 
     def test_unknown_autotrade_and_unqualified_activity_types_are_not_booked(self):
         with TemporaryDirectory() as directory:

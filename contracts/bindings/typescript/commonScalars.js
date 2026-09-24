@@ -2,6 +2,8 @@
 
 // TypeScript-consumable runtime binding for the canonical common scalar subset.
 // Values remain strings; no Number/BigInt coercion is allowed.
+const CONTRACT_VERSION = "1.0.0";
+
 const patterns = Object.freeze({
   Decimal: /^(?:0|[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]|-(?:[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]))$/,
   Sequence: /^(0|[1-9][0-9]*)$/,
@@ -19,4 +21,4 @@ function isValidCommonScalar(kind, value) {
   return pattern.test(value);
 }
 
-module.exports = { isValidCommonScalar };
+module.exports = { CONTRACT_VERSION, isValidCommonScalar };

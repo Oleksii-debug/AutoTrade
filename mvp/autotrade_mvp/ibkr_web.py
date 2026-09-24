@@ -144,6 +144,9 @@ class IbkrWebOrderIntent:
     quantity: Decimal
     limit_price: Decimal | None = None
     stop_price: Decimal | None = None
+    regulatory_manual_indicator_required: bool = False
+    manual_indicator: bool | None = None
+    ext_operator: str | None = None
 
     @classmethod
     def create(
@@ -158,6 +161,9 @@ class IbkrWebOrderIntent:
         quantity,
         limit_price=None,
         stop_price=None,
+        regulatory_manual_indicator_required: bool = False,
+        manual_indicator: bool | None = None,
+        ext_operator: str | None = None,
     ) -> "IbkrWebOrderIntent":
         if not isinstance(contract, IbkrContractIdentity):
             raise TypeError("contract must be IbkrContractIdentity")
@@ -181,6 +187,21 @@ class IbkrWebOrderIntent:
             raise IbkrWebAdapterError("stop_price is required for stop orders")
         if order not in {"STOP", "STOP_LIMIT"} and stop is not None:
             raise IbkrWebAdapterError("stop_price is not valid for this order type")
+        if type(regulatory_manual_indicator_required) is not bool:
+            raise IbkrWebAdapterError(
+                "regulatory_manual_indicator_required must be boolean"
+            )
+        if manual_indicator is not None and type(manual_indicator) is not bool:
+            raise IbkrWebAdapterError("manual_indicator must be boolean when present")
+        if regulatory_manual_indicator_required and manual_indicator is None:
+            raise IbkrWebAdapterError(
+                "manual_indicator is required by evidenced instrument regulation"
+            )
+        normalized_operator = (
+            None
+            if ext_operator is None
+            else _text(ext_operator, name="ext_operator")
+        )
         return cls(
             instrument_version=_text(instrument_version, name="instrument_version"),
             account_id=_text(account_id, name="account_id"),
@@ -191,6 +212,9 @@ class IbkrWebOrderIntent:
             quantity=qty,
             limit_price=limit,
             stop_price=stop,
+            regulatory_manual_indicator_required=regulatory_manual_indicator_required,
+            manual_indicator=manual_indicator,
+            ext_operator=normalized_operator,
         )
 
 
@@ -260,6 +284,10 @@ def prepare_normalized_order(
         fields["conid"] = intent.contract.conid
     else:
         fields["conidex"] = intent.contract.conidex
+    if intent.manual_indicator is not None:
+        fields["manualIndicator"] = intent.manual_indicator
+    if intent.ext_operator is not None:
+        fields["extOperator"] = intent.ext_operator
 
     return IbkrNormalizedOrder(
         endpoint=f"/iserver/account/{intent.account_id}/orders",

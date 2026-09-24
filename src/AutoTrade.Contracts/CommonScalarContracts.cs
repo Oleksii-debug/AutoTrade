@@ -11,6 +11,12 @@ public static partial class CommonScalarContracts
     private static readonly HashSet<string> Environments =
         new(StringComparer.Ordinal) { "REPLAY", "SIMULATION", "PAPER", "LIVE" };
 
+    /// <summary>
+    /// Validates one canonical textual common-scalar value without coercion.
+    /// </summary>
+    /// <param name="kind">Canonical scalar kind.</param>
+    /// <param name="value">Textual value to validate; null is invalid.</param>
+    /// <returns>True only when the value satisfies the selected canonical scalar contract.</returns>
     public static bool IsValid(string kind, string? value)
     {
         if (value is null)

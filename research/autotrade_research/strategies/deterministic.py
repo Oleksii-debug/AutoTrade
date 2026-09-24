@@ -83,13 +83,16 @@ class ReturnThresholdBaseline:
         if self.proposal_quantity <= 0:
             raise ValueError("proposal_quantity must be positive")
         self._history: dict[str, list[CausalObservation]] = {}
-        self._seen_event_ids: set[str] = set()
+        self._observations_by_id: dict[str, CausalObservation] = {}
 
     def ingest(self, observation: CausalObservation, *, simulation_time: datetime) -> bool:
         cutoff = _time(simulation_time, name="simulation_time")
         if observation.available_at > cutoff:
             raise ValueError("observation is not causally available at simulation_time")
-        if observation.event_id in self._seen_event_ids:
+        existing = self._observations_by_id.get(observation.event_id)
+        if existing is not None:
+            if existing != observation:
+                raise ValueError("event_id already exists with different observation content")
             return False
         history = self._history.setdefault(observation.symbol, [])
         if history and observation.available_at < history[-1].available_at:
@@ -97,7 +100,7 @@ class ReturnThresholdBaseline:
         history.append(observation)
         if len(history) > self.lookback:
             del history[:-self.lookback]
-        self._seen_event_ids.add(observation.event_id)
+        self._observations_by_id[observation.event_id] = observation
         return True
 
     def propose(self, *, symbol: str, decision_time: datetime) -> DeterministicProposal:

@@ -1,13 +1,13 @@
 {
   "schema_version": "1.0.0",
   "baseline_date": "2026-09-22",
-  "evidence_as_of": "2026-09-24T16:00:00Z",
+  "evidence_as_of": "2026-09-24T16:21:04Z",
   "overall_status": "IMPLEMENTATION_IN_PROGRESS_SIMULATED_VERTICAL_SLICE_AVAILABLE",
   "gates": {
     "engineering_baseline": "RECONCILED_00_16_WITH_GENERATED_BANK_AND_EXPORT_VALIDATION",
     "repository_bootstrap": "TRANSFER_BASELINE_COMPLETE",
     "reusable_code_migration": "IN_PROGRESS_CROSS_PLATFORM_CI_EXECUTED_ON_PR_HEADS",
-    "financial_runtime": "IN_PROGRESS_SIMULATED_MVP_LEDGER_RISK_RECONCILIATION_ONLY",
+    "financial_runtime": "IN_PROGRESS_DOUBLE_ENTRY_ACCOUNTING_RESERVATIONS_AND_SIMULATED_RECONCILIATION",
     "providers": "IN_PROGRESS_SIMULATED_PROVIDER_ONLY_REAL_ADAPTERS_NOT_QUALIFIED",
     "economic_edge": "UNPROVEN",
     "learning": "IN_PROGRESS_EVIDENCE_CAPTURE_AND_REPLAY_ONLY",
@@ -21,9 +21,12 @@
     "restart_recovery": "IN_PROGRESS_SIMULATED_CHECKPOINT_AND_EVIDENCE_RECOVERY",
     "command_surface": "IN_PROGRESS_MVP_CLI",
     "persistence": "IN_PROGRESS_SQLITE_JOURNAL_OUTBOX_AND_COMMAND_DEDUPE_PRIMITIVE",
-    "artifact_store": "IN_PROGRESS_CONTENT_ADDRESSED_RIGHTS_AWARE_STORE"
+    "artifact_store": "IN_PROGRESS_CONTENT_ADDRESSED_RIGHTS_AWARE_STORE",
+    "reservations": "IN_PROGRESS_CONSERVATIVE_WORKING_UNKNOWN_EXPOSURE_LEDGER"
   },
   "evidence_notes": [
+    "Main commits 7fb3b1a5628783f14f7fef56a9706152fa2a4517 and ed9c17e5d19a083af3b5de32e07b95d733e3a370 add exact multi-asset double-entry accounting, separate-unit balancing, third-currency fees/rebates, FX exchange, exact reversal and double-reversal protection.",
+    "Main commits 92fdc65d06336dbbe0fb7514d64f7e2b65d786ce, 01a8ebe14284b7c87e064c3ae0a05e2ed94a9cf8 and f59d4d4b0ba72cca667519a54ec4c9e90b2e5e05 add conservative resource reservations and fail-closed terminal semantics for working/UNKNOWN exposure.",
     "Main commits 8227c224817820e8485bfbed25d568b139c3ff0e and 5f284ed82ac7413c49d34aa19ee04cce03b07200 implement a content-addressed rights-aware artifact store with integrity, export and orphan-recovery tests.",
     "Main commits 27cacfa93439f91bd7e0afafcf4345493cefc335 and c9b9e3d65e6a53af99b8ca7e7e6377edb85a7fa4 add a SQLite WAL journal/outbox/command-dedupe primitive and focused persistence tests.",
     "Focused standalone persistence suite passed 5/5 locally before commit. This is not full WP-05 qualification: crash-boundary integration, projection rebuild equivalence, migration rollback and exact-head CI remain open.",

@@ -351,6 +351,37 @@ class ScientificRegistry:
         if not evidence.untouched or evidence.prior_access_count != 0:
             raise ProtocolViolation("candidate promotion requires an untouched locked holdout evaluation")
 
+        trial_state = self.completeness(expected_protocol)
+        if trial_state["recorded_trials"] < 1:
+            raise ProtocolViolation(
+                "candidate promotion requires at least one registered trial"
+            )
+        with self._connect() as con:
+            trial_rows = con.execute(
+                "SELECT status, payload_json FROM trials WHERE protocol_id=?",
+                (expected_protocol,),
+            ).fetchall()
+        candidate_trial_found = False
+        for row in trial_rows:
+            if row["status"] != "COMPLETED":
+                continue
+            try:
+                payload = json.loads(row["payload_json"])
+            except json.JSONDecodeError as error:
+                raise ProtocolViolation("registered trial payload is corrupt") from error
+            if not isinstance(payload, dict):
+                raise ProtocolViolation("registered trial payload is invalid")
+            if (
+                payload.get("candidate_id") == candidate_id
+                and payload.get("artifact_hash") == artifact_hash
+            ):
+                candidate_trial_found = True
+        if not candidate_trial_found:
+            raise ProtocolViolation(
+                "candidate promotion requires a completed registered trial "
+                "bound to candidate_id and artifact_hash"
+            )
+
         result = evidence.result
         required = {
             "candidate_id": _text(candidate_id, "candidate_id"),
@@ -360,6 +391,8 @@ class ScientificRegistry:
             "risk_passed": risk_passed,
             "authority_scope_id": _text(authority_scope_id, "authority_scope_id"),
             "evidence_valid_until": _text(evidence_valid_until, "evidence_valid_until"),
+            "recorded_trial_count": trial_state["recorded_trials"],
+            "trial_budget": trial_state["trial_budget"],
         }
         for field in ("retention_passed", "risk_passed"):
             if not isinstance(required[field], bool):

@@ -1,13 +1,14 @@
-"""Exact option expiry, exercise and adjusted-deliverable primitives.
+"""Exact option lifecycle, scenario-risk and model-bound sensitivity primitives.
 
-No volatility model, Greeks or trade authority are implied. Pre-expiry value is
-model-dependent and deliberately outside this deterministic settlement layer.
+No valuation model or trade authority is embedded here. Pre-expiry model values
+must be supplied with explicit evidence time; deterministic settlement remains
+separate from model-dependent Greeks and scenario analysis.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Iterable, Literal, Mapping
 
@@ -111,6 +112,188 @@ class OptionContract:
             raise OptionError("physical option requires explicit adjusted deliverable")
         if self.settlement_method == "CASH" and self.deliverable:
             raise OptionError("cash-settled option cannot silently carry physical deliverables")
+
+
+@dataclass(frozen=True)
+class OptionGreekEstimate:
+    """Model-bound finite-difference Greeks with explicit evidence time."""
+
+    model_id: str
+    observed_at: datetime
+    delta: Decimal
+    gamma: Decimal
+    vega: Decimal | None = None
+    theta_per_year: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "model_id", _text(self.model_id, "model_id"))
+        object.__setattr__(
+            self,
+            "observed_at",
+            _utc(self.observed_at, "observed_at"),
+        )
+        object.__setattr__(self, "delta", _decimal(self.delta, "delta"))
+        object.__setattr__(self, "gamma", _decimal(self.gamma, "gamma"))
+        if self.vega is not None:
+            object.__setattr__(self, "vega", _decimal(self.vega, "vega"))
+        if self.theta_per_year is not None:
+            object.__setattr__(
+                self,
+                "theta_per_year",
+                _decimal(self.theta_per_year, "theta_per_year"),
+            )
+
+    def require_fresh(self, at: datetime, *, max_age: timedelta) -> None:
+        point = _utc(at, "at")
+        if not isinstance(max_age, timedelta) or max_age <= timedelta(0):
+            raise OptionError("max_age must be positive")
+        if point < self.observed_at:
+            raise OptionError("Greek estimate cannot come from the future")
+        if point - self.observed_at > max_age:
+            raise OptionError("Greek estimate is stale")
+
+
+@dataclass(frozen=True)
+class FiniteDifferenceGrid:
+    """Explicit same-model valuation grid used to derive local Greeks.
+
+    These values are model outputs rather than authoritative cash or evidence
+    of economic edge. The grid is only a deterministic sensitivity boundary.
+    """
+
+    model_id: str
+    observed_at: datetime
+    base_value: Decimal
+    spot_down_value: Decimal
+    spot_up_value: Decimal
+    spot_step: Decimal
+    vol_down_value: Decimal | None = None
+    vol_up_value: Decimal | None = None
+    vol_step: Decimal | None = None
+    time_forward_value: Decimal | None = None
+    time_step_years: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "model_id", _text(self.model_id, "model_id"))
+        object.__setattr__(
+            self,
+            "observed_at",
+            _utc(self.observed_at, "observed_at"),
+        )
+        for name in ("base_value", "spot_down_value", "spot_up_value"):
+            value = _decimal(getattr(self, name), name)
+            if value < 0:
+                raise OptionError(f"{name} cannot be negative")
+            object.__setattr__(self, name, value)
+        object.__setattr__(
+            self,
+            "spot_step",
+            _decimal(self.spot_step, "spot_step", positive=True),
+        )
+
+        vol_values = (self.vol_down_value, self.vol_up_value, self.vol_step)
+        if any(value is not None for value in vol_values):
+            if not all(value is not None for value in vol_values):
+                raise OptionError(
+                    "vega grid requires vol_down_value, vol_up_value and vol_step together"
+                )
+            vol_down = _decimal(self.vol_down_value, "vol_down_value")
+            vol_up = _decimal(self.vol_up_value, "vol_up_value")
+            if vol_down < 0 or vol_up < 0:
+                raise OptionError("volatility scenario option values cannot be negative")
+            object.__setattr__(self, "vol_down_value", vol_down)
+            object.__setattr__(self, "vol_up_value", vol_up)
+            object.__setattr__(
+                self,
+                "vol_step",
+                _decimal(self.vol_step, "vol_step", positive=True),
+            )
+
+        time_values = (self.time_forward_value, self.time_step_years)
+        if any(value is not None for value in time_values):
+            if not all(value is not None for value in time_values):
+                raise OptionError(
+                    "theta grid requires time_forward_value and time_step_years together"
+                )
+            forward = _decimal(self.time_forward_value, "time_forward_value")
+            if forward < 0:
+                raise OptionError("time_forward_value cannot be negative")
+            object.__setattr__(self, "time_forward_value", forward)
+            object.__setattr__(
+                self,
+                "time_step_years",
+                _decimal(self.time_step_years, "time_step_years", positive=True),
+            )
+
+
+def finite_difference_greeks(grid: FiniteDifferenceGrid) -> OptionGreekEstimate:
+    if not isinstance(grid, FiniteDifferenceGrid):
+        raise TypeError("grid must be FiniteDifferenceGrid")
+    two = Decimal("2")
+    delta = (grid.spot_up_value - grid.spot_down_value) / (two * grid.spot_step)
+    gamma = (
+        grid.spot_up_value - two * grid.base_value + grid.spot_down_value
+    ) / (grid.spot_step * grid.spot_step)
+    vega = None
+    if grid.vol_step is not None:
+        vega = (grid.vol_up_value - grid.vol_down_value) / (two * grid.vol_step)
+    theta = None
+    if grid.time_step_years is not None:
+        theta = (grid.time_forward_value - grid.base_value) / grid.time_step_years
+    return OptionGreekEstimate(
+        model_id=grid.model_id,
+        observed_at=grid.observed_at,
+        delta=delta,
+        gamma=gamma,
+        vega=vega,
+        theta_per_year=theta,
+    )
+
+
+@dataclass(frozen=True)
+class ExpiryScenarioLeg:
+    contract: OptionContract
+    signed_contracts: Decimal
+    premium_per_unit: Decimal
+    underlying_price: Decimal
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.contract, OptionContract):
+            raise TypeError("contract must be OptionContract")
+        object.__setattr__(
+            self,
+            "signed_contracts",
+            _decimal(self.signed_contracts, "signed_contracts"),
+        )
+        premium = _decimal(self.premium_per_unit, "premium_per_unit")
+        if premium < 0:
+            raise OptionError("premium_per_unit cannot be negative")
+        object.__setattr__(self, "premium_per_unit", premium)
+        object.__setattr__(
+            self,
+            "underlying_price",
+            _decimal(self.underlying_price, "underlying_price", positive=True),
+        )
+
+    @property
+    def pnl(self) -> Decimal:
+        return expiration_pnl_after_premium(
+            self.contract,
+            signed_contracts=self.signed_contracts,
+            premium_per_unit=self.premium_per_unit,
+            underlying_price=self.underlying_price,
+        )
+
+
+def portfolio_expiration_scenario_pnl(
+    legs: Iterable[ExpiryScenarioLeg],
+) -> Decimal:
+    scenario = tuple(legs)
+    if not scenario:
+        raise OptionError("at least one option scenario leg is required")
+    if any(not isinstance(leg, ExpiryScenarioLeg) for leg in scenario):
+        raise TypeError("all scenario legs must be ExpiryScenarioLeg")
+    return sum((leg.pnl for leg in scenario), Decimal("0"))
 
 
 @dataclass(frozen=True)

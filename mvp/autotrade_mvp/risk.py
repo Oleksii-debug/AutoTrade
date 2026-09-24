@@ -246,25 +246,34 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
     intent_notional = intent.quantity * intent.price
     single_notional = max(mark_notional, intent_notional)
 
+    stress_symbols = set(notionals)
+    stress_coverage_complete = bool(context.stress_scenarios) or not stress_symbols
+    missing_stress_symbols: set[str] = set()
+    for scenario in context.stress_scenarios:
+        missing_stress_symbols.update(stress_symbols - set(scenario))
+    if missing_stress_symbols:
+        stress_coverage_complete = False
+
     base_worst_stress_loss = Decimal("0")
     worst_stress_loss = Decimal("0")
-    for scenario in context.stress_scenarios:
-        base_pnl = sum(
-            (
-                notional * scenario.get(symbol, Decimal("0"))
-                for symbol, notional in base_notionals.items()
-            ),
-            Decimal("0"),
-        )
-        pnl = sum(
-            (
-                notional * scenario.get(symbol, Decimal("0"))
-                for symbol, notional in notionals.items()
-            ),
-            Decimal("0"),
-        )
-        base_worst_stress_loss = max(base_worst_stress_loss, -base_pnl)
-        worst_stress_loss = max(worst_stress_loss, -pnl)
+    if stress_coverage_complete:
+        for scenario in context.stress_scenarios:
+            base_pnl = sum(
+                (
+                    notional * scenario.get(symbol, Decimal("0"))
+                    for symbol, notional in base_notionals.items()
+                ),
+                Decimal("0"),
+            )
+            pnl = sum(
+                (
+                    notional * scenario[symbol]
+                    for symbol, notional in notionals.items()
+                ),
+                Decimal("0"),
+            )
+            base_worst_stress_loss = max(base_worst_stress_loss, -base_pnl)
+            worst_stress_loss = max(worst_stress_loss, -pnl)
 
     reduces_absolute_exposure = (
         abs(resulting) < abs(base_position)
@@ -363,9 +372,17 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         "margin headroom must meet policy floor",
     )
     add(
+        "stress_coverage",
+        stress_coverage_complete,
+        ",".join(sorted(missing_stress_symbols)) if missing_stress_symbols else len(context.stress_scenarios),
+        "complete non-empty stress evidence for every non-zero projected position",
+        "stress admission must fail closed when scenarios are missing or incomplete",
+    )
+    add(
         "stress_loss",
-        worst_stress_loss <= policy.max_stress_loss or protective_reduction,
-        worst_stress_loss,
+        stress_coverage_complete
+        and (worst_stress_loss <= policy.max_stress_loss or protective_reduction),
+        worst_stress_loss if stress_coverage_complete else "UNKNOWN",
         policy.max_stress_loss,
         "worst configured stress loss must stay within policy",
     )

@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
 from typing import FrozenSet
+from uuid import UUID
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -39,17 +40,102 @@ def _instant(value: str, *, name: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+@dataclass(frozen=True, order=True)
+class InstrumentVersionIdentity:
+    """Immutable authority reference to one canonical instrument version."""
+
+    instrument_id: str
+    version: int
+
+    def __post_init__(self) -> None:
+        raw_id = _text(self.instrument_id, name="instrument_id")
+        try:
+            canonical_id = str(UUID(raw_id))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise ValueError("instrument_id must be a UUID") from error
+        if (
+            not isinstance(self.version, int)
+            or isinstance(self.version, bool)
+            or self.version < 1
+        ):
+            raise ValueError("instrument_version must be a positive integer")
+        object.__setattr__(self, "instrument_id", canonical_id)
+
+
+def _instrument_identity(value, *, name: str = "instrument") -> InstrumentVersionIdentity:
+    if isinstance(value, InstrumentVersionIdentity):
+        return value
+    if isinstance(value, (tuple, list)) and len(value) == 2:
+        return InstrumentVersionIdentity(value[0], value[1])
+    raise TypeError(
+        f"{name} must be InstrumentVersionIdentity or an (instrument_id, version) pair"
+    )
+
+
 @dataclass(frozen=True)
 class AuthorityPolicy:
     policy_id: str
     account_id: str
     environments: FrozenSet[str]
-    instruments: FrozenSet[str]
+    instruments: FrozenSet[InstrumentVersionIdentity]
     actions: FrozenSet[str]
     max_notional: Decimal
     expires_at: str
     autonomous: bool
+    valid_from: str = "1970-01-01T00:00:00Z"
     protection_only: bool = False
+
+    def __post_init__(self) -> None:
+        # The policy object itself is an authority boundary.  Callers can
+        # instantiate dataclasses directly, so validation cannot live only in
+        # create(); otherwise truthy non-booleans such as "false" could bypass
+        # the confirmation requirement through policy.autonomous.
+        if not isinstance(self.autonomous, bool) or not isinstance(
+            self.protection_only, bool
+        ):
+            raise TypeError("autonomous and protection_only must be booleans")
+        if isinstance(self.environments, (str, bytes)):
+            raise TypeError("environments must be a collection")
+        if isinstance(self.instruments, (str, bytes)):
+            raise TypeError("instruments must be a collection")
+        if isinstance(self.actions, (str, bytes)):
+            raise TypeError("actions must be a collection")
+
+        normalized_environments = frozenset(
+            _text(item, name="environment").upper() for item in self.environments
+        )
+        if (
+            not normalized_environments
+            or not normalized_environments <= {"SIMULATION", "PAPER", "LIVE"}
+        ):
+            raise ValueError("environments must contain supported values")
+        normalized_instruments = frozenset(
+            _instrument_identity(item) for item in self.instruments
+        )
+        normalized_actions = frozenset(
+            _text(item, name="action").upper() for item in self.actions
+        )
+        if not normalized_instruments or not normalized_actions:
+            raise ValueError("instruments and actions must be non-empty")
+
+        notional = _decimal(self.max_notional, name="max_notional")
+        if notional <= 0:
+            raise ValueError("max_notional must be positive")
+        valid_from = _text(self.valid_from, name="valid_from")
+        expires_at = _text(self.expires_at, name="expires_at")
+        if _instant(valid_from, name="valid_from") >= _instant(
+            expires_at, name="expires_at"
+        ):
+            raise ValueError("valid_from must precede expires_at")
+
+        object.__setattr__(self, "policy_id", _text(self.policy_id, name="policy_id"))
+        object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
+        object.__setattr__(self, "environments", normalized_environments)
+        object.__setattr__(self, "instruments", normalized_instruments)
+        object.__setattr__(self, "actions", normalized_actions)
+        object.__setattr__(self, "max_notional", notional)
+        object.__setattr__(self, "valid_from", valid_from)
+        object.__setattr__(self, "expires_at", expires_at)
 
     @classmethod
     def create(
@@ -63,6 +149,7 @@ class AuthorityPolicy:
         max_notional,
         expires_at: str,
         autonomous: bool,
+        valid_from: str = "1970-01-01T00:00:00Z",
         protection_only: bool = False,
     ) -> "AuthorityPolicy":
         normalized_environments = frozenset(
@@ -71,7 +158,7 @@ class AuthorityPolicy:
         if not normalized_environments or not normalized_environments <= {"SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("environments must contain supported values")
         normalized_instruments = frozenset(
-            _text(item, name="instrument") for item in instruments
+            _instrument_identity(item) for item in instruments
         )
         normalized_actions = frozenset(
             _text(item, name="action").upper() for item in actions
@@ -81,7 +168,10 @@ class AuthorityPolicy:
         notional = _decimal(max_notional, name="max_notional")
         if notional <= 0:
             raise ValueError("max_notional must be positive")
-        _instant(expires_at, name="expires_at")
+        valid_from_instant = _instant(valid_from, name="valid_from")
+        expires_at_instant = _instant(expires_at, name="expires_at")
+        if valid_from_instant >= expires_at_instant:
+            raise ValueError("valid_from must precede expires_at")
         if not isinstance(autonomous, bool) or not isinstance(protection_only, bool):
             raise TypeError("autonomous and protection_only must be booleans")
         return cls(
@@ -93,6 +183,7 @@ class AuthorityPolicy:
             max_notional=notional,
             expires_at=expires_at,
             autonomous=autonomous,
+            valid_from=valid_from,
             protection_only=protection_only,
         )
 
@@ -104,7 +195,7 @@ class Confirmation:
     intent_hash: str
     account_id: str
     environment: str
-    instrument: str
+    instrument_version: InstrumentVersionIdentity
     action: str
     notional: Decimal
     expires_at: str
@@ -117,7 +208,7 @@ class AdmissionRecord:
     intent_hash: str
     account_id: str
     environment: str
-    instrument: str
+    instrument_version: InstrumentVersionIdentity
     action: str
     notional: Decimal
     risk_reducing: bool
@@ -148,6 +239,8 @@ class AuthorityService:
         return self._epoch
 
     def register_policy(self, policy: AuthorityPolicy) -> bool:
+        if not isinstance(policy, AuthorityPolicy):
+            raise TypeError("policy must be AuthorityPolicy")
         existing = self._policies.get(policy.policy_id)
         if existing is not None:
             if existing != policy:
@@ -180,7 +273,8 @@ class AuthorityService:
         intent_hash: str,
         account_id: str,
         environment: str,
-        instrument: str,
+        instrument_id: str,
+        instrument_version: int,
         action: str,
         notional,
         expires_at: str,
@@ -198,7 +292,9 @@ class AuthorityService:
             intent_hash=_text(intent_hash, name="intent_hash"),
             account_id=_text(account_id, name="account_id"),
             environment=_text(environment, name="environment").upper(),
-            instrument=_text(instrument, name="instrument"),
+            instrument_version=InstrumentVersionIdentity(
+                instrument_id, instrument_version
+            ),
             action=_text(action, name="action").upper(),
             notional=confirmation_notional,
             expires_at=expires_at,
@@ -214,6 +310,8 @@ class AuthorityService:
 
     def _policy_active(self, policy: AuthorityPolicy, now: str) -> tuple[bool, str]:
         current = _instant(now, name="now")
+        if current < _instant(policy.valid_from, name="policy.valid_from"):
+            return False, "policy_not_yet_active"
         revocation = self._revocations.get(policy.policy_id)
         if revocation is not None:
             _, revoked_at = revocation
@@ -231,7 +329,8 @@ class AuthorityService:
         intent_hash: str,
         account_id: str,
         environment: str,
-        instrument: str,
+        instrument_id: str,
+        instrument_version: int,
         action: str,
         notional,
         state_version: int,
@@ -245,7 +344,7 @@ class AuthorityService:
         ihash = _text(intent_hash, name="intent_hash")
         account = _text(account_id, name="account_id")
         env = _text(environment, name="environment").upper()
-        symbol = _text(instrument, name="instrument")
+        identity = InstrumentVersionIdentity(instrument_id, instrument_version)
         normalized_action = _text(action, name="action").upper()
         if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
@@ -262,7 +361,8 @@ class AuthorityService:
             "intent_hash": ihash,
             "account_id": account,
             "environment": env,
-            "instrument": symbol,
+            "instrument_id": identity.instrument_id,
+            "instrument_version": identity.version,
             "action": normalized_action,
             "notional": str(amount),
             "state_version": state_version,
@@ -285,7 +385,7 @@ class AuthorityService:
             (risk_admitted, "risk_rejected"),
             (account == policy.account_id, "account_out_of_scope"),
             (env in policy.environments, "environment_out_of_scope"),
-            (symbol in policy.instruments, "instrument_out_of_scope"),
+            (identity in policy.instruments, "instrument_version_out_of_scope"),
             (normalized_action in policy.actions, "action_out_of_scope"),
             (amount <= policy.max_notional, "notional_out_of_scope"),
             (not policy.protection_only or risk_reducing, "protection_policy_requires_risk_reduction"),
@@ -315,7 +415,7 @@ class AuthorityService:
                 elif (
                     confirmation.account_id != account
                     or confirmation.environment != env
-                    or confirmation.instrument != symbol
+                    or confirmation.instrument_version != identity
                     or confirmation.action != normalized_action
                     or confirmation.notional != amount
                 ):
@@ -331,7 +431,7 @@ class AuthorityService:
             intent_hash=ihash,
             account_id=account,
             environment=env,
-            instrument=symbol,
+            instrument_version=identity,
             action=normalized_action,
             notional=amount,
             risk_reducing=risk_reducing,
@@ -355,7 +455,8 @@ class AuthorityService:
         intent_hash: str,
         account_id: str,
         environment: str,
-        instrument: str,
+        instrument_id: str,
+        instrument_version: int,
         action: str,
         now: str,
     ) -> tuple[bool, str]:
@@ -369,13 +470,13 @@ class AuthorityService:
         scope = (
             _text(account_id, name="account_id"),
             _text(environment, name="environment").upper(),
-            _text(instrument, name="instrument"),
+            InstrumentVersionIdentity(instrument_id, instrument_version),
             _text(action, name="action").upper(),
         )
         recorded_scope = (
             record.account_id,
             record.environment,
-            record.instrument,
+            record.instrument_version,
             record.action,
         )
         if scope != recorded_scope:

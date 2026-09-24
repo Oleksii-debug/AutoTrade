@@ -1,0 +1,115 @@
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
+
+from mvp.autotrade_mvp.decision_trace import BoundedMetricBacklog, DecisionTraceStore
+
+
+def evidence_trace(trace_id: str = "decision-1") -> dict:
+    return {
+        "trace_id": trace_id,
+        "input_hash": "b" * 64,
+        "strategy_version": "baseline-v2",
+        "decision": "NO_TRADE",
+        "decision_reason": "insufficient_after_cost_edge",
+        "risk_outcome": "not_applicable",
+        "evidence_refs": ["dataset-1", "risk-evidence-1"],
+        "correlation_id": "corr-1",
+        "event_ids": ["event-market", "event-decision"],
+        "attributes": {
+            "strategy": "baseline",
+            "token": "super-secret",
+            "nested": {"api_key": "hidden", "safe": "ok"},
+        },
+    }
+
+
+class DecisionTraceEvidenceTests(unittest.TestCase):
+    def test_durable_trace_redacts_sensitive_diagnostics_before_persistence(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = evidence_trace()
+            self.assertTrue(store.append(item))
+
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["attributes"]["token"], "[REDACTED]")
+            self.assertEqual(persisted["attributes"]["nested"]["api_key"], "[REDACTED]")
+            self.assertEqual(persisted["attributes"]["nested"]["safe"], "ok")
+            self.assertNotIn("super-secret", path.read_text(encoding="utf-8"))
+            self.assertTrue(store.verify())
+
+    def test_reconstruction_requires_all_durable_links(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            store.append(evidence_trace())
+
+            with self.assertRaisesRegex(ValueError, "trace evidence incomplete"):
+                store.reconstruct(
+                    "decision-1",
+                    available_event_ids=["event-market"],
+                    available_evidence_ids=["dataset-1", "risk-evidence-1"],
+                )
+
+            with self.assertRaisesRegex(ValueError, "trace evidence incomplete"):
+                store.reconstruct(
+                    "decision-1",
+                    available_event_ids=["event-market", "event-decision"],
+                    available_evidence_ids=["dataset-1"],
+                )
+
+            record = store.reconstruct(
+                "decision-1",
+                available_event_ids=["event-market", "event-decision"],
+                available_evidence_ids=["dataset-1", "risk-evidence-1"],
+            )
+            self.assertEqual(record["trace_id"], "decision-1")
+            self.assertEqual(record["event_ids"][-1], "event-decision")
+
+    def test_accessible_export_is_linear_verified_and_redacted(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            store.append(evidence_trace())
+            exported = store.accessible_export("decision-1")
+            self.assertIn("Decision trace: decision-1", exported)
+            self.assertIn("- event-decision", exported)
+            self.assertIn("- dataset-1", exported)
+            self.assertIn("[REDACTED]", exported)
+            self.assertNotIn("super-secret", exported)
+
+    def test_conflicting_retry_compares_redacted_persisted_semantics(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            first = evidence_trace()
+            second = evidence_trace()
+            second["attributes"]["token"] = "different-secret"
+            self.assertTrue(store.append(first))
+            self.assertFalse(store.append(second))
+
+            third = evidence_trace()
+            third["attributes"]["strategy"] = "changed"
+            with self.assertRaisesRegex(ValueError, "different decision content"):
+                store.append(third)
+
+    def test_event_identity_must_be_unique_and_non_empty(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            duplicate = evidence_trace()
+            duplicate["event_ids"] = ["event-1", "event-1"]
+            with self.assertRaisesRegex(ValueError, "must not contain duplicates"):
+                store.append(duplicate)
+
+    def test_metric_backlog_is_bounded_and_redacts_labels(self):
+        backlog = BoundedMetricBacklog(max_items=2)
+        backlog.record("queue.delay", 1.0, token="a")
+        backlog.record("queue.delay", 2.0, provider="sim")
+        backlog.record("queue.delay", 3.0, password="b")
+        self.assertEqual(backlog.dropped, 1)
+        snapshot = backlog.snapshot()
+        self.assertEqual(len(snapshot), 2)
+        self.assertEqual(snapshot[-1]["labels"]["password"], "[REDACTED]")
+
+
+if __name__ == "__main__":
+    unittest.main()

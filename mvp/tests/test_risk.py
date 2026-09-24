@@ -102,6 +102,100 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertFalse(decision.admitted)
         self.assertIn("reduce_only", {r.rule for r in decision.rules if not r.passed})
 
+    def test_genuine_reduce_only_can_decrease_risk_while_account_is_over_limits(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="SELL",
+                quantity="2",
+                price="100",
+                expected_state_version=7,
+                reduce_only=True,
+            ),
+            context(
+                positions={"ABC": "10"},
+                marks={"ABC": "100"},
+                daily_pnl="-600",
+                drawdown_fraction="0.30",
+                margin_headroom="0.10",
+                stress_scenarios=({"ABC": "-0.50"},),
+            ),
+            policy(
+                max_abs_position="5",
+                max_single_notional="100",
+                max_gross_leverage="0.5",
+                max_net_leverage="0.5",
+                max_daily_loss="100",
+                max_drawdown_fraction="0.10",
+                min_margin_headroom="0.30",
+                max_stress_loss="50",
+            ),
+        )
+        self.assertTrue(decision.admitted)
+        self.assertEqual(decision.resulting_position, Decimal("8"))
+        self.assertFalse({r.rule for r in decision.rules if not r.passed})
+
+    def test_reduce_only_does_not_get_exception_if_portfolio_net_risk_worsens(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="SELL",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                reduce_only=True,
+            ),
+            context(
+                positions={"ABC": "10", "XYZ": "-20"},
+                marks={"ABC": "100", "XYZ": "50"},
+                stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.10"},),
+            ),
+            policy(
+                max_abs_position="5",
+                max_gross_leverage="1",
+                max_net_leverage="0.05",
+            ),
+        )
+        self.assertFalse(decision.admitted)
+        failed = {r.rule for r in decision.rules if not r.passed}
+        self.assertTrue({"position_limit", "gross_leverage", "net_leverage"} & failed)
+
+    def test_protective_reduction_still_requires_fresh_data_and_state(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="SELL",
+                quantity="1",
+                price="100",
+                expected_state_version=6,
+                reduce_only=True,
+            ),
+            context(
+                positions={"ABC": "10"},
+                marks={"ABC": "100"},
+                market_data_age_seconds="10",
+            ),
+            policy(max_abs_position="5", max_data_age_seconds="5"),
+        )
+        self.assertFalse(decision.admitted)
+        failed = {r.rule for r in decision.rules if not r.passed}
+        self.assertTrue({"state_version", "market_freshness"} <= failed)
+
+    def test_unmarked_reduction_cannot_bypass_breached_caps(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="SELL",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                reduce_only=False,
+            ),
+            context(positions={"ABC": "10"}, marks={"ABC": "100"}),
+            policy(max_abs_position="5", max_gross_leverage="0.5"),
+        )
+        self.assertFalse(decision.admitted)
+
     def test_high_order_price_cannot_bypass_single_notional_limit(self):
         decision = evaluate_risk(
             RiskIntent.create(
@@ -170,6 +264,77 @@ class IndependentRiskTests(unittest.TestCase):
                 context(marks={"XYZ": "50"}),
                 policy(),
             )
+
+    def test_missing_stress_scenarios_block_nonzero_exposure(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(stress_scenarios=()),
+            policy(),
+        )
+        failed = {rule.rule for rule in decision.rules if not rule.passed}
+        self.assertIn("stress_coverage", failed)
+        self.assertIn("stress_loss", failed)
+        self.assertFalse(decision.admitted)
+
+    def test_incomplete_stress_scenario_cannot_hide_existing_position_risk(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(
+                positions={"ABC": "2", "XYZ": "3"},
+                stress_scenarios=({"ABC": "-0.10"},),
+            ),
+            policy(),
+        )
+        failed = {rule.rule for rule in decision.rules if not rule.passed}
+        self.assertIn("stress_coverage", failed)
+        stress_rule = next(rule for rule in decision.rules if rule.rule == "stress_coverage")
+        self.assertEqual(stress_rule.observed, "XYZ")
+        self.assertFalse(decision.admitted)
+
+    def test_full_liquidation_does_not_require_artificial_stress_scenario(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7, reduce_only=True,
+            ),
+            context(
+                positions={"ABC": "-1"},
+                stress_scenarios=(),
+            ),
+            policy(),
+        )
+        coverage = next(rule for rule in decision.rules if rule.rule == "stress_coverage")
+        self.assertTrue(coverage.passed)
+        self.assertTrue(decision.admitted)
+
+    def test_semantically_duplicate_identity_keys_fail_closed(self):
+        with self.assertRaisesRegex(ValueError, "unique after normalization"):
+            context(
+                positions={"ABC": "1", " ABC ": "2"},
+                marks={"ABC": "100"},
+            )
+        with self.assertRaisesRegex(ValueError, "unique after normalization"):
+            context(
+                marks={"ABC": "100", " ABC ": "101"},
+            )
+        with self.assertRaisesRegex(ValueError, "unique after normalization"):
+            context(
+                stress_scenarios=(
+                    {"ABC": "-0.1", " ABC ": "-0.2", "XYZ": "-0.2"},
+                ),
+            )
+
+    def test_risk_mapping_and_scenario_container_types_fail_closed(self):
+        with self.assertRaisesRegex(TypeError, "positions must be a mapping"):
+            context(positions=[("ABC", "1")])
+        with self.assertRaisesRegex(TypeError, "stress_scenarios must be a sequence"):
+            context(stress_scenarios="ABC:-0.1")
 
     def test_float_inputs_are_rejected(self):
         with self.assertRaises(TypeError):

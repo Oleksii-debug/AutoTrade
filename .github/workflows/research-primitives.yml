@@ -3,6 +3,7 @@ name: research-primitives
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     paths:
       - "research/**"
       - ".github/workflows/research-primitives.yml"
@@ -10,6 +11,10 @@ on:
     paths:
       - "research/**"
       - ".github/workflows/research-primitives.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

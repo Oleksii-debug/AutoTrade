@@ -42,10 +42,18 @@ class UnavailableModelInventory:
 
 
 def _require_source_sha(value: str) -> str:
-    token = value.strip().lower()
-    if len(token) != 40 or any(character not in "0123456789abcdef" for character in token):
-        raise ValueError("source SHA must be an exact 40-character Git commit SHA")
-    return token
+    if not isinstance(value, str):
+        raise TypeError("source SHA must be text")
+    if (
+        len(value) != 40
+        or value != value.strip()
+        or value != value.lower()
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(
+            "source SHA must be canonical lowercase 40-character Git commit SHA"
+        )
+    return value
 
 
 def qualify(source_sha: str) -> dict[str, object]:

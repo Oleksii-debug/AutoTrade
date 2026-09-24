@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -133,8 +133,8 @@ def _validate_temporal_protocol(payload: dict[str, Any]) -> None:
         right_start,
         _right_end,
     ) in zip(periods, periods[1:]):
-        actual_gap_seconds = (right_start - left_end).total_seconds()
-        if actual_gap_seconds < required_gap_seconds:
+        actual_gap = right_start - left_end
+        if actual_gap < timedelta(seconds=required_gap_seconds):
             raise ProtocolViolation(
                 f"{left_name} to {right_name} gap is shorter than the "
                 "registered purge/embargo dependency horizon"

@@ -132,6 +132,17 @@ class ScientificRegistryTests(unittest.TestCase):
             with self.assertRaisesRegex(ProtocolViolation, "gap is shorter"):
                 store.register_protocol(value)
 
+    def test_gap_comparison_is_exact_at_microsecond_boundary(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            value = protocol()
+            value["horizons"] = [1]
+            value["purge_embargo"] = {"purge_seconds": 1, "embargo_seconds": 1}
+            value["train_period"]["end"] = "2025-12-31T23:59:59.500000Z"
+            value["validation_period"]["start"] = "2026-01-01T00:00:00.499999Z"
+            with self.assertRaisesRegex(ProtocolViolation, "gap is shorter"):
+                store.register_protocol(value)
+
     def test_embargo_must_cover_longest_registered_dependency_horizon(self):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")

@@ -273,6 +273,49 @@ class BackupRestoreTests(unittest.TestCase):
                 )
             self.assertTrue(restore_requires_reconciliation(restored))
 
+    def test_same_fencing_artifact_id_cannot_claim_different_bytes(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = RecoveryController()
+            controller.start("restored-host")
+
+            conflicting = _fencing_evidence(restored)
+            conflicting[1]["artifact_id"] = conflicting[0]["artifact_id"]
+            self.assertNotEqual(conflicting[1]["sha256"], conflicting[0]["sha256"])
+            with self.assertRaisesRegex(BackupError, "artifact_id"):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation=_reconciliation(),
+                    fencing_evidence=conflicting,
+                    completed_at=_completed_at(restored),
+                )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_same_fencing_bytes_cannot_be_counted_as_two_evidence_objects(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = RecoveryController()
+            controller.start("restored-host")
+
+            duplicate_bytes = _fencing_evidence(restored)
+            duplicate_bytes[1]["sha256"] = duplicate_bytes[0]["sha256"]
+            with self.assertRaisesRegex(BackupError, "evidence bytes"):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation=_reconciliation(),
+                    fencing_evidence=duplicate_bytes,
+                    completed_at=_completed_at(restored),
+                )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
     def test_duplicate_or_future_fencing_evidence_never_clears_gate(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

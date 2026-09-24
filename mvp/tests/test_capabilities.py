@@ -6,6 +6,7 @@ from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
     CapabilityError,
     CapabilityRegistry,
+    CapabilitySnapshot,
     EvidenceVerification,
     derive_capability_snapshot as _derive_capability_snapshot,
 )
@@ -109,6 +110,66 @@ class CapabilityFoundationTests(unittest.TestCase):
                 permission_scope="ORDER.WRITE",
             )
         )
+
+    def test_verified_snapshot_cannot_be_forged_by_direct_construction(self):
+        canonical = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(),
+            observed_at=NOW,
+        )
+        with self.assertRaisesRegex(
+            CapabilityError,
+            "only be created by derive_capability_snapshot",
+        ):
+            CapabilitySnapshot(
+                snapshot_id=SNAPSHOT_2,
+                provider_id=canonical.provider_id,
+                account_id=canonical.account_id,
+                entity_id=canonical.entity_id,
+                environment=canonical.environment,
+                instrument_version=canonical.instrument_version,
+                observed_at=canonical.observed_at,
+                expires_at=canonical.expires_at,
+                supported_order_types=frozenset({"MARKET", "LIMIT"}),
+                time_in_force=canonical.time_in_force,
+                permission_scopes=frozenset({"ORDER.WRITE"}),
+                position_mode=canonical.position_mode,
+                native_protection=canonical.native_protection,
+                rate_limit_policy_id=canonical.rate_limit_policy_id,
+                data_entitlements=canonical.data_entitlements,
+                evidence=canonical.evidence,
+                status="VERIFIED",
+                sources=canonical.sources,
+            )
+
+    def test_claim_cannot_predate_its_evidence(self):
+        original = claim("API")
+        with self.assertRaisesRegex(
+            CapabilityError,
+            "evidence observed_at cannot be later",
+        ):
+            CapabilityClaim(
+                source=original.source,
+                provider_id=original.provider_id,
+                account_id=original.account_id,
+                entity_id=original.entity_id,
+                environment=original.environment,
+                instrument_version=original.instrument_version,
+                observed_at=NOW - timedelta(minutes=2),
+                expires_at=NOW + timedelta(minutes=10),
+                supported_order_types=original.supported_order_types,
+                time_in_force=original.time_in_force,
+                permission_scopes=original.permission_scopes,
+                position_mode=original.position_mode,
+                native_protection=original.native_protection,
+                rate_limit_policy_id=original.rate_limit_policy_id,
+                data_entitlements=original.data_entitlements,
+                evidence_ref={
+                    "artifact_id": "33333333-3333-4333-8333-333333333333",
+                    "sha256": "sha256:" + "a" * 64,
+                    "observed_at": "2026-09-24T15:59:00Z",
+                },
+            )
 
     def test_missing_required_source_is_unknown(self):
         snapshot = derive_capability_snapshot(

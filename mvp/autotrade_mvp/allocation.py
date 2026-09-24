@@ -47,6 +47,41 @@ class AllocationCandidate:
     min_notional: Decimal = Decimal("0")
     fee_floor: Decimal = Decimal("0")
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbol", _text(self.symbol, name="symbol"))
+        object.__setattr__(
+            self,
+            "desired_notional",
+            _decimal(self.desired_notional, name="desired_notional"),
+        )
+        object.__setattr__(self, "price", _positive(self.price, name="price"))
+        object.__setattr__(
+            self, "lot_size", _positive(self.lot_size, name="lot_size")
+        )
+        object.__setattr__(
+            self,
+            "cost_rate",
+            _positive(self.cost_rate, name="cost_rate", allow_zero=True),
+        )
+        object.__setattr__(
+            self,
+            "capital_requirement_rate",
+            _positive(
+                self.capital_requirement_rate,
+                name="capital_requirement_rate",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "min_notional",
+            _positive(self.min_notional, name="min_notional", allow_zero=True),
+        )
+        object.__setattr__(
+            self,
+            "fee_floor",
+            _positive(self.fee_floor, name="fee_floor", allow_zero=True),
+        )
+
     @classmethod
     def create(
         cls,
@@ -85,6 +120,39 @@ class AllocationPolicy:
     max_stress_loss: Decimal
     max_iterations: int = 64
     min_scale_tolerance: Decimal = Decimal("0.000001")
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "cash_available",
+            "max_gross_notional",
+            "max_net_notional",
+            "max_symbol_notional",
+            "max_total_cost",
+            "max_stress_loss",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _positive(
+                    getattr(self, field_name),
+                    name=field_name,
+                    allow_zero=True,
+                ),
+            )
+        if (
+            not isinstance(self.max_iterations, int)
+            or isinstance(self.max_iterations, bool)
+            or self.max_iterations < 1
+        ):
+            raise ValueError("max_iterations must be a positive integer")
+        object.__setattr__(
+            self,
+            "min_scale_tolerance",
+            _positive(
+                self.min_scale_tolerance,
+                name="min_scale_tolerance",
+            ),
+        )
 
     @classmethod
     def create(

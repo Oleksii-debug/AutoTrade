@@ -248,6 +248,53 @@ class ReconciliationTests(unittest.TestCase):
         self.assertTrue(result.complete)
         self.assertEqual(dict(result.cash_differences), {})
 
+    def test_direct_working_order_cannot_bypass_positive_remaining_quantity(self):
+        with self.assertRaisesRegex(ValueError, "remaining_quantity must be positive"):
+            ProviderWorkingOrderEvidence(
+                provider_order_id="provider-order",
+                client_order_id="client-order",
+                instrument="ABC",
+                remaining_quantity=Decimal("0"),
+            )
+
+    def test_direct_fill_cannot_bypass_provider_evidence_invariants(self):
+        with self.assertRaisesRegex(ValueError, "quantity and price must be positive"):
+            ProviderFillEvidence(
+                provider_execution_id="execution-1",
+                client_order_id="client-1",
+                instrument="ABC",
+                quantity=Decimal("0"),
+                price=Decimal("100"),
+                fee_amount=Decimal("0"),
+                fee_currency="USD",
+                trade_time="2026-09-24T18:00:00Z",
+            )
+        with self.assertRaisesRegex(ValueError, "provider_execution_id is required"):
+            ProviderFillEvidence(
+                provider_execution_id=" ",
+                client_order_id="client-1",
+                instrument="ABC",
+                quantity=Decimal("1"),
+                price=Decimal("100"),
+                fee_amount=Decimal("0"),
+                fee_currency="USD",
+                trade_time="2026-09-24T18:00:00Z",
+            )
+
+    def test_direct_unknown_submission_cannot_bypass_identity_or_time_validation(self):
+        with self.assertRaisesRegex(ValueError, "attempt_id is required"):
+            UnknownSubmission(
+                attempt_id=" ",
+                client_order_id="client-1",
+                started_at="2026-09-24T18:00:00Z",
+            )
+        with self.assertRaisesRegex(ValueError, "must include timezone"):
+            UnknownSubmission(
+                attempt_id="attempt-1",
+                client_order_id="client-1",
+                started_at="2026-09-24T18:00:00",
+            )
+
     def test_unknown_send_resolves_to_observed_working_order_without_retry(self):
         unknown = UnknownSubmission.create(
             attempt_id="attempt-working",

@@ -724,13 +724,17 @@ class BackupRestoreTests(unittest.TestCase):
             root = Path(directory)
             state, artifacts = self._build_sources(root)
             backup = create_backup(state, artifacts, root / "backup")
-            object_files = [
-                path
-                for path in (backup / "artifacts" / "objects" / "sha256").rglob("*")
-                if path.is_file()
-            ]
-            self.assertEqual(len(object_files), 1)
-            object_files[0].unlink()
+            digest = sha256(b"immutable-evidence").hexdigest()
+            object_path = (
+                backup
+                / "artifacts"
+                / "objects"
+                / "sha256"
+                / digest[:2]
+                / digest
+            )
+            self.assertTrue(object_path.is_file())
+            object_path.unlink()
             with self.assertRaisesRegex(BackupIntegrityError, "missing"):
                 verify_backup(backup)
 

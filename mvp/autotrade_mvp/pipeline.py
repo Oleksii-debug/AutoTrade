@@ -119,7 +119,7 @@ def handle_journal_event(root: Path, symbol: str, evidence: dict) -> None:
         "schema_version": "1.0.0",
         "aggregate_type": "simulation_portfolio",
         "aggregate_id": symbol,
-        "aggregate_version": aggregate_version,
+        "aggregate_version": str(aggregate_version),
         "host_id": "local-mvp",
         "owner_epoch": "1",
         "environment": "SIMULATION",

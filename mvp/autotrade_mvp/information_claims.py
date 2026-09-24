@@ -306,7 +306,24 @@ class ClaimStore:
 
         duplicate_id = self._syndication.get(claim.syndication_key)
         if duplicate_id is not None:
-            return self._by_id[duplicate_id], False
+            existing_duplicate = self._by_id[duplicate_id]
+            existing_key = (
+                existing_duplicate.available_at,
+                existing_duplicate.published_at,
+                existing_duplicate.claim_id,
+            )
+            candidate_key = (claim.available_at, claim.published_at, claim.claim_id)
+            if candidate_key < existing_key:
+                # Syndication identity is semantic content identity, but causal replay
+                # must retain the earliest observed availability independent of ingest
+                # order. Replace only the representative; do not count a duplicate.
+                index = self._claims.index(existing_duplicate)
+                self._claims[index] = claim
+                del self._by_id[duplicate_id]
+                self._by_id[claim.claim_id] = claim
+                self._syndication[claim.syndication_key] = claim.claim_id
+                return claim, False
+            return existing_duplicate, False
 
         self._claims.append(claim)
         self._by_id[claim.claim_id] = claim

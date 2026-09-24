@@ -6,7 +6,7 @@ causality, profitability or statistical significance by itself.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Iterable
 
 
@@ -15,7 +15,7 @@ def _decimal(value: Decimal | int | str, field: str) -> Decimal:
         raise TypeError(f"{field} must use Decimal, string or integer input")
     try:
         number = value if isinstance(value, Decimal) else Decimal(value)
-    except Exception as error:
+    except (InvalidOperation, TypeError, ValueError) as error:
         raise ValueError(f"{field} must be a finite decimal") from error
     if not number.is_finite():
         raise ValueError(f"{field} must be finite")

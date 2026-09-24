@@ -238,16 +238,25 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
     intent_notional = intent.quantity * intent.price
     single_notional = max(mark_notional, intent_notional)
 
-    worst_stress_loss = Decimal("0")
+    stress_symbols = set(notionals)
+    stress_coverage_complete = bool(context.stress_scenarios) or not stress_symbols
+    missing_stress_symbols: set[str] = set()
     for scenario in context.stress_scenarios:
-        pnl = sum(
-            (
-                notional * scenario.get(symbol, Decimal("0"))
-                for symbol, notional in notionals.items()
-            ),
-            Decimal("0"),
-        )
-        worst_stress_loss = max(worst_stress_loss, -pnl)
+        missing_stress_symbols.update(stress_symbols - set(scenario))
+    if missing_stress_symbols:
+        stress_coverage_complete = False
+
+    worst_stress_loss = Decimal("0")
+    if stress_coverage_complete:
+        for scenario in context.stress_scenarios:
+            pnl = sum(
+                (
+                    notional * scenario[symbol]
+                    for symbol, notional in notionals.items()
+                ),
+                Decimal("0"),
+            )
+            worst_stress_loss = max(worst_stress_loss, -pnl)
 
     rules: list[RiskRuleResult] = []
 
@@ -334,9 +343,16 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         "margin headroom must meet policy floor",
     )
     add(
+        "stress_coverage",
+        stress_coverage_complete,
+        ",".join(sorted(missing_stress_symbols)) if missing_stress_symbols else len(context.stress_scenarios),
+        "complete non-empty stress evidence for every non-zero projected position",
+        "stress admission must fail closed when scenarios are missing or incomplete",
+    )
+    add(
         "stress_loss",
-        worst_stress_loss <= policy.max_stress_loss,
-        worst_stress_loss,
+        stress_coverage_complete and worst_stress_loss <= policy.max_stress_loss,
+        worst_stress_loss if stress_coverage_complete else "UNKNOWN",
         policy.max_stress_loss,
         "worst configured stress loss must stay within policy",
     )

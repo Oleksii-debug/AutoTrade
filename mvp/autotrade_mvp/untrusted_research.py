@@ -184,6 +184,37 @@ class ResearchModelResult:
             raise ResearchBoundaryError("model result cannot grant authority")
 
 
+_FORBIDDEN_PRIVILEGED_FIELDS = frozenset(
+    {
+        "credentials",
+        "credential",
+        "secret",
+        "token",
+        "authority_grant",
+        "tool_grant",
+    }
+)
+_MAX_PROPOSAL_DEPTH = 32
+
+
+def _scan_privileged_fields(value: object, *, depth: int = 0) -> frozenset[str]:
+    if depth > _MAX_PROPOSAL_DEPTH:
+        raise ResearchBoundaryError("model proposal exceeds maximum nesting depth")
+    found: set[str] = set()
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            if not isinstance(key, str):
+                raise ResearchBoundaryError("model proposal object keys must be strings")
+            normalized = key.strip().lower()
+            if normalized in _FORBIDDEN_PRIVILEGED_FIELDS:
+                found.add(normalized)
+            found.update(_scan_privileged_fields(nested, depth=depth + 1))
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            found.update(_scan_privileged_fields(nested, depth=depth + 1))
+    return frozenset(found)
+
+
 def validate_model_result(result: ResearchModelResult) -> ResearchModelResult:
     """Reject capability-seeking model output instead of interpreting it as policy."""
 
@@ -193,16 +224,7 @@ def validate_model_result(result: ResearchModelResult) -> ResearchModelResult:
         raise PermissionError(
             "model output cannot request or expand runtime capabilities"
         )
-    forbidden_top_level = {
-        "credentials",
-        "credential",
-        "secret",
-        "token",
-        "authority_grant",
-        "tool_grant",
-    }
-    normalized_keys = {str(key).strip().lower() for key in result.proposal}
-    overlap = forbidden_top_level & normalized_keys
+    overlap = _scan_privileged_fields(result.proposal)
     if overlap:
         raise PermissionError(
             "model output contains forbidden privileged fields: "

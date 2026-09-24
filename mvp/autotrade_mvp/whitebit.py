@@ -179,6 +179,126 @@ class WhiteBitPreparedRequest:
         object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
 
 
+@dataclass(frozen=True)
+class WhiteBitMarketRules:
+    market: str
+    market_type: str
+    is_collateral: bool
+    trades_enabled: bool
+    step_size: Decimal
+    tick_size: Decimal
+    min_amount: Decimal
+    min_total: Decimal
+    max_total: Decimal | None
+    delisted_at: int | None
+
+    @classmethod
+    def from_provider(cls, payload: Mapping[str, object]) -> "WhiteBitMarketRules":
+        if not isinstance(payload, Mapping):
+            raise TypeError("payload must be a mapping")
+        required = {
+            "name",
+            "type",
+            "isCollateral",
+            "tradesEnabled",
+            "stepSize",
+            "tickSize",
+            "minAmount",
+            "minTotal",
+            "maxTotal",
+            "delistedAt",
+        }
+        missing = sorted(required - set(payload))
+        if missing:
+            raise WhiteBitAdapterError(
+                "market metadata missing required fields: " + ", ".join(missing)
+            )
+        if type(payload["isCollateral"]) is not bool:
+            raise WhiteBitAdapterError("isCollateral must be boolean")
+        if type(payload["tradesEnabled"]) is not bool:
+            raise WhiteBitAdapterError("tradesEnabled must be boolean")
+        step_raw = _text(str(payload["stepSize"]), name="stepSize")
+        tick_raw = _text(str(payload["tickSize"]), name="tickSize")
+        step = _decimal(step_raw, name="stepSize", positive=True)
+        tick = _decimal(tick_raw, name="tickSize", positive=True)
+        min_amount = _decimal(payload["minAmount"], name="minAmount", positive=True)
+        min_total = _decimal(payload["minTotal"], name="minTotal", positive=True)
+        max_raw = _decimal(payload["maxTotal"], name="maxTotal")
+        max_total = None if max_raw == 0 else max_raw
+        if max_total is not None and max_total < min_total:
+            raise WhiteBitAdapterError("maxTotal cannot be below minTotal")
+        delisted = payload["delistedAt"]
+        if delisted is not None:
+            if not isinstance(delisted, int) or isinstance(delisted, bool) or delisted < 0:
+                raise WhiteBitAdapterError("delistedAt must be a non-negative integer or null")
+        market_type = _text(str(payload["type"]), name="type").upper()
+        if market_type not in {"SPOT", "FUTURES", "TRADFIFUTURES"}:
+            raise WhiteBitAdapterError("unsupported WhiteBIT market type")
+        return cls(
+            market=_text(str(payload["name"]), name="name").upper(),
+            market_type=market_type,
+            is_collateral=payload["isCollateral"],
+            trades_enabled=payload["tradesEnabled"],
+            step_size=step,
+            tick_size=tick,
+            min_amount=min_amount,
+            min_total=min_total,
+            max_total=max_total,
+            delisted_at=delisted,
+        )
+
+
+def _require_multiple(value: Decimal, step: Decimal, *, field: str) -> None:
+    if value % step != 0:
+        raise WhiteBitAdapterError(
+            f"{field} must be an exact multiple of provider {field} step"
+        )
+
+
+def validate_intent_market_rules(
+    intent: WhiteBitOrderIntent,
+    rules: WhiteBitMarketRules,
+    *,
+    at: datetime,
+) -> None:
+    if not isinstance(intent, WhiteBitOrderIntent):
+        raise TypeError("intent must be WhiteBitOrderIntent")
+    if not isinstance(rules, WhiteBitMarketRules):
+        raise TypeError("rules must be WhiteBitMarketRules")
+    point = _instant(at, name="at")
+    if rules.market != intent.market:
+        raise WhiteBitAdapterError("market metadata does not match intent market")
+    if not rules.trades_enabled:
+        raise WhiteBitAdapterError("provider market is not trade-enabled")
+    if intent.product_family == "SPOT" and rules.market_type != "SPOT":
+        raise WhiteBitAdapterError("spot intent requires spot market metadata")
+    if intent.product_family == "FUTURES" and rules.market_type != "FUTURES":
+        raise WhiteBitAdapterError("futures intent requires futures market metadata")
+    if intent.product_family == "COLLATERAL" and not rules.is_collateral:
+        raise WhiteBitAdapterError("collateral intent requires collateral-enabled market")
+    if (
+        rules.delisted_at is not None
+        and int(point.timestamp()) >= rules.delisted_at
+    ):
+        raise WhiteBitAdapterError("market delisting time has passed")
+    if intent.amount < rules.min_amount:
+        raise WhiteBitAdapterError("amount is below provider minAmount")
+    _require_multiple(intent.amount, rules.step_size, field="amount")
+    if intent.price is not None:
+        _require_multiple(intent.price, rules.tick_size, field="price")
+        total = intent.amount * intent.price
+        if total < rules.min_total:
+            raise WhiteBitAdapterError("order total is below provider minTotal")
+        if rules.max_total is not None and total > rules.max_total:
+            raise WhiteBitAdapterError("order total exceeds provider maxTotal")
+    if intent.activation_price is not None:
+        _require_multiple(
+            intent.activation_price,
+            rules.tick_size,
+            field="activation_price",
+        )
+
+
 _SPOT_ENDPOINTS = {
     "MARKET": "/api/v4/order/market",
     "LIMIT": "/api/v4/order/new",
@@ -198,6 +318,7 @@ def prepare_order_request(
     *,
     client_order_id: str,
     capability: CapabilitySnapshot,
+    market_rules: WhiteBitMarketRules,
     at: datetime,
 ) -> WhiteBitPreparedRequest:
     """Translate an admitted intent without sending it.
@@ -225,7 +346,24 @@ def prepare_order_request(
     ):
         raise WhiteBitAdapterError("exact capability evidence does not admit this order")
 
+    validate_intent_market_rules(intent, market_rules, at=point)
+    if (
+        intent.product_family == "SPOT"
+        and intent.order_type == "STOP_MARKET"
+        and intent.side == "BUY"
+    ):
+        raise WhiteBitAdapterError(
+            "spot STOP_MARKET BUY uses quote-currency amount and is not "
+            "representable by this base-quantity intent"
+        )
     endpoints = _SPOT_ENDPOINTS if intent.product_family == "SPOT" else _COLLATERAL_ENDPOINTS
+    endpoint = endpoints[intent.order_type]
+    if (
+        intent.product_family == "SPOT"
+        and intent.order_type == "MARKET"
+        and intent.side == "BUY"
+    ):
+        endpoint = "/api/v4/order/stock_market"
     body: dict[str, object] = {
         "market": intent.market,
         "side": intent.side.lower(),
@@ -246,7 +384,7 @@ def prepare_order_request(
             body["positionSide"] = intent.position_side
 
     return WhiteBitPreparedRequest(
-        endpoint=endpoints[intent.order_type],
+        endpoint=endpoint,
         body=body,
         capability_snapshot_id=capability.snapshot_id,
         documentation_refs=tuple(WHITEBIT_OFFICIAL_DOCS.values()),

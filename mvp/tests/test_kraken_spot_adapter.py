@@ -8,7 +8,9 @@ from mvp.autotrade_mvp.kraken_spot import (
     KrakenSpotAbsenceEvidence,
     KrakenSpotAdapterError,
     KrakenSpotOrderIntent,
+    coverage_evidence,
     derivatives_supported_by_this_module,
+    parse_trade_history,
     parse_spot_submission_response,
     prepare_spot_order_request,
     validate_spot_client_order_id,
@@ -167,6 +169,125 @@ class KrakenSpotAdapterTests(unittest.TestCase):
 
     def test_derivatives_are_not_silently_claimed_by_spot_module(self):
         self.assertFalse(derivatives_supported_by_this_module())
+
+
+    def test_trade_history_uses_trade_id_as_unique_fill_identity(self):
+        fills = parse_trade_history(
+            {
+                "error": [],
+                "result": {
+                    "count": 1,
+                    "trades": {
+                        "T-EXEC-1": {
+                            "ordertxid": "OABC-D123-E456",
+                            "pair": "XXBTZUSD",
+                            "time": "1790280001.123456",
+                            "price": "60000.25",
+                            "vol": "0.0100",
+                            "fee": "0.20",
+                        }
+                    },
+                },
+            },
+            instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
+            client_ids_by_provider_order={"OABC-D123-E456": "at-order-1"},
+            fee_currency_by_pair={"XXBTZUSD": "USD"},
+        )
+        self.assertEqual(len(fills), 1)
+        fill = fills[0]
+        self.assertEqual(fill.provider_execution_id, "T-EXEC-1")
+        self.assertEqual(fill.client_order_id, "at-order-1")
+        self.assertEqual(fill.instrument, "XBTUSD:v1")
+        self.assertEqual(fill.quantity, Decimal("0.0100"))
+        self.assertEqual(fill.price, Decimal("60000.25"))
+        self.assertEqual(fill.fee_amount, Decimal("0.20"))
+        self.assertEqual(fill.fee_currency, "USD")
+        self.assertEqual(fill.trade_time, "2026-09-24T20:00:01.123456Z")
+
+    def test_trade_history_refuses_to_guess_instrument_or_fee_currency(self):
+        response = {
+            "error": [],
+            "result": {
+                "trades": {
+                    "T-EXEC-1": {
+                        "ordertxid": "OABC-D123-E456",
+                        "pair": "XXBTZUSD",
+                        "time": "1790280001",
+                        "price": "60000",
+                        "vol": "0.01",
+                        "fee": "0.2",
+                    }
+                }
+            },
+        }
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "unmapped Kraken pair"):
+            parse_trade_history(
+                response,
+                instrument_versions={},
+                client_ids_by_provider_order={},
+                fee_currency_by_pair={"XXBTZUSD": "USD"},
+            )
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "fee currency"):
+            parse_trade_history(
+                response,
+                instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
+                client_ids_by_provider_order={},
+                fee_currency_by_pair={},
+            )
+
+    def test_trade_timestamp_rejects_binary_float_and_sub_microsecond_precision(self):
+        base = {
+            "error": [],
+            "result": {
+                "trades": {
+                    "T-EXEC-1": {
+                        "ordertxid": "OABC-D123-E456",
+                        "pair": "XXBTZUSD",
+                        "time": 1790280001.25,
+                        "price": "60000",
+                        "vol": "0.01",
+                        "fee": "0.2",
+                    }
+                }
+            },
+        }
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "exact decimal"):
+            parse_trade_history(
+                base,
+                instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
+                client_ids_by_provider_order={},
+                fee_currency_by_pair={"XXBTZUSD": "USD"},
+            )
+        base["result"]["trades"]["T-EXEC-1"]["time"] = "1790280001.1234567"
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "microsecond"):
+            parse_trade_history(
+                base,
+                instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
+                client_ids_by_provider_order={},
+                fee_currency_by_pair={"XXBTZUSD": "USD"},
+            )
+
+    def test_coverage_defaults_to_non_authoritative_absence(self):
+        coverage = coverage_evidence(
+            surface="executions",
+            coverage_start="2026-09-24T19:00:00Z",
+            coverage_end="2026-09-24T21:00:00Z",
+            pagination_complete=True,
+            consistency_horizon_satisfied=True,
+        )
+        self.assertEqual(coverage.surface, "EXECUTIONS")
+        self.assertFalse(coverage.provider_semantics_exclude_execution)
+        self.assertFalse(coverage.proves_absence_for(NOW))
+        qualified = coverage_evidence(
+            surface="executions",
+            coverage_start="2026-09-24T19:00:00Z",
+            coverage_end="2026-09-24T21:00:00Z",
+            pagination_complete=True,
+            consistency_horizon_satisfied=True,
+            qualified_exclusion_semantics=True,
+        )
+        self.assertTrue(qualified.proves_absence_for(NOW))
+
 
 
 if __name__ == "__main__":

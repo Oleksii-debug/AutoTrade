@@ -84,7 +84,11 @@ class CorporateSettlementTests(unittest.TestCase):
         self.assertEqual(settled.settled_cash, Decimal("1015"))
 
     def test_short_dividend_payable_can_settle_as_negative_cash(self):
-        short_state = state(quantity="-10", total_basis="1000")
+        short_state = state(
+            quantity="-10",
+            total_basis="1000",
+            borrowed_quantity="10",
+        )
         book = CorporateActionBook(short_state)
         event = CorporateEvent.create(
             event_id="short-div-1",
@@ -140,6 +144,28 @@ class CorporateSettlementTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             book.apply(event)
         self.assertEqual(book.state.quantity, Decimal("10"))
+
+    def test_cash_equity_short_must_match_borrow_and_cannot_use_long_purchase_to_cover(self):
+        for values in (
+            {"quantity": "-2", "borrowed_quantity": "0"},
+            {"quantity": "-2", "borrowed_quantity": "1"},
+            {"quantity": "2", "borrowed_quantity": "2"},
+        ):
+            with self.subTest(values=values), self.assertRaisesRegex(
+                ValueError,
+                "borrowed_quantity",
+            ):
+                state(**values)
+
+        short = establish_short(
+            state(quantity="0", total_basis="0"),
+            quantity="2",
+            sale_price="100",
+        )
+        with self.assertRaisesRegex(ValueError, "cannot implicitly cover"):
+            record_unsettled_purchase(short, quantity="1", price="90")
+        self.assertEqual(short.quantity, Decimal("-2"))
+        self.assertEqual(short.borrowed_quantity, Decimal("2"))
 
     def test_unsettled_purchase_cannot_spend_unfunded_cash(self):
         with self.assertRaises(ValueError):

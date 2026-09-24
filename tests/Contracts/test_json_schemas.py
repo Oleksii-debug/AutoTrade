@@ -54,7 +54,13 @@ class ContractSchemaTests(unittest.TestCase):
 
     def test_language_anchor_and_openapi_version_match_manifest(self):
         version = self.contract_manifest["contract_version"]
-        csharp_path = ROOT / self.contract_manifest["language_anchors"]["csharp"]
+        anchors = self.contract_manifest["language_anchors"]
+        self.assertEqual(set(anchors), {"csharp", "python", "typescript"})
+        for language, relative in anchors.items():
+            with self.subTest(language=language):
+                self.assertTrue((ROOT / relative).is_file())
+
+        csharp_path = ROOT / anchors["csharp"]
         csharp = csharp_path.read_text(encoding="utf-8")
         match = re.search(r'\bVersion\s*=\s*"([^"]+)"', csharp)
         self.assertIsNotNone(match)
@@ -88,8 +94,18 @@ class ContractSchemaTests(unittest.TestCase):
         entries = self.fixture_manifest["fixtures"]
         listed = [entry["path"] for entry in entries]
         self.assertEqual(len(listed), len(set(listed)))
-        observed = {p.name for p in FIXTURES.glob("*.json") if p.name != "manifest.json"}
+        corpus_paths = {
+            entry["path"]
+            for entry in self.fixture_manifest.get("conformance_corpora", [])
+        }
+        observed = {
+            p.name
+            for p in FIXTURES.glob("*.json")
+            if p.name != "manifest.json" and p.name not in corpus_paths
+        }
         self.assertEqual(observed, set(listed))
+        for corpus_path in corpus_paths:
+            self.assertTrue((FIXTURES / corpus_path).is_file())
         self.assertEqual(self.fixture_manifest["corpus_version"], self.contract_manifest["contract_version"])
 
         for entry in entries:

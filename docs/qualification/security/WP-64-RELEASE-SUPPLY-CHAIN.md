@@ -25,3 +25,7 @@ A supply-chain PASS is qualification evidence only. The result has `release_auth
 `python -m pytest -q tests/SupplyChain/test_supply_chain_qualification.py`
 
 Result before publication: 9 passed. Exact-head CI on the GitHub branch remains required before integration.
+
+## Immutable evidence requirement
+
+Internal agreement between declared hashes is not proof that an SBOM, provenance statement, dependency lock or rights record exists. A supply-chain `PASS` therefore requires an independent immutable-evidence verifier for the complete release bundle. If that verifier is absent, unavailable or rejects the bundle, qualification is `INCONCLUSIVE` (or `FAIL` when another hard check fails). This verifier does not grant release authority.

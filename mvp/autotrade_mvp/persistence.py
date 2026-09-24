@@ -52,7 +52,7 @@ class JournalStore:
     publication intent; a separate qualified dispatcher must perform delivery.
     """
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -138,6 +138,34 @@ class JournalStore:
                     )
                 """,
             )
+        if version == 3:
+            return (
+                """
+                CREATE TABLE command_dedupe_v3 (
+                    command_id TEXT PRIMARY KEY,
+                    actor TEXT NOT NULL,
+                    environment TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    state_version INTEGER NOT NULL CHECK (state_version >= 0),
+                    created_at TEXT NOT NULL,
+                    UNIQUE (actor, environment, idempotency_key)
+                )
+                """,
+                """
+                INSERT INTO command_dedupe_v3(
+                    command_id, actor, environment, idempotency_key,
+                    request_hash, result_json, state_version, created_at
+                )
+                SELECT
+                    command_id, '__LEGACY_UNSCOPED__', '__LEGACY_UNSCOPED__',
+                    idempotency_key, request_hash, result_json, state_version, created_at
+                FROM command_dedupe
+                """,
+                "DROP TABLE command_dedupe",
+                "ALTER TABLE command_dedupe_v3 RENAME TO command_dedupe",
+            )
         raise ValueError(f"Unsupported journal migration version: {version}")
 
     @classmethod
@@ -153,8 +181,8 @@ class JournalStore:
                 "created_at", "delivered_at",
             }),
             "command_dedupe": frozenset({
-                "command_id", "idempotency_key", "request_hash", "result_json",
-                "state_version", "created_at",
+                "command_id", "actor", "environment", "idempotency_key",
+                "request_hash", "result_json", "state_version", "created_at",
             }),
             "projection_checkpoints": frozenset({
                 "projection_name", "aggregate_type", "aggregate_id",
@@ -195,7 +223,7 @@ class JournalStore:
                 ("aggregate_type", "aggregate_id", "aggregate_version"),
             },
             "outbox": {("event_id",)},
-            "command_dedupe": {("idempotency_key",)},
+            "command_dedupe": {("actor", "environment", "idempotency_key")},
         }
         for table_name, expected_pk in expected_primary_keys.items():
             pk_columns = tuple(
@@ -668,17 +696,60 @@ class JournalStore:
             connection.commit()
         return True
 
+    @staticmethod
+    def _command_environment(value: object) -> str:
+        normalized = value.strip().upper() if isinstance(value, str) else ""
+        if normalized not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+            raise ValueError(
+                "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
+            )
+        return normalized
+
+    def _command_scope(
+        self,
+        *,
+        actor: str,
+        environment: str,
+        idempotency_key: str,
+    ) -> tuple[str, str, str]:
+        return (
+            self._require_text(actor, "actor"),
+            self._command_environment(environment),
+            self._require_text(idempotency_key, "idempotency_key"),
+        )
+
+    @staticmethod
+    def _reject_legacy_unscoped_key(connection, idempotency_key: str) -> None:
+        legacy = connection.execute(
+            "SELECT 1 FROM command_dedupe "
+            "WHERE actor = '__LEGACY_UNSCOPED__' "
+            "AND environment = '__LEGACY_UNSCOPED__' "
+            "AND idempotency_key = ?",
+            (idempotency_key,),
+        ).fetchone()
+        if legacy is not None:
+            raise ValueError(
+                "idempotency_key exists in legacy unscoped command history; "
+                "use a new key"
+            )
+
     def record_command(
         self,
         *,
         command_id: str,
+        actor: str,
+        environment: str,
         idempotency_key: str,
         request: Any,
         result: Any,
         state_version: int,
     ) -> tuple[Any, bool]:
         self._require_text(command_id, "command_id")
-        self._require_text(idempotency_key, "idempotency_key")
+        actor, environment, idempotency_key = self._command_scope(
+            actor=actor,
+            environment=environment,
+            idempotency_key=idempotency_key,
+        )
         if (
             not isinstance(state_version, int)
             or isinstance(state_version, bool)
@@ -690,8 +761,11 @@ class JournalStore:
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self._reject_legacy_unscoped_key(connection, idempotency_key)
             existing = connection.execute(
-                "SELECT * FROM command_dedupe WHERE idempotency_key = ?", (idempotency_key,)
+                "SELECT * FROM command_dedupe "
+                "WHERE actor = ? AND environment = ? AND idempotency_key = ?",
+                (actor, environment, idempotency_key),
             ).fetchone()
             if existing is not None:
                 if existing["request_hash"] != request_hash:
@@ -707,10 +781,14 @@ class JournalStore:
             connection.execute(
                 """
                 INSERT INTO command_dedupe(
-                    command_id, idempotency_key, request_hash, result_json, state_version, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    command_id, actor, environment, idempotency_key,
+                    request_hash, result_json, state_version, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (command_id, idempotency_key, request_hash, result_json, state_version, self._now()),
+                (
+                    command_id, actor, environment, idempotency_key,
+                    request_hash, result_json, state_version, self._now(),
+                ),
             )
             connection.commit()
         return result, True
@@ -719,6 +797,8 @@ class JournalStore:
         self,
         *,
         command_id: str,
+        actor: str,
+        environment: str,
         idempotency_key: str,
         request: Any,
         result: Any,
@@ -728,7 +808,11 @@ class JournalStore:
         """Atomically commit command dedupe, ordered events and outbox rows."""
 
         self._require_text(command_id, "command_id")
-        self._require_text(idempotency_key, "idempotency_key")
+        actor, environment, idempotency_key = self._command_scope(
+            actor=actor,
+            environment=environment,
+            idempotency_key=idempotency_key,
+        )
         if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
         if not events:
@@ -786,9 +870,11 @@ class JournalStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                self._reject_legacy_unscoped_key(connection, idempotency_key)
                 existing = connection.execute(
-                    "SELECT * FROM command_dedupe WHERE idempotency_key = ?",
-                    (idempotency_key,),
+                    "SELECT * FROM command_dedupe "
+                    "WHERE actor = ? AND environment = ? AND idempotency_key = ?",
+                    (actor, environment, idempotency_key),
                 ).fetchone()
                 if existing is not None:
                     if existing["request_hash"] != request_hash:
@@ -830,12 +916,14 @@ class JournalStore:
                 connection.execute(
                     """
                     INSERT INTO command_dedupe(
-                        command_id, idempotency_key, request_hash, result_json,
-                        state_version, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        command_id, actor, environment, idempotency_key,
+                        request_hash, result_json, state_version, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         command_id,
+                        actor,
+                        environment,
                         idempotency_key,
                         request_hash,
                         result_json,

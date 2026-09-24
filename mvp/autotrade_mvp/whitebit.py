@@ -546,3 +546,183 @@ def parse_execution_history(
             continue
         by_id[deal.provider_execution_id] = deal
     return tuple(by_id[key] for key in sorted(by_id))
+
+
+@dataclass(frozen=True)
+class WhiteBitPageEvidence:
+    offset: int
+    limit: int
+    record_count: int
+
+    def __post_init__(self) -> None:
+        for name in ("offset", "limit", "record_count"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise WhiteBitAdapterError(f"{name} must be an integer")
+        if self.offset < 0:
+            raise WhiteBitAdapterError("offset cannot be negative")
+        if self.limit < 1:
+            raise WhiteBitAdapterError("limit must be positive")
+        if self.record_count < 0 or self.record_count > self.limit:
+            raise WhiteBitAdapterError(
+                "record_count must be between zero and the page limit"
+            )
+
+    @property
+    def proves_last_page(self) -> bool:
+        return self.record_count < self.limit
+
+
+class WhiteBitPaginationCoverage:
+    """Contiguous offset pagination proof for one provider surface."""
+
+    def __init__(self, *, maximum_limit: int, initial_offset: int = 0) -> None:
+        if (
+            not isinstance(maximum_limit, int)
+            or isinstance(maximum_limit, bool)
+            or maximum_limit < 1
+        ):
+            raise WhiteBitAdapterError("maximum_limit must be positive")
+        if (
+            not isinstance(initial_offset, int)
+            or isinstance(initial_offset, bool)
+            or initial_offset < 0
+        ):
+            raise WhiteBitAdapterError("initial_offset must be non-negative")
+        self.maximum_limit = maximum_limit
+        self.initial_offset = initial_offset
+        self._pages: list[WhiteBitPageEvidence] = []
+
+    def add_page(self, page: WhiteBitPageEvidence) -> None:
+        if not isinstance(page, WhiteBitPageEvidence):
+            raise TypeError("page must be WhiteBitPageEvidence")
+        if page.limit > self.maximum_limit:
+            raise WhiteBitAdapterError(
+                f"page limit cannot exceed {self.maximum_limit}"
+            )
+        if self.complete:
+            raise WhiteBitAdapterError("pagination coverage is already complete")
+        expected = (
+            self.initial_offset
+            if not self._pages
+            else self._pages[-1].offset + self._pages[-1].limit
+        )
+        if page.offset != expected:
+            raise WhiteBitAdapterError(
+                f"pagination gap: expected offset {expected}"
+            )
+        self._pages.append(page)
+
+    @property
+    def complete(self) -> bool:
+        return bool(self._pages and self._pages[-1].proves_last_page)
+
+    @property
+    def next_offset(self) -> int:
+        if not self._pages:
+            return self.initial_offset
+        return self._pages[-1].offset + self._pages[-1].limit
+
+    @property
+    def pages(self) -> tuple[WhiteBitPageEvidence, ...]:
+        return tuple(self._pages)
+
+
+def order_history_coverage() -> WhiteBitPaginationCoverage:
+    return WhiteBitPaginationCoverage(maximum_limit=500)
+
+
+def execution_history_coverage() -> WhiteBitPaginationCoverage:
+    return WhiteBitPaginationCoverage(maximum_limit=500)
+
+
+def open_order_coverage() -> WhiteBitPaginationCoverage:
+    return WhiteBitPaginationCoverage(maximum_limit=100)
+
+
+def _history_window(*, start_unix: int, end_unix: int) -> tuple[int, int]:
+    for value, name in ((start_unix, "start_unix"), (end_unix, "end_unix")):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise WhiteBitAdapterError(f"{name} must be an integer")
+        if value < 0:
+            raise WhiteBitAdapterError(f"{name} cannot be negative")
+    if end_unix < start_unix:
+        raise WhiteBitAdapterError("end_unix must not precede start_unix")
+    if end_unix - start_unix > 31 * 24 * 60 * 60:
+        raise WhiteBitAdapterError(
+            "WhiteBIT history request window cannot exceed 31 days"
+        )
+    return start_unix, end_unix
+
+
+def paged_order_history_request(
+    *,
+    start_unix: int,
+    end_unix: int,
+    offset: int,
+    limit: int = 50,
+    market: str | None = None,
+) -> WhiteBitLookupRequest:
+    _history_window(start_unix=start_unix, end_unix=end_unix)
+    page = WhiteBitPageEvidence(offset=offset, limit=limit, record_count=0)
+    if page.limit > 500:
+        raise WhiteBitAdapterError("order-history limit cannot exceed 500")
+    body: dict[str, object] = {
+        "startDate": start_unix,
+        "endDate": end_unix,
+        "offset": offset,
+        "limit": limit,
+    }
+    if market is not None:
+        body["market"] = _text(market, name="market").upper()
+    return WhiteBitLookupRequest(
+        "ORDER_HISTORY",
+        "/api/v4/trade-account/order/history",
+        body,
+    )
+
+
+def paged_execution_history_request(
+    *,
+    start_unix: int,
+    end_unix: int,
+    offset: int,
+    limit: int = 50,
+    market: str | None = None,
+) -> WhiteBitLookupRequest:
+    _history_window(start_unix=start_unix, end_unix=end_unix)
+    page = WhiteBitPageEvidence(offset=offset, limit=limit, record_count=0)
+    if page.limit > 500:
+        raise WhiteBitAdapterError("execution-history limit cannot exceed 500")
+    body: dict[str, object] = {
+        "startDate": start_unix,
+        "endDate": end_unix,
+        "offset": offset,
+        "limit": limit,
+    }
+    if market is not None:
+        body["market"] = _text(market, name="market").upper()
+    return WhiteBitLookupRequest(
+        "EXECUTIONS",
+        "/api/v4/trade-account/executed-history",
+        body,
+    )
+
+
+def paged_open_orders_request(
+    *,
+    offset: int,
+    limit: int = 50,
+    market: str | None = None,
+) -> WhiteBitLookupRequest:
+    page = WhiteBitPageEvidence(offset=offset, limit=limit, record_count=0)
+    if page.limit > 100:
+        raise WhiteBitAdapterError("open-orders limit cannot exceed 100")
+    body: dict[str, object] = {"offset": offset, "limit": limit}
+    if market is not None:
+        body["market"] = _text(market, name="market").upper()
+    return WhiteBitLookupRequest(
+        "OPEN_ORDERS",
+        "/api/v4/orders",
+        body,
+    )

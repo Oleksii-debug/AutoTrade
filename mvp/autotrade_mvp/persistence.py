@@ -154,10 +154,14 @@ class JournalStore:
         aggregate_type = self._require_text(envelope.get("aggregate_type"), "aggregate_type")
         aggregate_id = self._require_text(envelope.get("aggregate_id"), "aggregate_id")
         try:
-            aggregate_version = int(envelope["aggregate_version"])
-        except (KeyError, TypeError, ValueError) as error:
+            aggregate_version = envelope["aggregate_version"]
+        except KeyError as error:
             raise ValueError("aggregate_version must be a positive integer") from error
-        if aggregate_version <= 0:
+        if (
+            not isinstance(aggregate_version, int)
+            or isinstance(aggregate_version, bool)
+            or aggregate_version <= 0
+        ):
             raise ValueError("aggregate_version must be a positive integer")
         payload = envelope.get("payload")
         expected_hash = payload_digest(payload)
@@ -313,7 +317,11 @@ class JournalStore:
     ) -> tuple[Any, bool]:
         self._require_text(command_id, "command_id")
         self._require_text(idempotency_key, "idempotency_key")
-        if not isinstance(state_version, int) or state_version < 0:
+        if (
+            not isinstance(state_version, int)
+            or isinstance(state_version, bool)
+            or state_version < 0
+        ):
             raise ValueError("state_version must be a non-negative integer")
         request_hash = payload_digest(request)
         result_json = canonical_json(result)
@@ -380,10 +388,14 @@ class JournalStore:
             aggregate_type = self._require_text(envelope.get("aggregate_type"), "aggregate_type")
             aggregate_id = self._require_text(envelope.get("aggregate_id"), "aggregate_id")
             try:
-                aggregate_version = int(envelope["aggregate_version"])
-            except (KeyError, TypeError, ValueError) as error:
+                aggregate_version = envelope["aggregate_version"]
+            except KeyError as error:
                 raise ValueError("aggregate_version must be a positive integer") from error
-            if aggregate_version <= 0:
+            if (
+                not isinstance(aggregate_version, int)
+                or isinstance(aggregate_version, bool)
+                or aggregate_version <= 0
+            ):
                 raise ValueError("aggregate_version must be a positive integer")
             payload = envelope.get("payload")
             payload_json = canonical_json(payload)

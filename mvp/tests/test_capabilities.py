@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import unittest
 
@@ -208,7 +209,7 @@ class CapabilityFoundationTests(unittest.TestCase):
                 at=NOW + timedelta(minutes=5),
             )
 
-    def test_snapshot_id_is_immutable_and_duplicate_source_is_rejected(self):
+    def test_snapshot_id_is_immutable(self):
         snapshot = derive_capability_snapshot(
             snapshot_id=SNAPSHOT_1,
             claims=complete_claims(),
@@ -218,12 +219,51 @@ class CapabilityFoundationTests(unittest.TestCase):
         registry.add(snapshot)
         registry.add(snapshot)
 
-        with self.assertRaisesRegex(CapabilityError, "duplicate capability source"):
-            derive_capability_snapshot(
-                snapshot_id=SNAPSHOT_2,
-                claims=(claim("API"), claim("API")),
-                observed_at=NOW,
+        with self.assertRaisesRegex(CapabilityError, "snapshot_id"):
+            registry.add(replace(snapshot, status="UNKNOWN"))
+
+    def test_expired_historical_claim_does_not_poison_newer_live_claim(self):
+        claims = list(complete_claims())
+        claims.append(
+            claim(
+                "ACCOUNT",
+                observed_at=NOW - timedelta(minutes=20),
+                expires_at=NOW - timedelta(minutes=10),
             )
+        )
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=claims,
+            observed_at=NOW,
+        )
+        self.assertEqual(snapshot.status, "VERIFIED")
+        self.assertEqual(snapshot.sources, frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}))
+
+    def test_overlapping_live_claims_from_same_source_are_intersected(self):
+        claims = list(complete_claims())
+        claims.append(claim("ACCOUNT", order_types=("LIMIT",)))
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=claims,
+            observed_at=NOW,
+        )
+        self.assertEqual(snapshot.status, "VERIFIED")
+        self.assertEqual(snapshot.supported_order_types, frozenset({"LIMIT"}))
+
+    def test_conflicting_live_refresh_fails_closed(self):
+        claims = [
+            claim("DOCUMENTED", order_types=("LIMIT", "MARKET")),
+            claim("API", order_types=("LIMIT", "MARKET")),
+            claim("ACCOUNT", order_types=("LIMIT",)),
+            claim("ACCOUNT", order_types=("MARKET",)),
+            claim("INSTRUMENT", order_types=("LIMIT", "MARKET")),
+        ]
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=claims,
+            observed_at=NOW,
+        )
+        self.assertEqual(snapshot.status, "CONFLICTED")
 
     def test_future_dated_evidence_is_conflicted_not_expired(self):
         claims = list(complete_claims())

@@ -15,7 +15,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Mapping
 from uuid import UUID, NAMESPACE_URL, uuid5
 
-from .persistence import JournalStore, payload_digest
+from .persistence import JournalStore, canonical_json, payload_digest
 from .reservations import (
     ReservationBook,
     ReservationConflict,
@@ -117,35 +117,58 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _journal_identity(account_id: str, kind: str, external_id: str) -> str:
-    """Scope generic JournalStore identities to one reservation account."""
+def _environment(value: str) -> str:
+    normalized = value.strip().upper() if isinstance(value, str) else ""
+    if normalized not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+        raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
+    return normalized
 
+
+def _journal_identity(
+    environment: str,
+    account_id: str,
+    kind: str,
+    external_id: str,
+) -> str:
+    """Scope generic JournalStore identities to one account/environment tuple."""
+
+    environment = _environment(environment)
     account = _text(account_id, name="account_id")
     identity_kind = _text(kind, name="identity_kind")
     external = _text(external_id, name="external_id")
-    return str(
-        uuid5(
-            NAMESPACE_URL,
-            "https://reservations.autotrade.local/"
-            f"{identity_kind}/{account!r}/{external!r}",
-        )
+    canonical = canonical_json(
+        [environment, account, identity_kind, external]
     )
+    return str(uuid5(NAMESPACE_URL, "reservation-identity:" + canonical))
 
 
 class DurableReservationBook:
     """ReservationBook projection with crash/restart and dedupe semantics."""
 
-    def __init__(self, store: JournalStore, *, account_id: str):
+    def __init__(
+        self,
+        store: JournalStore,
+        *,
+        environment: str,
+        account_id: str,
+    ):
         if not isinstance(store, JournalStore):
             raise TypeError("store must be JournalStore")
         self.store = store
+        self.environment = _environment(environment)
         self.account_id = _text(account_id, name="account_id")
+        self.scope_id = _journal_identity(
+            self.environment,
+            self.account_id,
+            "scope",
+            "reservation-book",
+        )
         self._book = ReservationBook()
         self._idempotency: dict[str, tuple[str, dict[str, object]]] = {}
         self._reload()
 
     def _events(self) -> list[dict[str, object]]:
-        return self.store.load_events(_AGGREGATE_TYPE, self.account_id)
+        return self.store.load_events(_AGGREGATE_TYPE, self.scope_id)
 
     def _replay(
         self,
@@ -307,24 +330,27 @@ class DurableReservationBook:
             if not events
             else int(events[-1]["aggregate_version"]) + 1
         )
-        event_id = str(
-            uuid5(
-                NAMESPACE_URL,
-                "https://reservations.autotrade.local/event/"
-                f"{self.account_id!r}/{cid!r}/{next_version}",
-            )
+        event_id = _journal_identity(
+            self.environment,
+            self.account_id,
+            "event",
+            canonical_json([cid, str(next_version)]),
         )
         journal_command_id = _journal_identity(
+            self.environment,
             self.account_id,
             "command",
             cid,
         )
         journal_idempotency_key = _journal_identity(
+            self.environment,
             self.account_id,
             "idempotency",
             idem,
         )
         payload = {
+            "environment": self.environment,
+            "account_id": self.account_id,
             "operation": operation,
             "request": request,
             "idempotency_key": idem,
@@ -335,7 +361,7 @@ class DurableReservationBook:
             "event_id": event_id,
             "event_type": _EVENT_TYPE,
             "aggregate_type": _AGGREGATE_TYPE,
-            "aggregate_id": self.account_id,
+            "aggregate_id": self.scope_id,
             "aggregate_version": next_version,
             "payload": payload,
             "payload_hash": payload_digest(payload),
@@ -349,6 +375,7 @@ class DurableReservationBook:
                 command_id=journal_command_id,
                 idempotency_key=journal_idempotency_key,
                 request={
+                    "environment": self.environment,
                     "account_id": self.account_id,
                     "operation": operation,
                     "request": request,

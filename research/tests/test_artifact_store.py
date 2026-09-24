@@ -199,5 +199,53 @@ class ArtifactStoreTests(unittest.TestCase):
                 self.assertEqual(target.read_bytes(), b"durable")
 
 
+    def test_recovery_reports_malformed_or_misplaced_objects_without_crashing(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+
+            malformed_name = "g" * 64
+            malformed = store.objects / "gg" / malformed_name
+            malformed.parent.mkdir(parents=True, exist_ok=True)
+            malformed.write_bytes(b"malformed")
+
+            misplaced_data = b"misplaced"
+            misplaced_digest = hashlib.sha256(misplaced_data).hexdigest()
+            wrong_prefix = "00" if misplaced_digest[:2] != "00" else "ff"
+            misplaced = store.objects / wrong_prefix / misplaced_digest
+            misplaced.parent.mkdir(parents=True, exist_ok=True)
+            misplaced.write_bytes(misplaced_data)
+
+            orphan_data = b"valid-orphan"
+            orphan_digest = hashlib.sha256(orphan_data).hexdigest()
+            orphan = store._object_path(orphan_digest)
+            orphan.parent.mkdir(parents=True, exist_ok=True)
+            orphan.write_bytes(orphan_data)
+
+            before = store.audit()
+            self.assertIn(orphan_digest, before.unreferenced_objects)
+            self.assertIn(
+                "object:" + malformed.relative_to(store.root).as_posix(),
+                before.corrupt_objects,
+            )
+            self.assertIn(
+                "object:" + misplaced.relative_to(store.root).as_posix(),
+                before.corrupt_objects,
+            )
+
+            after = store.recover_orphans()
+            self.assertFalse(orphan.exists())
+            self.assertTrue(malformed.exists())
+            self.assertTrue(misplaced.exists())
+            self.assertEqual(after.unreferenced_objects, ())
+            self.assertIn(
+                "object:" + malformed.relative_to(store.root).as_posix(),
+                after.corrupt_objects,
+            )
+            self.assertIn(
+                "object:" + misplaced.relative_to(store.root).as_posix(),
+                after.corrupt_objects,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

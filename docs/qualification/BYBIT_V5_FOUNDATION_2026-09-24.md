@@ -79,3 +79,10 @@ pass all `provider_core.REQUIRED_QUALIFICATION_CASES` with recorded evidence,
 including timeout-after-send, reconnect/gap recovery, partial fills,
 cancel/fill races, terminal corrections, account-mode changes, manual activity,
 snapshot reconciliation and secret redaction.
+
+
+## Уточнення повноти комісій виконання
+
+REST `/v5/execution/list` не вважається повним економічним доказом лише через наявність `execFee`. Документований linear-приклад Bybit містить ненульовий `execFee` з порожнім `feeCurrency`, тому адаптер не виводить валюту з символу, котирувальної чи розрахункової валюти. За порожнього `feeCurrency` потрібне окреме кваліфіковане зіставлення для точної версії інструмента; без нього перетворення в канонічний `ProviderFillEvidence` завершується fail-closed.
+
+Поле `extraFees` також входить до provider execution economics. Поки для його юрисдикційних складових немає канонічного представлення й кваліфікованої одиниці, будь-яке непорожнє значення блокує створення повного fill evidence. Порожні форми не додають економічного факту. Це навмисно не є твердженням про повну WP-22 qualification.

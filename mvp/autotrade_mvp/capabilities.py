@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timezone
 import hashlib
 import re
@@ -307,10 +307,10 @@ class CapabilitySnapshot:
     evidence: tuple[Mapping[str, object], ...]
     status: str
     sources: frozenset[str]
-    _authority_marker: object = field(default=None, repr=False, compare=False)
+    _authority_marker: InitVar[object] = None
 
-    def __post_init__(self) -> None:
-        if self._authority_marker is not _CAPABILITY_SNAPSHOT_AUTHORITY:
+    def __post_init__(self, _authority_marker: object) -> None:
+        if _authority_marker is not _CAPABILITY_SNAPSHOT_AUTHORITY:
             raise CapabilityError(
                 "CapabilitySnapshot can only be created by derive_capability_snapshot"
             )

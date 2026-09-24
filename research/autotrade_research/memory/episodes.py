@@ -138,14 +138,18 @@ class ExperienceMemory:
         if not isinstance(payload["evidence_refs"], list) or not payload["evidence_refs"]:
             raise ValueError("episode requires evidence references")
         identifier = _identifier(episode_id)
+        normalized_task = _text(task, name="task")
+        normalized_regime = _text(regime, name="regime")
+        normalized_family = _text(instrument_family, name="instrument_family")
+        normalized_permission = _text(permission_class, name="permission_class")
         digest = _hash(
             {
                 "decision_time": decision.isoformat(),
                 "information_cutoff": cutoff.isoformat(),
-                "task": task,
-                "regime": regime,
-                "instrument_family": instrument_family,
-                "permission_class": permission_class,
+                "task": normalized_task,
+                "regime": normalized_regime,
+                "instrument_family": normalized_family,
+                "permission_class": normalized_permission,
                 "payload": payload,
             }
         )
@@ -172,10 +176,10 @@ class ExperienceMemory:
                     digest,
                     decision.isoformat(),
                     cutoff.isoformat(),
-                    _text(task, name="task"),
-                    _text(regime, name="regime"),
-                    _text(instrument_family, name="instrument_family"),
-                    _text(permission_class, name="permission_class"),
+                    normalized_task,
+                    normalized_regime,
+                    normalized_family,
+                    normalized_permission,
                     canonical,
                     datetime.now(timezone.utc).isoformat(),
                 ),

@@ -13,6 +13,7 @@ from mvp.autotrade_mvp.backup import (
     BackupCompatibilityError,
     BackupError,
     BackupIntegrityError,
+    complete_restore_reconciliation,
     create_backup,
     restore_backup,
     restore_requires_reconciliation,
@@ -20,6 +21,8 @@ from mvp.autotrade_mvp.backup import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.pipeline import run_vertical_slice
+from mvp.autotrade_mvp.reconciliation import reconcile_account
+from mvp.autotrade_mvp.recovery import HostState, RecoveryController
 
 
 def _artifact_store(root: Path) -> str:
@@ -44,6 +47,20 @@ def _artifact_store(root: Path) -> str:
         encoding="utf-8",
     )
     return digest
+
+
+def _reconciliation(*, complete: bool = True):
+    return reconcile_account(
+        local_cash={"USD": "1000"},
+        provider_cash={"USD": "1000"},
+        local_positions={},
+        provider_positions={},
+        local_execution_ids=[],
+        provider_fills=[],
+        coverage_start="2026-09-24T17:00:00Z",
+        coverage_end="2026-09-24T19:00:00Z",
+        pagination_complete=complete,
+    )
 
 
 class BackupRestoreTests(unittest.TestCase):
@@ -76,6 +93,89 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertTrue(restore_requires_reconciliation(restored))
             self.assertTrue((restored / "state" / "journal.sqlite3").is_file())
             self.assertTrue((restored / "artifacts" / "objects" / "sha256").is_dir())
+
+    def test_completed_restore_reconciliation_can_clear_gate_durably(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+            controller = RecoveryController()
+            owner = controller.start("restored-host")
+            proof = complete_restore_reconciliation(
+                restored,
+                controller=controller,
+                reconciliation=_reconciliation(),
+                fencing_evidence=["old-host:fenced", "provider-session:reconciled"],
+                completed_at="2026-09-24T20:00:00Z",
+            )
+
+            self.assertEqual(controller.state, HostState.READY)
+            self.assertEqual(proof["owner_id"], owner.owner_id)
+            self.assertEqual(proof["blocking_resources"], [])
+            self.assertFalse(restore_requires_reconciliation(restored))
+            self.assertFalse(restore_requires_reconciliation(restored))
+
+    def test_incomplete_reconciliation_never_clears_restore_gate(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = RecoveryController()
+            controller.start("restored-host")
+
+            with self.assertRaisesRegex(BackupError, "incomplete"):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation=_reconciliation(complete=False),
+                    fencing_evidence=["old-host:fenced"],
+                    completed_at="2026-09-24T20:00:00Z",
+                )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_missing_fencing_evidence_never_clears_restore_gate(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = RecoveryController()
+            controller.start("restored-host")
+
+            with self.assertRaisesRegex(BackupError, "fencing"):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation=_reconciliation(),
+                    fencing_evidence=[],
+                    completed_at="2026-09-24T20:00:00Z",
+                )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_tampered_restore_completion_proof_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = RecoveryController()
+            controller.start("restored-host")
+            complete_restore_reconciliation(
+                restored,
+                controller=controller,
+                reconciliation=_reconciliation(),
+                fencing_evidence=["old-host:fenced"],
+                completed_at="2026-09-24T20:00:00Z",
+            )
+            proof_path = restored / "RESTORE_RECONCILIATION_COMPLETE.json"
+            payload = json.loads(proof_path.read_text(encoding="utf-8"))
+            payload["owner_epoch"] = 999
+            proof_path.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertTrue(restore_requires_reconciliation(restored))
 
     def test_logically_inconsistent_runtime_snapshot_is_rejected(self):
         with TemporaryDirectory() as directory:

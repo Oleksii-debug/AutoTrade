@@ -1,9 +1,12 @@
 import json
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from mvp.autotrade_mvp.cli import main as cli_main
 from mvp.autotrade_mvp.pipeline import SimulatedProvider, run_multi_episode, run_vertical_slice, verify_replay
 
 
@@ -138,6 +141,26 @@ class VerticalSliceTests(unittest.TestCase):
                 run_vertical_slice([100, 101, 102, 103], directory, fee_rate="-0.1")
             with self.assertRaises(ValueError):
                 run_vertical_slice(["0.000000001"], directory)
+
+    def test_generator_market_data_is_consumed_once(self):
+        with TemporaryDirectory() as directory:
+            prices = (value for value in [100, 101, 102, 103])
+            result = run_vertical_slice(prices, directory)
+            self.assertEqual(result.status, "filled")
+            self.assertEqual(result.position, 1)
+            self.assertTrue(result.reconciled)
+
+    def test_cli_status_command_is_executable(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            output = StringIO()
+            with patch("sys.argv", ["autotrade", "--state-dir", directory, "--status"]):
+                with redirect_stdout(output):
+                    exit_code = cli_main()
+            self.assertEqual(exit_code, 0)
+            status = json.loads(output.getvalue())
+            self.assertEqual(status["status"], "running")
+            self.assertEqual(status["evidence_count"], 1)
 
     def test_replay_verification_detects_tampered_evidence(self):
         with TemporaryDirectory() as directory:

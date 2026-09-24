@@ -21,6 +21,12 @@ _REDACT_RE = re.compile(
 )
 
 
+def _required_text(value: object, *, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    return value.strip()
+
+
 @dataclass(frozen=True)
 class CredentialHandle:
     handle_id: str
@@ -66,7 +72,10 @@ class SecurityBoundary:
     ) -> None:
         if not allowed_origins:
             raise ValueError("At least one authenticated origin is required")
-        self._allowed_origins = frozenset(allowed_origins)
+        normalized_origins = frozenset(
+            _required_text(value, name="allowed origin") for value in allowed_origins
+        )
+        self._allowed_origins = normalized_origins
         self._now = now or time.time
         self._sessions: dict[str, Session] = {}
         self._records: dict[str, _SecretRecord] = {}
@@ -79,18 +88,20 @@ class SecurityBoundary:
         origin: str,
         ttl_seconds: int = 900,
     ) -> Session:
-        normalized_role = role.upper()
+        normalized_subject = _required_text(subject, name="subject")
+        normalized_role = _required_text(role, name="role").upper()
+        normalized_origin = _required_text(origin, name="origin")
         if normalized_role not in self._ROLES:
             raise PermissionError("Unknown role")
-        if origin not in self._allowed_origins:
+        if normalized_origin not in self._allowed_origins:
             raise PermissionError("Origin is not paired")
         if ttl_seconds <= 0 or ttl_seconds > 3600:
             raise ValueError("Session lifetime is outside the permitted bound")
         session = Session(
             token=secrets.token_urlsafe(32),
-            subject=subject,
+            subject=normalized_subject,
             role=normalized_role,
-            origin=origin,
+            origin=normalized_origin,
             expires_at=self._now() + ttl_seconds,
         )
         self._sessions[session.token] = session
@@ -127,22 +138,25 @@ class SecurityBoundary:
         secret_value: str,
     ) -> CredentialHandle:
         self.validate_session(token, required_roles={"OWNER"}, origin=origin)
-        if not secret_value:
+        normalized_owner = _required_text(owner_identity, name="owner_identity")
+        normalized_account = _required_text(account_id, name="account_id")
+        normalized_provider = _required_text(provider, name="provider")
+        normalized_purpose = _required_text(purpose, name="purpose").upper()
+        if not isinstance(secret_value, str) or not secret_value:
             raise ValueError("Secret value must not be empty")
-        normalized_purpose = purpose.upper()
         if normalized_purpose in {"WITHDRAWAL", "TRANSFER", "EXTERNAL_TRANSFER"}:
             raise PermissionError("Withdrawal and external-transfer credentials are unsupported")
         handle_id = "cred_" + secrets.token_hex(16)
         handle = CredentialHandle(
             handle_id=handle_id,
-            account_id=account_id,
-            provider=provider,
+            account_id=normalized_account,
+            provider=normalized_provider,
             purpose=normalized_purpose,
             generation=1,
         )
         self._records[handle_id] = _SecretRecord(
             handle=handle,
-            owner_identity=owner_identity,
+            owner_identity=normalized_owner,
             value=secret_value,
         )
         return handle

@@ -1,4 +1,6 @@
 using AutoTrade.Engine.Lean;
+using QuantConnect;
+using QuantConnect.Orders;
 
 static void Require(bool condition, string message)
 {
@@ -69,5 +71,64 @@ ExpectFailure<ArgumentException>(
         "10",
         DateTime.SpecifyKind(instant, DateTimeKind.Unspecified)),
     "ambiguous wall-clock time must be rejected");
+
+var symbol = Symbol.Create("SPY", SecurityType.Equity, Market.USA);
+var callbacks = new LeanCallbackCharacterizer();
+
+var submitted = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 1,
+    Symbol = symbol,
+    UtcTime = instant,
+    Status = OrderStatus.Submitted,
+    FillQuantity = decimal.Zero,
+    FillPrice = decimal.Zero
+});
+Require(submitted.Status == "Submitted", "Acknowledgement status was not preserved.");
+Require(!submitted.HasEconomicFill, "Acknowledgement must not be characterized as a fill.");
+Require(!submitted.DuplicateIdentity, "First callback identity was marked duplicate.");
+Require(!submitted.TimeRegressed, "First callback cannot regress time.");
+
+var partial = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 2,
+    Symbol = symbol,
+    UtcTime = instant.AddMilliseconds(1),
+    Status = OrderStatus.PartiallyFilled,
+    FillQuantity = 0.25m,
+    FillPrice = 451.125m
+});
+Require(partial.Status == "PartiallyFilled", "Partial-fill status was not preserved.");
+Require(partial.HasEconomicFill, "Non-zero fill quantity was lost.");
+Require(partial.FillQuantity == "0.25", "Callback fill quantity changed.");
+Require(partial.FillPrice == "451.125", "Callback fill price changed.");
+Require(!partial.DuplicateIdentity, "New callback identity was marked duplicate.");
+
+var duplicate = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 2,
+    Symbol = symbol,
+    UtcTime = instant.AddMilliseconds(1),
+    Status = OrderStatus.PartiallyFilled,
+    FillQuantity = 0.25m,
+    FillPrice = 451.125m
+});
+Require(duplicate.DuplicateIdentity, "Duplicate callback identity was not surfaced.");
+
+var regressed = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 3,
+    Symbol = symbol,
+    UtcTime = instant,
+    Status = OrderStatus.Filled,
+    FillQuantity = 0.75m,
+    FillPrice = 451.125m
+});
+Require(regressed.TimeRegressed, "Arrival-time regression was silently hidden.");
+Require(regressed.HasEconomicFill, "Final non-zero fill was not characterized.");
 
 Console.WriteLine("WP02_LEAN_ADOPTION_PROBE_PASS");

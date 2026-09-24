@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 
+CONTRACT_VERSION = "1.0.0"
+
 _PATTERNS = {
     "Decimal": re.compile(r"^(?:0|[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]|-(?:[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]))$"),
     "Sequence": re.compile(r"^(0|[1-9][0-9]*)$"),

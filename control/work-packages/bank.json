@@ -421,8 +421,8 @@
         "Exclusive mutation key: DATA / market-normalization",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Market normalization foundation is present on main in mvp/autotrade_mvp/market_data.py with raw evidence binding, canonical normalized events, explicit causal timestamps, exact decimal fields and sequence/conflict handling. Remaining work: provider-stream integration, broader gap/freshness qualification and production placement."
     },
     {
       "id": "WP-10",
@@ -468,8 +468,8 @@
         "Exclusive mutation key: DATA / historical-vintages",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Immutable historical-vintage foundation is present on main in research/autotrade_research/data/vintages.py with point-in-time revisions/universes, explicit missingness, raw/adjusted consistency, rights-aware manifests and append-only version storage. Remaining work: deeper causal lineage hardening, large-dataset storage integration and production qualification."
     },
     {
       "id": "WP-11",
@@ -514,8 +514,8 @@
         "Exclusive mutation key: INFORMATION / news-macro-claims",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Evidence-bound information-claim foundation is present on main in mvp/autotrade_mvp/information_claims.py with source documents, availability times, provenance digests, immutable claim identity and store ingestion. Remaining work: source-policy breadth, contradiction/supersession qualification and production information pipelines."
     },
     {
       "id": "WP-12",
@@ -564,8 +564,8 @@
         "Exclusive mutation key: REPLAY / causal-feeder",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Deterministic causal replay foundation is present on main in mvp/autotrade_mvp/replay.py with availability-time ordering, frozen dataset digest, monotonic simulation clock and checkpoint/resume primitives. Remaining work: pending-event/RNG/strategy/account state completeness, hostile-process isolation and exact resume-equivalence qualification."
     },
     {
       "id": "WP-13",
@@ -1357,8 +1357,8 @@
         "Exclusive mutation key: FINANCE / futures-lifecycle",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Futures lifecycle foundation is present on main in mvp/autotrade_mvp/futures.py with exact linear/inverse P&L, variation margin, settlement fractions, lifecycle gates and balanced accounting vectors. Remaining work: provider contract metadata, exchange calendars/rolls, settlement edge cases and qualification."
     },
     {
       "id": "WP-29",
@@ -1405,8 +1405,8 @@
         "Exclusive mutation key: FINANCE / perpetual-lifecycle",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Perpetual lifecycle foundation is present on main in mvp/autotrade_mvp/perpetuals.py with exact notional/funding, collateral and margin snapshots, stressed loss, risk-capacity checks and funding ledger primitives. Remaining work: provider funding schedules, liquidation/ADL semantics, inverse variants and qualification."
     },
     {
       "id": "WP-30",
@@ -1596,8 +1596,8 @@
         "Exclusive mutation key: STRATEGY / deterministic-path",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Deterministic strategy baseline is present on main in research/autotrade_research/strategies/deterministic.py with causal observations, exact-decimal thresholds and reproducible proposals independent of language models. Remaining work: broader baselines, transaction-cost/capacity integration and scientific qualification."
     },
     {
       "id": "WP-34",
@@ -1645,8 +1645,8 @@
         "Exclusive mutation key: FEATURE / causal-features",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Causal feature/label foundation is present on main in research/autotrade_research/features/causal.py with availability-aware source values, causal windows, fold-fitted normalization, forward-label timing and universe-membership guards. Remaining work: broader feature families, leakage sentinels and walk-forward integration."
     },
     {
       "id": "WP-35",
@@ -1840,8 +1840,8 @@
         "Exclusive mutation key: LEARNING / continual-candidates",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Continual-candidate retention foundation is present on main in research/autotrade_research/learning/retention.py with protected/recent regime matrices, delayed-label inconclusive handling and independent science/risk promotion gates. Remaining work: actual bounded update pipelines, drift calibration, evidence-bound gate references and production candidate generation."
     },
     {
       "id": "WP-39",
@@ -2373,8 +2373,8 @@
         "Exclusive mutation key: RECOVERY / backup-restore",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Backup/restore foundation is present on main in mvp/autotrade_mvp/backup.py with SQLite backup API use, content verification, artifact integrity, atomic staging restore and fail-closed post-restore reconciliation requirement. Remaining work: qualified gate clearing, sender fencing integration, interrupted/power-loss drills and clean-machine release evidence."
     },
     {
       "id": "WP-50",
@@ -3074,8 +3074,8 @@
         "Exclusive mutation key: SCIENCE / source-agent-value",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Matched-input ablation foundation is present on main in research/autotrade_research/evaluation/ablation.py with exact-decimal utility/cost, component-difference checks and deadline accounting. Remaining work: causal cutoff hardening, duplicate-case controls, broader source/agent experiments and locked scientific evidence."
     },
     {
       "id": "WP-64",

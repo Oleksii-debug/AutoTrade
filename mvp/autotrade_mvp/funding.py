@@ -101,6 +101,8 @@ class FundingEvent:
         if self.sign_convention not in {"POSITIVE_LONG_PAYS", "POSITIVE_LONG_RECEIVES"}:
             raise FundingError("unsupported funding sign convention")
         object.__setattr__(self, "evidence_ref", _text(self.evidence_ref, "evidence_ref"))
+        if self.kind == "FINAL" and self.available_at < self.effective_at:
+            raise FundingError("final funding cannot be available before its effective instant")
 
     @property
     def economic_cash_flow(self) -> Decimal:
@@ -151,6 +153,10 @@ class FundingRevisionBook:
                 raise FundingConflict("funding revision cannot change settlement currency")
             if event.effective_at != previous.effective_at:
                 raise FundingConflict("funding revision cannot change effective instant")
+            if event.available_at < previous.available_at:
+                raise FundingConflict("funding revision cannot backdate availability")
+            if event.sign_convention != previous.sign_convention:
+                raise FundingConflict("funding revision cannot change sign convention")
 
         old_final = self._final_cash_flow.get(event.funding_id, Decimal("0"))
         new_final = event.economic_cash_flow if event.kind == "FINAL" else old_final

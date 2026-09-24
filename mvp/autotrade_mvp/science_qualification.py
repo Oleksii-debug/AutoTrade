@@ -31,9 +31,9 @@ def _sha256_identity(value: str, name: str) -> str:
     if not isinstance(value, str) or not value.startswith("sha256:"):
         raise ValueError(f"{name} must use sha256:<64 hex>")
     digest = value[7:]
-    if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest.lower()):
-        raise ValueError(f"{name} must use sha256:<64 hex>")
-    return value.lower()
+    if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise ValueError(f"{name} must use sha256:<64 lowercase hex>")
+    return value
 
 
 @dataclass(frozen=True)
@@ -78,6 +78,10 @@ class ScientificQualificationInput:
         _sha256_identity(self.input_snapshot_hash, "input_snapshot_hash")
         if self.economic_claim not in _VALID_CLAIMS:
             raise ValueError("economic_claim is not supported")
+        if not isinstance(self.holdout_used_for_tuning, bool):
+            raise TypeError("holdout_used_for_tuning must be boolean")
+        if not isinstance(self.future_information_used_for_routing, bool):
+            raise TypeError("future_information_used_for_routing must be boolean")
         ids = [gate.gate_id for gate in self.gates]
         if len(ids) != len(set(ids)):
             raise ValueError("duplicate qualification gate")

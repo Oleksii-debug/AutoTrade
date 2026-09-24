@@ -255,6 +255,19 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             )
         secret.unlink()
 
+        env_variant = self.staging / ".env.production"
+        env_variant.write_text("API_TOKEN=must-not-ship\n", encoding="utf-8")
+        with self.assertRaisesRegex(BundleError, "sensitive"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "bad-env-variant.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+        env_variant.unlink()
+
         target = self.staging / "AutoTrade.exe"
         link = self.staging / "linked.exe"
         try:
@@ -270,6 +283,25 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
                 mode="diagnostics",
                 provenance_path=self.provenance(eligible=False),
             )
+
+    def test_hash_sidecar_publish_removes_stale_temporary_file(self):
+        provenance = self.provenance(eligible=False)
+        output = self.root / "atomic-hash.zip"
+        stale = output.with_suffix(".zip.sha256.tmp")
+        stale.write_text("stale partial digest", encoding="utf-8")
+        result = build_bundle(
+            staging=self.staging,
+            output=output,
+            version="0.1.0-dev",
+            source_sha=SOURCE_SHA,
+            mode="diagnostics",
+            provenance_path=provenance,
+        )
+        self.assertFalse(stale.exists())
+        self.assertEqual(
+            output.with_suffix(".zip.sha256").read_text(encoding="utf-8").split()[0],
+            result["sha256"],
+        )
 
     def test_output_and_hash_must_be_outside_staging(self):
         provenance = self.provenance(eligible=False)

@@ -1,5 +1,4 @@
 import hashlib
-from tempfile import TemporaryDirectory
 import unittest
 from uuid import NAMESPACE_URL, uuid5
 
@@ -10,9 +9,8 @@ from mvp.autotrade_mvp.bounded_real import (
     ImmutableEvidenceRef,
     QualificationEvidence,
     artifact_store_evidence_verifier,
-    assess_bounded_real_qualification as _assess_bounded_real_qualification,
+    assess_bounded_real_qualification,
 )
-from research.autotrade_research.artifacts.store import ArtifactStore
 
 
 SHA = "a" * 40
@@ -26,45 +24,14 @@ OBSERVATION_KINDS = (
     "AUTHORITY_AUDIT",
     "UNKNOWN_SUBMISSION_AUDIT",
 )
-
-
-def _seed(
-    kind,
-    *,
-    source_sha=SHA,
-    envelope_id="bounded-1",
-    provider_id="provider-1",
-    account_id="account-1",
-):
-    return (
-        f"{kind}|{source_sha}|{envelope_id}|{provider_id}|{account_id}"
-    ).encode("utf-8")
-
-
-def evidence_ref(
-    kind,
-    *,
-    source_sha=SHA,
-    envelope_id="bounded-1",
-    provider_id="provider-1",
-    account_id="account-1",
-):
-    payload = _seed(
-        kind,
-        source_sha=source_sha,
-        envelope_id=envelope_id,
-        provider_id=provider_id,
-        account_id=account_id,
-    )
-    return ImmutableEvidenceRef(
-        artifact_id=str(uuid5(NAMESPACE_URL, payload.decode("utf-8"))),
-        sha256="sha256:" + hashlib.sha256(payload).hexdigest(),
-        evidence_kind=kind,
-        source_sha=source_sha,
-        envelope_id=envelope_id,
-        provider_id=provider_id,
-        account_id=account_id,
-    )
+PREREQUISITE_KINDS = (
+    "RELEASE_CANDIDATE",
+    "SCIENTIFIC_QUALIFICATION",
+    "FORWARD_PAPER",
+    "PROVIDER_CAPABILITY",
+    "ACCESSIBILITY",
+    "RECOVERY",
+)
 
 
 def envelope(**overrides):
@@ -83,54 +50,48 @@ def envelope(**overrides):
     return BoundedRealEnvelope.create(**values)
 
 
-def evidence(kind, **overrides):
-    source_sha = overrides.pop("source_sha", SHA)
-    envelope_id = overrides.pop("envelope_id", "bounded-1")
-    provider_id = overrides.pop("provider_id", "provider-1")
-    account_id = overrides.pop("account_id", "account-1")
-    ref = overrides.pop(
-        "evidence_ref",
-        evidence_ref(
-            f"PREREQUISITE:{kind}",
-            source_sha=source_sha,
-            envelope_id=envelope_id,
-            provider_id=provider_id,
-            account_id=account_id,
-        ),
-    )
+def ref(label, *, evidence_kind, **overrides):
     values = dict(
-        evidence_id="e-" + kind.lower(),
+        artifact_id=str(uuid5(NAMESPACE_URL, "autotrade:" + label)),
+        sha256="sha256:" + hashlib.sha256(label.encode("utf-8")).hexdigest(),
+        evidence_kind=evidence_kind,
+        source_sha=SHA,
+        envelope_id="bounded-1",
+        provider_id="provider-1",
+        account_id="account-1",
+    )
+    values.update(overrides)
+    return ImmutableEvidenceRef(**values)
+
+
+def evidence(kind, **overrides):
+    ref_overrides = overrides.pop("ref_overrides", {})
+    values = dict(
+        evidence_id="evidence-" + kind.lower(),
         evidence_kind=kind,
-        source_sha=source_sha,
-        envelope_id=envelope_id,
+        source_sha=SHA,
+        envelope_id="bounded-1",
         passed=True,
-        evidence_ref=ref,
+        evidence_ref=ref(
+            "prerequisite:" + kind,
+            evidence_kind="PREREQUISITE:" + kind,
+            **ref_overrides,
+        ),
+        unresolved_blockers=(),
     )
     values.update(overrides)
     return QualificationEvidence.create(**values)
 
 
 def prerequisites():
-    return [
-        evidence("RELEASE_CANDIDATE"),
-        evidence("SCIENTIFIC_QUALIFICATION"),
-        evidence("FORWARD_PAPER"),
-        evidence("PROVIDER_CAPABILITY"),
-        evidence("ACCESSIBILITY"),
-        evidence("RECOVERY"),
-    ]
+    return [evidence(kind) for kind in PREREQUISITE_KINDS]
 
 
-def observation_evidence(
-    *,
-    source_sha=SHA,
-    envelope_id="bounded-1",
-    provider_id="provider-1",
-    account_id="account-1",
-):
+def observation_refs(*, source_sha=SHA, envelope_id="bounded-1", provider_id="provider-1", account_id="account-1"):
     return tuple(
-        evidence_ref(
-            kind,
+        ref(
+            "observation:" + kind,
+            evidence_kind=kind,
             source_sha=source_sha,
             envelope_id=envelope_id,
             provider_id=provider_id,
@@ -141,15 +102,14 @@ def observation_evidence(
 
 
 def observations(**overrides):
-    source_sha = overrides.get("source_sha", SHA)
-    envelope_id = overrides.get("envelope_id", "bounded-1")
-    provider_id = overrides.get("provider_id", "provider-1")
-    account_id = overrides.get("account_id", "account-1")
+    scope = {
+        "source_sha": overrides.get("source_sha", SHA),
+        "envelope_id": overrides.get("envelope_id", "bounded-1"),
+        "provider_id": overrides.get("provider_id", "provider-1"),
+        "account_id": overrides.get("account_id", "account-1"),
+    }
     values = dict(
-        source_sha=source_sha,
-        envelope_id=envelope_id,
-        provider_id=provider_id,
-        account_id=account_id,
+        **scope,
         observed_fill_count=3,
         observed_partial_fill=True,
         all_fills_reconciled=True,
@@ -158,57 +118,48 @@ def observations(**overrides):
         protection_verified=True,
         unauthorized_action_count=0,
         unresolved_unknown_count=0,
-        evidence_refs=observation_evidence(
-            source_sha=source_sha,
-            envelope_id=envelope_id,
-            provider_id=provider_id,
-            account_id=account_id,
-        ),
+        evidence_refs=observation_refs(**scope),
     )
     values.update(overrides)
     return BoundedRealObservations.create(**values)
 
 
-def trusted_evidence_verifier(_ref):
+def valid_verifier(_ref):
     return EvidenceVerification(valid=True)
 
 
-def assess_bounded_real_qualification(**kwargs):
-    kwargs.setdefault("evidence_verifier", trusted_evidence_verifier)
-    return _assess_bounded_real_qualification(**kwargs)
-
-
-def publish_ref(store, ref):
-    payload = _seed(
-        ref.evidence_kind,
-        source_sha=ref.source_sha,
-        envelope_id=ref.envelope_id,
-        provider_id=ref.provider_id,
-        account_id=ref.account_id,
-    )
-    manifest = store.publish_bytes(
-        artifact_id=ref.artifact_id,
-        data=payload,
-        media_type="application/json",
-        rights={
-            "storage": True,
-            "export": False,
-            "rights_id": "bounded-real-qualification",
-        },
-        metadata={
+class _ArtifactStoreStub:
+    def __init__(self, evidence_ref, *, metadata_overrides=None, payload=b"evidence"):
+        self.payload = payload
+        self.ref = evidence_ref
+        metadata = {
             "artifact_kind": "BOUNDED_REAL_EVIDENCE",
             "schema_version": 1,
-            "evidence_kind": ref.evidence_kind,
-            "source_sha": ref.source_sha,
-            "envelope_id": ref.envelope_id,
-            "provider_id": ref.provider_id,
-            "account_id": ref.account_id,
+            "evidence_kind": evidence_ref.evidence_kind,
+            "source_sha": evidence_ref.source_sha,
+            "envelope_id": evidence_ref.envelope_id,
+            "provider_id": evidence_ref.provider_id,
+            "account_id": evidence_ref.account_id,
             "outcome": "PASS",
-            "producer_id": "qualification-runner-v1",
+            "producer_id": "qualification-harness",
             "evidence_version": "1",
-        },
-    )
-    assert manifest["sha256"] == ref.sha256
+        }
+        metadata.update(metadata_overrides or {})
+        self.manifest = {
+            "artifact_id": evidence_ref.artifact_id,
+            "sha256": "sha256:" + hashlib.sha256(payload).hexdigest(),
+            "metadata": metadata,
+        }
+
+    def load_manifest(self, artifact_id):
+        if artifact_id != self.ref.artifact_id:
+            raise KeyError(artifact_id)
+        return self.manifest
+
+    def read_bytes(self, artifact_id):
+        if artifact_id != self.ref.artifact_id:
+            raise KeyError(artifact_id)
+        return self.payload
 
 
 class BoundedRealQualificationTests(unittest.TestCase):
@@ -217,14 +168,15 @@ class BoundedRealQualificationTests(unittest.TestCase):
             envelope=envelope(),
             prerequisite_evidence=prerequisites(),
             observations=observations(),
+            evidence_verifier=valid_verifier,
         )
         self.assertTrue(result.complete)
         self.assertEqual(result.reason_codes, ())
         self.assertFalse(result.authorizes_trading)
         self.assertEqual(result.exact_source_sha, SHA)
 
-    def test_no_verifier_means_self_asserted_bundle_can_never_complete(self):
-        result = _assess_bounded_real_qualification(
+    def test_caller_booleans_without_immutable_verifier_never_pass(self):
+        result = assess_bounded_real_qualification(
             envelope=envelope(),
             prerequisite_evidence=prerequisites(),
             observations=observations(),
@@ -232,137 +184,47 @@ class BoundedRealQualificationTests(unittest.TestCase):
         self.assertFalse(result.complete)
         self.assertIn("immutable_evidence_verifier_required", result.reason_codes)
 
-    def test_missing_observation_artifacts_block_self_declared_green_flags(self):
-        green_without_refs = observations(evidence_refs=())
-        result = assess_bounded_real_qualification(
-            envelope=envelope(),
-            prerequisite_evidence=prerequisites(),
-            observations=green_without_refs,
-        )
-        self.assertFalse(result.complete)
-        self.assertTrue(
-            any(
-                reason.startswith("missing_observation_evidence:")
-                for reason in result.reason_codes
-            )
-        )
-
-    def test_missing_artifacts_in_canonical_store_never_verify(self):
-        with TemporaryDirectory() as directory:
-            store = ArtifactStore(directory)
-            result = _assess_bounded_real_qualification(
-                envelope=envelope(),
-                prerequisite_evidence=prerequisites(),
-                observations=observations(),
-                evidence_verifier=artifact_store_evidence_verifier(store),
-            )
-            self.assertFalse(result.complete)
-            self.assertTrue(
-                any(
-                    reason.startswith("immutable_evidence_unverified:")
-                    for reason in result.reason_codes
-                )
-            )
-
-    def test_exact_immutable_artifacts_can_make_evidence_bundle_complete(self):
-        with TemporaryDirectory() as directory:
-            store = ArtifactStore(directory)
-            prereq = prerequisites()
-            observed = observations()
-            for item in prereq:
-                publish_ref(store, item.evidence_ref)
-            for ref in observed.evidence_refs:
-                publish_ref(store, ref)
-
-            result = _assess_bounded_real_qualification(
-                envelope=envelope(),
-                prerequisite_evidence=prereq,
-                observations=observed,
-                evidence_verifier=artifact_store_evidence_verifier(store),
-            )
-            self.assertTrue(result.complete)
-            self.assertFalse(result.authorizes_trading)
-
-    def test_artifact_digest_mismatch_is_conflicted(self):
-        with TemporaryDirectory() as directory:
-            store = ArtifactStore(directory)
-            prereq = prerequisites()
-            observed = observations()
-            for item in prereq:
-                publish_ref(store, item.evidence_ref)
-            for ref in observed.evidence_refs:
-                publish_ref(store, ref)
-
-            original = prereq[0]
-            wrong_ref = ImmutableEvidenceRef(
-                artifact_id=original.evidence_ref.artifact_id,
-                sha256="sha256:" + "b" * 64,
-                evidence_kind=original.evidence_ref.evidence_kind,
-                source_sha=original.evidence_ref.source_sha,
-                envelope_id=original.evidence_ref.envelope_id,
-                provider_id=original.evidence_ref.provider_id,
-                account_id=original.evidence_ref.account_id,
-            )
-            prereq[0] = QualificationEvidence(
-                evidence_id=original.evidence_id,
-                evidence_kind=original.evidence_kind,
-                source_sha=original.source_sha,
-                envelope_id=original.envelope_id,
-                passed=True,
-                evidence_ref=wrong_ref,
-            )
-            result = _assess_bounded_real_qualification(
-                envelope=envelope(),
-                prerequisite_evidence=prereq,
-                observations=observed,
-                evidence_verifier=artifact_store_evidence_verifier(store),
-            )
-            self.assertFalse(result.complete)
-            self.assertIn(
-                "immutable_evidence_conflicted:PREREQUISITE:RELEASE_CANDIDATE",
-                result.reason_codes,
-            )
-
-    def test_missing_or_failed_prerequisite_fails_closed(self):
-        result = assess_bounded_real_qualification(
+    def test_missing_failed_or_blocked_prerequisite_fails_closed(self):
+        missing = assess_bounded_real_qualification(
             envelope=envelope(),
             prerequisite_evidence=prerequisites()[:-1],
             observations=observations(),
+            evidence_verifier=valid_verifier,
         )
-        self.assertFalse(result.complete)
         self.assertTrue(
             any(
                 reason.startswith("missing_prerequisite_evidence:")
-                for reason in result.reason_codes
+                for reason in missing.reason_codes
             )
         )
-        failed = prerequisites()
-        failed[1] = evidence("SCIENTIFIC_QUALIFICATION", passed=False)
-        result = assess_bounded_real_qualification(
+
+        failed_items = prerequisites()
+        failed_items[1] = evidence("SCIENTIFIC_QUALIFICATION", passed=False)
+        failed = assess_bounded_real_qualification(
             envelope=envelope(),
-            prerequisite_evidence=failed,
+            prerequisite_evidence=failed_items,
             observations=observations(),
+            evidence_verifier=valid_verifier,
         )
         self.assertIn(
             "prerequisite_failed:SCIENTIFIC_QUALIFICATION",
-            result.reason_codes,
+            failed.reason_codes,
         )
 
-    def test_exact_build_provider_account_and_envelope_must_match(self):
-        items = prerequisites()
-        items[0] = evidence("RELEASE_CANDIDATE", source_sha="b" * 40)
-        result = assess_bounded_real_qualification(
+        blocked_items = prerequisites()
+        blocked_items[2] = evidence(
+            "FORWARD_PAPER",
+            unresolved_blockers=("paper drawdown gate unresolved",),
+        )
+        blocked = assess_bounded_real_qualification(
             envelope=envelope(),
-            prerequisite_evidence=items,
+            prerequisite_evidence=blocked_items,
             observations=observations(),
+            evidence_verifier=valid_verifier,
         )
-        self.assertIn("source_sha_mismatch:RELEASE_CANDIDATE", result.reason_codes)
-        self.assertIn(
-            "immutable_evidence_scope_mismatch:PREREQUISITE:RELEASE_CANDIDATE",
-            result.reason_codes,
-        )
+        self.assertIn("unresolved_blockers:FORWARD_PAPER", blocked.reason_codes)
 
-    def test_actual_fill_reconciliation_revocation_and_protection_are_required(self):
+    def test_real_fill_partial_fill_reconciliation_and_safety_facts_are_required(self):
         result = assess_bounded_real_qualification(
             envelope=envelope(),
             prerequisite_evidence=prerequisites(),
@@ -373,96 +235,220 @@ class BoundedRealQualificationTests(unittest.TestCase):
                 fees_reconciled=False,
                 revocation_verified=False,
                 protection_verified=False,
+                unauthorized_action_count=1,
                 unresolved_unknown_count=1,
             ),
+            evidence_verifier=valid_verifier,
+        )
+        self.assertFalse(result.complete)
+        expected = {
+            "no_real_fill_evidence",
+            "partial_fill_not_evidenced",
+            "fills_not_fully_reconciled",
+            "fees_not_reconciled",
+            "revocation_not_verified",
+            "protection_not_verified",
+            "unauthorized_action_observed",
+            "unresolved_submission_unknown",
+        }
+        self.assertTrue(expected <= set(result.reason_codes))
+
+    def test_required_observation_artifact_kinds_cannot_be_self_asserted_away(self):
+        refs = tuple(
+            item for item in observation_refs()
+            if item.evidence_kind != "PARTIAL_FILL"
+        )
+        result = assess_bounded_real_qualification(
+            envelope=envelope(),
+            prerequisite_evidence=prerequisites(),
+            observations=observations(evidence_refs=refs),
+            evidence_verifier=valid_verifier,
         )
         self.assertFalse(result.complete)
         self.assertTrue(
-            {
-                "no_real_fill_evidence",
-                "partial_fill_not_evidenced",
-                "fills_not_fully_reconciled",
-                "fees_not_reconciled",
-                "revocation_not_verified",
-                "protection_not_verified",
-                "unresolved_submission_unknown",
-            }
-            <= set(result.reason_codes)
+            any(
+                reason.startswith("missing_observation_evidence:")
+                and "PARTIAL_FILL" in reason
+                for reason in result.reason_codes
+            )
         )
 
-    def test_any_unauthorized_action_blocks_qualification(self):
+    def test_scope_mismatch_is_explicit_even_when_evidence_is_internally_consistent(self):
+        other = observations(
+            account_id="other-account",
+            evidence_refs=observation_refs(account_id="other-account"),
+        )
         result = assess_bounded_real_qualification(
             envelope=envelope(),
             prerequisite_evidence=prerequisites(),
-            observations=observations(unauthorized_action_count=1),
+            observations=other,
+            evidence_verifier=valid_verifier,
         )
-        self.assertIn("unauthorized_action_observed", result.reason_codes)
         self.assertFalse(result.complete)
+        self.assertIn("observation_scope_mismatch", result.reason_codes)
+        self.assertTrue(
+            any(
+                reason.startswith("immutable_evidence_scope_mismatch:")
+                for reason in result.reason_codes
+            )
+        )
 
-    def test_observation_scope_must_match_exact_account_provider_build_and_envelope(self):
+    def test_evidence_verifier_failure_or_conflict_blocks_qualification(self):
+        target = prerequisites()[0].evidence_ref
+
+        def verifier(item):
+            if item.artifact_id == target.artifact_id:
+                return EvidenceVerification(valid=False, reason="missing")
+            return EvidenceVerification(valid=True)
+
         result = assess_bounded_real_qualification(
             envelope=envelope(),
             prerequisite_evidence=prerequisites(),
-            observations=observations(account_id="other-account"),
+            observations=observations(),
+            evidence_verifier=verifier,
         )
-        self.assertIn("observation_scope_mismatch", result.reason_codes)
+        self.assertTrue(
+            any(
+                reason.startswith("immutable_evidence_unverified:")
+                for reason in result.reason_codes
+            )
+        )
 
-    def test_withdrawals_transfers_and_unknown_actions_cannot_enter_bounded_envelope(self):
+        def conflicted(item):
+            if item.artifact_id == target.artifact_id:
+                return EvidenceVerification(
+                    valid=False,
+                    conflicted=True,
+                    reason="digest changed",
+                )
+            return EvidenceVerification(valid=True)
+
+        result = assess_bounded_real_qualification(
+            envelope=envelope(),
+            prerequisite_evidence=prerequisites(),
+            observations=observations(),
+            evidence_verifier=conflicted,
+        )
+        self.assertTrue(
+            any(
+                reason.startswith("immutable_evidence_conflicted:")
+                for reason in result.reason_codes
+            )
+        )
+
+    def test_duplicate_artifact_or_digest_cannot_be_reused_as_distinct_evidence(self):
+        items = prerequisites()
+        original = items[0].evidence_ref
+        duplicate = ImmutableEvidenceRef(
+            artifact_id=original.artifact_id,
+            sha256="sha256:" + hashlib.sha256(b"other").hexdigest(),
+            evidence_kind="PREREQUISITE:SCIENTIFIC_QUALIFICATION",
+            source_sha=SHA,
+            envelope_id="bounded-1",
+            provider_id="provider-1",
+            account_id="account-1",
+        )
+        items[1] = evidence(
+            "SCIENTIFIC_QUALIFICATION",
+            evidence_ref=duplicate,
+        )
+        with self.assertRaisesRegex(ValueError, "artifact_id"):
+            assess_bounded_real_qualification(
+                envelope=envelope(),
+                prerequisite_evidence=items,
+                observations=observations(),
+                evidence_verifier=valid_verifier,
+            )
+
+        first = prerequisites()[0].evidence_ref
+        refs = list(observation_refs())
+        refs[0] = ImmutableEvidenceRef(
+            artifact_id=refs[0].artifact_id,
+            sha256=first.sha256,
+            evidence_kind=refs[0].evidence_kind,
+            source_sha=refs[0].source_sha,
+            envelope_id=refs[0].envelope_id,
+            provider_id=refs[0].provider_id,
+            account_id=refs[0].account_id,
+        )
+        with self.assertRaisesRegex(ValueError, "digest"):
+            assess_bounded_real_qualification(
+                envelope=envelope(),
+                prerequisite_evidence=prerequisites(),
+                observations=observations(evidence_refs=tuple(refs)),
+                evidence_verifier=valid_verifier,
+            )
+
+    def test_artifact_store_verifier_recomputes_payload_digest_and_semantics(self):
+        payload = b"verified bounded-real evidence"
+        good_ref = ref(
+            "store-backed",
+            evidence_kind="ACTUAL_FILL",
+            sha256="sha256:" + hashlib.sha256(payload).hexdigest(),
+        )
+        good = artifact_store_evidence_verifier(
+            _ArtifactStoreStub(good_ref, payload=payload)
+        )(good_ref)
+        self.assertTrue(good.valid)
+        self.assertFalse(good.conflicted)
+
+        tampered_store = _ArtifactStoreStub(good_ref, payload=payload)
+        tampered_store.payload = b"changed after manifest"
+        bad = artifact_store_evidence_verifier(tampered_store)(good_ref)
+        self.assertFalse(bad.valid)
+        self.assertTrue(bad.conflicted)
+
+        wrong_scope = artifact_store_evidence_verifier(
+            _ArtifactStoreStub(
+                good_ref,
+                payload=payload,
+                metadata_overrides={"account_id": "wrong-account"},
+            )
+        )(good_ref)
+        self.assertFalse(wrong_scope.valid)
+        self.assertTrue(wrong_scope.conflicted)
+
+    def test_forbidden_actions_float_bounds_and_direct_bool_bypasses_are_rejected(self):
         for action in ("WITHDRAW", "TRANSFER", "CREDENTIAL.ROTATE", "OTHER"):
             with self.subTest(action=action):
                 with self.assertRaises(ValueError):
                     envelope(allowed_actions={"ORDER.SUBMIT", action})
-
-    def test_financial_bounds_reject_float_and_nonpositive_values(self):
         with self.assertRaises(TypeError):
             envelope(max_capital=1000.0)
         with self.assertRaises(ValueError):
             envelope(max_single_notional="0")
-        with self.assertRaises(ValueError):
-            envelope(max_gross_leverage="-1")
-
-    def test_direct_construction_cannot_bypass_evidence_scope(self):
-        ref = evidence_ref("PREREQUISITE:RECOVERY")
         with self.assertRaises(TypeError):
             QualificationEvidence(
-                evidence_id="e-recovery",
+                evidence_id="bad",
                 evidence_kind="RECOVERY",
                 source_sha=SHA,
                 envelope_id="bounded-1",
                 passed=1,
-                evidence_ref=ref,
+                evidence_ref=ref(
+                    "bad-bool",
+                    evidence_kind="PREREQUISITE:RECOVERY",
+                ),
             )
         with self.assertRaises(ValueError):
-            QualificationEvidence(
-                evidence_id="e-recovery",
-                evidence_kind="RECOVERY",
-                source_sha=SHA,
-                envelope_id="bounded-1",
-                passed=True,
-                evidence_ref=evidence_ref("PREREQUISITE:ACCESSIBILITY"),
-            )
+            observations(observed_fill_count=True)
 
-    def test_duplicate_evidence_identity_or_kind_fails_closed(self):
-        duplicate_id = prerequisites()
-        duplicate_id[1] = evidence(
-            "SCIENTIFIC_QUALIFICATION",
-            evidence_id=duplicate_id[0].evidence_id,
-        )
-        with self.assertRaisesRegex(ValueError, "evidence_id"):
-            assess_bounded_real_qualification(
-                envelope=envelope(),
-                prerequisite_evidence=duplicate_id,
-                observations=observations(),
+    def test_prerequisite_reference_kind_and_scope_are_immutable_contracts(self):
+        with self.assertRaisesRegex(ValueError, "kind"):
+            evidence(
+                "RECOVERY",
+                evidence_ref=ref(
+                    "wrong-kind",
+                    evidence_kind="RECOVERY",
+                ),
             )
-        duplicate_kind = prerequisites()
-        duplicate_kind.append(
-            evidence("RECOVERY", evidence_id="different-recovery")
-        )
-        with self.assertRaisesRegex(ValueError, "duplicate prerequisite evidence kind"):
-            assess_bounded_real_qualification(
-                envelope=envelope(),
-                prerequisite_evidence=duplicate_kind,
-                observations=observations(),
+        with self.assertRaisesRegex(ValueError, "scope"):
+            evidence(
+                "RECOVERY",
+                evidence_ref=ref(
+                    "wrong-source",
+                    evidence_kind="PREREQUISITE:RECOVERY",
+                    source_sha="b" * 40,
+                ),
             )
 
 

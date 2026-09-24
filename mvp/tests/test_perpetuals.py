@@ -82,6 +82,7 @@ class PerpetualLifecycleTests(unittest.TestCase):
             payoff="INVERSE",
             face_currency="USD",
             price_quote_currency="USD",
+            price_base_currency="BTC",
         )
         self.assertEqual(
             inverse_perpetual_pnl_exact(
@@ -130,8 +131,28 @@ class PerpetualLifecycleTests(unittest.TestCase):
             payoff="INVERSE",
             face_currency="USD",
             price_quote_currency="EUR",
+            price_base_currency="BTC",
         )
         with self.assertRaisesRegex(PerpetualError, "face_currency must match"):
+            inverse_perpetual_pnl_exact(
+                contract=contract,
+                signed_contracts="100",
+                entry_price="10000",
+                exit_price="11000",
+            )
+
+    def test_inverse_exact_math_rejects_settlement_currency_dimension_mismatch(self):
+        contract = PerpetualContract(
+            instrument_id="BTC-USD-INVERSE-PERP",
+            settlement_currency="USDT",
+            collateral_currency="USDT",
+            multiplier=Decimal("1"),
+            payoff="INVERSE",
+            face_currency="USD",
+            price_quote_currency="USD",
+            price_base_currency="BTC",
+        )
+        with self.assertRaisesRegex(PerpetualError, "settlement_currency must match"):
             inverse_perpetual_pnl_exact(
                 contract=contract,
                 signed_contracts="100",

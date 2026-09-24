@@ -159,8 +159,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Data/Instruments/ and its contract/qualification evidence.
 - **Forbidden scope:** Ticker as global identity; default 100-share option assumption; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: INSTRUMENT / instrument-registry; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Immutable instrument registry foundation is integrated on main at 4d1e361893490eff2906468e8262283050d28bfd, covering stable instrument identity, effective-dated symbol versions, calendars, exact price/quantity steps and derivative descriptors. Remaining WP-07 work includes full lifecycle/provider metadata ingestion, broader DST/delisting/adjusted-deliverable qualification and final production placement.
 
 ### WP-08 — account-capabilities
 
@@ -312,8 +312,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Risk/ and its contract/qualification evidence.
 - **Forbidden scope:** Risk penalties posted as cash expenses; VaR-only safety claims; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: RISK / independent-risk; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Independent deterministic risk admission is integrated on main at 05b0ce7506731b573fff3523a1684c7e1c0f22bb with focused freshness, leverage, stress and borrow gates tested at 636cb18193b6e9905bbc5c01613f6ee6717451fe. Remaining WP-16 work includes the full portfolio/margin/correlation rule surface, provider-account constraints, broader boundary properties and production integration.
 
 ### WP-17 — policy-confirmation
 
@@ -329,8 +329,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Execution/Authority/ and its contract/qualification evidence.
 - **Forbidden scope:** Learning or agent votes modifying user authority; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: AUTHORITY / policy-confirmation; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Authority confirmation/revocation admission is integrated on main at a9d428d621ec35f18f909e7a333a4f4d5462710a, with expiry/revoke/protection tests at c4976449312cc51866858e4121a9dc48bc91f879 and idempotent request-fingerprint retries at 7f32b147d95e0e44675abf4dc6d61b0f13726643/f1a084288bcf0689a7313de1b16d75ef65c23ef6. Remaining WP-17 work includes full autonomous policy/account scope, persisted operator workflows and production integration.
 
 ### WP-18 — guarded-dispatch
 
@@ -346,8 +346,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Execution/Dispatch/ and its contract/qualification evidence.
 - **Forbidden scope:** Blind retry; claiming exactly-once external execution; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: EXECUTION / guarded-dispatch; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Guarded durable submission dispatcher is integrated on main at f8ef287d43516ed56f722d2cad5f366287bbafb8 with revoke-race, timeout and crash-ambiguity tests at e8edfdd0fc081bf82acad9564f7d620f90427e2a. Remaining WP-18 work includes qualified provider send seams, stable provider-compatible client IDs, quota/retry interception and crash-at-every-send-point qualification.
 
 ### WP-19 — order-projection
 
@@ -839,8 +839,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Host/Observability/ and its contract/qualification evidence.
 - **Forbidden scope:** Logs substituted for durable financial journal; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: OBSERVABILITY / decision-traces; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Evidence-bound diagnostic reconstruction is integrated on main at 8c82628b9f6d8779fd225f59107f8ca75a39334c. It rebuilds simulated decision traces from durable journal plus evidence, rejects linkage/tamper gaps, samples pending outbox backlog, redacts credential-shaped fields and provides line-oriented accessible diagnostics. Remaining WP-47 work includes production metrics/tracing, richer backlog/resource diagnostics, exact build/source evidence export and Windows/NVDA qualification.
 
 ### WP-48 — runtime-failure-control
 

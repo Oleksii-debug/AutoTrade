@@ -72,6 +72,16 @@ class ExecutionRealismTests(unittest.TestCase):
         self.assertEqual(result.filled_quantity, Decimal("0"))
         self.assertIsNone(result.trade_time)
 
+    def test_execution_result_retains_event_and_availability_time(self):
+        observation = top(
+            market_time="2026-09-24T10:00:00.200000Z",
+            available_at="2026-09-24T10:00:00.900000Z",
+        )
+        result = simulate_execution(order(), observation, model())
+        self.assertEqual(result.trade_time, observation.market_time)
+        self.assertEqual(result.evidence_available_at, observation.available_at)
+        self.assertGreater(result.evidence_available_at, result.trade_time)
+
     def test_latency_pushes_arrival_past_otherwise_future_quote(self):
         result = simulate_execution(
             order(),

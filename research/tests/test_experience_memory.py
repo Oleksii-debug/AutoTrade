@@ -96,6 +96,79 @@ class ExperienceMemoryTests(unittest.TestCase):
             self.assertEqual(retrieved[0]["corrections"][0]["outcome"]["label"], "reconciled")
 
 
+    def test_correction_retry_without_explicit_availability_is_idempotent(self):
+        with TemporaryDirectory() as directory:
+            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("pending"),
+            )
+            correction_id = "00000000-0000-0000-0000-000000000099"
+            correction = {
+                "supersedes_fields": ["outcome"],
+                "outcome": {"label": "late"},
+                "evidence_ref": "artifact:retry",
+            }
+            first, inserted = store.append_correction(
+                episode,
+                correction_id=correction_id,
+                payload=correction,
+            )
+            second, inserted_again = store.append_correction(
+                episode,
+                correction_id=correction_id,
+                payload=correction,
+            )
+            self.assertTrue(inserted)
+            self.assertFalse(inserted_again)
+            self.assertEqual(first, second)
+
+    def test_legacy_correction_hash_remains_idempotent_after_schema_migration(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.sqlite3"
+            store = ExperienceMemory(path)
+            episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("pending"),
+            )
+            correction_id = "00000000-0000-0000-0000-000000000098"
+            correction = {
+                "supersedes_fields": ["outcome"],
+                "outcome": {"label": "legacy"},
+                "evidence_ref": "artifact:legacy",
+            }
+            store.append_correction(
+                episode,
+                correction_id=correction_id,
+                available_at=BASE,
+                payload=correction,
+            )
+            from research.autotrade_research.memory.episodes import _hash
+            with store._connect() as con:
+                con.execute(
+                    "UPDATE corrections SET correction_hash=?, available_at=NULL WHERE correction_id=?",
+                    (_hash(correction), correction_id),
+                )
+
+            reopened = ExperienceMemory(path)
+            same_id, inserted_again = reopened.append_correction(
+                episode,
+                correction_id=correction_id,
+                payload=correction,
+            )
+            self.assertEqual(same_id, correction_id)
+            self.assertFalse(inserted_again)
+
     def test_future_correction_is_not_visible_before_its_evidenced_availability(self):
         with TemporaryDirectory() as directory:
             store = ExperienceMemory(Path(directory) / "memory.sqlite3")

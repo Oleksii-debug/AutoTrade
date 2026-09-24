@@ -251,6 +251,42 @@ def apply_inverse_variation_margin(
     )
 
 
+def settle_and_book_inverse_variation_margin(
+    *,
+    transaction_id: str,
+    cause_event_id: str,
+    contract: FuturesContract,
+    exact_amount: Fraction,
+    settlement_quantum: Decimal | str,
+    rounding: Literal["HALF_EVEN", "DOWN"] = "HALF_EVEN",
+) -> tuple[Decimal, JournalTransaction | None]:
+    """Round only at the explicit settlement boundary and book exact currency truth.
+
+    A sub-quantum amount that rounds to zero creates no artificial zero posting.
+    The caller retains the exact rational amount as evidence; the returned Decimal
+    is the provider-facing cash settlement amount.
+    """
+
+    if not isinstance(contract, FuturesContract) or contract.payoff != "INVERSE":
+        raise FuturesError("inverse settlement booking requires an INVERSE futures contract")
+    settled = settle_fraction(
+        exact_amount,
+        quantum=settlement_quantum,
+        rounding=rounding,
+    )
+    if settled == 0:
+        return settled, None
+    return (
+        settled,
+        book_variation_margin(
+            transaction_id=transaction_id,
+            cause_event_id=cause_event_id,
+            settlement_currency=contract.settlement_currency,
+            amount=settled,
+        ),
+    )
+
+
 def unrealized_inverse_after_variation(
     state: InverseVariationMarginState,
     mark_price: Decimal | str | int,

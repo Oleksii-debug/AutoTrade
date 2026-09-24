@@ -257,6 +257,7 @@ class BudgetLedger:
         self._reserved: dict[str, Decimal] = {}
         self._incurred = Decimal("0")
         self._estimated_unbilled = Decimal("0")
+        self._reconciled_bills: dict[str, Decimal] = {}
 
     def snapshot(self) -> BudgetSnapshot:
         return BudgetSnapshot(
@@ -307,11 +308,20 @@ class BudgetLedger:
         self._incurred += incurred
         self._estimated_unbilled += estimated_unbilled
 
-    def reconcile_unbilled(self, *, billed: Decimal) -> None:
+    def reconcile_unbilled(self, *, billing_id: str, billed: Decimal) -> None:
+        if not isinstance(billing_id, str) or not billing_id.strip():
+            raise ValueError("billing_id is required")
+        identifier = billing_id.strip()
         billed = _exact_decimal(billed, "billed cost")
         if billed < 0:
             raise ValueError("billed cost cannot be negative")
+        prior = self._reconciled_bills.get(identifier)
+        if prior is not None:
+            if prior != billed:
+                raise ValueError("billing reconciliation conflict")
+            return
         if billed > self._estimated_unbilled:
             raise ValueError("billed cost exceeds estimated unbilled amount")
         self._estimated_unbilled -= billed
         self._incurred += billed
+        self._reconciled_bills[identifier] = billed

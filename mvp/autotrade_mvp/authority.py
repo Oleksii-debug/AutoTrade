@@ -65,17 +65,25 @@ class AuthorityPolicy:
         autonomous: bool,
         protection_only: bool = False,
     ) -> "AuthorityPolicy":
-        normalized_environments = frozenset(str(item).upper() for item in environments)
+        normalized_environments = frozenset(
+            _text(item, name="environment").upper() for item in environments
+        )
         if not normalized_environments or not normalized_environments <= {"SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("environments must contain supported values")
-        normalized_instruments = frozenset(_text(str(item), name="instrument") for item in instruments)
-        normalized_actions = frozenset(str(item).upper() for item in actions)
+        normalized_instruments = frozenset(
+            _text(item, name="instrument") for item in instruments
+        )
+        normalized_actions = frozenset(
+            _text(item, name="action").upper() for item in actions
+        )
         if not normalized_instruments or not normalized_actions:
             raise ValueError("instruments and actions must be non-empty")
         notional = _decimal(max_notional, name="max_notional")
         if notional <= 0:
             raise ValueError("max_notional must be positive")
         _instant(expires_at, name="expires_at")
+        if not isinstance(autonomous, bool) or not isinstance(protection_only, bool):
+            raise TypeError("autonomous and protection_only must be booleans")
         return cls(
             policy_id=_text(policy_id, name="policy_id"),
             account_id=_text(account_id, name="account_id"),
@@ -84,8 +92,8 @@ class AuthorityPolicy:
             actions=normalized_actions,
             max_notional=notional,
             expires_at=expires_at,
-            autonomous=bool(autonomous),
-            protection_only=bool(protection_only),
+            autonomous=autonomous,
+            protection_only=protection_only,
         )
 
 
@@ -102,6 +110,12 @@ class AdmissionRecord:
     admission_id: str
     policy_id: str
     intent_hash: str
+    account_id: str
+    environment: str
+    instrument: str
+    action: str
+    notional: Decimal
+    risk_reducing: bool
     state_version: int
     authority_epoch: int
     outcome: str
@@ -182,8 +196,11 @@ class AuthorityService:
 
     def _policy_active(self, policy: AuthorityPolicy, now: str) -> tuple[bool, str]:
         current = _instant(now, name="now")
-        if policy.policy_id in self._revocations:
-            return False, "policy_revoked"
+        revocation = self._revocations.get(policy.policy_id)
+        if revocation is not None:
+            _, revoked_at = revocation
+            if current >= _instant(revoked_at, name="revoked_at"):
+                return False, "policy_revoked"
         if current >= _instant(policy.expires_at, name="policy.expires_at"):
             return False, "policy_expired"
         return True, "active"
@@ -286,6 +303,12 @@ class AuthorityService:
             admission_id=aid,
             policy_id=pid,
             intent_hash=ihash,
+            account_id=account,
+            environment=env,
+            instrument=symbol,
+            action=normalized_action,
+            notional=amount,
+            risk_reducing=risk_reducing,
             state_version=state_version,
             authority_epoch=self._epoch,
             outcome=outcome,
@@ -304,6 +327,10 @@ class AuthorityService:
         admission_id: str,
         *,
         intent_hash: str,
+        account_id: str,
+        environment: str,
+        instrument: str,
+        action: str,
         now: str,
     ) -> tuple[bool, str]:
         record = self._admissions.get(_text(admission_id, name="admission_id"))
@@ -313,6 +340,20 @@ class AuthorityService:
             return False, "admission_not_admitted"
         if record.intent_hash != _text(intent_hash, name="intent_hash"):
             return False, "intent_hash_changed"
+        scope = (
+            _text(account_id, name="account_id"),
+            _text(environment, name="environment").upper(),
+            _text(instrument, name="instrument"),
+            _text(action, name="action").upper(),
+        )
+        recorded_scope = (
+            record.account_id,
+            record.environment,
+            record.instrument,
+            record.action,
+        )
+        if scope != recorded_scope:
+            return False, "admission_scope_changed"
         policy = self._policies[record.policy_id]
         active, reason = self._policy_active(policy, now)
         if not active:

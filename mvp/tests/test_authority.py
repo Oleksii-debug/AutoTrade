@@ -1,6 +1,9 @@
 import unittest
 from decimal import Decimal
+from tempfile import TemporaryDirectory
 
+from mvp.autotrade_mvp.dispatch import GuardedDispatcher
+from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.authority import (
     AuthorityPolicy,
     AuthorityService,
@@ -524,6 +527,66 @@ class AuthorityTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "admission_id"):
             service.admit(**{**base, "instrument_version": 2})
 
+
+
+    def test_final_dispatch_barrier_rechecks_revocation_for_exact_instrument_version(self):
+        with TemporaryDirectory() as directory:
+            service = AuthorityService()
+            service.register_policy(policy(autonomous=True))
+            admitted = service.admit(
+                admission_id="a-final",
+                policy_id="p1",
+                intent_hash="h-final",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                state_version=1,
+                risk_admitted=True,
+                now="2026-09-24T18:00:00Z",
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+            guard = service.dispatch_guard(
+                "a-final",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+            )
+            dispatcher = GuardedDispatcher(
+                JournalStore(f"{directory}/journal.sqlite3"),
+                owner_token="owner",
+            )
+            outbound = 0
+
+            def transport(client_id, request, final_guard):
+                nonlocal outbound
+                service.revoke_policy(
+                    "p1",
+                    reason="operator revoke",
+                    revoked_at="2026-09-24T18:00:01Z",
+                )
+                final_guard()
+                outbound += 1
+                return {"ok": True}
+
+            result = dispatcher.dispatch(
+                attempt_id="attempt-final",
+                intent_id="intent-final",
+                intent_hash="h-final",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=guard,
+                transport_send=transport,
+                final_barrier_clock=lambda: "2026-09-24T18:00:02Z",
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "policy_revoked")
+            self.assertEqual(outbound, 0)
 
 
 if __name__ == "__main__":

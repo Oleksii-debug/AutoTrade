@@ -9,6 +9,11 @@ from types import MappingProxyType
 from typing import Mapping, Sequence
 
 
+_REQUIRED_ABSENCE_SURFACES = frozenset(
+    {"OPEN_ORDERS", "ORDER_HISTORY", "EXECUTIONS", "ACTIVITIES"}
+)
+
+
 def _decimal(value, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")
@@ -36,6 +41,44 @@ def _instant(value: str, *, name: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError(f"{name} must include timezone")
     return parsed.astimezone(timezone.utc)
+
+
+@dataclass(frozen=True)
+class CoverageSurfaceEvidence:
+    surface: str
+    coverage_start: str
+    coverage_end: str
+    pagination_complete: bool
+    consistency_horizon_satisfied: bool
+    provider_semantics_exclude_execution: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "surface",
+            _text(self.surface, name="surface").upper(),
+        )
+        start = _instant(self.coverage_start, name="coverage_start")
+        end = _instant(self.coverage_end, name="coverage_end")
+        if end < start:
+            raise ValueError("coverage_end must not precede coverage_start")
+        for field in (
+            "pagination_complete",
+            "consistency_horizon_satisfied",
+            "provider_semantics_exclude_execution",
+        ):
+            if type(getattr(self, field)) is not bool:
+                raise TypeError(f"{field} must be boolean")
+
+    def proves_absence_for(self, instant: datetime) -> bool:
+        start = _instant(self.coverage_start, name="coverage_start")
+        end = _instant(self.coverage_end, name="coverage_end")
+        return (
+            self.pagination_complete
+            and self.consistency_horizon_satisfied
+            and self.provider_semantics_exclude_execution
+            and start <= instant <= end
+        )
 
 
 @dataclass(frozen=True)
@@ -142,6 +185,34 @@ def _amount_map(
     return result
 
 
+def _absence_coverage_index(
+    evidence: Sequence[CoverageSurfaceEvidence],
+) -> dict[str, CoverageSurfaceEvidence]:
+    result: dict[str, CoverageSurfaceEvidence] = {}
+    for item in evidence:
+        if not isinstance(item, CoverageSurfaceEvidence):
+            raise TypeError(
+                "absence_coverage must contain CoverageSurfaceEvidence"
+            )
+        if item.surface in result:
+            raise ValueError(
+                f"duplicate absence coverage surface: {item.surface}"
+            )
+        result[item.surface] = item
+    return result
+
+
+def _absence_is_proven(
+    evidence: Mapping[str, CoverageSurfaceEvidence],
+    submission_time: datetime,
+) -> bool:
+    return all(
+        surface in evidence
+        and evidence[surface].proves_absence_for(submission_time)
+        for surface in _REQUIRED_ABSENCE_SURFACES
+    )
+
+
 def reconcile_account(
     *,
     local_cash: Mapping[str, object],
@@ -155,15 +226,18 @@ def reconcile_account(
     coverage_start: str,
     coverage_end: str,
     pagination_complete: bool,
+    absence_coverage: Sequence[CoverageSurfaceEvidence] = (),
     cash_tolerance: Mapping[str, object] | None = None,
     position_tolerance: Mapping[str, object] | None = None,
 ) -> ReconciliationResult:
     """Compare local and provider truth without inventing absence evidence.
 
-    A previously UNKNOWN send becomes PROVEN_ABSENT only when activity coverage
-    is complete, the provider lookup explicitly searched its client order id,
-    and the coverage window includes the submission start time. Otherwise it
-    remains UNKNOWN and blocks affected new risk.
+    A previously UNKNOWN send becomes PROVEN_ABSENT only when the provider
+    lookup explicitly searched its client order id and open-order, order-history,
+    execution and activity surfaces each provide complete coverage across the
+    submission instant, their consistency horizons have elapsed, and provider
+    semantics explicitly exclude execution. Otherwise it remains UNKNOWN and
+    blocks affected new risk.
     """
 
     if not isinstance(pagination_complete, bool):
@@ -235,6 +309,7 @@ def reconcile_account(
         _text(value, name="searched_client_order_id")
         for value in searched_client_order_ids
     }
+    absence_evidence = _absence_coverage_index(absence_coverage)
     resolutions: list[SubmissionResolution] = []
     for submission in unknown_submissions:
         if not isinstance(submission, UnknownSubmission):
@@ -249,17 +324,23 @@ def reconcile_account(
             pagination_complete
             and submission.client_order_id in searched
             and start <= submission_time <= end
+            and _absence_is_proven(absence_evidence, submission_time)
         ):
             outcome = "PROVEN_ABSENT"
-            reason = "complete_activity_window_and_explicit_client_id_search"
+            reason = (
+                "complete_open_history_execution_activity_coverage_"
+                "with_elapsed_consistency_horizons_and_provider_semantics"
+            )
         else:
             outcome = "UNKNOWN"
             if not pagination_complete:
                 reason = "provider_activity_pagination_incomplete"
             elif submission.client_order_id not in searched:
                 reason = "client_order_id_not_explicitly_searched"
-            else:
+            elif not (start <= submission_time <= end):
                 reason = "submission_time_outside_complete_coverage"
+            else:
+                reason = "absence_surface_evidence_incomplete"
         resolutions.append(
             SubmissionResolution(
                 attempt_id=submission.attempt_id,

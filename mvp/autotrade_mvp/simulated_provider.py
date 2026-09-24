@@ -66,6 +66,11 @@ def _uuid(namespace: str, key: str) -> str:
     return str(uuid5(NAMESPACE_URL, f"https://sim.autotrade.local/{namespace}/{key}"))
 
 
+def _unit_id(instrument_version: str) -> str:
+    digest = sha256(instrument_version.encode("utf-8")).hexdigest()[:16]
+    return f"unit:contract:{digest}"
+
+
 def _evidence(kind: str, key: str, observed_at: str, payload: Any) -> dict[str, str]:
     encoded = json.dumps(
         payload,
@@ -244,7 +249,7 @@ class SimulatedProvider:
             "side": order.side,
             "last_quantity": {
                 "value": _decimal_text(order.quantity),
-                "unit": f"unit:{order.instrument_version}",
+                "unit": _unit_id(order.instrument_version),
             },
             "last_price": _decimal_text(order.price),
             "trade_time": now,
@@ -314,8 +319,8 @@ class SimulatedProvider:
                 "instrument_version": instrument,
                 "position_side": "NET",
                 "quantity": {
-                    "value": _decimal_text(abs(quantity)),
-                    "unit": f"unit:{instrument}",
+                    "value": _decimal_text(quantity),
+                    "unit": _unit_id(instrument),
                 },
                 "source": "SIMULATED_PROVIDER",
                 "as_of": now,

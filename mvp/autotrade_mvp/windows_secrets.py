@@ -536,6 +536,11 @@ class ProtectedCredentialVault:
                 raise PermissionError("Credential handle generation is stale")
             if record["owner_identity"] != owner:
                 raise PermissionError("Secret identity mismatch")
+            self._prove_current_identity_can_decrypt(
+                record,
+                current,
+                owner_identity=owner,
+            )
             record["active"] = False
             record["ciphertext"] = b64encode(os.urandom(32)).decode("ascii")
             self._write(state)

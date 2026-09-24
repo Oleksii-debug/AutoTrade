@@ -216,9 +216,9 @@ def exercise_gate(contract: OptionContract, at: datetime) -> str:
         return "EXPIRED"
     if point >= contract.exercise_cutoff:
         return "EXERCISE_WINDOW_CLOSED"
-    if contract.exercise_style == "EUROPEAN" and contract.exercise_opens_at is None:
+    if contract.exercise_opens_at is None:
         return "EXERCISE_SCHEDULE_UNKNOWN"
-    if contract.exercise_opens_at is not None and point < contract.exercise_opens_at:
+    if point < contract.exercise_opens_at:
         return "EXERCISE_NOT_YET_OPEN"
     return "OPEN"
 

@@ -113,10 +113,32 @@ def _validate_temporal_protocol(payload: dict[str, Any]) -> None:
                 f"horizons[{index}] must be a positive integer number of seconds"
             )
         normalized_horizons.append(value)
-    if purge["purge_seconds"] < max(normalized_horizons):
+    longest_horizon = max(normalized_horizons)
+    if purge["purge_seconds"] < longest_horizon:
         raise ProtocolViolation(
             "purge_seconds must cover the longest registered label horizon"
         )
+    if purge["embargo_seconds"] < longest_horizon:
+        raise ProtocolViolation(
+            "embargo_seconds must cover the longest registered dependency horizon"
+        )
+
+    required_gap_seconds = max(
+        purge["purge_seconds"],
+        purge["embargo_seconds"],
+        longest_horizon,
+    )
+    for (left_name, _left_start, left_end), (
+        right_name,
+        right_start,
+        _right_end,
+    ) in zip(periods, periods[1:]):
+        actual_gap_seconds = (right_start - left_end).total_seconds()
+        if actual_gap_seconds < required_gap_seconds:
+            raise ProtocolViolation(
+                f"{left_name} to {right_name} gap is shorter than the "
+                "registered purge/embargo dependency horizon"
+            )
 
 
 class ProtocolConflict(ValueError):

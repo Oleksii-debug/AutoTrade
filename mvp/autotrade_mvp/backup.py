@@ -225,6 +225,12 @@ def _validate_artifact_source(root: Path) -> None:
                 raise BackupIntegrityError("Artifact manifest references a missing or corrupt object")
 
 
+def _text(value: object, *, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise BackupError(f"{name} must be non-empty text")
+    return value.strip()
+
+
 def _canonical_sha256_ref(value: str, *, name: str) -> str:
     if (
         not isinstance(value, str)

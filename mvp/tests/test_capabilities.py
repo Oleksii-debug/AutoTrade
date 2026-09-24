@@ -299,8 +299,27 @@ class CapabilityFoundationTests(unittest.TestCase):
         registry.add(snapshot)
         registry.add(snapshot)
 
-        with self.assertRaisesRegex(CapabilityError, "snapshot_id"):
-            registry.add(replace(snapshot, status="UNKNOWN"))
+        with self.assertRaisesRegex(
+            CapabilityError,
+            "only be created by derive_capability_snapshot",
+        ):
+            replace(snapshot, status="UNKNOWN")
+
+    def test_verified_snapshot_cannot_be_forged_with_dataclass_replace(self):
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(),
+            observed_at=NOW,
+        )
+        with self.assertRaisesRegex(
+            CapabilityError,
+            "only be created by derive_capability_snapshot",
+        ):
+            replace(
+                snapshot,
+                supported_order_types=frozenset({"LIMIT", "MARKET", "STOP"}),
+                permission_scopes=frozenset({"ORDER.READ", "ORDER.WRITE", "ADMIN"}),
+            )
 
     def test_expired_historical_claim_does_not_poison_newer_live_claim(self):
         claims = list(complete_claims())

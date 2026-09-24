@@ -1,4 +1,5 @@
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -45,8 +46,25 @@ FENCING_EVIDENCE = [
 ]
 
 
-def _fencing_evidence():
-    return [dict(item) for item in FENCING_EVIDENCE]
+def _restore_instant(restored: Path, seconds: int) -> str:
+    marker = json.loads(
+        (restored / "RESTORE_RECONCILIATION_REQUIRED.json").read_text(encoding="utf-8")
+    )
+    base = datetime.fromisoformat(marker["restored_at"].replace("Z", "+00:00"))
+    value = base.astimezone(timezone.utc) + timedelta(seconds=seconds)
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _fencing_evidence(restored: Path | None = None):
+    values = [dict(item) for item in FENCING_EVIDENCE]
+    if restored is not None:
+        for index, item in enumerate(values, start=1):
+            item["observed_at"] = _restore_instant(restored, index)
+    return values
+
+
+def _completed_at(restored: Path) -> str:
+    return _restore_instant(restored, 10)
 
 
 def _artifact_store(root: Path) -> str:
@@ -166,8 +184,8 @@ class BackupRestoreTests(unittest.TestCase):
                 restored,
                 controller=controller,
                 reconciliation=_reconciliation(),
-                fencing_evidence=_fencing_evidence(),
-                completed_at="2026-09-24T20:00:00Z",
+                fencing_evidence=_fencing_evidence(restored),
+                completed_at=_completed_at(restored),
             )
 
             self.assertEqual(controller.state, HostState.READY)
@@ -189,8 +207,8 @@ class BackupRestoreTests(unittest.TestCase):
                 restored,
                 controller=controller,
                 reconciliation=_resolved_absence_reconciliation(),
-                fencing_evidence=_fencing_evidence(),
-                completed_at="2026-09-24T20:00:00Z",
+                fencing_evidence=_fencing_evidence(restored),
+                completed_at=_completed_at(restored),
             )
 
             resolution = proof["submission_resolutions"][0]
@@ -213,8 +231,8 @@ class BackupRestoreTests(unittest.TestCase):
                     restored,
                     controller=controller,
                     reconciliation=_reconciliation(complete=False),
-                    fencing_evidence=_fencing_evidence()[:1],
-                    completed_at="2026-09-24T20:00:00Z",
+                    fencing_evidence=_fencing_evidence(restored)[:1],
+                    completed_at=_completed_at(restored),
                 )
             self.assertTrue(restore_requires_reconciliation(restored))
 
@@ -233,7 +251,7 @@ class BackupRestoreTests(unittest.TestCase):
                     controller=controller,
                     reconciliation=_reconciliation(),
                     fencing_evidence=[],
-                    completed_at="2026-09-24T20:00:00Z",
+                    completed_at=_completed_at(restored),
                 )
             self.assertTrue(restore_requires_reconciliation(restored))
 
@@ -251,7 +269,7 @@ class BackupRestoreTests(unittest.TestCase):
                     controller=controller,
                     reconciliation=_reconciliation(),
                     fencing_evidence=["old-host:fenced"],
-                    completed_at="2026-09-24T20:00:00Z",
+                    completed_at=_completed_at(restored),
                 )
             self.assertTrue(restore_requires_reconciliation(restored))
 
@@ -264,25 +282,57 @@ class BackupRestoreTests(unittest.TestCase):
             controller = RecoveryController()
             controller.start("restored-host")
 
-            duplicate = _fencing_evidence()[:1] * 2
+            duplicate = _fencing_evidence(restored)[:1] * 2
             with self.assertRaisesRegex(BackupError, "unique"):
                 complete_restore_reconciliation(
                     restored,
                     controller=controller,
                     reconciliation=_reconciliation(),
                     fencing_evidence=duplicate,
-                    completed_at="2026-09-24T20:00:00Z",
+                    completed_at=_completed_at(restored),
                 )
 
-            future = _fencing_evidence()[:1]
-            future[0]["observed_at"] = "2026-09-24T20:00:01Z"
+            future = _fencing_evidence(restored)[:1]
+            future[0]["observed_at"] = _restore_instant(restored, 11)
             with self.assertRaisesRegex(BackupError, "postdate"):
                 complete_restore_reconciliation(
                     restored,
                     controller=controller,
                     reconciliation=_reconciliation(),
                     fencing_evidence=future,
-                    completed_at="2026-09-24T20:00:00Z",
+                    completed_at=_completed_at(restored),
+                )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_stale_or_semantically_unbound_fencing_evidence_cannot_clear_gate(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = RecoveryController()
+            controller.start("restored-host")
+
+            stale = _fencing_evidence(restored)[:1]
+            stale[0]["observed_at"] = _restore_instant(restored, -1)
+            with self.assertRaisesRegex(BackupError, "predate"):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation=_reconciliation(),
+                    fencing_evidence=stale,
+                    completed_at=_completed_at(restored),
+                )
+
+            unrelated = _fencing_evidence(restored)[:1]
+            unrelated[0]["rights_id"] = "recovery:unrelated"
+            with self.assertRaisesRegex(BackupError, "recovery:fencing"):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation=_reconciliation(),
+                    fencing_evidence=unrelated,
+                    completed_at=_completed_at(restored),
                 )
             self.assertTrue(restore_requires_reconciliation(restored))
 
@@ -298,8 +348,8 @@ class BackupRestoreTests(unittest.TestCase):
                 restored,
                 controller=controller,
                 reconciliation=_reconciliation(),
-                fencing_evidence=_fencing_evidence()[:1],
-                completed_at="2026-09-24T20:00:00Z",
+                fencing_evidence=_fencing_evidence(restored)[:1],
+                completed_at=_completed_at(restored),
             )
             proof_path = restored / "RESTORE_RECONCILIATION_COMPLETE.json"
             payload = json.loads(proof_path.read_text(encoding="utf-8"))
@@ -319,8 +369,8 @@ class BackupRestoreTests(unittest.TestCase):
                 restored,
                 controller=controller,
                 reconciliation=_reconciliation(),
-                fencing_evidence=_fencing_evidence()[:1],
-                completed_at="2026-09-24T20:00:00Z",
+                fencing_evidence=_fencing_evidence(restored)[:1],
+                completed_at=_completed_at(restored),
             )
 
             proof_path = restored / "RESTORE_RECONCILIATION_COMPLETE.json"
@@ -365,8 +415,8 @@ class BackupRestoreTests(unittest.TestCase):
                 restored,
                 controller=controller,
                 reconciliation=_reconciliation(),
-                fencing_evidence=_fencing_evidence()[:1],
-                completed_at="2026-09-24T20:00:00Z",
+                fencing_evidence=_fencing_evidence(restored)[:1],
+                completed_at=_completed_at(restored),
             )
             proof_path = restored / "RESTORE_RECONCILIATION_COMPLETE.json"
             marker_path = restored / "RESTORE_RECONCILIATION_REQUIRED.json"

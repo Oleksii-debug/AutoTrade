@@ -155,6 +155,70 @@ class HistoricalVintageTests(unittest.TestCase):
                 datetime(2026, 1, 2, tzinfo=timezone.utc),
             )
 
+    def test_revision_lineage_cannot_move_availability_backwards(self):
+        event_id = str(uuid4())
+        common = {
+            "event_id": event_id,
+            "instrument_version": "instrument:v1",
+            "kind": "TRADE",
+            "source_event_at": "2026-01-01T10:00:00Z",
+            "availability_basis": "provider",
+            "quality_flags": [],
+            "raw_evidence_ref": evidence("2026-01-02T00:00:00Z"),
+        }
+        revision_one = {
+            **common,
+            "available_at": "2026-01-01T10:05:00Z",
+            "ingested_at": "2026-01-01T10:05:01Z",
+            "revision": "1",
+            "payload": {"price": "10"},
+        }
+        revision_two = {
+            **common,
+            "available_at": "2026-01-01T10:04:00Z",
+            "ingested_at": "2026-01-01T10:04:01Z",
+            "revision": "2",
+            "payload": {"price": "11"},
+        }
+        with self.assertRaisesRegex(HistoricalConflict, "cannot move backwards"):
+            point_in_time_market_events(
+                [revision_one, revision_two],
+                datetime(2026, 1, 2, tzinfo=timezone.utc),
+            )
+
+    def test_revision_lineage_cannot_change_source_identity(self):
+        event_id = str(uuid4())
+        common = {
+            "event_id": event_id,
+            "instrument_version": "instrument:v1",
+            "kind": "TRADE",
+            "availability_basis": "provider",
+            "quality_flags": [],
+            "raw_evidence_ref": evidence("2026-01-02T00:00:00Z"),
+        }
+        with self.assertRaisesRegex(HistoricalConflict, "source identity"):
+            point_in_time_market_events(
+                [
+                    {
+                        **common,
+                        "source_event_at": "2026-01-01T10:00:00Z",
+                        "available_at": "2026-01-01T10:01:00Z",
+                        "ingested_at": "2026-01-01T10:01:01Z",
+                        "revision": "1",
+                        "payload": {"price": "10"},
+                    },
+                    {
+                        **common,
+                        "source_event_at": "2026-01-01T10:00:01Z",
+                        "available_at": "2026-01-01T10:02:00Z",
+                        "ingested_at": "2026-01-01T10:02:01Z",
+                        "revision": "2",
+                        "payload": {"price": "11"},
+                    },
+                ],
+                datetime(2026, 1, 2, tzinfo=timezone.utc),
+            )
+
     def test_point_in_time_universe_retains_delisted_asset(self):
         delisted_id = str(uuid4())
         future_id = str(uuid4())

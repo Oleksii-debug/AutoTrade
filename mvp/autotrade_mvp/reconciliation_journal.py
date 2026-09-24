@@ -60,6 +60,9 @@ def reconciliation_payload(
         "missing_local_working_client_order_ids": list(
             result.missing_local_working_client_order_ids
         ),
+        "mismatched_working_client_order_ids": list(
+            result.mismatched_working_client_order_ids
+        ),
         "cash_differences": _decimal_map(result.cash_differences),
         "position_differences": _decimal_map(result.position_differences),
         "submission_resolutions": [

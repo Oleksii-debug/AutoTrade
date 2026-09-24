@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
+from .accessibility import format_accessible_status
 from .economics import build_economic_report
 from .pipeline import run_multi_episode, run_vertical_slice, verify_replay
 
@@ -56,11 +57,22 @@ def main() -> int:
     parser.add_argument("--state-dir", default="mvp-state")
     parser.add_argument("--prices", default="100,101,102,103")
     parser.add_argument("--status", action="store_true", help="Show the current status")
+    parser.add_argument("--accessible-status", action="store_true", help="Show a stable plain-text status for keyboard and screen-reader use")
     parser.add_argument("--economic-report", action="store_true", help="Show evidence-bound simulated economics")
     parser.add_argument("--multi-episode", action="store_true", help="Run semicolon-separated episodes")
     args = parser.parse_args()
     if args.status:
         print(json.dumps(get_status(args.state_dir), indent=2))
+        return 0
+    if args.accessible_status:
+        status = get_status(args.state_dir)
+        economic_report = None
+        if status.get("status") in {"running", "needs_recovery"}:
+            try:
+                economic_report = build_economic_report(args.state_dir).as_jsonable()
+            except ValueError:
+                economic_report = None
+        print(format_accessible_status(status, economic_report))
         return 0
     if args.economic_report:
         print(json.dumps(build_economic_report(args.state_dir).as_jsonable(), indent=2))

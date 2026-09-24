@@ -107,6 +107,35 @@ class ReconciliationJournalTests(unittest.TestCase):
             self.assertEqual(latest["owner_epoch"], "7")
             self.assertEqual(latest["environment"], "PAPER")
 
+    def test_same_payload_with_new_owner_epoch_appends_new_version(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            result = reconciliation()
+            first = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="acct-fence",
+                result=result,
+                observed_at="2026-09-24T19:00:00Z",
+                owner_epoch=7,
+                environment="PAPER",
+            )
+            second = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="acct-fence",
+                result=result,
+                observed_at="2026-09-24T19:00:00Z",
+                owner_epoch=8,
+                environment="PAPER",
+            )
+            self.assertNotEqual(first["event_id"], second["event_id"])
+            events = store.load_events("account_reconciliation", "acct-fence")
+            self.assertEqual(
+                [event["aggregate_version"] for event in events],
+                [1, 2],
+            )
+            self.assertEqual(events[0]["owner_epoch"], "7")
+            self.assertEqual(events[1]["owner_epoch"], "8")
+
     def test_changed_checkpoint_appends_new_version(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

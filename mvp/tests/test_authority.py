@@ -139,6 +139,41 @@ class AuthorityTests(unittest.TestCase):
         )
         self.assertEqual(active.outcome, "ADMITTED")
 
+    def test_direct_policy_construction_cannot_bypass_confirmation_with_truthy_string(self):
+        with self.assertRaisesRegex(TypeError, "must be booleans"):
+            AuthorityPolicy(
+                policy_id="unsafe-direct",
+                account_id="paper-1",
+                environments=frozenset({"PAPER"}),
+                instruments=frozenset({"ABC"}),
+                actions=frozenset({"ORDER.SUBMIT"}),
+                max_notional=Decimal("1000"),
+                valid_from="2026-09-24T00:00:00Z",
+                expires_at="2026-09-25T00:00:00Z",
+                autonomous="false",
+                protection_only=False,
+            )
+
+    def test_direct_policy_construction_normalizes_same_authority_invariants(self):
+        direct = AuthorityPolicy(
+            policy_id=" direct ",
+            account_id=" paper-1 ",
+            environments=frozenset({"paper"}),
+            instruments=frozenset({" ABC "}),
+            actions=frozenset({"order.submit"}),
+            max_notional="1000",
+            valid_from="2026-09-24T00:00:00Z",
+            expires_at="2026-09-25T00:00:00Z",
+            autonomous=False,
+            protection_only=False,
+        )
+        self.assertEqual(direct.policy_id, "direct")
+        self.assertEqual(direct.account_id, "paper-1")
+        self.assertEqual(direct.environments, frozenset({"PAPER"}))
+        self.assertEqual(direct.instruments, frozenset({"ABC"}))
+        self.assertEqual(direct.actions, frozenset({"ORDER.SUBMIT"}))
+        self.assertEqual(direct.max_notional, Decimal("1000"))
+
     def test_policy_requires_nonempty_validity_window(self):
         with self.assertRaisesRegex(ValueError, "valid_from must precede expires_at"):
             policy(

@@ -179,3 +179,83 @@ def route_model(
         chosen.estimated_cost,
         "admitted",
     )
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetSnapshot:
+    ceiling: Decimal
+    reserved: Decimal
+    incurred: Decimal
+    estimated_unbilled: Decimal
+
+    @property
+    def available(self) -> Decimal:
+        used = self.reserved + self.incurred + self.estimated_unbilled
+        remaining = self.ceiling - used
+        return remaining if remaining > 0 else Decimal("0")
+
+
+class BudgetLedger:
+    """In-memory accounting primitive for model-call cost ceilings.
+
+    Persistence is intentionally deferred to the journal integration work.
+    """
+
+    def __init__(self, ceiling: Decimal) -> None:
+        if ceiling < 0:
+            raise ValueError("budget ceiling cannot be negative")
+        self._ceiling = ceiling
+        self._reserved: dict[str, Decimal] = {}
+        self._incurred = Decimal("0")
+        self._estimated_unbilled = Decimal("0")
+
+    def snapshot(self) -> BudgetSnapshot:
+        return BudgetSnapshot(
+            ceiling=self._ceiling,
+            reserved=sum(self._reserved.values(), Decimal("0")),
+            incurred=self._incurred,
+            estimated_unbilled=self._estimated_unbilled,
+        )
+
+    def reserve(self, request_id: str, amount: Decimal) -> None:
+        if not request_id:
+            raise ValueError("request_id is required")
+        if amount < 0:
+            raise ValueError("reservation cannot be negative")
+        prior = self._reserved.get(request_id)
+        if prior is not None:
+            if prior != amount:
+                raise ValueError("reservation conflict")
+            return
+        if amount > self.snapshot().available:
+            raise ValueError("budget exhausted")
+        self._reserved[request_id] = amount
+
+    def release(self, request_id: str) -> Decimal:
+        return self._reserved.pop(request_id, Decimal("0"))
+
+    def settle(
+        self,
+        request_id: str,
+        *,
+        incurred: Decimal,
+        estimated_unbilled: Decimal = Decimal("0"),
+    ) -> None:
+        if incurred < 0 or estimated_unbilled < 0:
+            raise ValueError("costs cannot be negative")
+        reserved = self._reserved.pop(request_id, None)
+        if reserved is None:
+            raise ValueError("unknown reservation")
+        if incurred + estimated_unbilled > reserved:
+            self._reserved[request_id] = reserved
+            raise ValueError("settlement exceeds reserved ceiling")
+        self._incurred += incurred
+        self._estimated_unbilled += estimated_unbilled
+
+    def reconcile_unbilled(self, *, billed: Decimal) -> None:
+        if billed < 0:
+            raise ValueError("billed cost cannot be negative")
+        if billed > self._estimated_unbilled:
+            raise ValueError("billed cost exceeds estimated unbilled amount")
+        self._estimated_unbilled -= billed
+        self._incurred += billed

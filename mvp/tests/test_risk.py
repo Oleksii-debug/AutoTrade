@@ -313,6 +313,64 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertTrue(coverage.passed)
         self.assertTrue(decision.admitted)
 
+    def test_context_financial_identity_keys_are_canonicalized(self):
+        normalized = context(
+            positions={" ABC ": "2"},
+            marks={" ABC ": "100"},
+            reserved_position_delta={" ABC ": "1"},
+            fx_age_seconds={" USD ": "10"},
+            stress_scenarios=({" ABC ": "-0.10"},),
+        )
+        self.assertEqual(dict(normalized.positions), {"ABC": Decimal("2")})
+        self.assertEqual(dict(normalized.marks), {"ABC": Decimal("100")})
+        self.assertEqual(
+            dict(normalized.reserved_position_delta),
+            {"ABC": Decimal("1")},
+        )
+        self.assertEqual(dict(normalized.fx_age_seconds), {"USD": Decimal("10")})
+        self.assertEqual(
+            dict(normalized.stress_scenarios[0]),
+            {"ABC": Decimal("-0.10")},
+        )
+
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol=" ABC ",
+                side="BUY",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+            ),
+            normalized,
+            policy(),
+        )
+        self.assertEqual(decision.resulting_position, Decimal("4"))
+        self.assertTrue(decision.admitted)
+
+    def test_context_rejects_duplicate_financial_identity_after_normalization(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "positions keys must be unique after normalization",
+        ):
+            context(positions={"ABC": "1", " ABC ": "2"})
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "stress_scenarios\[0\] keys must be unique after normalization",
+        ):
+            context(
+                stress_scenarios=(
+                    {"ABC": "-0.10", " ABC ": "-0.20"},
+                )
+            )
+
+    def test_context_rejects_non_string_financial_identity_keys(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "marks keys must be non-empty strings",
+        ):
+            context(marks={1: "100"})
+
     def test_float_inputs_are_rejected(self):
         with self.assertRaises(TypeError):
             RiskPolicy.create(

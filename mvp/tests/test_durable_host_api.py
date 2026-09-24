@@ -161,6 +161,21 @@ class JournalBackedHostApiTests(unittest.TestCase):
         self.assertEqual(retried, stale)
         self.assertEqual(restarted.cursor, 1)
 
+    def test_unsupported_action_rejection_survives_restart_without_event(self):
+        first = self.store()
+        command = self.command(action="ARBITRARY_PROVIDER_COMMAND")
+        rejected = first.submit(command)
+        self.assertEqual(rejected.status, "REJECTED")
+        self.assertEqual(rejected.reason_codes, ("unsupported_action",))
+        self.assertEqual(first.state_version, 0)
+        self.assertEqual(first.cursor, 0)
+
+        restarted = self.store()
+        retried = restarted.submit(command)
+        self.assertEqual(retried, rejected)
+        self.assertEqual(restarted.state_version, 0)
+        self.assertEqual(restarted.cursor, 0)
+
     def test_unauthorized_session_never_reaches_journal(self):
         store = self.store()
         with self.assertRaises(PermissionError):

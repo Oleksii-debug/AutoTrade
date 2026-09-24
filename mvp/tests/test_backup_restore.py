@@ -246,6 +246,83 @@ class BackupRestoreTests(unittest.TestCase):
             proof_path.write_text(json.dumps(payload), encoding="utf-8")
             self.assertTrue(restore_requires_reconciliation(restored))
 
+    def test_self_consistent_but_unknown_restore_proof_keeps_gate_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = RecoveryController()
+            controller.start("restored-host")
+            complete_restore_reconciliation(
+                restored,
+                controller=controller,
+                reconciliation=_reconciliation(),
+                fencing_evidence=_fencing_evidence()[:1],
+                completed_at="2026-09-24T20:00:00Z",
+            )
+
+            proof_path = restored / "RESTORE_RECONCILIATION_COMPLETE.json"
+            marker_path = restored / "RESTORE_RECONCILIATION_REQUIRED.json"
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+            proof["submission_resolutions"] = [
+                {
+                    "attempt_id": "ambiguous-1",
+                    "client_order_id": "client-ambiguous",
+                    "outcome": "UNKNOWN",
+                    "provider_execution_ids": [],
+                }
+            ]
+            proof_bytes = (
+                json.dumps(
+                    proof,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                + "\n"
+            ).encode("utf-8")
+            proof_path.write_bytes(proof_bytes)
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker["completion_proof_sha256"] = "sha256:" + sha256(proof_bytes).hexdigest()
+            marker_path.write_text(
+                json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_boolean_owner_epoch_cannot_clear_restore_gate(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = RecoveryController()
+            controller.start("restored-host")
+            complete_restore_reconciliation(
+                restored,
+                controller=controller,
+                reconciliation=_reconciliation(),
+                fencing_evidence=_fencing_evidence()[:1],
+                completed_at="2026-09-24T20:00:00Z",
+            )
+            proof_path = restored / "RESTORE_RECONCILIATION_COMPLETE.json"
+            marker_path = restored / "RESTORE_RECONCILIATION_REQUIRED.json"
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+            proof["owner_epoch"] = True
+            proof_bytes = (
+                json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("utf-8")
+            proof_path.write_bytes(proof_bytes)
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker["completion_proof_sha256"] = "sha256:" + sha256(proof_bytes).hexdigest()
+            marker_path.write_text(
+                json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
     def test_logically_inconsistent_runtime_snapshot_is_rejected(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

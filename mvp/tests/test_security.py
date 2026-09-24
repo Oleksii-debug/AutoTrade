@@ -28,6 +28,28 @@ class SecurityBoundaryTests(unittest.TestCase):
             secret_value="top-secret",
         )
 
+    def test_empty_identity_and_scope_are_rejected(self):
+        for field, overrides in (
+            ("owner_identity", {"owner_identity": ""}),
+            ("account_id", {"account_id": "   "}),
+            ("provider", {"provider": ""}),
+            ("purpose", {"purpose": ""}),
+        ):
+            values = {
+                "owner_identity": "windows-user-1",
+                "account_id": "paper-1",
+                "provider": "SIMULATED",
+                "purpose": "TRADE",
+            }
+            values.update(overrides)
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.boundary.register_secret(
+                    self.owner.token,
+                    origin=self.owner.origin,
+                    secret_value="top-secret",
+                    **values,
+                )
+
     def test_researcher_cannot_resolve_trade_secret(self):
         handle = self._credential()
         researcher = self.boundary.create_session(

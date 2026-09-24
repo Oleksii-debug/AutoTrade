@@ -277,11 +277,15 @@ class AlpacaOrderObservation:
 def parse_order_observation(payload: Mapping[str, object]) -> AlpacaOrderObservation:
     if not isinstance(payload, Mapping):
         raise TypeError("payload must be a mapping")
-    provider_order_id = _text(str(payload.get("id", "")), name="id")
-    client_id = validate_client_order_id(str(payload.get("client_order_id", "")))
-    symbol = _text(str(payload.get("symbol", "")), name="symbol").upper()
-    status = _text(str(payload.get("status", "")), name="status").lower()
-    filled = _decimal(payload.get("filled_qty", "0"), name="filled_qty")
+    provider_order_id = _text(payload.get("id"), name="id")
+    client_id = validate_client_order_id(payload.get("client_order_id"))
+    symbol = _text(payload.get("symbol"), name="symbol").upper()
+    status = _text(payload.get("status"), name="status").lower()
+    if "filled_qty" not in payload or payload["filled_qty"] is None:
+        raise AlpacaAdapterError(
+            "filled_qty is required; missing financial quantity cannot be treated as zero"
+        )
+    filled = _decimal(payload["filled_qty"], name="filled_qty")
     if filled < 0:
         raise AlpacaAdapterError("filled_qty cannot be negative")
     average_value = payload.get("filled_avg_price")

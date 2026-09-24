@@ -72,6 +72,18 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertTrue((restored / "state" / "journal.sqlite3").is_file())
             self.assertTrue((restored / "artifacts" / "objects" / "sha256").is_dir())
 
+    def test_logically_inconsistent_runtime_snapshot_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            evidence_path = state / "learning-evidence.jsonl"
+            row = json.loads(evidence_path.read_text(encoding="utf-8"))
+            row["risk_outcome"] = "tampered"
+            evidence_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(BackupIntegrityError, "consistent snapshot"):
+                create_backup(state, artifacts, root / "backup")
+            self.assertFalse((root / "backup").exists())
+
     def test_missing_artifact_blob_invalidates_backup(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

@@ -133,12 +133,36 @@ class LabelPoint:
         object.__setattr__(self, "source_revision", _text(self.source_revision, name="source_revision"))
 
 
+def _normalizer_digest(
+    *,
+    fit_cutoff: datetime,
+    feature_names: Sequence[str],
+    input_ids: Sequence[str],
+    source_revisions: Sequence[str],
+    mean: Decimal,
+    scale: Decimal,
+) -> str:
+    payload = {
+        "fit_cutoff": fit_cutoff.isoformat(),
+        "feature_names": list(feature_names),
+        "input_ids": list(input_ids),
+        "source_revisions": list(source_revisions),
+        "mean": str(mean),
+        "scale": str(scale),
+    }
+    return "sha256:" + sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 @dataclass(frozen=True)
 class Normalizer:
     mean: Decimal
     scale: Decimal
     fit_cutoff: datetime
     fit_input_ids: tuple[str, ...]
+    fit_feature_names: tuple[str, ...]
+    fit_source_revisions: tuple[str, ...]
     provenance_hash: str
 
     def __post_init__(self) -> None:
@@ -146,16 +170,46 @@ class Normalizer:
         scale = _decimal(self.scale, name="scale")
         if scale <= 0:
             raise ValueError("scale must be positive")
+        cutoff = _time(self.fit_cutoff, name="fit_cutoff")
         if isinstance(self.fit_input_ids, (str, bytes)) or not self.fit_input_ids:
             raise ValueError("fit_input_ids must be a non-empty sequence")
+        if isinstance(self.fit_feature_names, (str, bytes)) or not self.fit_feature_names:
+            raise ValueError("fit_feature_names must be a non-empty sequence")
+        if isinstance(self.fit_source_revisions, (str, bytes)) or not self.fit_source_revisions:
+            raise ValueError("fit_source_revisions must be a non-empty sequence")
         ids = tuple(_text(value, name="fit_input_id") for value in self.fit_input_ids)
+        feature_names = tuple(
+            _text(value, name="fit_feature_name") for value in self.fit_feature_names
+        )
+        revisions = tuple(
+            _text(value, name="fit_source_revision")
+            for value in self.fit_source_revisions
+        )
+        if len(ids) != len(revisions):
+            raise ValueError(
+                "fit_input_ids and fit_source_revisions must have equal length"
+            )
         digest = _text(self.provenance_hash, name="provenance_hash")
         if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
             raise ValueError("provenance_hash must be a canonical SHA-256 digest")
+        expected = _normalizer_digest(
+            fit_cutoff=cutoff,
+            feature_names=feature_names,
+            input_ids=ids,
+            source_revisions=revisions,
+            mean=mean,
+            scale=scale,
+        )
+        if digest != expected:
+            raise ValueError(
+                "provenance_hash does not match normalized fit provenance"
+            )
         object.__setattr__(self, "mean", mean)
         object.__setattr__(self, "scale", scale)
-        object.__setattr__(self, "fit_cutoff", _time(self.fit_cutoff, name="fit_cutoff"))
+        object.__setattr__(self, "fit_cutoff", cutoff)
         object.__setattr__(self, "fit_input_ids", ids)
+        object.__setattr__(self, "fit_feature_names", feature_names)
+        object.__setattr__(self, "fit_source_revisions", revisions)
         object.__setattr__(self, "provenance_hash", digest)
 
     def transform(self, value) -> Decimal:
@@ -230,26 +284,27 @@ def fit_normalizer(
         raise ValueError("normalizer scale would be zero")
     scale = variance.sqrt()
     ids = tuple(item for point in eligible for item in point.input_ids)
-    payload = {
-        "fit_cutoff": cutoff.isoformat(),
-        "feature_names": [point.feature_name for point in eligible],
-        "input_ids": ids,
-        "source_revisions": [
-            revision
-            for point in eligible
-            for revision in point.source_revisions
-        ],
-        "mean": str(mean),
-        "scale": str(scale),
-    }
-    digest = "sha256:" + sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    feature_names = tuple(point.feature_name for point in eligible)
+    source_revisions = tuple(
+        revision
+        for point in eligible
+        for revision in point.source_revisions
+    )
+    digest = _normalizer_digest(
+        fit_cutoff=cutoff,
+        feature_names=feature_names,
+        input_ids=ids,
+        source_revisions=source_revisions,
+        mean=mean,
+        scale=scale,
+    )
     return Normalizer(
         mean=mean,
         scale=scale,
         fit_cutoff=cutoff,
         fit_input_ids=ids,
+        fit_feature_names=feature_names,
+        fit_source_revisions=source_revisions,
         provenance_hash=digest,
     )
 

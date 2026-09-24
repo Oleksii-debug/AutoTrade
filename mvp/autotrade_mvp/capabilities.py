@@ -147,6 +147,14 @@ class EvidenceVerification:
             raise CapabilityError("evidence cannot be both valid and conflicted")
 
 
+_CAPABILITY_PRODUCER_TYPES = {
+    "DOCUMENTED": "PROVIDER_DOCUMENTATION",
+    "API": "PROVIDER_API",
+    "ACCOUNT": "ACCOUNT_CAPABILITY",
+    "INSTRUMENT": "INSTRUMENT_CAPABILITY",
+}
+
+
 def artifact_store_evidence_verifier(
     store: object,
 ) -> Callable[[CapabilityClaim], EvidenceVerification]:
@@ -202,7 +210,7 @@ def artifact_store_evidence_verifier(
             "artifact_kind": "CAPABILITY_EVIDENCE",
             "schema_version": 1,
             "capability_source": claim.source,
-            "producer_type": claim.source,
+            "producer_type": _CAPABILITY_PRODUCER_TYPES[claim.source],
             "provider_id": claim.provider_id,
             "account_id": claim.account_id,
             "entity_id": claim.entity_id,
@@ -471,7 +479,7 @@ def derive_capability_snapshot(
         native_protection=protection,
         rate_limit_policy_id=next(iter(rate_policies)) if len(rate_policies) == 1 else "CONFLICTED",
         data_entitlements=entitlements,
-        evidence=tuple(claim.evidence_ref for claim in records),
+        evidence=tuple(claim.evidence_ref for claim in verified_live),
         status=status,
         sources=verified_sources,
     )

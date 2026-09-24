@@ -78,6 +78,7 @@ class EconomicBook:
     def __init__(self, transactions: Iterable[JournalTransaction] = ()):
         self._transactions: list[JournalTransaction] = []
         self._by_id: dict[str, JournalTransaction] = {}
+        self._reversed_transaction_ids: set[str] = set()
         for transaction in transactions:
             self.append(transaction)
 
@@ -95,9 +96,12 @@ class EconomicBook:
                 )
             return False
         if transaction.reverses_transaction_id is not None:
-            original = self._by_id.get(transaction.reverses_transaction_id)
+            original_id = transaction.reverses_transaction_id
+            original = self._by_id.get(original_id)
             if original is None:
                 raise AccountingConflict("Cannot reverse an unknown transaction")
+            if original_id in self._reversed_transaction_ids:
+                raise AccountingConflict("Transaction has already been reversed")
             expected = tuple(
                 Posting(item.ledger_account, item.asset_or_currency, -item.signed_amount)
                 for item in original.postings
@@ -106,6 +110,8 @@ class EconomicBook:
                 raise AccountingConflict("A reversal must exactly negate the original postings")
         self._by_id[transaction.transaction_id] = transaction
         self._transactions.append(transaction)
+        if transaction.reverses_transaction_id is not None:
+            self._reversed_transaction_ids.add(transaction.reverses_transaction_id)
         return True
 
     def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:

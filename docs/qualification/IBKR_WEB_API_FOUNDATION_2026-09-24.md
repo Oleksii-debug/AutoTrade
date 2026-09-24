@@ -28,9 +28,13 @@ barrier.
 Unique execution identity is carried into the canonical
 `ProviderFillEvidence`. The provider `permId` must be a positive integer and
 an execution is rejected if its account differs from the reconciliation account,
-so evidence cannot drift across accounts. Fee amount, fee currency and trade time
-must be supplied from separately observed evidence; the adapter does not
-manufacture them from an order acknowledgement or order-status summary.
+so evidence cannot drift across accounts. For the TWS-shaped execution helper, fee amount, fee currency and trade time
+must be supplied from separately observed evidence. The Web API trades parser
+instead consumes the documented execution id, cOID/order reference, conid,
+quantity, price, commission and trade time directly; because the trades row does
+not establish a canonical commission currency, that currency remains separately
+bound evidence. Neither path manufactures economics from an order acknowledgement
+or order-status summary.
 
 ## Current official references
 
@@ -38,6 +42,7 @@ manufacture them from an order acknowledgement or order-status summary.
 - https://www.interactivebrokers.com/docs/web-api/v1/endpoints/orders/place-order
 - https://www.interactivebrokers.com/docs/web-api/trading/orders/order-reply-messages
 - https://www.interactivebrokers.com/docs/web-api/v1/endpoints/order-monitoring/live-orders
+- https://www.interactivebrokers.com/docs/web-api/v1/endpoints/order-monitoring/trades
 - https://www.interactivebrokers.com/docs/tws-api/ref/execution
 
 ## What remains unqualified
@@ -52,3 +57,7 @@ recorded paper/provider test matrix.
 No claim is made that paper behavior proves live execution realism, that every
 IBKR asset class shares identical semantics, or that a provider reply warning is
 safe to suppress.
+
+## Distribution gate update — 2026-09-25
+
+The official IBKR TWS API changelog states that TWS API 10.49+ is released under the GNU GPL as of 2026-08-03. This foundation therefore remains on the official Web API route and does not import or redistribute the TWS SDK. Any future TWS route requires an explicit exact-composition distribution decision; an Apache-licensed wrapper alone is not evidence that the combined distribution is acceptable.

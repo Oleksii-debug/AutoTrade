@@ -217,6 +217,31 @@ def prepare_json_export(
     )
 
 
+def _serialized_payload_is_safe(value: object) -> bool:
+    """Revalidate serialized JSON without trusting PreparedExport provenance."""
+
+    if value is None or isinstance(value, (bool, int, str)):
+        return True
+    if isinstance(value, Decimal):
+        # json.loads(parse_float=Decimal) exposes forbidden binary-style JSON
+        # numeric fractions. Exact financial decimals must have been strings.
+        return False
+    if isinstance(value, list):
+        return all(_serialized_payload_is_safe(item) for item in value)
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str) or not key:
+                return False
+            if _SENSITIVE_KEY.search(key):
+                if item != "[REDACTED]":
+                    return False
+                continue
+            if not _serialized_payload_is_safe(item):
+                return False
+        return True
+    return False
+
+
 def verify_prepared_export(export: PreparedExport) -> bool:
     if not isinstance(export, PreparedExport):
         raise TypeError("export must be PreparedExport")
@@ -226,11 +251,18 @@ def verify_prepared_export(export: PreparedExport) -> bool:
         _export_id(export.export_id)
         _safe_filename(export.filename)
         _required_text(export.rights_id, name="rights_id")
+        normalized_sources = tuple(
+            _required_text(item, name="source_ref") for item in export.source_refs
+        )
+        if len(normalized_sources) != len(set(normalized_sources)):
+            return False
+        if not isinstance(export.data, bytes):
+            return False
         decoded = export.data.decode("utf-8")
-        parsed = json.loads(decoded)
-    except (UnicodeError, json.JSONDecodeError, ExportBoundaryError):
+        parsed = json.loads(decoded, parse_float=Decimal)
+    except (UnicodeError, json.JSONDecodeError, ExportBoundaryError, TypeError):
         return False
-    if isinstance(parsed, (bytes, bytearray)):
+    if not _serialized_payload_is_safe(parsed):
         return False
     return export.sha256 == f"sha256:{sha256(export.data).hexdigest()}"
 

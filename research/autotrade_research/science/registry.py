@@ -42,6 +42,83 @@ REQUIRED_PROTOCOL_FIELDS = {
 }
 
 
+
+
+
+def _utc_instant(value: Any, name: str) -> datetime:
+    text = _text(value, name)
+    if not text.endswith("Z"):
+        raise ProtocolViolation(f"{name} must be UTC and end in Z")
+    try:
+        parsed = datetime.fromisoformat(text[:-1] + "+00:00")
+    except ValueError as error:
+        raise ProtocolViolation(f"{name} must be an ISO-8601 instant") from error
+    return parsed.astimezone(timezone.utc)
+
+
+def _period(value: Any, name: str) -> tuple[datetime, datetime]:
+    if not isinstance(value, dict) or set(value) != {"start", "end"}:
+        raise ProtocolViolation(
+            f"{name} must be an object with exactly start and end UTC instants"
+        )
+    start = _utc_instant(value["start"], f"{name}.start")
+    end = _utc_instant(value["end"], f"{name}.end")
+    if start >= end:
+        raise ProtocolViolation(f"{name}.start must precede {name}.end")
+    return start, end
+
+
+def _validate_temporal_protocol(payload: dict[str, Any]) -> None:
+    periods = [
+        ("train_period", *_period(payload["train_period"], "train_period")),
+        (
+            "validation_period",
+            *_period(payload["validation_period"], "validation_period"),
+        ),
+        ("test_period", *_period(payload["test_period"], "test_period")),
+        ("forward_period", *_period(payload["forward_period"], "forward_period")),
+    ]
+    for (left_name, _left_start, left_end), (
+        right_name,
+        right_start,
+        _right_end,
+    ) in zip(periods, periods[1:]):
+        if left_end > right_start:
+            raise ProtocolViolation(
+                f"{left_name} overlaps or leaks into {right_name}"
+            )
+
+    purge = payload.get("purge_embargo")
+    if not isinstance(purge, dict) or set(purge) != {
+        "purge_seconds",
+        "embargo_seconds",
+    }:
+        raise ProtocolViolation(
+            "purge_embargo must contain exactly purge_seconds and embargo_seconds"
+        )
+    for key in ("purge_seconds", "embargo_seconds"):
+        value = purge[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ProtocolViolation(
+                f"purge_embargo.{key} must be a non-negative integer"
+            )
+
+    horizons = payload.get("horizons")
+    if not isinstance(horizons, list) or not horizons:
+        raise ProtocolViolation("horizons must be a non-empty list")
+    normalized_horizons: list[int] = []
+    for index, value in enumerate(horizons):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ProtocolViolation(
+                f"horizons[{index}] must be a positive integer number of seconds"
+            )
+        normalized_horizons.append(value)
+    if purge["purge_seconds"] < max(normalized_horizons):
+        raise ProtocolViolation(
+            "purge_seconds must cover the longest registered label horizon"
+        )
+
+
 class ProtocolConflict(ValueError):
     pass
 
@@ -156,6 +233,7 @@ class ScientificRegistry:
             raise ProtocolViolation("required protocol fields cannot be empty: " + ", ".join(empty))
         if not isinstance(payload.get("trial_budget"), int) or isinstance(payload.get("trial_budget"), bool) or payload["trial_budget"] < 1:
             raise ProtocolViolation("trial_budget must be a positive integer")
+        _validate_temporal_protocol(payload)
         identifier = _id(protocol_id)
         canonical = _canonical(payload)
         digest = _hash(payload)

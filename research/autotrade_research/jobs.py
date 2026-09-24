@@ -395,6 +395,7 @@ class ResearchJobStore:
         self,
         job_id: str,
         *,
+        generation: int,
         verdict: str,
         evidence_ref: str,
         output_refs: list[str] | None = None,
@@ -408,6 +409,8 @@ class ResearchJobStore:
         """
 
         identifier = str(UUID(_require_text(job_id, "job_id")))
+        if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+            raise ValueError("generation must be a positive integer")
         normalized_verdict = _require_text(verdict, "verdict").upper()
         allowed = {"PROVEN_NOT_RUN", "PROVEN_SUCCEEDED", "PROVEN_FAILED"}
         if normalized_verdict not in allowed:
@@ -425,6 +428,7 @@ class ResearchJobStore:
 
         current = _utc(now or datetime.now(timezone.utc))
         semantic_resolution = {
+            "generation": generation,
             "verdict": normalized_verdict,
             "evidence_ref": evidence,
             "output_refs": outputs,
@@ -444,12 +448,16 @@ class ResearchJobStore:
             if row is None:
                 connection.rollback()
                 raise KeyError(identifier)
+            if int(row["generation"]) != generation:
+                connection.rollback()
+                raise JobLeaseError("external resolution generation is stale")
 
             existing_resolution = row["external_resolution_json"]
             if row["state"] != "WAITING_EXTERNAL":
                 if existing_resolution is not None:
                     prior = json.loads(existing_resolution)
                     prior_semantic = {
+                        "generation": prior.get("generation"),
                         "verdict": prior.get("verdict"),
                         "evidence_ref": prior.get("evidence_ref"),
                         "output_refs": prior.get("output_refs", []),

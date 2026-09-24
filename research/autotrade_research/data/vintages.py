@@ -121,17 +121,22 @@ def point_in_time_market_events(
     """Return only revisions that were available by the requested cutoff.
 
     Revisions after the cutoff remain invisible even if they are now known.
-    Duplicate identities with different bytes are rejected rather than guessed.
+    Revision chronology and identity are validated across the complete frozen
+    dataset before the point-in-time view is exposed.
     """
 
     point = _utc(cutoff, "cutoff")
-    selected: dict[str, tuple[int, bytes, dict[str, Any]]] = {}
+    lineages: dict[
+        str,
+        dict[int, tuple[datetime, datetime, str, bytes, dict[str, Any]]],
+    ] = {}
+
     for raw in events:
         if not isinstance(raw, Mapping):
             raise HistoricalDataError("market event must be an object")
         event = dict(raw)
         event_id = _uuid(event.get("event_id"), "event_id")
-        _text(event.get("instrument_version"), "instrument_version")
+        instrument_version = _text(event.get("instrument_version"), "instrument_version")
         revision = _sequence(event.get("revision"), "revision")
         available = _utc(event.get("available_at"), "available_at")
         source_at = _utc(event.get("source_event_at"), "source_event_at")
@@ -143,15 +148,46 @@ def point_in_time_market_events(
         _evidence(raw_evidence)
         if ingested < available:
             raise HistoricalDataError("ingested_at cannot precede evidenced available_at")
-        if available > point:
-            continue
 
         canonical = _canonical_bytes(event)
-        previous = selected.get(event_id)
-        if previous is None or revision > previous[0]:
-            selected[event_id] = (revision, canonical, event)
-        elif revision == previous[0] and canonical != previous[1]:
-            raise HistoricalConflict("same event revision has conflicting bytes")
+        lineage = lineages.setdefault(event_id, {})
+        previous = lineage.get(revision)
+        if previous is not None:
+            if canonical != previous[3]:
+                raise HistoricalConflict("same event revision has conflicting bytes")
+            continue
+        lineage[revision] = (
+            available,
+            source_at,
+            instrument_version,
+            canonical,
+            event,
+        )
+
+    selected: dict[str, tuple[int, bytes, dict[str, Any]]] = {}
+    for event_id, lineage in lineages.items():
+        ordered = sorted(lineage.items())
+        expected_source_at: datetime | None = None
+        expected_instrument_version: str | None = None
+        previous_available: datetime | None = None
+        for revision, (available, source_at, instrument_version, canonical, event) in ordered:
+            if expected_source_at is None:
+                expected_source_at = source_at
+                expected_instrument_version = instrument_version
+            elif (
+                source_at != expected_source_at
+                or instrument_version != expected_instrument_version
+            ):
+                raise HistoricalConflict(
+                    "event revision changed source identity metadata"
+                )
+            if previous_available is not None and available < previous_available:
+                raise HistoricalConflict(
+                    "event revision availability cannot move backwards"
+                )
+            previous_available = available
+            if available <= point:
+                selected[event_id] = (revision, canonical, event)
 
     rows = [item[2] for item in selected.values()]
     rows.sort(

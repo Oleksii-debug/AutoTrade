@@ -46,6 +46,26 @@ class JournalBackedHostApiTests(unittest.TestCase):
             "payload": payload or {},
         }
 
+    def test_journal_envelope_uses_canonical_sequence_string(self):
+        store = self.store()
+        original_commit = store._journal.commit_command
+        captured = {}
+
+        def capture_then_commit(*args, **kwargs):
+            captured["aggregate_version"] = kwargs["events"][0][0]["aggregate_version"]
+            return original_commit(*args, **kwargs)
+
+        with patch.object(
+            store._journal,
+            "commit_command",
+            side_effect=capture_then_commit,
+        ):
+            accepted = store.submit(self.command())
+
+        self.assertEqual(accepted.status, "ACCEPTED")
+        self.assertEqual(captured["aggregate_version"], "1")
+        self.assertIsInstance(captured["aggregate_version"], str)
+
     def test_accepted_command_and_operation_survive_restart(self):
         first = self.store()
         accepted = first.submit(self.command())
@@ -101,7 +121,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 "event_type": "OPERATION_UPDATED",
                 "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
                 "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
-                "aggregate_version": 2,
+                "aggregate_version": "2",
                 "payload": payload,
                 "payload_hash": payload_digest(payload),
                 "committed_at": "2026-09-24T18:00:01Z",
@@ -251,7 +271,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 "event_type": "OPERATION_UPDATED",
                 "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
                 "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
-                "aggregate_version": 1,
+                "aggregate_version": "1",
                 "payload": {
                     "operation_id": "ghost-operation",
                     "phase": "SUCCEEDED",
@@ -291,7 +311,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 "event_type": "OPERATION_UPDATED",
                 "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
                 "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
-                "aggregate_version": 3,
+                "aggregate_version": "3",
                 "payload": payload,
                 "payload_hash": payload_digest(payload),
                 "committed_at": "2026-09-24T18:00:01Z",

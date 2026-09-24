@@ -12,6 +12,7 @@ from mvp.autotrade_mvp.ibkr_web import (
     IbkrWebAdapterError,
     IbkrWebOrderIntent,
     execution_to_reconciliation_fill,
+    parse_cancel_response,
     parse_order_submission_response,
     prepare_normalized_order,
     prepare_reply_confirmation,
@@ -197,26 +198,92 @@ class IbkrWebAdapterTests(unittest.TestCase):
 
     def test_incomplete_execution_surfaces_do_not_prove_absence(self):
         evidence = IbkrAbsenceEvidence(
+            exact_client_order_lookup_complete=True,
+            exact_client_order_absent=True,
             open_orders_complete=True,
             completed_orders_complete=True,
             executions_complete=False,
             account_activity_complete=True,
             consistency_horizon_satisfied=True,
+            exclusion_semantics_qualified=True,
             order_found=False,
         )
         self.assertEqual(evidence.verdict(), "INCONCLUSIVE")
 
     def test_complete_order_execution_activity_evidence_can_prove_absence(self):
         evidence = IbkrAbsenceEvidence(
+            exact_client_order_lookup_complete=True,
+            exact_client_order_absent=True,
             open_orders_complete=True,
             completed_orders_complete=True,
             executions_complete=True,
             account_activity_complete=True,
             consistency_horizon_satisfied=True,
+            exclusion_semantics_qualified=True,
             order_found=False,
         )
         self.assertEqual(evidence.verdict(), "PROVEN_ABSENT")
 
+
+    def test_complete_generic_surfaces_without_exact_lookup_are_still_inconclusive(self):
+        evidence = IbkrAbsenceEvidence(
+            exact_client_order_lookup_complete=False,
+            exact_client_order_absent=False,
+            open_orders_complete=True,
+            completed_orders_complete=True,
+            executions_complete=True,
+            account_activity_complete=True,
+            consistency_horizon_satisfied=True,
+            exclusion_semantics_qualified=True,
+            order_found=False,
+        )
+        self.assertEqual(evidence.verdict(), "INCONCLUSIVE")
+
+    def test_absence_requires_qualified_exclusion_semantics(self):
+        evidence = IbkrAbsenceEvidence(
+            exact_client_order_lookup_complete=True,
+            exact_client_order_absent=True,
+            open_orders_complete=True,
+            completed_orders_complete=True,
+            executions_complete=True,
+            account_activity_complete=True,
+            consistency_horizon_satisfied=True,
+            exclusion_semantics_qualified=False,
+            order_found=False,
+        )
+        self.assertEqual(evidence.verdict(), "INCONCLUSIVE")
+
+    def test_contradictory_exact_absence_and_found_order_is_rejected(self):
+        with self.assertRaisesRegex(IbkrWebAdapterError, "conflicts"):
+            IbkrAbsenceEvidence(
+                exact_client_order_lookup_complete=True,
+                exact_client_order_absent=True,
+                open_orders_complete=True,
+                completed_orders_complete=True,
+                executions_complete=True,
+                account_activity_complete=True,
+                consistency_horizon_satisfied=True,
+                exclusion_semantics_qualified=True,
+                order_found=True,
+            )
+
+    def test_cancel_acknowledgement_never_proves_terminal_cancel(self):
+        outcome = parse_cancel_response(
+            provider_order_id="123456789",
+            payload={"msg": "Request was submitted"},
+        )
+        self.assertTrue(outcome.acknowledged)
+        self.assertFalse(outcome.terminal_cancel_proven)
+        self.assertEqual(outcome.provider_order_id, "123456789")
+
+    def test_cancel_provider_error_is_not_terminal_cancel(self):
+        outcome = parse_cancel_response(
+            provider_order_id="123456789",
+            payload={"error": "Order cannot be cancelled"},
+        )
+        self.assertFalse(outcome.acknowledged)
+        self.assertFalse(outcome.terminal_cancel_proven)
+        self.assertEqual(outcome.message, "Order cannot be cancelled")
 
     def test_acknowledgement_is_not_fill_or_retry_permission(self):
         outcome = parse_order_submission_response(

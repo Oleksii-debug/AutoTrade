@@ -1,28 +1,38 @@
 # WP-41 durable jobs foundation — 2026-09-25
 
-Base main: `93f9ba2773973bcd45b43a98ec49a8171a3603d0`.
+Exact base main: `39ef7063bc17c96eb0eb51d6dccbfb24bc1e563a`.
 
-This increment adds one SQLite-backed durable job authority for background research,
-learning and agent work. It does not grant trading authority and does not perform
-network sends.
+This increment adds one SQLite-backed durable job authority for non-financial
+background research, learning and agent work. It performs no financial sends and
+grants no trading authority.
 
-## Invariants implemented
+## Implemented invariants
 
-- One immutable accepted result per `job_id + version`.
-- Durable PENDING/RUNNING/SUCCEEDED/FAILED/CANCELLED state.
-- Fencing token increases on every claim; stale workers cannot heartbeat, fail or complete.
-- Expired RUNNING jobs recover to PENDING until the configured attempt budget is exhausted.
-- Attempt budgets are durable across restart.
-- Exact duplicate enqueue is idempotent; conflicting reuse of a job identity fails closed.
-- SQLite WAL + FULL synchronous durability boundary, with foreign keys enabled.
-- Result rows are protected against UPDATE/DELETE by SQLite triggers.
-- Non-finite JSON payloads/results are rejected.
+- Explicit durable lifecycle: QUEUED → CLAIMED → RUNNING → SUCCEEDED / FAILED / CANCELLED.
+- Stable job ID + version plus globally unique dedupe key.
+- Explicit immutable input hashes and canonical JSON payloads.
+- Checkpoints are durable and restart-visible only from a valid RUNNING lease.
+- Claim records attempt count, owner identity, owner epoch, monotonic fencing token,
+  lease expiry and resource reservation units.
+- Workers can claim only jobs within the caller's resource ceiling.
+- Expired CLAIMED/RUNNING work requeues only while its bounded attempt budget remains;
+  otherwise it becomes FAILED.
+- Old owner epochs and old fencing tokens cannot heartbeat, checkpoint, fail or publish.
+- One immutable accepted result per job ID + version; exact replay is a no-op and a
+  different second result fails closed.
+- WAL + FULL synchronous SQLite durability and foreign keys are enabled.
+- Result UPDATE/DELETE is blocked by SQLite triggers.
+- Non-finite JSON payloads, checkpoints and results are rejected.
 
-## Focused tests
+## Focused evidence
 
-`mvp/tests/test_durable_jobs.py` covers duplicate identity, restart recovery,
-stale-worker fencing, bounded retries, cancellation and non-finite input.
+`mvp/tests/test_durable_jobs.py` covers identity/dedupe conflicts, explicit lifecycle,
+restart checkpoint recovery, owner-epoch fencing, expired-lease recovery, single result,
+resource ceilings, bounded retries, cancellation and non-finite inputs.
 
-Repository CI on the exact PR head is required before integration. This foundation
-does not claim full WP-41 completion until integration with bounded worker resources,
-job producers/consumers and whole-product qualification evidence is demonstrated.
+## Remaining before whole-product WP-41 PASS
+
+This is still a foundation until real producers/consumers use this authority and
+whole-product qualification demonstrates cancellation propagation, resource release,
+artifact compare-and-swap/publication semantics, and that financial sends never enter
+this generic retry loop. Exact-head CI is also required before integration.

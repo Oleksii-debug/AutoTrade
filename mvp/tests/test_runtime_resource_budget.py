@@ -53,6 +53,10 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeBudgetError, "horizon"):
             self.spec(max_financial_staleness_us=5_000_001)
 
+    def test_research_interference_budget_cannot_exceed_strategy_horizon(self):
+        with self.assertRaisesRegex(RuntimeBudgetError, "research interference"):
+            self.spec(max_research_interference_us=5_000_001)
+
     def test_declared_load_can_pass_without_universal_claim(self):
         decision = evaluate_runtime_budget(self.spec(), self.observation())
         self.assertEqual(decision.status, "PASS")

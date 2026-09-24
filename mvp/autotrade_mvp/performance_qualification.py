@@ -81,6 +81,10 @@ class RuntimeBudgetSpec:
             raise RuntimeBudgetError(
                 "staleness budget cannot exceed the declared strategy horizon"
             )
+        if self.max_research_interference_us > self.strategy_horizon_us:
+            raise RuntimeBudgetError(
+                "research interference budget cannot exceed the declared strategy horizon"
+            )
 
 
 @dataclass(frozen=True)

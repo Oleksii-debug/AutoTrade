@@ -145,6 +145,50 @@ class JournalBackedHostApiTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Terminal"):
             restarted.update_operation(accepted.operation_id, "FAILED")
 
+    def test_unknown_survives_restart_then_resolves_from_external_evidence(self):
+        store = self.store()
+        accepted = store.submit(self.command())
+        unknown = store.update_operation(
+            accepted.operation_id,
+            "UNKNOWN",
+            remaining_uncertainty=("provider_outcome_unresolved",),
+        )
+        self.assertEqual(unknown.phase, "UNKNOWN")
+
+        restarted = self.store()
+        recovered = restarted.get_operation(accepted.operation_id)
+        self.assertEqual(recovered.phase, "UNKNOWN")
+        self.assertEqual(
+            recovered.remaining_uncertainty,
+            ("provider_outcome_unresolved",),
+        )
+        with self.assertRaisesRegex(ValueError, "only resolve"):
+            restarted.update_operation(
+                accepted.operation_id,
+                "WAITING_EXTERNAL",
+                remaining_uncertainty=("provider_outcome_unresolved",),
+            )
+
+        resolved = restarted.update_operation(accepted.operation_id, "SUCCEEDED")
+        self.assertEqual(resolved.phase, "SUCCEEDED")
+        self.assertEqual(resolved.remaining_uncertainty, ())
+
+        final = self.store().get_operation(accepted.operation_id)
+        self.assertEqual(final.phase, "SUCCEEDED")
+        self.assertEqual(final.remaining_uncertainty, ())
+
+    def test_unknown_requires_uncertainty_and_terminal_cannot_hide_it(self):
+        store = self.store()
+        accepted = store.submit(self.command())
+        with self.assertRaisesRegex(ValueError, "preserve remaining uncertainty"):
+            store.update_operation(accepted.operation_id, "UNKNOWN")
+        with self.assertRaisesRegex(ValueError, "cannot retain unresolved uncertainty"):
+            store.update_operation(
+                accepted.operation_id,
+                "CANCELLED",
+                remaining_uncertainty=("cancel_ack_not_completion",),
+            )
+
     def test_retention_gap_is_explicit_but_full_snapshot_remains_current(self):
         store = self.store(max_events=2)
         accepted = store.submit(self.command())

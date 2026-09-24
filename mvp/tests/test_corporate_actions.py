@@ -61,6 +61,36 @@ class CorporateSettlementTests(unittest.TestCase):
         self.assertEqual(settled.unsettled_cash, Decimal("0.00"))
         self.assertEqual(settled.settled_cash, Decimal("1015"))
 
+    def test_short_dividend_payable_can_settle_as_negative_cash(self):
+        short_state = state(quantity="-10", total_basis="1000")
+        book = CorporateActionBook(short_state)
+        event = CorporateEvent.create(
+            event_id="short-div-1",
+            kind="CASH_DIVIDEND",
+            effective_date=date(2026, 1, 2),
+            source_revision="r1",
+            payload={"per_share": "1.50"},
+        )
+        result = book.apply(event)
+        self.assertEqual(result.after.unsettled_cash, Decimal("-15.00"))
+        self.assertEqual(result.economic_pnl, Decimal("-15.00"))
+
+        settled = settle_cash(result.after, "-15")
+        self.assertEqual(settled.unsettled_cash, Decimal("0.00"))
+        self.assertEqual(settled.settled_cash, Decimal("985"))
+
+    def test_settlement_cannot_flip_or_overrun_unsettled_balance(self):
+        receivable = state(unsettled_cash="15")
+        payable = state(unsettled_cash="-15")
+        with self.assertRaisesRegex(ValueError, "same sign"):
+            settle_cash(receivable, "-1")
+        with self.assertRaisesRegex(ValueError, "same sign"):
+            settle_cash(payable, "1")
+        with self.assertRaisesRegex(ValueError, "more cash"):
+            settle_cash(receivable, "16")
+        with self.assertRaisesRegex(ValueError, "more cash"):
+            settle_cash(payable, "-16")
+
     def test_cash_merger_extinguishes_position_once(self):
         book = CorporateActionBook(state())
         event = CorporateEvent.create(
@@ -129,6 +159,24 @@ class CorporateSettlementTests(unittest.TestCase):
         recalled = record_recall(short, "1")
         with self.assertRaises(ValueError):
             cover_recalled_short(recalled, quantity="1", buy_price="90")
+
+    def test_corporate_event_rejects_binary_float_economics(self):
+        with self.assertRaisesRegex(TypeError, "exact decimal"):
+            CorporateEvent.create(
+                event_id="split-float",
+                kind="SPLIT",
+                effective_date=date(2026, 1, 2),
+                source_revision="r1",
+                payload={"numerator": 2.0, "denominator": 1},
+            )
+        with self.assertRaisesRegex(TypeError, "exact decimal"):
+            CorporateEvent.create(
+                event_id="div-float",
+                kind="CASH_DIVIDEND",
+                effective_date=date(2026, 1, 2),
+                source_revision="r1",
+                payload={"per_share": 0.1},
+            )
 
     def test_duplicate_event_identity_with_changed_content_is_rejected(self):
         book = CorporateActionBook(state())

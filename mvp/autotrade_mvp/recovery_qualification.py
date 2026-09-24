@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 import re
 from types import MappingProxyType
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -43,14 +43,14 @@ def _text(value: str, *, name: str) -> str:
 
 
 def _git_sha(value: str, *, name: str) -> str:
-    result = _text(value, name=name).lower()
+    result = _text(value, name=name)
     if _GIT_SHA.fullmatch(result) is None:
         raise ValueError(f"{name} must be a lowercase 40-character git SHA")
     return result
 
 
 def _sha256(value: str, *, name: str) -> str:
-    result = _text(value, name=name).lower()
+    result = _text(value, name=name)
     if _SHA256.fullmatch(result) is None:
         raise ValueError(f"{name} must be canonical sha256:<64 lowercase hex>")
     return result
@@ -165,6 +165,9 @@ class RecoveryQualificationPolicy:
         object.__setattr__(self, "max_downtime_ms", MappingProxyType(normalized))
 
 
+RecoveryEvidenceVerifier = Callable[[RecoveryScenarioEvidence], bool]
+
+
 @dataclass(frozen=True, slots=True)
 class RecoveryQualificationDecision:
     status: RecoveryEvidenceStatus
@@ -180,6 +183,7 @@ def qualify_recovery_release(
     *,
     policy: RecoveryQualificationPolicy,
     evidence: Sequence[RecoveryScenarioEvidence],
+    evidence_verifier: RecoveryEvidenceVerifier | None = None,
 ) -> RecoveryQualificationDecision:
     """Evaluate recovery evidence without performing recovery itself."""
 
@@ -210,6 +214,17 @@ def qualify_recovery_release(
     for scenario in sorted(by_scenario, key=lambda item: item.value):
         item = by_scenario[scenario]
         prefix = scenario.value.lower()
+
+        externally_verified = False
+        if evidence_verifier is not None:
+            try:
+                verification = evidence_verifier(item)
+            except Exception:
+                verification = False
+            externally_verified = isinstance(verification, bool) and verification
+        if not externally_verified:
+            blockers.append(f"{prefix}:evidence_unverified")
+            inconclusive = True
 
         if item.source_sha != policy.source_sha:
             blockers.append(f"{prefix}:source_sha_mismatch")

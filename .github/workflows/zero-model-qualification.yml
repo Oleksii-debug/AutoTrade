@@ -1,0 +1,41 @@
+name: zero-model-qualification
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "qualification/zero_model/**"
+      - "mvp/autotrade_mvp/model_gateway.py"
+      - "mvp/autotrade_mvp/pipeline.py"
+      - "mvp/autotrade_mvp/economics.py"
+      - "mvp/tests/test_zero_model_qualification.py"
+      - ".github/workflows/zero-model-qualification.yml"
+  push:
+    branches: [main]
+    paths:
+      - "qualification/zero_model/**"
+      - "mvp/autotrade_mvp/model_gateway.py"
+      - "mvp/autotrade_mvp/pipeline.py"
+      - "mvp/autotrade_mvp/economics.py"
+      - "mvp/tests/test_zero_model_qualification.py"
+      - ".github/workflows/zero-model-qualification.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest mvp.tests.test_zero_model_qualification -v
+      - name: Generate exact-head qualification evidence
+        run: python qualification/zero_model/qualify.py --source-sha "$GITHUB_SHA" --output "$RUNNER_TEMP/zero-model-evidence.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zero-model-qualification-${{ github.sha }}
+          path: ${{ runner.temp }}/zero-model-evidence.json
+          if-no-files-found: error

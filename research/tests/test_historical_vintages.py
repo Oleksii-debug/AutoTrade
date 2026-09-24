@@ -142,6 +142,26 @@ class HistoricalVintageTests(unittest.TestCase):
                 datetime(2026, 1, 2, tzinfo=timezone.utc),
             )
 
+    def test_market_event_availability_cannot_predate_source_event(self):
+        row = {
+            "event_id": str(uuid4()),
+            "instrument_version": "instrument:v1",
+            "kind": "TRADE",
+            "source_event_at": "2026-01-01T10:00:02Z",
+            "available_at": "2026-01-01T10:00:01Z",
+            "ingested_at": "2026-01-01T10:00:03Z",
+            "revision": "1",
+            "availability_basis": "provider",
+            "quality_flags": [],
+            "payload": {"price": "10"},
+            "raw_evidence_ref": evidence("2026-01-01T10:00:03Z"),
+        }
+        with self.assertRaisesRegex(HistoricalDataError, "available_at cannot precede source_event_at"):
+            point_in_time_market_events(
+                [row],
+                datetime(2026, 1, 2, tzinfo=timezone.utc),
+            )
+
     def test_point_in_time_universe_retains_delisted_asset(self):
         delisted_id = str(uuid4())
         future_id = str(uuid4())
@@ -230,6 +250,15 @@ class HistoricalVintageTests(unittest.TestCase):
             "source_evidence": [evidence("2026-01-01T00:00:00Z")],
             "created_at": "2026-01-01T00:00:01Z",
         }
+
+    def test_manifest_cannot_claim_creation_before_source_evidence(self):
+        with TemporaryDirectory() as directory:
+            registry = HistoricalVintageRegistry(Path(directory))
+            manifest = self._manifest(str(uuid4()), 1, "chronology")
+            manifest["source_evidence"] = [evidence("2026-01-01T00:00:02Z")]
+            manifest["created_at"] = "2026-01-01T00:00:01Z"
+            with self.assertRaisesRegex(HistoricalDataError, "created_at cannot precede"):
+                registry.commit(manifest)
 
     def test_registry_is_append_only_and_old_vintage_digest_stays_stable(self):
         with TemporaryDirectory() as directory:

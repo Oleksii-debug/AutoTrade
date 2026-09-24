@@ -1,3 +1,4 @@
+from contextlib import closing
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -10,12 +11,14 @@ from unittest.mock import patch
 from mvp.autotrade_mvp.backup import (
     BACKUP_SCHEMA_VERSION,
     BackupCompatibilityError,
+    BackupError,
     BackupIntegrityError,
     create_backup,
     restore_backup,
     restore_requires_reconciliation,
     verify_backup,
 )
+from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.pipeline import run_vertical_slice
 
 
@@ -66,6 +69,8 @@ class BackupRestoreTests(unittest.TestCase):
             manifest = verify_backup(backup)
             self.assertEqual(manifest["schema_version"], BACKUP_SCHEMA_VERSION)
             self.assertTrue(manifest["reconciliation_required_after_restore"])
+            self.assertFalse((backup / "state" / "journal.sqlite3-wal").exists())
+            self.assertFalse((backup / "state" / "journal.sqlite3-shm").exists())
 
             restored = restore_backup(backup, root / "restored")
             self.assertTrue(restore_requires_reconciliation(restored))
@@ -129,11 +134,12 @@ class BackupRestoreTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             state, artifacts = self._build_sources(root)
-            with sqlite3.connect(state / "journal.sqlite3") as connection:
+            with closing(sqlite3.connect(state / "journal.sqlite3")) as connection:
                 connection.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (99, "2026-09-24T00:00:00Z"),
                 )
+                connection.commit()
             with self.assertRaises(BackupCompatibilityError):
                 create_backup(state, artifacts, root / "backup")
 

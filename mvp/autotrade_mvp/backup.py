@@ -8,6 +8,7 @@ reconciliation before any future trading authority can be considered.
 
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -120,7 +121,7 @@ def _sqlite_schema_version(path: Path) -> int:
         raise BackupError("Durable journal is missing")
     uri = path.resolve().as_uri() + "?mode=ro"
     try:
-        with sqlite3.connect(uri, uri=True) as connection:
+        with closing(sqlite3.connect(uri, uri=True)) as connection:
             rows = connection.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
@@ -142,8 +143,8 @@ def _backup_sqlite(source: Path, destination: Path) -> tuple[str, int, int]:
     destination.parent.mkdir(parents=True, exist_ok=True)
     source_uri = source.resolve().as_uri() + "?mode=ro"
     try:
-        with sqlite3.connect(source_uri, uri=True) as source_db:
-            with sqlite3.connect(destination) as destination_db:
+        with closing(sqlite3.connect(source_uri, uri=True)) as source_db:
+            with closing(sqlite3.connect(destination)) as destination_db:
                 source_db.backup(destination_db)
                 destination_db.commit()
     except sqlite3.Error as error:
@@ -283,7 +284,22 @@ def create_backup(
             stage / "state" / "learning-evidence.jsonl"
         ).is_file():
             try:
-                build_diagnostic_snapshot(stage / "state")
+                # Diagnostic reconstruction opens the journal in WAL mode. Run it
+                # against an isolated byte-for-byte verification copy so SQLite
+                # sidecars can never become undeclared backup payloads.
+                with tempfile.TemporaryDirectory(
+                    prefix=".autotrade-backup-check-",
+                    dir=target.parent,
+                ) as verification_directory:
+                    verification_state = Path(verification_directory) / "state"
+                    verification_state.mkdir()
+                    for name in (
+                        "journal.sqlite3",
+                        "checkpoint.json",
+                        "learning-evidence.jsonl",
+                    ):
+                        shutil.copy2(stage / "state" / name, verification_state / name)
+                    build_diagnostic_snapshot(verification_state)
             except ValueError as error:
                 raise BackupIntegrityError(
                     "Runtime state, journal and evidence are not one consistent snapshot"

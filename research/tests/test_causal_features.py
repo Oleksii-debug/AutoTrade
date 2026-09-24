@@ -90,6 +90,50 @@ class CausalFeatureTests(unittest.TestCase):
         self.assertEqual(x, feature.value)
         self.assertEqual(y, label.value)
 
+    def test_training_row_rejects_feature_from_after_label_anchor(self):
+        feature = FeaturePoint(
+            "AAA",
+            BASE + timedelta(days=2),
+            Decimal("0.1"),
+            ("future-feature",),
+            ("r2",),
+            "x",
+        )
+        label = make_forward_label(
+            symbol="AAA",
+            anchor_time=BASE + timedelta(days=1),
+            anchor_value="101",
+            future=source(3, "104"),
+        )
+        with self.assertRaisesRegex(ValueError, "must equal label anchor_time"):
+            training_row(
+                feature=feature,
+                label=label,
+                training_cutoff=BASE + timedelta(days=4),
+            )
+
+    def test_training_row_rejects_stale_feature_from_different_anchor(self):
+        feature = FeaturePoint(
+            "AAA",
+            BASE,
+            Decimal("0.1"),
+            ("stale-feature",),
+            ("r1",),
+            "x",
+        )
+        label = make_forward_label(
+            symbol="AAA",
+            anchor_time=BASE + timedelta(days=1),
+            anchor_value="101",
+            future=source(3, "104"),
+        )
+        with self.assertRaisesRegex(ValueError, "must equal label anchor_time"):
+            training_row(
+                feature=feature,
+                label=label,
+                training_cutoff=BASE + timedelta(days=4),
+            )
+
     def test_missing_asset_fails_explicitly(self):
         with self.assertRaises(ValueError):
             require_universe_members(

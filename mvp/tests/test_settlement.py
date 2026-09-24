@@ -131,42 +131,56 @@ class SettlementBookTests(unittest.TestCase):
         with self.assertRaises(SettlementConflict):
             book.add(changed)
 
-    def test_same_economic_cause_cannot_create_two_settlement_obligations(self):
+    def test_same_economic_cause_component_cannot_duplicate_but_distinct_components_can(self):
         first = SettlementObligation(
             "obligation-a",
             " provider-fill-1 ",
             "USD",
-            Decimal("-201"),
+            Decimal("-200"),
             date(2026, 9, 24),
             date(2026, 9, 26),
+            "PRINCIPAL",
         )
-        duplicate_cause = SettlementObligation(
+        duplicate_component = SettlementObligation(
             "obligation-b",
             "provider-fill-1",
             "USD",
-            Decimal("-201"),
+            Decimal("-200"),
             date(2026, 9, 24),
             date(2026, 9, 26),
+            "PRINCIPAL",
         )
-        book = SettlementBook(settled_cash={"USD": "1000"})
+        third_currency_fee = SettlementObligation(
+            "obligation-fee",
+            "provider-fill-1",
+            "BNB",
+            Decimal("-0.01"),
+            date(2026, 9, 24),
+            date(2026, 9, 26),
+            "FEE",
+        )
+        book = SettlementBook(settled_cash={"USD": "1000", "BNB": "1"})
         self.assertTrue(book.add(first))
-        with self.assertRaisesRegex(SettlementConflict, "cause_event_id"):
-            book.add(duplicate_cause)
-        self.assertEqual(book.snapshot("USD").unsettled_payable, Decimal("201"))
-        self.assertEqual(book.available_to_spend("USD"), Decimal("799"))
+        with self.assertRaisesRegex(SettlementConflict, "component_id"):
+            book.add(duplicate_component)
+        self.assertTrue(book.add(third_currency_fee))
+        self.assertEqual(book.snapshot("USD").unsettled_payable, Decimal("200"))
+        self.assertEqual(book.snapshot("BNB").unsettled_payable, Decimal("0.01"))
+        self.assertEqual(book.available_to_spend("USD"), Decimal("800"))
+        self.assertEqual(book.available_to_spend("BNB"), Decimal("0.99"))
 
-    def test_restart_constructor_rejects_duplicate_economic_causes(self):
+    def test_restart_constructor_rejects_duplicate_economic_cause_components(self):
         obligations = (
             SettlementObligation(
                 "a", "same-fill", "USD", Decimal("-10"),
-                date(2026, 9, 24), date(2026, 9, 25),
+                date(2026, 9, 24), date(2026, 9, 25), "PRINCIPAL",
             ),
             SettlementObligation(
                 "b", "same-fill", "USD", Decimal("-10"),
-                date(2026, 9, 24), date(2026, 9, 25),
+                date(2026, 9, 24), date(2026, 9, 25), "PRINCIPAL",
             ),
         )
-        with self.assertRaisesRegex(SettlementConflict, "cause_event_id"):
+        with self.assertRaisesRegex(SettlementConflict, "component_id"):
             SettlementBook(obligations=obligations)
 
     def test_reserve_reduces_only_settled_spendable_cash(self):

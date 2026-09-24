@@ -77,6 +77,8 @@ def _code_sha(value: str) -> str:
         int(text, 16)
     except ValueError as error:
         raise ProviderSelectionError("adapter_code_sha must be hexadecimal") from error
+    if text != text.lower():
+        raise ProviderSelectionError("adapter_code_sha must use canonical lowercase hex")
     return text
 
 

@@ -83,6 +83,27 @@ class ReleaseQualificationTests(unittest.TestCase):
         self.assertEqual(decision.status, "FAIL")
         self.assertTrue(any("signatures" in reason for reason in decision.reasons))
 
+    def test_direct_candidate_cannot_use_truthy_string_as_verified_signature(self):
+        with self.assertRaisesRegex(ReleaseQualificationError, "must be boolean"):
+            ReleaseCandidate(
+                version="0.1.0",
+                source_sha=SOURCE,
+                installer_sha256=DIGEST,
+                diagnostics_sha256=DIGEST,
+                sbom_sha256=DIGEST,
+                compatibility_manifest_sha256=DIGEST,
+                signatures_verified="false",
+            )
+
+    def test_direct_release_check_requires_real_evidence_reference(self):
+        with self.assertRaisesRegex(ReleaseQualificationError, "evidence_ref is required"):
+            ReleaseCheck(
+                name="PR_CI",
+                status="PASS",
+                source_sha=SOURCE,
+                evidence_ref="   ",
+            )
+
     def test_malformed_hashes_and_unknown_checks_fail_closed(self):
         with self.assertRaisesRegex(ReleaseQualificationError, "canonical SHA-256"):
             ReleaseCandidate.create(

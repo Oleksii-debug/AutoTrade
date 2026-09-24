@@ -1862,3 +1862,164 @@ def market_fee_request() -> WhiteBitLookupRequest:
         "/api/v4/market/fee",
         {},
     )
+
+
+@dataclass(frozen=True)
+class WhiteBitFundingObservation:
+    market: str
+    funding_time: str
+    funding_rate: Decimal
+    funding_amount: Decimal
+    position_amount: Decimal
+    settlement_price: Decimal
+    rate_calculated_time: str
+    observation_fingerprint: str
+    economic_event_identity_authoritative: bool = False
+
+    @classmethod
+    def from_provider(
+        cls,
+        payload: Mapping[str, object],
+    ) -> "WhiteBitFundingObservation":
+        if not isinstance(payload, Mapping):
+            raise TypeError("payload must be a mapping")
+        required = {
+            "market",
+            "fundingTime",
+            "fundingRate",
+            "fundingAmount",
+            "positionAmount",
+            "settlementPrice",
+            "rateCalculatedTime",
+        }
+        missing = sorted(required - set(payload))
+        if missing:
+            raise WhiteBitAdapterError(
+                "funding observation missing required fields: "
+                + ", ".join(missing)
+            )
+
+        market = _text(str(payload["market"]), name="market").upper()
+        funding_time = _unix_instant(
+            payload["fundingTime"],
+            name="fundingTime",
+        )
+        rate_calculated_time = _unix_instant(
+            payload["rateCalculatedTime"],
+            name="rateCalculatedTime",
+        )
+        if rate_calculated_time > funding_time:
+            raise WhiteBitAdapterError(
+                "rateCalculatedTime cannot follow fundingTime"
+            )
+        funding_rate = _decimal(
+            payload["fundingRate"],
+            name="fundingRate",
+        )
+        funding_amount = _decimal(
+            payload["fundingAmount"],
+            name="fundingAmount",
+        )
+        position_amount = _decimal(
+            payload["positionAmount"],
+            name="positionAmount",
+        )
+        settlement_price = _decimal(
+            payload["settlementPrice"],
+            name="settlementPrice",
+            positive=True,
+        )
+
+        canonical = {
+            "market": market,
+            "fundingTime": funding_time,
+            "fundingRate": str(funding_rate),
+            "fundingAmount": str(funding_amount),
+            "positionAmount": str(position_amount),
+            "settlementPrice": str(settlement_price),
+            "rateCalculatedTime": rate_calculated_time,
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                canonical,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return cls(
+            market=market,
+            funding_time=funding_time,
+            funding_rate=funding_rate,
+            funding_amount=funding_amount,
+            position_amount=position_amount,
+            settlement_price=settlement_price,
+            rate_calculated_time=rate_calculated_time,
+            observation_fingerprint=f"sha256:{fingerprint}",
+            economic_event_identity_authoritative=False,
+        )
+
+
+@dataclass(frozen=True)
+class WhiteBitFundingPage:
+    records: tuple[WhiteBitFundingObservation, ...]
+    offset: int
+    limit: int
+
+    @property
+    def short_page(self) -> bool:
+        return len(self.records) < self.limit
+
+
+def funding_history_request(
+    *,
+    offset: int = 0,
+    limit: int = 100,
+    market: str | None = None,
+) -> WhiteBitLookupRequest:
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        raise WhiteBitAdapterError("offset must be a non-negative integer")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        raise WhiteBitAdapterError("limit must be a positive integer")
+    body: dict[str, object] = {"offset": offset, "limit": limit}
+    if market is not None:
+        body["market"] = _text(market, name="market").upper()
+    return WhiteBitLookupRequest(
+        "FUNDING_HISTORY",
+        "/api/v4/collateral-account/funding-history",
+        body,
+    )
+
+
+def parse_funding_page(
+    payload: Mapping[str, object],
+    *,
+    expected_offset: int,
+    expected_limit: int,
+) -> WhiteBitFundingPage:
+    if not isinstance(payload, Mapping):
+        raise TypeError("payload must be a mapping")
+    for field in ("records", "offset", "limit"):
+        if field not in payload:
+            raise WhiteBitAdapterError(
+                f"funding page missing required field: {field}"
+            )
+    if payload["offset"] != expected_offset or payload["limit"] != expected_limit:
+        raise WhiteBitAdapterError(
+            "funding page pagination does not match requested offset/limit"
+        )
+    records_raw = payload["records"]
+    if not isinstance(records_raw, list):
+        raise WhiteBitAdapterError("funding records must be a list")
+    if len(records_raw) > expected_limit:
+        raise WhiteBitAdapterError(
+            "funding page contains more records than requested limit"
+        )
+    records = tuple(
+        WhiteBitFundingObservation.from_provider(item)
+        for item in records_raw
+    )
+    return WhiteBitFundingPage(
+        records=records,
+        offset=expected_offset,
+        limit=expected_limit,
+    )

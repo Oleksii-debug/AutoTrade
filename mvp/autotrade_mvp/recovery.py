@@ -183,6 +183,7 @@ class RecoveryController:
             raise PermissionError("Ownership transfer requires reconciliation")
         self.owner = OwnerFence(new_owner_id, self.owner.epoch + 1)
         self.provider_reconciled = False
+        self.reason_codes.discard("lease_expired_no_failover")
         self.reason_codes.add("startup_reconciliation_required")
         self.state = HostState.RECOVERING
         return self.owner
@@ -232,6 +233,9 @@ class RecoveryController:
             self.state = HostState.BLOCKED
             return
         if self.unresolved_attempts:
+            self.state = HostState.DEGRADED
+            return
+        if "lease_expired_no_failover" in self.reason_codes:
             self.state = HostState.DEGRADED
             return
         if self.provider_reconciled and "startup_reconciliation_required" not in self.reason_codes:

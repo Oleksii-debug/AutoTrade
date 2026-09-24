@@ -2,7 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { isValidCommonScalar } = require(
+const { CONTRACT_VERSION, isValidCommonScalar } = require(
   "../../contracts/bindings/typescript/commonScalars.js"
 );
 
@@ -11,8 +11,10 @@ const corpusPath = path.resolve(
   "contracts/fixtures/common-scalars.corpus.json"
 );
 const corpus = JSON.parse(fs.readFileSync(corpusPath, "utf8"));
-if (corpus.contract_version !== "1.0.0") {
-  throw new Error(`unexpected contract version: ${corpus.contract_version}`);
+if (corpus.contract_version !== CONTRACT_VERSION) {
+  throw new Error(
+    `corpus contract version ${corpus.contract_version} != binding ${CONTRACT_VERSION}`
+  );
 }
 
 const names = new Set();

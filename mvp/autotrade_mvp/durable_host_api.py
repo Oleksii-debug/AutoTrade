@@ -12,7 +12,13 @@ from datetime import datetime, timezone
 from typing import Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
-from .host_api import CommandResult, EventGap, HostEvent, OperationResult
+from .host_api import (
+    CommandResult,
+    EventGap,
+    HostEvent,
+    OperationResult,
+    command_result_payload,
+)
 from .persistence import JournalStore, payload_digest
 
 
@@ -59,22 +65,41 @@ class JournalBackedHostCommandStore:
             status=str(value["status"]),
             state_version=str(value["state_version"]),
             reason_codes=tuple(str(x) for x in value.get("reason_codes", ())),
+            field_errors=tuple(
+                dict(x)
+                for x in value.get("field_errors", ())
+                if isinstance(x, Mapping)
+            ),
             operation_id=(
                 None
                 if value.get("operation_id") is None
                 else str(value["operation_id"])
             ),
+            current_value_ref=(
+                None
+                if value.get("current_value_ref") is None
+                else str(value["current_value_ref"])
+            ),
         )
 
     @staticmethod
     def _result_dict(result: CommandResult) -> dict[str, object]:
-        return {
-            "command_id": result.command_id,
-            "status": result.status,
-            "state_version": result.state_version,
-            "reason_codes": list(result.reason_codes),
-            "operation_id": result.operation_id,
-        }
+        return command_result_payload(result)
+
+    @staticmethod
+    def _normalize_refs(values: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(str(item) for item in values)
+        if any(not item.strip() for item in normalized):
+            raise ValueError("affected_refs cannot contain empty values")
+        return normalized
+
+    @staticmethod
+    def _normalize_evidence(
+        values: tuple[Mapping[str, object], ...],
+    ) -> tuple[Mapping[str, object], ...]:
+        if any(not isinstance(item, Mapping) for item in values):
+            raise ValueError("operation evidence must contain objects")
+        return tuple(dict(item) for item in values)
 
     def _events(self) -> list[dict[str, object]]:
         return self._journal.load_events(self.AGGREGATE_TYPE, self.AGGREGATE_ID)
@@ -174,6 +199,7 @@ class JournalBackedHostCommandStore:
         event_id = str(
             uuid5(NAMESPACE_URL, f"https://events.autotrade.local/command/{command_id}")
         )
+        operation_time = self._now()
         envelope = self._event_envelope(
             event_id=event_id,
             event_type="COMMAND_ACCEPTED",
@@ -184,6 +210,10 @@ class JournalBackedHostCommandStore:
                 "action": action,
                 "actor": actor,
                 "phase": "QUEUED",
+                "started_at": operation_time,
+                "updated_at": operation_time,
+                "affected_refs": [],
+                "evidence": [],
                 "remaining_uncertainty": ["financial_outcome_not_completed"],
             },
         )
@@ -240,10 +270,25 @@ class JournalBackedHostCommandStore:
                     raise ValueError(
                         "Queued operation must preserve financial uncertainty"
                     )
+                started_at = str(payload.get("started_at") or event["committed_at"])
+                updated_at = str(payload.get("updated_at") or started_at)
+                affected_refs = self._normalize_refs(
+                    tuple(str(x) for x in payload.get("affected_refs", ()))
+                )
+                evidence = self._normalize_evidence(
+                    tuple(
+                        x
+                        for x in payload.get("evidence", ())
+                        if isinstance(x, Mapping)
+                    )
+                )
                 operations[operation_id] = OperationResult(
                     operation_id=operation_id,
                     phase=phase,
-                    state_version=str(event["aggregate_version"]),
+                    started_at=started_at,
+                    updated_at=updated_at,
+                    affected_refs=affected_refs,
+                    evidence=evidence,
                     remaining_uncertainty=uncertainty,
                 )
             elif event["event_type"] == "OPERATION_UPDATED":
@@ -280,10 +325,23 @@ class JournalBackedHostCommandStore:
                     raise ValueError(
                         "Terminal journal operation cannot retain uncertainty"
                     )
+                affected_refs = self._normalize_refs(
+                    tuple(
+                        str(x)
+                        for x in payload.get("affected_refs", current.affected_refs)
+                    )
+                )
+                evidence_values = payload.get("evidence", current.evidence)
+                if not isinstance(evidence_values, (list, tuple)):
+                    raise ValueError("Host journal operation evidence must be an array")
+                evidence = self._normalize_evidence(tuple(evidence_values))
                 operations[operation_id] = OperationResult(
                     operation_id=operation_id,
                     phase=phase,
-                    state_version=str(event["aggregate_version"]),
+                    started_at=current.started_at,
+                    updated_at=str(payload.get("updated_at") or event["committed_at"]),
+                    affected_refs=affected_refs,
+                    evidence=evidence,
                     remaining_uncertainty=uncertainty,
                 )
         return operations
@@ -294,6 +352,8 @@ class JournalBackedHostCommandStore:
         phase: str,
         *,
         remaining_uncertainty: tuple[str, ...] = (),
+        affected_refs: tuple[str, ...] | None = None,
+        evidence: tuple[Mapping[str, object], ...] | None = None,
     ) -> OperationResult:
         if not isinstance(operation_id, str) or not operation_id.strip():
             raise ValueError("operation_id must be a non-empty string")
@@ -305,9 +365,21 @@ class JournalBackedHostCommandStore:
             raise KeyError("Unknown operation")
 
         normalized_uncertainty = tuple(str(x) for x in remaining_uncertainty)
+        normalized_refs = (
+            current.affected_refs
+            if affected_refs is None
+            else self._normalize_refs(affected_refs)
+        )
+        normalized_evidence = (
+            current.evidence
+            if evidence is None
+            else self._normalize_evidence(evidence)
+        )
         if (
             current.phase == phase
             and current.remaining_uncertainty == normalized_uncertainty
+            and current.affected_refs == normalized_refs
+            and current.evidence == normalized_evidence
         ):
             return current
         if current.phase in self.TERMINAL_PHASES:
@@ -320,9 +392,14 @@ class JournalBackedHostCommandStore:
             raise ValueError("Terminal operation cannot retain unresolved uncertainty")
 
         next_version = self.state_version + 1
+        updated_at = self._now()
         payload = {
             "operation_id": operation_id,
             "phase": phase,
+            "started_at": current.started_at,
+            "updated_at": updated_at,
+            "affected_refs": list(normalized_refs),
+            "evidence": [dict(item) for item in normalized_evidence],
             "remaining_uncertainty": list(normalized_uncertainty),
         }
         event_id = str(
@@ -341,7 +418,10 @@ class JournalBackedHostCommandStore:
         return OperationResult(
             operation_id=operation_id,
             phase=phase,
-            state_version=str(next_version),
+            started_at=current.started_at,
+            updated_at=updated_at,
+            affected_refs=normalized_refs,
+            evidence=normalized_evidence,
             remaining_uncertainty=normalized_uncertainty,
         )
 

@@ -60,6 +60,22 @@ class ReleaseCheck:
     source_sha: str
     evidence_ref: str
 
+    def __post_init__(self) -> None:
+        normalized_name = _text(self.name, "name").upper()
+        normalized_status = _text(self.status, "status").upper()
+        if normalized_status not in {"PASS", "FAIL", "INCONCLUSIVE"}:
+            raise ReleaseQualificationError(
+                "status must be PASS, FAIL or INCONCLUSIVE"
+            )
+        object.__setattr__(self, "name", normalized_name)
+        object.__setattr__(self, "status", normalized_status)
+        object.__setattr__(self, "source_sha", _git_sha(self.source_sha))
+        object.__setattr__(
+            self,
+            "evidence_ref",
+            _text(self.evidence_ref, "evidence_ref"),
+        )
+
     @classmethod
     def create(
         cls,
@@ -90,6 +106,35 @@ class ReleaseCandidate:
     sbom_sha256: str
     compatibility_manifest_sha256: str
     signatures_verified: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.signatures_verified, bool):
+            raise ReleaseQualificationError("signatures_verified must be boolean")
+        object.__setattr__(self, "version", _text(self.version, "version"))
+        object.__setattr__(self, "source_sha", _git_sha(self.source_sha))
+        object.__setattr__(
+            self,
+            "installer_sha256",
+            _sha256(self.installer_sha256, "installer_sha256"),
+        )
+        object.__setattr__(
+            self,
+            "diagnostics_sha256",
+            _sha256(self.diagnostics_sha256, "diagnostics_sha256"),
+        )
+        object.__setattr__(
+            self,
+            "sbom_sha256",
+            _sha256(self.sbom_sha256, "sbom_sha256"),
+        )
+        object.__setattr__(
+            self,
+            "compatibility_manifest_sha256",
+            _sha256(
+                self.compatibility_manifest_sha256,
+                "compatibility_manifest_sha256",
+            ),
+        )
 
     @classmethod
     def create(

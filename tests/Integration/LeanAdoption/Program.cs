@@ -1,6 +1,7 @@
 using AutoTrade.Engine.Lean;
 using QuantConnect;
 using QuantConnect.Orders;
+using System.Xml.Linq;
 
 static void Require(bool condition, string message)
 {
@@ -138,5 +139,31 @@ Require(
 Require(
     engineIdentity.AssemblyName == "QuantConnect.Lean.Engine",
     "The real LEAN Engine assembly was not compiled into the project graph.");
+
+var integrationProjectPath = Path.Combine(
+    Directory.GetCurrentDirectory(),
+    "src",
+    "AutoTrade.Engine.Lean",
+    "AutoTrade.Engine.Lean.csproj");
+var integrationProject = XDocument.Load(integrationProjectPath);
+var directProjectReferences = integrationProject
+    .Descendants("ProjectReference")
+    .Select(element => element.Attribute("Include")?.Value ?? string.Empty)
+    .ToHashSet(StringComparer.Ordinal);
+
+Require(
+    directProjectReferences.SetEquals(new[]
+    {
+        "$(LeanRoot)/Common/QuantConnect.csproj",
+        "$(LeanRoot)/Engine/QuantConnect.Lean.Engine.csproj"
+    }),
+    "LEAN boundary direct project references drifted from the approved isolation set.");
+Require(
+    !integrationProject.Descendants("PackageReference").Any(),
+    "LEAN boundary must not introduce direct package dependencies.");
+Require(
+    directProjectReferences.All(reference =>
+        !reference.Contains("Brokerages", StringComparison.OrdinalIgnoreCase)),
+    "LEAN boundary must not directly reference a brokerage sender project.");
 
 Console.WriteLine("WP02_LEAN_ADOPTION_PROBE_PASS");

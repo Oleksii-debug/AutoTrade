@@ -225,10 +225,99 @@ def _validate_artifact_source(root: Path) -> None:
                 raise BackupIntegrityError("Artifact manifest references a missing or corrupt object")
 
 
+def _canonical_sha256_ref(value: str, *, name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.startswith("sha256:")
+        or len(value) != 71
+        or any(character not in "0123456789abcdef" for character in value[7:])
+    ):
+        raise BackupIntegrityError(f"{name} must be a canonical SHA-256 reference")
+    return value
+
+
+def _exact_git_sha(value: object, *, name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 40
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise BackupCompatibilityError(
+            f"{name} must be an exact lowercase 40-character Git SHA"
+        )
+    return value
+
+
+def _load_typed_artifact(
+    artifact_root: Path,
+    digest_ref: str,
+    *,
+    expected_kind: str,
+) -> dict[str, Any]:
+    canonical = _canonical_sha256_ref(digest_ref, name="artifact digest")
+    digest = canonical.removeprefix("sha256:")
+    manifest_path = (
+        artifact_root
+        / "manifests"
+        / "sha256"
+        / digest[:2]
+        / f"{digest}.json"
+    )
+    object_path = artifact_root / "objects" / "sha256" / digest[:2] / digest
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        payload_bytes = object_path.read_bytes()
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise BackupIntegrityError("Referenced evidence artifact is missing") from error
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != 1
+        or manifest.get("algorithm") != "sha256"
+        or manifest.get("digest") != digest
+        or manifest.get("size_bytes") != len(payload_bytes)
+        or _sha256_bytes(payload_bytes) != digest
+    ):
+        raise BackupIntegrityError(
+            "Referenced evidence artifact manifest/object does not verify"
+        )
+    try:
+        payload = json.loads(payload_bytes)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise BackupIntegrityError("Referenced typed artifact is not valid JSON") from error
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+        or payload.get("kind") != expected_kind
+    ):
+        raise BackupCompatibilityError(
+            f"Referenced artifact is not {expected_kind}"
+        )
+    return payload
+
+
+def _load_build_identity(
+    artifact_root: Path,
+    digest_ref: str,
+) -> tuple[str, str]:
+    payload = _load_typed_artifact(
+        artifact_root,
+        digest_ref,
+        expected_kind="AUTOTRADE_BUILD_IDENTITY",
+    )
+    source_sha = _exact_git_sha(payload.get("source_sha"), name="build identity source_sha")
+    composition = _canonical_sha256_ref(
+        payload.get("composition_sha256"),
+        name="build identity composition_sha256",
+    )
+    return source_sha, composition
+
+
 def create_backup(
     state_dir: str | Path,
     artifact_root: str | Path,
     destination: str | Path,
+    *,
+    build_identity_sha256: str | None = None,
 ) -> Path:
     """Create an atomic verified backup bundle.
 
@@ -248,6 +337,17 @@ def create_backup(
     if _inside(target, state) or _inside(target, artifacts):
         raise BackupError("Backup destination must be outside source directories")
     _validate_artifact_source(artifacts)
+    source_sha: str | None = None
+    composition_sha256: str | None = None
+    if build_identity_sha256 is not None:
+        build_identity_sha256 = _canonical_sha256_ref(
+            build_identity_sha256,
+            name="build_identity_sha256",
+        )
+        source_sha, composition_sha256 = _load_build_identity(
+            artifacts,
+            build_identity_sha256,
+        )
 
     target.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".autotrade-backup-", dir=target.parent))
@@ -321,9 +421,17 @@ def create_backup(
                     "Runtime state, journal and evidence are not one consistent snapshot"
                 ) from error
 
+        unresolved_limits = ["RECONCILIATION_REQUIRED_AFTER_RESTORE"]
+        if build_identity_sha256 is None:
+            unresolved_limits.append("SOURCE_SHA_UNBOUND")
         manifest = {
             "schema_version": BACKUP_SCHEMA_VERSION,
             "created_at": _utc_now(),
+            "source_sha": source_sha,
+            "source_sha_bound": source_sha is not None,
+            "build_identity_sha256": build_identity_sha256,
+            "composition_sha256": composition_sha256,
+            "unresolved_limits": unresolved_limits,
             "journal_schema_version": journal_schema,
             "reconciliation_required_after_restore": True,
             "runtime_consistency_check": "DURABLE_TRACE_RECONSTRUCTION",
@@ -344,7 +452,12 @@ def create_backup(
         raise
 
 
-def verify_backup(backup_root: str | Path) -> dict[str, Any]:
+def verify_backup(
+    backup_root: str | Path,
+    *,
+    expected_source_sha: str | None = None,
+    expected_build_identity_sha256: str | None = None,
+) -> dict[str, Any]:
     """Verify the backup manifest, every payload byte and compatibility gates."""
 
     root = Path(backup_root)
@@ -363,6 +476,58 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
 
     if not isinstance(manifest, dict) or manifest.get("schema_version") != BACKUP_SCHEMA_VERSION:
         raise BackupCompatibilityError("Unsupported backup schema version")
+    source_sha = manifest.get("source_sha")
+    source_bound = manifest.get("source_sha_bound")
+    build_identity = manifest.get("build_identity_sha256")
+    composition = manifest.get("composition_sha256")
+    unresolved_limits = manifest.get("unresolved_limits")
+    if not isinstance(unresolved_limits, list) or any(
+        not isinstance(item, str) or not item for item in unresolved_limits
+    ):
+        raise BackupIntegrityError("Backup unresolved limits are invalid")
+    if source_bound is True:
+        source_sha = _exact_git_sha(source_sha, name="backup source_sha")
+        if not isinstance(build_identity, str):
+            raise BackupIntegrityError("Bound backup is missing build identity")
+        build_identity = _canonical_sha256_ref(
+            build_identity,
+            name="backup build_identity_sha256",
+        )
+        verified_source_sha, verified_composition = _load_build_identity(
+            root / "artifacts",
+            build_identity,
+        )
+        if source_sha != verified_source_sha or composition != verified_composition:
+            raise BackupIntegrityError(
+                "Backup build identity does not match immutable artifact"
+            )
+        if "SOURCE_SHA_UNBOUND" in unresolved_limits:
+            raise BackupIntegrityError("Bound backup cannot declare SOURCE_SHA_UNBOUND")
+    elif source_bound is False:
+        if source_sha is not None or build_identity is not None or composition is not None:
+            raise BackupIntegrityError("Unbound backup contains build identity metadata")
+        if "SOURCE_SHA_UNBOUND" not in unresolved_limits:
+            raise BackupIntegrityError("Unbound backup must declare SOURCE_SHA_UNBOUND")
+    else:
+        raise BackupIntegrityError("Backup source-SHA binding flag is invalid")
+    if expected_source_sha is not None:
+        requested_source = _exact_git_sha(
+            expected_source_sha,
+            name="expected_source_sha",
+        )
+        if source_sha != requested_source:
+            raise BackupCompatibilityError(
+                "Backup source SHA does not match requested build"
+            )
+    if expected_build_identity_sha256 is not None:
+        requested_identity = _canonical_sha256_ref(
+            expected_build_identity_sha256,
+            name="expected_build_identity_sha256",
+        )
+        if build_identity != requested_identity:
+            raise BackupCompatibilityError(
+                "Backup build identity does not match requested artifact"
+            )
     if manifest.get("journal_schema_version") != JournalStore.SCHEMA_VERSION:
         raise BackupCompatibilityError("Unsupported backed-up journal schema version")
     if manifest.get("reconciliation_required_after_restore") is not True:
@@ -440,11 +605,21 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
     return manifest
 
 
-def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Path:
+def restore_backup(
+    backup_root: str | Path,
+    destination_root: str | Path,
+    *,
+    expected_source_sha: str | None = None,
+    expected_build_identity_sha256: str | None = None,
+) -> Path:
     """Restore through staging and leave a mandatory reconciliation marker."""
 
     backup = Path(backup_root)
-    manifest = verify_backup(backup)
+    manifest = verify_backup(
+        backup,
+        expected_source_sha=expected_source_sha,
+        expected_build_identity_sha256=expected_build_identity_sha256,
+    )
     destination = Path(destination_root)
     if destination.exists():
         raise BackupError("Restore destination already exists")
@@ -470,6 +645,8 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
             "backup_manifest_sha256": (backup / MANIFEST_DIGEST_NAME)
             .read_text(encoding="ascii")
             .strip(),
+            "source_sha": manifest["source_sha"],
+            "build_identity_sha256": manifest["build_identity_sha256"],
         }
         _write_bytes_durable(stage / RESTORE_MARKER_NAME, _canonical_json(marker))
         os.replace(stage, destination)

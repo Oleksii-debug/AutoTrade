@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Iterable
 
+from .persistence import payload_digest
+
 
 class AccountingConflict(ValueError):
     """Raised when an immutable transaction identity is reused inconsistently."""
@@ -33,6 +35,16 @@ def _name(value: str, *, field: str) -> str:
     return value.strip()
 
 
+def _canonical_decimal(value: Decimal) -> str:
+    amount = _decimal(value, name="signed_amount")
+    if amount == 0:
+        return "0"
+    fixed = format(amount, "f")
+    if "." in fixed:
+        fixed = fixed.rstrip("0").rstrip(".")
+    return fixed
+
+
 @dataclass(frozen=True)
 class Posting:
     ledger_account: str
@@ -54,6 +66,35 @@ def posting(ledger_account: str, asset_or_currency: str, signed_amount: Decimal 
         asset_or_currency=_name(asset_or_currency, field="asset_or_currency"),
         signed_amount=_decimal(signed_amount, name="signed_amount"),
     )
+
+
+def canonical_transaction(transaction: JournalTransaction) -> dict[str, object]:
+    validate_transaction(transaction)
+    return {
+        "schema_version": "1.0.0",
+        "transaction_id": _name(transaction.transaction_id, field="transaction_id"),
+        "cause_event_id": _name(transaction.cause_event_id, field="cause_event_id"),
+        "reverses_transaction_id": (
+            _name(transaction.reverses_transaction_id, field="reverses_transaction_id")
+            if transaction.reverses_transaction_id is not None
+            else None
+        ),
+        "postings": [
+            {
+                "ledger_account": _name(item.ledger_account, field="ledger_account"),
+                "asset_or_currency": _name(
+                    item.asset_or_currency,
+                    field="asset_or_currency",
+                ),
+                "signed_amount": _canonical_decimal(item.signed_amount),
+            }
+            for item in transaction.postings
+        ],
+    }
+
+
+def transaction_digest(transaction: JournalTransaction) -> str:
+    return payload_digest(canonical_transaction(transaction))
 
 
 def validate_transaction(transaction: JournalTransaction) -> None:
@@ -152,6 +193,23 @@ class EconomicBook:
     def fee_expense(self, currency: str) -> Decimal:
         value = _name(currency, field="currency")
         return self.balance(f"FEE_EXPENSE:{value}", value)
+
+    def audit_digest(self) -> str:
+        return payload_digest(
+            {
+                "schema_version": "1.0.0",
+                "transactions": [
+                    {
+                        "transaction_id": _name(
+                            transaction.transaction_id,
+                            field="transaction_id",
+                        ),
+                        "digest": transaction_digest(transaction),
+                    }
+                    for transaction in self._transactions
+                ],
+            }
+        )
 
 
 def book_external_cash_flow(

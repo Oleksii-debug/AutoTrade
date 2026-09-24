@@ -104,6 +104,18 @@ class ScientificQualificationTests(unittest.TestCase):
         self.assertEqual(baseline.status, revised.status)
         self.assertNotEqual(baseline.qualification_id, revised.qualification_id)
 
+    def test_unknown_gate_cannot_be_silently_ignored(self):
+        with self.assertRaises(ValueError):
+            QualificationGate("future_magic_gate", "PASS", (H,), H, H, H)
+
+    def test_gate_collections_are_strictly_typed(self):
+        with self.assertRaises(ValueError):
+            QualificationGate("protocol", "PASS", [H], H, H, H)
+        with self.assertRaises(ValueError):
+            QualificationGate("protocol", "FAIL", (H,), H, H, H, ("",))
+        with self.assertRaises(TypeError):
+            ScientificQualificationInput(H, H, H, list(complete_gates()), "NONE")
+
 
 if __name__ == "__main__":
     unittest.main()

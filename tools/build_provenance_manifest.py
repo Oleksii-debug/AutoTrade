@@ -21,7 +21,12 @@ UTC_EVIDENCE_TIME = re.compile(
 )
 
 
-def release_evidence_document(path: Path, *, label: str) -> tuple[bool, str | None]:
+def release_evidence_document(
+    path: Path,
+    *,
+    label: str,
+    expected_source_sha: str | None = None,
+) -> tuple[bool, str | None]:
     """Require explicit evidence before a release gate can be treated as satisfied."""
     if not path.exists():
         return False, "missing"
@@ -38,6 +43,11 @@ def release_evidence_document(path: Path, *, label: str) -> tuple[bool, str | No
     source_sha = value.get("source_sha")
     if not isinstance(source_sha, str) or GIT_SHA.fullmatch(source_sha) is None:
         return False, "invalid_source_sha"
+    if expected_source_sha is not None:
+        if GIT_SHA.fullmatch(expected_source_sha) is None:
+            raise ValueError("expected_source_sha must be a canonical 40-hex commit SHA")
+        if source_sha != expected_source_sha:
+            return False, "source_sha_mismatch"
     refs = value.get("evidence_refs")
     if not isinstance(refs, list) or not refs:
         return False, "missing_evidence_refs"
@@ -69,11 +79,13 @@ def dependency_advisory_evidence_document(
     path: Path,
     *,
     expected_dependency_graph: dict[str, object],
+    expected_source_sha: str | None = None,
 ) -> tuple[bool, str | None]:
     """Require advisory evidence for the exact dependency graph under review."""
     qualified, reason = release_evidence_document(
         path,
         label="dependency advisory qualification",
+        expected_source_sha=expected_source_sha,
     )
     if not qualified:
         return False, reason
@@ -160,6 +172,11 @@ def build_manifest() -> dict[str, object]:
         composition,
         label="release composition",
     )
+    release_source_sha: str | None = None
+    if composition_ok:
+        release_source_sha = json.loads(
+            composition.read_text(encoding="utf-8")
+        )["source_sha"]
     if not composition_ok:
         blockers.append(
             {
@@ -179,6 +196,7 @@ def build_manifest() -> dict[str, object]:
     rights_ok, rights_reason = release_evidence_document(
         rights,
         label="model/data rights",
+        expected_source_sha=release_source_sha,
     )
     if not rights_ok:
         blockers.append(
@@ -216,6 +234,7 @@ def build_manifest() -> dict[str, object]:
     advisories_ok, advisories_reason = dependency_advisory_evidence_document(
         advisories,
         expected_dependency_graph=dependency_graph,
+        expected_source_sha=release_source_sha,
     )
     if not advisories_ok:
         blockers.append(

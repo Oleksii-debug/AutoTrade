@@ -62,6 +62,22 @@ def _require_text(value: Any, name: str) -> str:
     return value.strip()
 
 
+
+def _require_immutable_artifact_ref(value: Any, name: str) -> str:
+    reference = _require_text(value, name)
+    prefix = "artifact:"
+    marker = "@sha256:"
+    if not reference.startswith(prefix) or marker not in reference:
+        raise ValueError(f"{name} must bind an immutable artifact and SHA-256 digest")
+    artifact_id, digest = reference[len(prefix):].split(marker, 1)
+    try:
+        UUID(artifact_id)
+    except (ValueError, TypeError, AttributeError) as error:
+        raise ValueError(f"{name} artifact id must be a UUID") from error
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        raise ValueError(f"{name} must use a canonical lowercase SHA-256 digest")
+    return reference
+
 def _require_research_kind(kind: str) -> str:
     normalized = _require_text(kind, "kind")
     if not normalized.lower().startswith("research."):
@@ -100,7 +116,7 @@ def _validate_budget(budget: dict[str, int | float]) -> dict[str, float]:
 
 
 class ResearchJobStore:
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -172,6 +188,20 @@ class ResearchJobStore:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (2, _iso(datetime.now(timezone.utc))),
                 )
+                versions.append(2)
+            if 3 not in versions:
+                columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+                }
+                if "external_resolution_json" not in columns:
+                    connection.execute(
+                        "ALTER TABLE jobs ADD COLUMN external_resolution_json TEXT"
+                    )
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (3, _iso(datetime.now(timezone.utc))),
+                )
             connection.commit()
 
     @staticmethod
@@ -196,6 +226,8 @@ class ResearchJobStore:
             record["checkpoint_ref"] = row["checkpoint_ref"]
         if row["error_json"] is not None:
             record["error"] = json.loads(row["error_json"])
+        if "external_resolution_json" in row.keys() and row["external_resolution_json"] is not None:
+            record["external_resolution"] = json.loads(row["external_resolution_json"])
         return record
 
     def enqueue(
@@ -356,6 +388,104 @@ class ResearchJobStore:
                     )
             connection.commit()
         return requeued
+
+
+    def resolve_waiting_external(
+        self,
+        job_id: str,
+        *,
+        verdict: str,
+        evidence_ref: str,
+        output_refs: list[str] | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        """Resolve an ambiguous non-idempotent lease only from immutable evidence.
+
+        PROVEN_NOT_RUN requeues the already-fenced generation. PROVEN_SUCCEEDED
+        accepts explicit output references. PROVEN_FAILED terminates the job.
+        This is a research-job recovery boundary and cannot submit financial work.
+        """
+
+        identifier = str(UUID(_require_text(job_id, "job_id")))
+        normalized_verdict = _require_text(verdict, "verdict").upper()
+        allowed = {"PROVEN_NOT_RUN", "PROVEN_SUCCEEDED", "PROVEN_FAILED"}
+        if normalized_verdict not in allowed:
+            raise ValueError("unsupported external-resolution verdict")
+        evidence = _require_immutable_artifact_ref(evidence_ref, "evidence_ref")
+        outputs = [] if output_refs is None else [
+            _require_text(value, "output_ref") for value in output_refs
+        ]
+        if output_refs is not None and not isinstance(output_refs, list):
+            raise ValueError("output_refs must be a list when provided")
+        if normalized_verdict == "PROVEN_SUCCEEDED" and not outputs:
+            raise ValueError("PROVEN_SUCCEEDED requires output_refs")
+        if normalized_verdict != "PROVEN_SUCCEEDED" and outputs:
+            raise ValueError("output_refs are valid only for PROVEN_SUCCEEDED")
+
+        current = _utc(now or datetime.now(timezone.utc))
+        resolution = {
+            "verdict": normalized_verdict,
+            "evidence_ref": evidence,
+            "resolved_at": _iso(current),
+        }
+        encoded_resolution = _json(resolution)
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id = ?",
+                (identifier,),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise KeyError(identifier)
+
+            existing_resolution = row["external_resolution_json"]
+            if row["state"] != "WAITING_EXTERNAL":
+                if existing_resolution == encoded_resolution:
+                    connection.commit()
+                    return False
+                connection.rollback()
+                raise JobConflictError(
+                    "job is not waiting for the supplied external resolution"
+                )
+
+            if normalized_verdict == "PROVEN_NOT_RUN":
+                state = "QUEUED"
+                error_json = None
+                output_json = "[]"
+            elif normalized_verdict == "PROVEN_SUCCEEDED":
+                state = "SUCCEEDED"
+                error_json = None
+                output_json = _json(outputs)
+            else:
+                state = "FAILED"
+                error_json = _json(
+                    {
+                        "code": "EXTERNAL_OUTCOME_PROVEN_FAILED",
+                        "message": "Immutable recovery evidence proves external research work failed",
+                    }
+                )
+                output_json = "[]"
+
+            connection.execute(
+                """
+                UPDATE jobs
+                SET state=?, owner=NULL, lease_until=NULL, error_json=?,
+                    output_refs_json=?, external_resolution_json=?, updated_at=?
+                WHERE job_id=? AND state='WAITING_EXTERNAL'
+                """,
+                (
+                    state,
+                    error_json,
+                    output_json,
+                    encoded_resolution,
+                    _iso(current),
+                    identifier,
+                ),
+            )
+            connection.commit()
+        return True
 
     def renew(
         self,

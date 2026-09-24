@@ -49,6 +49,7 @@ class AuthorityPolicy:
     max_notional: Decimal
     expires_at: str
     autonomous: bool
+    valid_from: str = "1970-01-01T00:00:00Z"
     protection_only: bool = False
 
     @classmethod
@@ -63,6 +64,7 @@ class AuthorityPolicy:
         max_notional,
         expires_at: str,
         autonomous: bool,
+        valid_from: str = "1970-01-01T00:00:00Z",
         protection_only: bool = False,
     ) -> "AuthorityPolicy":
         normalized_environments = frozenset(
@@ -81,7 +83,10 @@ class AuthorityPolicy:
         notional = _decimal(max_notional, name="max_notional")
         if notional <= 0:
             raise ValueError("max_notional must be positive")
-        _instant(expires_at, name="expires_at")
+        valid_from_instant = _instant(valid_from, name="valid_from")
+        expires_at_instant = _instant(expires_at, name="expires_at")
+        if valid_from_instant >= expires_at_instant:
+            raise ValueError("valid_from must precede expires_at")
         if not isinstance(autonomous, bool) or not isinstance(protection_only, bool):
             raise TypeError("autonomous and protection_only must be booleans")
         return cls(
@@ -93,6 +98,7 @@ class AuthorityPolicy:
             max_notional=notional,
             expires_at=expires_at,
             autonomous=autonomous,
+            valid_from=valid_from,
             protection_only=protection_only,
         )
 
@@ -214,6 +220,8 @@ class AuthorityService:
 
     def _policy_active(self, policy: AuthorityPolicy, now: str) -> tuple[bool, str]:
         current = _instant(now, name="now")
+        if current < _instant(policy.valid_from, name="policy.valid_from"):
+            return False, "policy_not_yet_active"
         revocation = self._revocations.get(policy.policy_id)
         if revocation is not None:
             _, revoked_at = revocation

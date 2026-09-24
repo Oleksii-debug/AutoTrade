@@ -340,6 +340,19 @@ class InstrumentVersion:
             raise InstrumentRegistryError("perpetual instruments must not define expiry")
         if self.asset_class in {"FUTURE", "OPTION"} and self.expiry is None:
             raise InstrumentRegistryError("dated derivative requires expiry")
+        if self.expiry is not None:
+            if self.last_trade_at is not None and self.last_trade_at > self.expiry:
+                raise InstrumentRegistryError("last_trade_at must not be after expiry")
+            if self.delivery_cutoff is not None and self.delivery_cutoff > self.expiry:
+                raise InstrumentRegistryError("delivery_cutoff must not be after expiry")
+        if (
+            self.last_trade_at is not None
+            and self.delivery_cutoff is not None
+            and self.delivery_cutoff < self.last_trade_at
+        ):
+            raise InstrumentRegistryError(
+                "delivery_cutoff must not be before last_trade_at"
+            )
         if self.asset_class == "OPTION":
             if self.payoff != "OPTION":
                 raise InstrumentRegistryError("option payoff must be OPTION")

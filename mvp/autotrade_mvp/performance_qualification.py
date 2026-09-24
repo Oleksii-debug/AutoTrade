@@ -9,6 +9,8 @@ evidence. It makes no universal throughput or HFT claim.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
+import json
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
@@ -117,10 +119,33 @@ class RuntimeBudgetSpec:
                 "research interference budget cannot exceed the declared strategy horizon"
             )
 
+    @property
+    def digest(self) -> str:
+        payload = {
+            "scenario_id": self.scenario_id,
+            "release_sha": self.release_sha,
+            "configuration_hash": self.configuration_hash,
+            "host_fingerprint": self.host_fingerprint,
+            "strategy_horizon_us": self.strategy_horizon_us,
+            "max_p95_financial_latency_us": self.max_p95_financial_latency_us,
+            "max_financial_staleness_us": self.max_financial_staleness_us,
+            "max_research_interference_us": self.max_research_interference_us,
+            "min_financial_samples": self.min_financial_samples,
+            "min_research_samples": self.min_research_samples,
+        }
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        return "sha256:" + sha256(encoded).hexdigest()
+
 
 @dataclass(frozen=True)
 class RuntimeLoadObservation:
     scenario_id: str
+    spec_digest: str
     release_sha: str
     configuration_hash: str
     host_fingerprint: str
@@ -136,6 +161,7 @@ class RuntimeLoadObservation:
         cls,
         *,
         scenario_id: str,
+        spec_digest: str,
         release_sha: str,
         configuration_hash: str,
         host_fingerprint: str,
@@ -158,6 +184,7 @@ class RuntimeLoadObservation:
             raise RuntimeBudgetError("recovered_financial_events cannot exceed expected")
         return cls(
             scenario_id=scenario_id.strip(),
+            spec_digest=_sha256_identity(spec_digest, name="spec_digest"),
             release_sha=_git_sha(release_sha, name="release_sha"),
             configuration_hash=_sha256_identity(
                 configuration_hash, name="configuration_hash"
@@ -209,6 +236,8 @@ def evaluate_runtime_budget(
         raise RuntimeBudgetError("observation belongs to another configuration")
     if spec.host_fingerprint != observation.host_fingerprint:
         raise RuntimeBudgetError("observation belongs to another host")
+    if spec.digest != observation.spec_digest:
+        raise RuntimeBudgetError("observation belongs to another budget spec digest")
 
     reasons: list[str] = []
     metrics: dict[str, int] = {

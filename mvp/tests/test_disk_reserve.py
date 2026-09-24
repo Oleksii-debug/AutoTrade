@@ -50,6 +50,22 @@ class EmergencyDiskReserveTests(unittest.TestCase):
             self.assertFalse(released.present)
             self.assertFalse(path.exists())
 
+    def test_same_sized_foreign_file_is_never_treated_as_owned_reserve(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "reserve.bin"
+            path.write_bytes(b"x" * 128)
+            reserve = EmergencyDiskReserve(path, reserve_bytes=128)
+
+            status = reserve.status()
+            self.assertTrue(status.present)
+            self.assertTrue(status.exact_size)
+            self.assertFalse(status.available_for_emergency)
+            with self.assertRaisesRegex(DiskReserveError, "no verified"):
+                reserve.release_for_emergency(
+                    reason=ReserveReleaseReason.RECOVERY_CRITICAL
+                )
+            self.assertEqual(path.read_bytes(), b"x" * 128)
+
     def test_release_refuses_missing_or_wrong_sized_reserve(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "reserve.bin"
@@ -86,7 +102,7 @@ class EmergencyDiskReserveTests(unittest.TestCase):
     def test_configuration_and_boolean_inputs_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "reserve.bin"
-            for invalid in (0, -1, True, 1.5, "1024"):
+            for invalid in (0, 1, -1, True, 1.5, "1024"):
                 with self.subTest(reserve_bytes=invalid):
                     with self.assertRaises(DiskReserveError):
                         EmergencyDiskReserve(path, reserve_bytes=invalid)

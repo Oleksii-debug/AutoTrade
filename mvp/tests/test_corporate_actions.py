@@ -182,6 +182,16 @@ class CorporateSettlementTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cover_recalled_short(recalled, quantity="1", buy_price="90")
 
+    def test_corporate_event_rejects_duplicate_normalized_payload_keys(self):
+        with self.assertRaisesRegex(ValueError, "unique after normalization"):
+            CorporateEvent.create(
+                event_id="ambiguous-split",
+                kind="SPLIT",
+                effective_date=date(2026, 1, 2),
+                source_revision="r1",
+                payload={"numerator": 2, " numerator ": 3, "denominator": 1},
+            )
+
     def test_corporate_event_rejects_binary_float_economics(self):
         with self.assertRaisesRegex(TypeError, "exact decimal"):
             CorporateEvent.create(

@@ -340,13 +340,15 @@ class JournalStore:
             event_type = self._require_text(envelope.get("event_type"), "event_type")
             aggregate_type = self._require_text(envelope.get("aggregate_type"), "aggregate_type")
             aggregate_id = self._require_text(envelope.get("aggregate_id"), "aggregate_id")
-            aggregate_version = envelope.get("aggregate_version")
-            if (
-                not isinstance(aggregate_version, int)
-                or isinstance(aggregate_version, bool)
-                or aggregate_version <= 0
-            ):
+            raw_version = envelope.get("aggregate_version")
+            if isinstance(raw_version, bool):
                 raise ValueError("aggregate_version must be a positive integer")
+            try:
+                aggregate_version = int(raw_version)
+            except (TypeError, ValueError) as error:
+                raise ValueError("aggregate_version must be a positive integer") from error
+            if aggregate_version <= 0 or str(aggregate_version) != str(raw_version):
+                raise ValueError("aggregate_version must be a canonical positive integer")
             payload = envelope.get("payload")
             payload_json = canonical_json(payload)
             supplied_hash = envelope.get("payload_hash")

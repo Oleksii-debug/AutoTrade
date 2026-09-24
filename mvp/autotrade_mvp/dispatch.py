@@ -13,11 +13,31 @@ from .persistence import JournalStore, canonical_json, payload_digest
 
 
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
+SenderCheck = Callable[[str, int], None]
 TransportSend = Callable[[str, Mapping[str, Any], Callable[[], None]], Any]
 
 
 class DispatchBlocked(RuntimeError):
     """Raised inside a provider wrapper when the final send barrier rejects."""
+
+
+def _authority_decision(
+    authority_check: AuthorityCheck,
+    intent_hash: str,
+    now: str,
+) -> tuple[bool, str]:
+    try:
+        result = authority_check(intent_hash, now)
+    except Exception as error:
+        return False, f"authority_check_error:{type(error).__name__}"
+    if not isinstance(result, tuple) or len(result) != 2:
+        return False, "authority_check_invalid_result"
+    allowed, reason = result
+    if not isinstance(allowed, bool):
+        return False, "authority_check_invalid_allowed"
+    if not isinstance(reason, str) or not reason.strip():
+        return False, "authority_check_invalid_reason"
+    return allowed, reason.strip()
 
 
 @dataclass(frozen=True)
@@ -28,14 +48,31 @@ class DispatchOutcome:
     reason: str
 
 
-def stable_client_order_id(provider: str, intent_id: str, *, max_length: int = 32) -> str:
+def stable_client_order_id(
+    provider: str,
+    intent_id: str,
+    *,
+    environment: str,
+    account_id: str,
+    max_length: int = 32,
+) -> str:
     if not isinstance(provider, str) or not provider.strip():
         raise ValueError("provider is required")
     if not isinstance(intent_id, str) or not intent_id.strip():
         raise ValueError("intent_id is required")
+    normalized_environment = environment.strip().upper() if isinstance(environment, str) else ""
+    if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+        raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
+    if not isinstance(account_id, str) or not account_id.strip():
+        raise ValueError("account_id is required")
     if not isinstance(max_length, int) or isinstance(max_length, bool) or max_length < 12:
         raise ValueError("max_length must be an integer of at least 12")
-    digest = sha256(f"{provider.strip().lower()}|{intent_id.strip()}".encode("utf-8")).hexdigest()
+    digest = sha256(
+        (
+            f"{provider.strip().lower()}|{normalized_environment}|"
+            f"{account_id.strip()}|{intent_id.strip()}"
+        ).encode("utf-8")
+    ).hexdigest()
     return ("at-" + digest)[:max_length]
 
 
@@ -51,33 +88,50 @@ def _instant(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _event_id(attempt_id: str, event_type: str, version: int) -> str:
-    return str(uuid5(NAMESPACE_URL, f"https://events.autotrade.local/dispatch/{attempt_id}/{event_type}/{version}"))
+def _event_id(scope_key: str, attempt_id: str, event_type: str, version: int) -> str:
+    return str(
+        uuid5(
+            NAMESPACE_URL,
+            (
+                f"https://events.autotrade.local/dispatch/{scope_key}/"
+                f"{attempt_id}/{event_type}/{version}"
+            ),
+        )
+    )
 
 
 def _envelope(
     *,
+    scope_key: str,
+    aggregate_id: str,
+    environment: str,
     attempt_id: str,
     event_type: str,
     version: int,
     payload: dict[str, Any],
     now: str,
+    owner_epoch: int,
 ) -> dict[str, Any]:
     timestamp = _instant(now).isoformat().replace("+00:00", "Z")
     return {
-        "event_id": _event_id(attempt_id, event_type, version),
+        "event_id": _event_id(scope_key, attempt_id, event_type, version),
         "event_type": event_type,
         "schema_version": "1.0.0",
         "aggregate_type": "submission_attempt",
-        "aggregate_id": attempt_id,
+        "aggregate_id": aggregate_id,
         "aggregate_version": str(version),
         "host_id": "local-mvp",
-        "owner_epoch": "1",
-        "environment": "SIMULATION",
+        "owner_epoch": str(owner_epoch),
+        "environment": environment,
         "occurred_at": timestamp,
         "observed_at": timestamp,
         "committed_at": timestamp,
-        "correlation_id": str(uuid5(NAMESPACE_URL, f"https://events.autotrade.local/dispatch/{attempt_id}")),
+        "correlation_id": str(
+            uuid5(
+                NAMESPACE_URL,
+                f"https://events.autotrade.local/dispatch/{scope_key}/{attempt_id}",
+            )
+        ),
         "causation_id": None,
         "payload": payload,
         "payload_hash": payload_digest(payload),
@@ -97,17 +151,43 @@ class GuardedDispatcher:
         self,
         store: JournalStore,
         *,
+        environment: str,
+        account_id: str,
         owner_token: str | None = None,
+        owner_epoch: int = 1,
         prepared_lease_seconds: int = 60,
     ):
         self.store = store
-        self.owner_token = owner_token or str(uuid4())
+        normalized_environment = (
+            environment.strip().upper() if isinstance(environment, str) else ""
+        )
+        if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+            raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
+        if not isinstance(account_id, str) or not account_id.strip():
+            raise ValueError("account_id is required")
+        self.environment = normalized_environment
+        self.account_id = account_id.strip()
+        self.scope_key = f"{self.environment}:{self.account_id}"
+        if owner_token is not None and (
+            not isinstance(owner_token, str) or not owner_token.strip()
+        ):
+            raise ValueError("owner_token must be a non-empty string when supplied")
+        self.owner_token = owner_token.strip() if owner_token is not None else str(uuid4())
+        if not isinstance(owner_epoch, int) or isinstance(owner_epoch, bool) or owner_epoch < 1:
+            raise ValueError("owner_epoch must be a positive integer")
+        self.owner_epoch = owner_epoch
         if not isinstance(prepared_lease_seconds, int) or isinstance(prepared_lease_seconds, bool) or prepared_lease_seconds < 1:
             raise ValueError("prepared_lease_seconds must be a positive integer")
         self.prepared_lease_seconds = prepared_lease_seconds
 
+    def _aggregate_id(self, attempt_id: str) -> str:
+        return f"{self.scope_key}:{attempt_id}"
+
     def _events(self, attempt_id: str) -> list[dict[str, Any]]:
-        return self.store.load_events("submission_attempt", attempt_id)
+        return self.store.load_events(
+            "submission_attempt",
+            self._aggregate_id(attempt_id),
+        )
 
     def _append(
         self,
@@ -120,11 +200,15 @@ class GuardedDispatcher:
     ):
         return self.store.append_event(
             _envelope(
+                scope_key=self.scope_key,
+                aggregate_id=self._aggregate_id(attempt_id),
+                environment=self.environment,
                 attempt_id=attempt_id,
                 event_type=event_type,
                 version=version,
                 payload=payload,
                 now=now,
+                owner_epoch=self.owner_epoch,
             ),
             outbox_topic="autotrade.submission.events",
         )
@@ -199,6 +283,7 @@ class GuardedDispatcher:
         transport_send: TransportSend,
         client_id_max_length: int = 32,
         final_barrier_clock: Callable[[], str] | None = None,
+        sender_check: SenderCheck | None = None,
     ) -> DispatchOutcome:
         for value, name in (
             (attempt_id, "attempt_id"),
@@ -216,6 +301,8 @@ class GuardedDispatcher:
         client_order_id = stable_client_order_id(
             provider,
             intent_id,
+            environment=self.environment,
+            account_id=self.account_id,
             max_length=client_id_max_length,
         )
 
@@ -228,6 +315,9 @@ class GuardedDispatcher:
                 "provider": provider,
                 "request_hash": request_hash,
                 "client_order_id": client_order_id,
+                "environment": self.environment,
+                "account_id": self.account_id,
+                "owner_epoch": self.owner_epoch,
             }
             if any(prepared.get(key) != value for key, value in expected.items()):
                 raise ValueError("attempt_id conflicts with existing submission content")
@@ -243,7 +333,10 @@ class GuardedDispatcher:
             "provider": provider,
             "request_hash": request_hash,
             "client_order_id": client_order_id,
+            "environment": self.environment,
+            "account_id": self.account_id,
             "owner_token": self.owner_token,
+            "owner_epoch": self.owner_epoch,
             "prepared_at": _instant(now).isoformat().replace("+00:00", "Z"),
         }
         prepared = self._append(
@@ -260,7 +353,18 @@ class GuardedDispatcher:
                 now=now,
             )
 
-        allowed, reason = authority_check(intent_hash, now)
+        if self.environment == "LIVE" and sender_check is None:
+            reason = "live_sender_fence_required"
+            self._append(
+                attempt_id=attempt_id,
+                event_type="SubmissionBlocked",
+                version=2,
+                payload={"client_order_id": client_order_id, "reason": reason},
+                now=now,
+            )
+            return DispatchOutcome("BLOCKED", client_order_id, None, reason)
+
+        allowed, reason = _authority_decision(authority_check, intent_hash, now)
         if not allowed:
             self._append(
                 attempt_id=attempt_id,
@@ -295,7 +399,29 @@ class GuardedDispatcher:
                         now=barrier_now,
                     )
                     raise DispatchBlocked("final_barrier_clock_moved_backwards")
-            allowed_now, barrier_reason = authority_check(intent_hash, barrier_now)
+            if sender_check is not None:
+                try:
+                    sender_check(self.owner_token, self.owner_epoch)
+                except Exception as error:
+                    barrier_reason = f"sender_fence_rejected:{type(error).__name__}"
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionBlocked",
+                        version=2,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": barrier_reason,
+                            "owner_token": self.owner_token,
+                            "owner_epoch": self.owner_epoch,
+                        },
+                        now=barrier_now,
+                    )
+                    raise DispatchBlocked(barrier_reason) from error
+            allowed_now, barrier_reason = _authority_decision(
+                authority_check,
+                intent_hash,
+                barrier_now,
+            )
             if not allowed_now:
                 self._append(
                     attempt_id=attempt_id,
@@ -312,6 +438,7 @@ class GuardedDispatcher:
                 payload={
                     "client_order_id": client_order_id,
                     "owner_token": self.owner_token,
+                    "owner_epoch": self.owner_epoch,
                     "reason": "final_send_barrier_passed",
                 },
                 now=barrier_now,

@@ -1,7 +1,7 @@
 """Independent whole-science qualification for AutoTrade candidate evidence.
 
-This layer does not optimize models, select trades, or promote candidates. It audits
-already-produced evidence and returns PASS, FAIL or INCONCLUSIVE. A strong backtest
+This layer does not optimize models, select trades, or promote candidates.  It audits
+already-produced evidence and returns PASS, FAIL or INCONCLUSIVE.  A strong backtest
 metric is deliberately not an input: protocol validity, causal leakage, untouched
 holdout/forward evidence, retention, promotion controls, ablations and uncertainty are.
 """
@@ -41,6 +41,9 @@ class QualificationGate:
     gate_id: str
     status: str
     evidence_hashes: tuple[str, ...]
+    candidate_hash: str
+    frozen_protocol_hash: str
+    input_snapshot_hash: str
     reason_codes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -52,6 +55,9 @@ class QualificationGate:
             raise ValueError("gate evidence is required")
         for item in self.evidence_hashes:
             _sha256_identity(item, "gate evidence hash")
+        _sha256_identity(self.candidate_hash, "gate candidate_hash")
+        _sha256_identity(self.frozen_protocol_hash, "gate frozen_protocol_hash")
+        _sha256_identity(self.input_snapshot_hash, "gate input_snapshot_hash")
         if self.status == "FAIL" and not self.reason_codes:
             raise ValueError("failed gate requires a reason code")
 
@@ -98,6 +104,15 @@ def qualify_scientific_learning(evidence: ScientificQualificationInput) -> Scien
         if gate is None:
             checks.append((gate_id, "INCONCLUSIVE"))
             reasons.append("SCIENCE.MISSING_GATE:" + gate_id)
+            continue
+        binding_ok = (
+            gate.candidate_hash == evidence.candidate_hash
+            and gate.frozen_protocol_hash == evidence.frozen_protocol_hash
+            and gate.input_snapshot_hash == evidence.input_snapshot_hash
+        )
+        if not binding_ok:
+            checks.append((gate_id, "FAIL"))
+            reasons.append("SCIENCE.EVIDENCE_BINDING_MISMATCH:" + gate_id)
             continue
         checks.append((gate_id, gate.status))
         if gate.status == "FAIL":

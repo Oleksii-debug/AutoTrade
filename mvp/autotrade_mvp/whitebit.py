@@ -121,6 +121,66 @@ class WhiteBitOrderIntent:
     reduce_only: bool = False
     position_side: str | None = None
 
+    def __post_init__(self) -> None:
+        product = _text(self.product_family, name="product_family").upper()
+        order = _text(self.order_type, name="order_type").upper()
+        side_value = _text(self.side, name="side").upper()
+        tif = _text(self.time_in_force, name="time_in_force").upper()
+        if product not in _PRODUCTS:
+            raise WhiteBitAdapterError("unsupported WhiteBIT product family")
+        if order not in _ORDER_TYPES:
+            raise WhiteBitAdapterError("unsupported WhiteBIT order type")
+        if side_value not in _SIDES:
+            raise WhiteBitAdapterError("side must be BUY or SELL")
+        if tif not in {"GTC", "IOC"}:
+            raise WhiteBitAdapterError("time_in_force must be GTC or IOC")
+        if type(self.post_only) is not bool or type(self.reduce_only) is not bool:
+            raise WhiteBitAdapterError("post_only and reduce_only must be boolean")
+        amount = _decimal(self.amount, name="amount", positive=True)
+        price = None if self.price is None else _decimal(
+            self.price, name="price", positive=True
+        )
+        activation = None if self.activation_price is None else _decimal(
+            self.activation_price, name="activation_price", positive=True
+        )
+        if order in {"LIMIT", "STOP_LIMIT"} and price is None:
+            raise WhiteBitAdapterError("price is required for limit orders")
+        if order in {"MARKET", "STOP_MARKET"} and price is not None:
+            raise WhiteBitAdapterError("price is not valid for market orders")
+        if order.startswith("STOP_") and activation is None:
+            raise WhiteBitAdapterError("activation_price is required for stop orders")
+        if not order.startswith("STOP_") and activation is not None:
+            raise WhiteBitAdapterError("activation_price is only valid for stop orders")
+        if self.reduce_only and product == "SPOT":
+            raise WhiteBitAdapterError("reduce_only is not available for spot orders")
+        if tif == "IOC" and not (product == "SPOT" and order == "LIMIT"):
+            raise WhiteBitAdapterError(
+                "IOC is admitted only for spot limit orders in this adapter foundation"
+            )
+        if self.post_only and order not in {"LIMIT", "STOP_LIMIT"}:
+            raise WhiteBitAdapterError("post_only is valid only for limit-style orders")
+        if self.post_only and tif == "IOC":
+            raise WhiteBitAdapterError("post_only and IOC are mutually exclusive")
+        position_side = None
+        if self.position_side is not None:
+            position_side = _text(self.position_side, name="position_side").upper()
+            if position_side not in {"LONG", "SHORT"}:
+                raise WhiteBitAdapterError("position_side must be LONG or SHORT")
+            if product == "SPOT":
+                raise WhiteBitAdapterError("position_side is not valid for spot")
+        object.__setattr__(
+            self, "instrument_version", _text(self.instrument_version, name="instrument_version")
+        )
+        object.__setattr__(self, "product_family", product)
+        object.__setattr__(self, "market", _text(self.market, name="market").upper())
+        object.__setattr__(self, "side", side_value)
+        object.__setattr__(self, "order_type", order)
+        object.__setattr__(self, "amount", amount)
+        object.__setattr__(self, "price", price)
+        object.__setattr__(self, "activation_price", activation)
+        object.__setattr__(self, "time_in_force", tif)
+        object.__setattr__(self, "position_side", position_side)
+
     @classmethod
     def create(
         cls,

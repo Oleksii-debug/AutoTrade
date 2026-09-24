@@ -1,11 +1,57 @@
 import unittest
 
+from mvp.autotrade_mvp.reconciliation import (
+    CoverageSurfaceEvidence,
+    SnapshotConsistencyEvidence,
+    UnknownSubmission,
+    reconcile_account,
+)
 from mvp.autotrade_mvp.recovery import (
     HostState,
     OutboundAttempt,
     RecoveryController,
     SendPhase,
 )
+
+
+def _proven_absent_reconciliation(*, attempt_id="a1"):
+    started_at = "2026-09-24T18:00:00Z"
+    surfaces = [
+        CoverageSurfaceEvidence(
+            surface=surface,
+            coverage_start="2026-09-24T17:00:00Z",
+            coverage_end="2026-09-24T19:00:00Z",
+            pagination_complete=True,
+            consistency_horizon_satisfied=True,
+            provider_semantics_exclude_execution=True,
+        )
+        for surface in ("OPEN_ORDERS", "ORDER_HISTORY", "EXECUTIONS", "ACTIVITIES")
+    ]
+    return reconcile_account(
+        local_cash={"USD": "1000"},
+        provider_cash={"USD": "1000"},
+        local_positions={},
+        provider_positions={},
+        local_execution_ids=[],
+        provider_fills=[],
+        snapshot_consistency=SnapshotConsistencyEvidence(
+            mode="ATOMIC",
+            query_started_at="2026-09-24T17:00:00Z",
+            query_completed_at="2026-09-24T19:00:00Z",
+        ),
+        unknown_submissions=[
+            UnknownSubmission.create(
+                attempt_id=attempt_id,
+                client_order_id="client-a1",
+                started_at=started_at,
+            )
+        ],
+        searched_client_order_ids=["client-a1"],
+        coverage_start="2026-09-24T17:00:00Z",
+        coverage_end="2026-09-24T19:00:00Z",
+        pagination_complete=True,
+        absence_coverage=surfaces,
+    )
 
 
 class RuntimeRecoveryTests(unittest.TestCase):
@@ -78,45 +124,40 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.assertEqual(attempt.retry_disposition, "NEVER")
         self.assertEqual(controller.state, HostState.READY)
 
-    def test_absence_requires_complete_provider_surfaces_before_retry(self):
+    def test_absence_requires_canonical_reconciliation_before_retry(self):
         attempt = OutboundAttempt("a1", "intent-1", 1)
         attempt.persist()
         attempt.mark_send_started("journal:send-started")
-        incomplete = [
-            "client-order-lookup:missing",
-            "open-orders:complete",
-            "order-history:complete",
-            "executions:complete",
-        ]
-        with self.assertRaisesRegex(ValueError, "activities"):
-            attempt.prove_absent(incomplete)
 
-        attempt.prove_absent(
-            [
-                "client-order-lookup:missing",
-                "open-orders:complete",
-                "order-history:complete",
-                "executions:complete",
-                "activities:complete",
-            ]
-        )
+        with self.assertRaisesRegex(TypeError, "canonical ReconciliationResult"):
+            attempt.prove_absent(
+                [
+                    "client-order-lookup:missing",
+                    "open-orders:complete",
+                    "order-history:complete",
+                    "executions:complete",
+                    "activities:complete",
+                ]
+            )
+
+        reconciliation = _proven_absent_reconciliation()
+        self.assertTrue(reconciliation.complete)
+        attempt.prove_absent(reconciliation)
         self.assertEqual(attempt.phase, SendPhase.PROVEN_ABSENT)
         self.assertEqual(attempt.retry_disposition, "SAFE_WITH_NEW_ADMISSION")
+        self.assertTrue(attempt.evidence[-1].startswith("reconciliation:PROVEN_ABSENT:"))
 
-    def test_absence_proof_rejects_duplicate_evidence(self):
+    def test_absence_resolution_must_match_exact_attempt(self):
         attempt = OutboundAttempt("a1", "intent-1", 1)
         attempt.persist()
         attempt.mark_send_started("journal:send-started")
-        refs = [
-            "client-order-lookup:missing",
-            "open-orders:complete",
-            "order-history:complete",
-            "executions:complete",
-            "activities:complete",
-            "activities:complete",
-        ]
-        with self.assertRaisesRegex(ValueError, "unique"):
-            attempt.prove_absent(refs)
+
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            attempt.prove_absent(
+                _proven_absent_reconciliation(attempt_id="another-attempt")
+            )
+        self.assertEqual(attempt.phase, SendPhase.SENT_UNKNOWN)
+        self.assertEqual(attempt.retry_disposition, "RECONCILE_FIRST")
 
     def test_full_disk_blocks_new_financial_admission(self):
         controller, owner = self._ready()

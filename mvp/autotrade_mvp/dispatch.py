@@ -21,6 +21,22 @@ class DispatchBlocked(RuntimeError):
     """Raised inside a provider wrapper when the final send barrier rejects."""
 
 
+def _authority_decision(
+    authority_check: AuthorityCheck,
+    intent_hash: str,
+    now: str,
+) -> tuple[bool, str]:
+    result = authority_check(intent_hash, now)
+    if not isinstance(result, tuple) or len(result) != 2:
+        return False, "authority_check_invalid_result"
+    allowed, reason = result
+    if not isinstance(allowed, bool):
+        return False, "authority_check_invalid_allowed"
+    if not isinstance(reason, str) or not reason.strip():
+        return False, "authority_check_invalid_reason"
+    return allowed, reason.strip()
+
+
 @dataclass(frozen=True)
 class DispatchOutcome:
     status: str
@@ -269,7 +285,7 @@ class GuardedDispatcher:
                 now=now,
             )
 
-        allowed, reason = authority_check(intent_hash, now)
+        allowed, reason = _authority_decision(authority_check, intent_hash, now)
         if not allowed:
             self._append(
                 attempt_id=attempt_id,
@@ -322,7 +338,11 @@ class GuardedDispatcher:
                         now=barrier_now,
                     )
                     raise DispatchBlocked(barrier_reason) from error
-            allowed_now, barrier_reason = authority_check(intent_hash, barrier_now)
+            allowed_now, barrier_reason = _authority_decision(
+                authority_check,
+                intent_hash,
+                barrier_now,
+            )
             if not allowed_now:
                 self._append(
                     attempt_id=attempt_id,

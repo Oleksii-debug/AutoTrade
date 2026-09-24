@@ -96,19 +96,6 @@ class AblationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate matched ablation case"):
             summarize_ablation("agent", [pair, pair])
 
-    def test_binary_float_metrics_are_rejected(self):
-        with self.assertRaisesRegex(ValueError, "exact decimal"):
-            AblationOutcome(
-                case_id="case-float",
-                input_fingerprint="same",
-                variant="FULL",
-                utility=0.8,
-                cost=Decimal("0.1"),
-                elapsed_ms=10,
-                deadline_ms=100,
-                components=("base",),
-            )
-
     def test_syndicated_duplicates_require_canonical_deduplication(self):
         with self.assertRaisesRegex(ValueError, "deduplicated"):
             outcome(

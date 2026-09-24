@@ -135,3 +135,58 @@ class RuntimeRecoveryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RuntimePressureTests(unittest.TestCase):
+    def _ready(self):
+        controller = RecoveryController()
+        owner = controller.start("host-a")
+        controller.record_reconciliation(consistent=True)
+        self.assertEqual(controller.state, HostState.READY)
+        return controller, owner
+
+    def test_stale_market_data_blocks_new_risk_but_allows_risk_reduction(self):
+        controller, owner = self._ready()
+        controller.set_market_data_fresh(False)
+        self.assertEqual(controller.state, HostState.DEGRADED)
+        with self.assertRaises(PermissionError):
+            controller.validate_admission(owner.epoch)
+        controller.validate_admission(owner.epoch, risk_reducing=True)
+        controller.validate_sender(owner.owner_id, owner.epoch, risk_reducing=True)
+
+    def test_overload_blocks_new_risk_but_preserves_protective_path(self):
+        controller, owner = self._ready()
+        controller.set_runtime_overloaded(True)
+        self.assertEqual(controller.state, HostState.DEGRADED)
+        with self.assertRaises(PermissionError):
+            controller.validate_sender(owner.owner_id, owner.epoch)
+        controller.validate_sender(owner.owner_id, owner.epoch, risk_reducing=True)
+        controller.set_runtime_overloaded(False)
+        self.assertEqual(controller.state, HostState.READY)
+
+    def test_financial_event_gap_invalidates_reconciliation(self):
+        controller, owner = self._ready()
+        self.assertTrue(controller.observe_financial_event_sequence(10))
+        self.assertTrue(controller.observe_financial_event_sequence(11))
+        self.assertFalse(controller.observe_financial_event_sequence(13))
+        self.assertEqual(controller.state, HostState.DEGRADED)
+        self.assertIn("financial_event_gap", controller.reason_codes)
+        with self.assertRaises(PermissionError):
+            controller.validate_admission(owner.epoch, risk_reducing=True)
+
+        controller.record_reconciliation(consistent=True)
+        self.assertNotIn("financial_event_gap", controller.reason_codes)
+        self.assertEqual(controller.state, HostState.READY)
+
+    def test_duplicate_financial_event_sequence_is_idempotent(self):
+        controller, _ = self._ready()
+        self.assertTrue(controller.observe_financial_event_sequence(4))
+        self.assertFalse(controller.observe_financial_event_sequence(4))
+        self.assertEqual(controller.state, HostState.READY)
+
+    def test_backward_financial_event_sequence_fails_closed(self):
+        controller, _ = self._ready()
+        controller.observe_financial_event_sequence(4)
+        self.assertFalse(controller.observe_financial_event_sequence(3))
+        self.assertIn("financial_event_gap", controller.reason_codes)
+        self.assertEqual(controller.state, HostState.DEGRADED)

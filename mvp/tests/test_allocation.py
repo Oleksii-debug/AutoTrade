@@ -22,13 +22,22 @@ class AllocationTests(unittest.TestCase):
         values.update(overrides)
         return AllocationPolicy.create(**values)
 
-    def candidate(self, symbol="AAA", desired="500", price="10", lot="1", cost="0"):
+    def candidate(
+        self,
+        symbol="AAA",
+        desired="500",
+        price="10",
+        lot="1",
+        cost="0",
+        capital_requirement="1",
+    ):
         return AllocationCandidate.create(
             symbol=symbol,
             desired_notional=desired,
             price=price,
             lot_size=lot,
             cost_rate=cost,
+            capital_requirement_rate=capital_requirement,
         )
 
     def test_funded_request_is_accepted_without_scaling(self):
@@ -51,6 +60,46 @@ class AllocationTests(unittest.TestCase):
         long_target = next(item for item in result.targets if item.symbol == "LONG")
         self.assertLessEqual(long_target.notional, Decimal("600"))
         self.assertLessEqual(result.cash_required, Decimal("600"))
+
+    def test_pure_short_cannot_bypass_cash_budget_with_sale_proceeds(self):
+        result = allocate_targets(
+            [self.candidate("SHORT", desired="-1000", price="10")],
+            self.policy(
+                cash_available="100",
+                max_gross_notional="5000",
+                max_net_notional="5000",
+                max_symbol_notional="5000",
+            ),
+        )
+        self.assertEqual(result.status, "ALLOCATED")
+        self.assertLess(result.scale, Decimal("1"))
+        self.assertLessEqual(result.cash_required, Decimal("100"))
+        self.assertGreater(abs(result.targets[0].notional), Decimal("0"))
+
+    def test_explicit_margin_rate_allows_only_evidenced_leverage(self):
+        result = allocate_targets(
+            [
+                self.candidate(
+                    "MARGIN_SHORT",
+                    desired="-1000",
+                    price="10",
+                    capital_requirement="0.20",
+                )
+            ],
+            self.policy(
+                cash_available="200",
+                max_gross_notional="5000",
+                max_net_notional="5000",
+                max_symbol_notional="5000",
+            ),
+        )
+        self.assertEqual(result.status, "ALLOCATED")
+        self.assertEqual(result.scale, Decimal("1"))
+        self.assertEqual(result.cash_required, Decimal("200"))
+
+    def test_capital_requirement_rejects_binary_float_input(self):
+        with self.assertRaises(TypeError):
+            self.candidate(capital_requirement=0.2)
 
     def test_correlation_stress_caps_joint_exposure(self):
         result = allocate_targets(

@@ -642,6 +642,82 @@ def prepare_reply_confirmation(
     )
 
 
+def parse_web_api_trades(
+    payload: object,
+    *,
+    expected_account_id: str,
+    instrument_versions_by_conid: Mapping[int, str],
+    fee_currency_by_execution_id: Mapping[str, str],
+) -> tuple[ProviderFillEvidence, ...]:
+    """Normalize the documented Web API trades surface into unique fill evidence.
+
+    Numeric JSON values must arrive as Decimal/string values from a qualified
+    transport decoder; binary floats are rejected by _decimal. IBKR's trade row
+    exposes commission but not a canonical commission currency, so that currency
+    remains separate observed evidence rather than being guessed from account or
+    instrument currency.
+    """
+
+    if not isinstance(payload, (list, tuple)):
+        raise IbkrWebAdapterError("trades response must be an array")
+    if not isinstance(instrument_versions_by_conid, Mapping):
+        raise TypeError("instrument_versions_by_conid must be a mapping")
+    if not isinstance(fee_currency_by_execution_id, Mapping):
+        raise TypeError("fee_currency_by_execution_id must be a mapping")
+    account = _text(expected_account_id, name="expected_account_id")
+    by_execution: dict[str, ProviderFillEvidence] = {}
+
+    for index, raw in enumerate(payload):
+        if not isinstance(raw, Mapping):
+            raise IbkrWebAdapterError(f"trades[{index}] must be an object")
+        execution_id = _text(raw.get("execution_id"), name="execution_id")
+        raw_account = raw.get("account", raw.get("accountCode"))
+        observed_account = _text(raw_account, name="trade.account")
+        if observed_account != account:
+            raise IbkrWebAdapterError("trade account does not match reconciliation account")
+
+        conid = raw.get("conid")
+        if not isinstance(conid, int) or isinstance(conid, bool) or conid <= 0:
+            raise IbkrWebAdapterError("trade conid must be a positive integer")
+        if conid not in instrument_versions_by_conid:
+            raise IbkrWebAdapterError(f"unmapped IBKR conid: {conid}")
+        instrument = _text(
+            instrument_versions_by_conid[conid], name="instrument_version"
+        )
+
+        raw_client_id = raw.get("order_ref")
+        client_id = None
+        if raw_client_id not in {None, ""}:
+            client_id = validate_coid(_text(raw_client_id, name="order_ref"))
+
+        if execution_id not in fee_currency_by_execution_id:
+            raise IbkrWebAdapterError(
+                f"missing fee currency evidence for IBKR execution: {execution_id}"
+            )
+        fee_currency = _text(
+            fee_currency_by_execution_id[execution_id], name="fee_currency"
+        )
+        trade_time = _text(raw.get("trade_time"), name="trade_time")
+        fill = ProviderFillEvidence.create(
+            provider_execution_id=execution_id,
+            client_order_id=client_id,
+            instrument=instrument,
+            quantity=_decimal(raw.get("size"), name="trade.size", positive=True),
+            price=_decimal(raw.get("price"), name="trade.price", positive=True),
+            fee_amount=_decimal(raw.get("commission"), name="trade.commission"),
+            fee_currency=fee_currency,
+            trade_time=trade_time,
+        )
+        prior = by_execution.get(execution_id)
+        if prior is not None and prior != fill:
+            raise IbkrWebAdapterError(
+                "IBKR execution id appears with conflicting economic content"
+            )
+        by_execution[execution_id] = fill
+
+    return tuple(by_execution.values())
+
+
 def execution_to_reconciliation_fill(
     execution: IbkrExecutionEvidence,
     *,

@@ -72,6 +72,19 @@ def reconciliation_payload(
             }
             for item in result.submission_resolutions
         ],
+        "matched_provider_activity_ids": list(
+            result.matched_provider_activity_ids
+        ),
+        "unexpected_provider_activity_ids": list(
+            result.unexpected_provider_activity_ids
+        ),
+        "missing_local_provider_activity_ids": list(
+            result.missing_local_provider_activity_ids
+        ),
+        "manual_or_external_activity_ids": list(
+            result.manual_or_external_activity_ids
+        ),
+        "activity_coverage_complete": result.activity_coverage_complete,
         "blocking_resources": list(result.blocking_resources),
         "reasons": list(result.reasons),
     }
@@ -163,6 +176,29 @@ def unresolved_attempt_ids_from_checkpoint(
         if outcome == "UNKNOWN":
             unresolved.append(attempt_id)
     return tuple(sorted(set(unresolved)))
+
+
+def unresolved_provider_activity_ids_from_checkpoint(
+    checkpoint: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    if checkpoint is None:
+        return ()
+    payload = checkpoint.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ValueError("checkpoint payload is required")
+    unexpected = payload.get("unexpected_provider_activity_ids", [])
+    missing = payload.get("missing_local_provider_activity_ids", [])
+    for values, name in (
+        (unexpected, "unexpected_provider_activity_ids"),
+        (missing, "missing_local_provider_activity_ids"),
+    ):
+        if not isinstance(values, list):
+            raise ValueError(f"checkpoint {name} must be a list")
+    normalized = [
+        _text(str(value), name="provider_activity_id")
+        for value in [*unexpected, *missing]
+    ]
+    return tuple(sorted(set(normalized)))
 
 
 def unknown_submissions_from_dispatch(

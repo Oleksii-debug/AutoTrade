@@ -1307,3 +1307,129 @@ def signed_position_quantities(
             )
         totals[position.market] = totals.get(position.market, Decimal("0")) + signed
     return MappingProxyType(dict(sorted(totals.items())))
+
+
+@dataclass(frozen=True)
+class WhiteBitCollateralBalanceObservation:
+    """Collateral account balance without treating borrow capacity as owned cash."""
+
+    asset: str
+    balance: Decimal
+    borrowed: Decimal
+    available_without_borrow: Decimal
+    available_with_borrow: Decimal
+
+    @classmethod
+    def from_provider(
+        cls,
+        payload: Mapping[str, object],
+    ) -> "WhiteBitCollateralBalanceObservation":
+        if not isinstance(payload, Mapping):
+            raise TypeError("payload must be a mapping")
+        required = {
+            "asset",
+            "balance",
+            "borrow",
+            "availableWithoutBorrow",
+            "availableWithBorrow",
+        }
+        missing = sorted(required - set(payload))
+        if missing:
+            raise WhiteBitAdapterError(
+                "collateral balance missing required fields: "
+                + ", ".join(missing)
+            )
+        balance = _decimal(payload["balance"], name="balance")
+        borrowed = _decimal(payload["borrow"], name="borrow")
+        available_without = _decimal(
+            payload["availableWithoutBorrow"],
+            name="availableWithoutBorrow",
+        )
+        available_with = _decimal(
+            payload["availableWithBorrow"],
+            name="availableWithBorrow",
+        )
+        if borrowed < 0:
+            raise WhiteBitAdapterError("borrow cannot be negative")
+        if available_with < available_without:
+            raise WhiteBitAdapterError(
+                "availableWithBorrow cannot be below availableWithoutBorrow"
+            )
+        return cls(
+            asset=_text(str(payload["asset"]), name="asset").upper(),
+            balance=balance,
+            borrowed=borrowed,
+            available_without_borrow=available_without,
+            available_with_borrow=available_with,
+        )
+
+
+def collateral_balance_request(
+    *,
+    asset: str | None = None,
+) -> WhiteBitLookupRequest:
+    body: dict[str, object] = {}
+    if asset is not None:
+        body["ticker"] = _text(asset, name="asset").upper()
+    return WhiteBitLookupRequest(
+        "COLLATERAL_BALANCE",
+        "/api/v4/collateral-account/balance-summary",
+        body,
+    )
+
+
+def parse_collateral_balances(
+    records: list[Mapping[str, object]] | tuple[Mapping[str, object], ...],
+) -> tuple[WhiteBitCollateralBalanceObservation, ...]:
+    if not isinstance(records, (list, tuple)):
+        raise TypeError("records must be a list or tuple")
+    by_asset: dict[str, WhiteBitCollateralBalanceObservation] = {}
+    for payload in records:
+        observation = WhiteBitCollateralBalanceObservation.from_provider(payload)
+        existing = by_asset.get(observation.asset)
+        if existing is not None:
+            if existing != observation:
+                raise WhiteBitAdapterError(
+                    "collateral asset has conflicting balance observations"
+                )
+            continue
+        by_asset[observation.asset] = observation
+    return tuple(by_asset[key] for key in sorted(by_asset))
+
+
+def provider_collateral_cash(
+    observations: list[WhiteBitCollateralBalanceObservation]
+    | tuple[WhiteBitCollateralBalanceObservation, ...],
+) -> Mapping[str, Decimal]:
+    """Return provider cash/equity input using balance, never borrow capacity."""
+    cash: dict[str, Decimal] = {}
+    for observation in observations:
+        if not isinstance(observation, WhiteBitCollateralBalanceObservation):
+            raise TypeError(
+                "observations must contain WhiteBitCollateralBalanceObservation"
+            )
+        if observation.asset in cash:
+            raise WhiteBitAdapterError(
+                "duplicate collateral asset after normalization"
+            )
+        cash[observation.asset] = observation.balance
+    return MappingProxyType(dict(sorted(cash.items())))
+
+
+def provider_collateral_borrow(
+    observations: list[WhiteBitCollateralBalanceObservation]
+    | tuple[WhiteBitCollateralBalanceObservation, ...],
+) -> Mapping[str, Decimal]:
+    """Return liabilities separately from balance and available buying power."""
+    borrowed: dict[str, Decimal] = {}
+    for observation in observations:
+        if not isinstance(observation, WhiteBitCollateralBalanceObservation):
+            raise TypeError(
+                "observations must contain WhiteBitCollateralBalanceObservation"
+            )
+        if observation.asset in borrowed:
+            raise WhiteBitAdapterError(
+                "duplicate collateral asset after normalization"
+            )
+        borrowed[observation.asset] = observation.borrowed
+    return MappingProxyType(dict(sorted(borrowed.items())))

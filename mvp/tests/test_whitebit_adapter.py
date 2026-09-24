@@ -7,6 +7,7 @@ from mvp.autotrade_mvp.capabilities import CapabilitySnapshot
 from mvp.autotrade_mvp.whitebit import (
     WhiteBitAbsenceEvidence,
     WhiteBitAdapterError,
+    WhiteBitMarketRules,
     WhiteBitOrderIntent,
     WhiteBitPageEvidence,
     execution_history_coverage,
@@ -21,6 +22,7 @@ from mvp.autotrade_mvp.whitebit import (
     parse_order_snapshot,
     prepare_order_request,
     validate_client_order_id,
+    validate_intent_market_rules,
 )
 
 
@@ -56,6 +58,33 @@ def capability(*, order_types=("LIMIT", "MARKET", "STOP_MARKET", "STOP_LIMIT"), 
     )
 
 
+def market_rules(
+    *,
+    market_type="spot",
+    is_collateral=True,
+    step_size="0.001",
+    tick_size="0.01",
+    min_amount="0.001",
+    min_total="5",
+    max_total="1000000",
+    delisted_at=None,
+):
+    return WhiteBitMarketRules.from_provider(
+        {
+            "name": "BTC_USDT",
+            "type": market_type,
+            "isCollateral": is_collateral,
+            "tradesEnabled": True,
+            "stepSize": step_size,
+            "tickSize": tick_size,
+            "minAmount": min_amount,
+            "minTotal": min_total,
+            "maxTotal": max_total,
+            "delistedAt": delisted_at,
+        }
+    )
+
+
 class WhiteBitAdapterTests(unittest.TestCase):
     def test_spot_limit_request_uses_exact_strings_and_dispatcher_client_id(self):
         intent = WhiteBitOrderIntent.create(
@@ -71,6 +100,7 @@ class WhiteBitAdapterTests(unittest.TestCase):
             intent,
             client_order_id="at-0123456789abcdef",
             capability=capability(),
+            market_rules=market_rules(),
             at=NOW,
         )
         self.assertEqual(request.endpoint, "/api/v4/order/new")
@@ -79,6 +109,111 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertEqual(request.body["clientOrderId"], "at-0123456789abcdef")
         self.assertNotIn("nonce", request.body)
         self.assertNotIn("request", request.body)
+
+    def test_spot_market_buy_uses_base_quantity_stock_market_endpoint(self):
+        intent = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="MARKET",
+            amount="0.010",
+        )
+        request = prepare_order_request(
+            intent,
+            client_order_id="at-stock-buy",
+            capability=capability(),
+            market_rules=market_rules(),
+            at=NOW,
+        )
+        self.assertEqual(request.endpoint, "/api/v4/order/stock_market")
+        self.assertEqual(request.body["amount"], "0.010")
+
+    def test_spot_stop_market_buy_fails_closed_on_quote_amount_semantics(self):
+        intent = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="STOP_MARKET",
+            amount="0.010",
+            activation_price="40000.00",
+        )
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "quote-currency amount",
+        ):
+            prepare_order_request(
+                intent,
+                client_order_id="at-stop-buy",
+                capability=capability(),
+                market_rules=market_rules(),
+                at=NOW,
+            )
+
+    def test_market_rules_fail_closed_on_amount_and_price_steps(self):
+        bad_amount = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="LIMIT",
+            amount="0.0105",
+            price="40000.00",
+        )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "amount step"):
+            validate_intent_market_rules(
+                bad_amount,
+                market_rules(),
+                at=NOW,
+            )
+
+        bad_price = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="LIMIT",
+            amount="0.010",
+            price="40000.005",
+        )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "price step"):
+            validate_intent_market_rules(
+                bad_price,
+                market_rules(),
+                at=NOW,
+            )
+
+    def test_market_rules_validate_total_and_delisting(self):
+        too_small_total = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="LIMIT",
+            amount="0.001",
+            price="1.00",
+        )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "minTotal"):
+            validate_intent_market_rules(
+                too_small_total,
+                market_rules(),
+                at=NOW,
+            )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "delisting"):
+            validate_intent_market_rules(
+                WhiteBitOrderIntent.create(
+                    instrument_version="BTC_USDT:v1",
+                    product_family="SPOT",
+                    market="BTC_USDT",
+                    side="BUY",
+                    order_type="LIMIT",
+                    amount="0.010",
+                    price="40000.00",
+                ),
+                market_rules(delisted_at=int(NOW.timestamp()) - 1),
+                at=NOW,
+            )
 
     def test_binary_float_money_is_rejected(self):
         with self.assertRaises(WhiteBitAdapterError):
@@ -107,6 +242,7 @@ class WhiteBitAdapterTests(unittest.TestCase):
                 intent,
                 client_order_id="at-order-1",
                 capability=capability(order_types=("MARKET",)),
+                market_rules=market_rules(),
                 at=NOW,
             )
 

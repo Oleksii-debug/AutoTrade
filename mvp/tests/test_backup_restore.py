@@ -24,6 +24,7 @@ from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.pipeline import run_vertical_slice
 from mvp.autotrade_mvp.reconciliation import (
     CoverageSurfaceEvidence,
+    SnapshotConsistencyEvidence,
     UnknownSubmission,
     reconcile_account,
 )
@@ -156,6 +157,11 @@ def _reconciliation(*, complete: bool = True):
         provider_positions={},
         local_execution_ids=[],
         provider_fills=[],
+        snapshot_consistency=SnapshotConsistencyEvidence(
+            mode="ATOMIC",
+            query_started_at="2026-09-24T17:00:00Z",
+            query_completed_at="2026-09-24T19:00:00Z",
+        ),
         coverage_start="2026-09-24T17:00:00Z",
         coverage_end="2026-09-24T19:00:00Z",
         pagination_complete=complete,
@@ -181,6 +187,11 @@ def _resolved_absence_reconciliation():
         provider_positions={},
         local_execution_ids=[],
         provider_fills=[],
+        snapshot_consistency=SnapshotConsistencyEvidence(
+            mode="ATOMIC",
+            query_started_at="2026-09-24T17:00:00Z",
+            query_completed_at="2026-09-24T19:00:00Z",
+        ),
         unknown_submissions=[
             UnknownSubmission.create(
                 attempt_id="attempt-absent",

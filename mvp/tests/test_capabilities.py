@@ -62,8 +62,18 @@ class CapabilityFoundationTests(unittest.TestCase):
         )
         snapshot = evaluate(claims)
         self.assertEqual(snapshot.status, "UNKNOWN")
-        self.assertIn("EVIDENCE.EXPIRED", snapshot.reason_codes)
-        self.assertIn("CAPABILITY.MISSING_ACCOUNT", snapshot.reason_codes)
+        self.assertIn("CAPABILITY.EXPIRED_ACCOUNT", snapshot.reason_codes)
+
+    def test_expired_historical_claim_does_not_override_newer_live_evidence(self):
+        claims = list(full_claims())
+        claims.append(claim(
+            "ACCOUNT",
+            observed_delta=timedelta(minutes=-20),
+            expiry_delta=timedelta(minutes=-10),
+        ))
+        snapshot = evaluate(claims)
+        self.assertEqual(snapshot.status, "VERIFIED")
+        self.assertEqual(snapshot.reason_codes, ())
 
     def test_any_current_deny_blocks_matching_action(self):
         claims = list(full_claims())

@@ -5,6 +5,7 @@ from mvp.autotrade_mvp.accounting import (
     AccountingConflict,
     EconomicBook,
     JournalTransaction,
+    Posting,
     book_equity_fill,
     book_external_cash_flow,
     book_fx_exchange,
@@ -319,6 +320,26 @@ class AccountingFoundationTests(unittest.TestCase):
         with self.assertRaisesRegex(AccountingConflict, "transaction_id"):
             book.append(changed)
         self.assertEqual(book.cash("USD"), Decimal("100"))
+
+    def test_audit_identity_and_balance_projection_share_canonical_posting_names(self):
+        raw = JournalTransaction(
+            transaction_id=" tx-whitespace ",
+            cause_event_id=" source-event ",
+            postings=(
+                Posting(" CASH:USD ", " USD ", Decimal("100")),
+                Posting(" CLEARING:USD ", " USD ", Decimal("-100")),
+            ),
+        )
+        book = EconomicBook()
+        self.assertTrue(book.append(raw))
+
+        self.assertEqual(book.cash("USD"), Decimal("100"))
+        stored = book.transactions[0]
+        self.assertEqual(stored.transaction_id, "tx-whitespace")
+        self.assertEqual(stored.cause_event_id, "source-event")
+        self.assertEqual(stored.postings[0].ledger_account, "CASH:USD")
+        self.assertEqual(stored.postings[0].asset_or_currency, "USD")
+        self.assertEqual(book.audit_digest(), EconomicBook(book.transactions).audit_digest())
 
     def test_transaction_digest_is_stable_across_equivalent_decimal_scales(self):
         first = JournalTransaction(

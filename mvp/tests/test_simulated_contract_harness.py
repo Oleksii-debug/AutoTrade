@@ -108,6 +108,40 @@ class SimulatedProviderContractHarnessTests(unittest.TestCase):
         )
         self.assertEqual(visible["verdict"], "FOUND")
 
+    def test_submission_times_and_history_horizon_are_canonical_utc(self):
+        harness = SimulatedProviderContractHarness()
+        directive = SubmissionDirective(
+            "UNKNOWN",
+            persist_unknown=False,
+            history_visible_at="2026-09-24T20:05:00+02:00",
+        )
+        self.assertEqual(directive.history_visible_at, "2026-09-24T18:05:00Z")
+        harness.script_submission("canonical-time", directive)
+        result = harness.transport_send(
+            "canonical-time",
+            request(now="2026-09-24T20:00:00+02:00"),
+            lambda: None,
+        )
+        self.assertEqual(result["provider_received_at"], "2026-09-24T18:00:00Z")
+        self.assertEqual(
+            result["evidence"][0]["observed_at"],
+            "2026-09-24T18:00:00Z",
+        )
+
+    def test_fill_immediately_requires_strict_boolean_before_send(self):
+        provider = SimulatedProvider()
+        harness = SimulatedProviderContractHarness(provider)
+        guard_calls = []
+        with self.assertRaisesRegex(TypeError, "fill_immediately"):
+            harness.transport_send(
+                "bad-bool",
+                request(fill_immediately=1),
+                lambda: guard_calls.append("called"),
+            )
+        self.assertEqual(guard_calls, [])
+        self.assertEqual(provider.outbound_request_count, 0)
+        self.assertEqual(harness.quota.used, Decimal("0"))
+
     def test_history_lag_rejects_invalid_coverage_and_evidence_is_canonical_utc(self):
         harness = SimulatedProviderContractHarness()
         harness.script_submission(

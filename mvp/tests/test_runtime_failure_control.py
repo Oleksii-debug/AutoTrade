@@ -133,10 +133,6 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.assertIn("provider_uncertainty", controller.reason_codes)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class RuntimePressureTests(unittest.TestCase):
     def _ready(self):
         controller = RecoveryController()
@@ -190,3 +186,7 @@ class RuntimePressureTests(unittest.TestCase):
         self.assertFalse(controller.observe_financial_event_sequence(3))
         self.assertIn("financial_event_gap", controller.reason_codes)
         self.assertEqual(controller.state, HostState.DEGRADED)
+
+
+if __name__ == "__main__":
+    unittest.main()

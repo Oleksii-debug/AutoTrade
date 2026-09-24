@@ -166,8 +166,9 @@ class MarketSnapshot:
             raise PerpetualError("market snapshot cannot come from the future")
         if point - self.observed_at > self.max_age:
             raise PerpetualError("market snapshot is stale")
-        relative = abs(self.mark_price - self.index_price) / self.index_price
-        if relative > self.max_mark_index_deviation:
+        distance = abs(_fraction(self.mark_price) - _fraction(self.index_price))
+        permitted = _fraction(self.max_mark_index_deviation) * _fraction(self.index_price)
+        if distance > permitted:
             raise PerpetualError("mark/index deviation exceeds configured bound")
 
 
@@ -285,10 +286,19 @@ def require_liquidation_headroom(
     minimum = _decimal(minimum_headroom_fraction, "minimum_headroom_fraction")
     if minimum < 0:
         raise PerpetualError("minimum_headroom_fraction cannot be negative")
-    headroom = liquidation.headroom_fraction(market.mark_price)
-    if headroom < minimum:
+    mark = market.mark_price
+    if liquidation.side == "LONG":
+        if liquidation.liquidation_price >= mark:
+            raise PerpetualError("long liquidation boundary must be below current mark")
+        distance = _fraction(mark) - _fraction(liquidation.liquidation_price)
+    else:
+        if liquidation.liquidation_price <= mark:
+            raise PerpetualError("short liquidation boundary must be above current mark")
+        distance = _fraction(liquidation.liquidation_price) - _fraction(mark)
+    required_distance = _fraction(minimum) * _fraction(mark)
+    if distance < required_distance:
         raise PerpetualError("liquidation headroom is below configured minimum")
-    return headroom
+    return liquidation.headroom_fraction(mark)
 
 
 def linear_notional(

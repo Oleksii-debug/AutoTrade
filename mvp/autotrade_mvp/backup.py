@@ -147,6 +147,18 @@ def _backup_sqlite(source: Path, destination: Path) -> tuple[str, int, int]:
             with closing(sqlite3.connect(destination)) as destination_db:
                 source_db.backup(destination_db)
                 destination_db.commit()
+                # SQLite backup preserves the source journal mode. A portable
+                # backup bundle must be a self-contained database, not a main
+                # file whose latest pages live in undeclared WAL sidecars.
+                destination_db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                journal_mode = destination_db.execute(
+                    "PRAGMA journal_mode=DELETE"
+                ).fetchone()[0]
+                if str(journal_mode).lower() != "delete":
+                    raise BackupIntegrityError(
+                        "SQLite backup could not be finalized as a standalone snapshot"
+                    )
+                destination_db.commit()
     except sqlite3.Error as error:
         raise BackupError("SQLite backup failed") from error
     copied_schema = _sqlite_schema_version(destination)
@@ -394,7 +406,11 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
         if path.is_file() and path.name not in {MANIFEST_NAME, MANIFEST_DIGEST_NAME}
     }
     if observed_paths != expected_paths:
-        raise BackupIntegrityError("Backup contains untracked or missing payload files")
+        raise BackupIntegrityError(
+            "Backup contains untracked or missing payload files; "
+            f"extra={sorted(observed_paths - expected_paths)}; "
+            f"missing={sorted(expected_paths - observed_paths)}"
+        )
 
     journal_relative = "state/journal.sqlite3"
     if journal_relative not in expected_paths:

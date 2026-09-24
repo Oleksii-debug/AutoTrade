@@ -80,6 +80,31 @@ def _require_immutable_artifact_ref(value: Any, name: str) -> str:
     return reference
 
 
+def _verify_artifact_ref(
+    artifact_store: ArtifactStore,
+    reference: str,
+) -> bool:
+    if not isinstance(artifact_store, ArtifactStore):
+        raise TypeError("artifact_store must be ArtifactStore")
+    normalized = _require_immutable_artifact_ref(reference, "artifact_ref")
+    artifact_id, digest = normalized[len("artifact:"):].split("@sha256:", 1)
+    expected_hash = "sha256:" + digest
+    try:
+        manifest = artifact_store.load_manifest(artifact_id)
+        payload = artifact_store.read_bytes(artifact_id)
+    except (FileNotFoundError, UnicodeError, ValueError, TypeError):
+        return False
+    manifest_hash = manifest.get("manifest_hash")
+    return (
+        manifest.get("sha256") == expected_hash
+        and "sha256:" + sha256(payload).hexdigest() == expected_hash
+        and isinstance(manifest_hash, str)
+        and len(manifest_hash) == 71
+        and manifest_hash.startswith("sha256:")
+        and all(ch in "0123456789abcdef" for ch in manifest_hash[7:])
+    )
+
+
 def _verify_external_resolution_artifact(
     *,
     artifact_store: ArtifactStore,
@@ -88,30 +113,17 @@ def _verify_external_resolution_artifact(
     generation: int,
     verdict: str,
 ) -> bool:
-    if not isinstance(artifact_store, ArtifactStore):
-        raise TypeError("artifact_store must be ArtifactStore")
+    if not _verify_artifact_ref(artifact_store, evidence_ref):
+        return False
     reference = _require_immutable_artifact_ref(evidence_ref, "evidence_ref")
-    artifact_id, digest = reference[len("artifact:"):].split("@sha256:", 1)
-    expected_hash = "sha256:" + digest
+    artifact_id = reference[len("artifact:"):].split("@sha256:", 1)[0]
     try:
         manifest = artifact_store.load_manifest(artifact_id)
         payload = artifact_store.read_bytes(artifact_id)
         proof = json.loads(payload.decode("utf-8"))
     except (FileNotFoundError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
         return False
-    if (
-        manifest.get("sha256") != expected_hash
-        or "sha256:" + sha256(payload).hexdigest() != expected_hash
-        or manifest.get("media_type") != "application/json"
-    ):
-        return False
-    manifest_hash = manifest.get("manifest_hash")
-    if (
-        not isinstance(manifest_hash, str)
-        or len(manifest_hash) != 71
-        or not manifest_hash.startswith("sha256:")
-        or any(ch not in "0123456789abcdef" for ch in manifest_hash[7:])
-    ):
+    if manifest.get("media_type") != "application/json":
         return False
     expected = {
         "artifact_kind": "RESEARCH_JOB_EXTERNAL_RESOLUTION",
@@ -472,7 +484,8 @@ class ResearchJobStore:
         if output_refs is not None and not isinstance(output_refs, list):
             raise ValueError("output_refs must be a list when provided")
         outputs = [] if output_refs is None else [
-            _require_text(value, "output_ref") for value in output_refs
+            _require_immutable_artifact_ref(value, "output_ref")
+            for value in output_refs
         ]
         if normalized_verdict == "PROVEN_SUCCEEDED" and not outputs:
             raise ValueError("PROVEN_SUCCEEDED requires output_refs")
@@ -533,6 +546,14 @@ class ResearchJobStore:
                 connection.rollback()
                 raise JobConflictError(
                     "external resolution requires matching immutable artifact evidence"
+                )
+            if normalized_verdict == "PROVEN_SUCCEEDED" and any(
+                not _verify_artifact_ref(artifact_store, output_ref)
+                for output_ref in outputs
+            ):
+                connection.rollback()
+                raise JobConflictError(
+                    "external success requires verified immutable output artifacts"
                 )
 
             if normalized_verdict == "PROVEN_NOT_RUN":

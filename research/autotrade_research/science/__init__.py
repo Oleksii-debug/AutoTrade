@@ -1,13 +1,15 @@
 from .registry import (
-    HoldoutState,
     ProtocolConflict,
-    ProtocolRegistry,
-    RegistryInvariantError,
+    ProtocolRegistration,
+    ProtocolViolation,
+    REQUIRED_PROTOCOL_FIELDS,
+    ScientificRegistry,
 )
 
 __all__ = [
-    "HoldoutState",
     "ProtocolConflict",
-    "ProtocolRegistry",
-    "RegistryInvariantError",
+    "ProtocolRegistration",
+    "ProtocolViolation",
+    "REQUIRED_PROTOCOL_FIELDS",
+    "ScientificRegistry",
 ]

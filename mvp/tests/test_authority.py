@@ -3,12 +3,19 @@ import unittest
 from mvp.autotrade_mvp.authority import AuthorityPolicy, AuthorityService
 
 
+INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
+OTHER_INSTRUMENT_ID = "22222222-2222-4222-8222-222222222222"
+INSTRUMENT_V1 = f"{INSTRUMENT_ID}:1"
+INSTRUMENT_V2 = f"{INSTRUMENT_ID}:2"
+OTHER_INSTRUMENT_V1 = f"{OTHER_INSTRUMENT_ID}:1"
+
+
 def policy(**overrides):
     values = dict(
         policy_id="p1",
         account_id="paper-1",
         environments={"PAPER"},
-        instruments={"ABC"},
+        instrument_versions={INSTRUMENT_V1},
         actions={"ORDER.SUBMIT", "ORDER.CANCEL"},
         max_notional="1000",
         expires_at="2026-09-25T00:00:00Z",
@@ -29,14 +36,14 @@ class AuthorityTests(unittest.TestCase):
             intent_hash="hash-a",
             account_id="paper-1",
             environment="PAPER",
-            instrument="ABC",
+            instrument_version=INSTRUMENT_V1,
             action="ORDER.SUBMIT",
             notional="100",
             expires_at="2026-09-24T23:00:00Z",
         )
         rejected = service.admit(
             admission_id="a-bad", policy_id="p1", intent_hash="hash-b",
-            account_id="paper-1", environment="PAPER", instrument="ABC",
+            account_id="paper-1", environment="PAPER", instrument_version=INSTRUMENT_V1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
             risk_admitted=True, now="2026-09-24T18:00:00Z",
             confirmation_id="c1",
@@ -46,7 +53,7 @@ class AuthorityTests(unittest.TestCase):
 
         admitted = service.admit(
             admission_id="a-good", policy_id="p1", intent_hash="hash-a",
-            account_id="paper-1", environment="PAPER", instrument="ABC",
+            account_id="paper-1", environment="PAPER", instrument_version=INSTRUMENT_V1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
             risk_admitted=True, now="2026-09-24T18:00:00Z",
             confirmation_id="c1",
@@ -55,7 +62,7 @@ class AuthorityTests(unittest.TestCase):
 
         reused = service.admit(
             admission_id="a-reuse", policy_id="p1", intent_hash="hash-a",
-            account_id="paper-1", environment="PAPER", instrument="ABC",
+            account_id="paper-1", environment="PAPER", instrument_version=INSTRUMENT_V1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
             risk_admitted=True, now="2026-09-24T18:01:00Z",
             confirmation_id="c1",
@@ -64,11 +71,11 @@ class AuthorityTests(unittest.TestCase):
 
     def test_confirmation_is_bound_to_exact_financial_scope(self):
         variants = (
-            dict(account_id="other", environment="PAPER", instrument="ABC", action="ORDER.SUBMIT", notional="100"),
-            dict(account_id="paper-1", environment="SIMULATION", instrument="ABC", action="ORDER.SUBMIT", notional="100"),
-            dict(account_id="paper-1", environment="PAPER", instrument="XYZ", action="ORDER.SUBMIT", notional="100"),
-            dict(account_id="paper-1", environment="PAPER", instrument="ABC", action="ORDER.CANCEL", notional="100"),
-            dict(account_id="paper-1", environment="PAPER", instrument="ABC", action="ORDER.SUBMIT", notional="101"),
+            dict(account_id="other", environment="PAPER", instrument_version=INSTRUMENT_V1, action="ORDER.SUBMIT", notional="100"),
+            dict(account_id="paper-1", environment="SIMULATION", instrument_version=INSTRUMENT_V1, action="ORDER.SUBMIT", notional="100"),
+            dict(account_id="paper-1", environment="PAPER", instrument_version=OTHER_INSTRUMENT_V1, action="ORDER.SUBMIT", notional="100"),
+            dict(account_id="paper-1", environment="PAPER", instrument_version=INSTRUMENT_V1, action="ORDER.CANCEL", notional="100"),
+            dict(account_id="paper-1", environment="PAPER", instrument_version=INSTRUMENT_V1, action="ORDER.SUBMIT", notional="101"),
         )
         for index, confirmation_scope in enumerate(variants):
             with self.subTest(confirmation_scope=confirmation_scope):
@@ -87,7 +94,7 @@ class AuthorityTests(unittest.TestCase):
                     intent_hash="same-hash",
                     account_id="paper-1",
                     environment="PAPER",
-                    instrument="ABC",
+                    instrument_version=INSTRUMENT_V1,
                     action="ORDER.SUBMIT",
                     notional="100",
                     state_version=1,
@@ -108,7 +115,7 @@ class AuthorityTests(unittest.TestCase):
                 intent_hash="h",
                 account_id="paper-1",
                 environment="PAPER",
-                instrument="ABC",
+                instrument_version=INSTRUMENT_V1,
                 action="ORDER.SUBMIT",
                 notional="-1",
                 expires_at="2026-09-24T23:00:00Z",
@@ -119,7 +126,7 @@ class AuthorityTests(unittest.TestCase):
         service.register_policy(policy(autonomous=True))
         admitted = service.admit(
             admission_id="a1", policy_id="p1", intent_hash="h1",
-            account_id="paper-1", environment="PAPER", instrument="ABC",
+            account_id="paper-1", environment="PAPER", instrument_version=INSTRUMENT_V1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
             risk_admitted=True, now="2026-09-24T18:00:00Z",
         )
@@ -127,7 +134,7 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(
             service.dispatch_allowed(
                 "a1", intent_hash="h1", account_id="paper-1", environment="PAPER",
-                instrument="ABC", action="ORDER.SUBMIT", now="2026-09-24T18:01:00Z"
+                instrument_version=INSTRUMENT_V1, action="ORDER.SUBMIT", now="2026-09-24T18:01:00Z"
             ),
             (True, "allowed"),
         )
@@ -137,7 +144,7 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(
             service.dispatch_allowed(
                 "a1", intent_hash="h1", account_id="paper-1", environment="PAPER",
-                instrument="ABC", action="ORDER.SUBMIT", now="2026-09-24T18:03:00Z"
+                instrument_version=INSTRUMENT_V1, action="ORDER.SUBMIT", now="2026-09-24T18:03:00Z"
             ),
             (False, "policy_revoked"),
         )
@@ -146,7 +153,7 @@ class AuthorityTests(unittest.TestCase):
         second.register_policy(policy(autonomous=True))
         expired = second.admit(
             admission_id="a2", policy_id="p1", intent_hash="h2",
-            account_id="paper-1", environment="PAPER", instrument="ABC",
+            account_id="paper-1", environment="PAPER", instrument_version=INSTRUMENT_V1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
             risk_admitted=True, now="2026-09-25T00:00:00Z",
         )
@@ -157,14 +164,14 @@ class AuthorityTests(unittest.TestCase):
         service.register_policy(policy(autonomous=True))
         service.admit(
             admission_id="a1", policy_id="p1", intent_hash="original",
-            account_id="paper-1", environment="PAPER", instrument="ABC",
+            account_id="paper-1", environment="PAPER", instrument_version=INSTRUMENT_V1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
             risk_admitted=True, now="2026-09-24T18:00:00Z",
         )
         self.assertEqual(
             service.dispatch_allowed(
                 "a1", intent_hash="changed", account_id="paper-1", environment="PAPER",
-                instrument="ABC", action="ORDER.SUBMIT", now="2026-09-24T18:01:00Z"
+                instrument_version=INSTRUMENT_V1, action="ORDER.SUBMIT", now="2026-09-24T18:01:00Z"
             ),
             (False, "intent_hash_changed"),
         )
@@ -174,15 +181,15 @@ class AuthorityTests(unittest.TestCase):
         service.register_policy(policy(autonomous=True))
         service.admit(
             admission_id="a1", policy_id="p1", intent_hash="h1",
-            account_id="paper-1", environment="PAPER", instrument="ABC",
+            account_id="paper-1", environment="PAPER", instrument_version=INSTRUMENT_V1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
             risk_admitted=True, now="2026-09-24T18:00:00Z",
         )
         variants = (
-            dict(account_id="other", environment="PAPER", instrument="ABC", action="ORDER.SUBMIT"),
-            dict(account_id="paper-1", environment="SIMULATION", instrument="ABC", action="ORDER.SUBMIT"),
-            dict(account_id="paper-1", environment="PAPER", instrument="XYZ", action="ORDER.SUBMIT"),
-            dict(account_id="paper-1", environment="PAPER", instrument="ABC", action="ORDER.CANCEL"),
+            dict(account_id="other", environment="PAPER", instrument_version=INSTRUMENT_V1, action="ORDER.SUBMIT"),
+            dict(account_id="paper-1", environment="SIMULATION", instrument_version=INSTRUMENT_V1, action="ORDER.SUBMIT"),
+            dict(account_id="paper-1", environment="PAPER", instrument_version=OTHER_INSTRUMENT_V1, action="ORDER.SUBMIT"),
+            dict(account_id="paper-1", environment="PAPER", instrument_version=INSTRUMENT_V1, action="ORDER.CANCEL"),
         )
         for scope in variants:
             with self.subTest(scope=scope):
@@ -197,7 +204,7 @@ class AuthorityTests(unittest.TestCase):
         service.register_policy(policy(autonomous=True))
         service.admit(
             admission_id="a1", policy_id="p1", intent_hash="h1",
-            account_id="paper-1", environment="PAPER", instrument="ABC",
+            account_id="paper-1", environment="PAPER", instrument_version=INSTRUMENT_V1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
             risk_admitted=True, now="2026-09-24T18:00:00Z",
         )
@@ -206,12 +213,12 @@ class AuthorityTests(unittest.TestCase):
         )
         before = service.dispatch_allowed(
             "a1", intent_hash="h1", account_id="paper-1", environment="PAPER",
-            instrument="ABC", action="ORDER.SUBMIT", now="2026-09-24T18:04:59Z"
+            instrument_version=INSTRUMENT_V1, action="ORDER.SUBMIT", now="2026-09-24T18:04:59Z"
         )
         self.assertEqual(before, (True, "allowed"))
         at = service.dispatch_allowed(
             "a1", intent_hash="h1", account_id="paper-1", environment="PAPER",
-            instrument="ABC", action="ORDER.SUBMIT", now="2026-09-24T18:05:00Z"
+            instrument_version=INSTRUMENT_V1, action="ORDER.SUBMIT", now="2026-09-24T18:05:00Z"
         )
         self.assertEqual(at, (False, "policy_revoked"))
 
@@ -220,7 +227,7 @@ class AuthorityTests(unittest.TestCase):
         service.register_policy(policy(autonomous=True))
         service.admit(
             admission_id="a1", policy_id="p1", intent_hash="h1",
-            account_id="paper-1", environment="PAPER", instrument="ABC",
+            account_id="paper-1", environment="PAPER", instrument_version=INSTRUMENT_V1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
             risk_admitted=True, now="2026-09-24T18:00:00Z",
         )
@@ -230,7 +237,7 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(
             service.dispatch_allowed(
                 "a1", intent_hash="h1", account_id="paper-1", environment="PAPER",
-                instrument="ABC", action="ORDER.SUBMIT", now="2026-09-24T18:01:00Z"
+                instrument_version=INSTRUMENT_V1, action="ORDER.SUBMIT", now="2026-09-24T18:01:00Z"
             ),
             (True, "allowed"),
         )
@@ -251,7 +258,7 @@ class AuthorityTests(unittest.TestCase):
         ))
         rejected = service.admit(
             admission_id="a1", policy_id="protect", intent_hash="h1",
-            account_id="paper-1", environment="PAPER", instrument="ABC",
+            account_id="paper-1", environment="PAPER", instrument_version=INSTRUMENT_V1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
             risk_admitted=True, risk_reducing=False,
             now="2026-09-24T18:00:00Z",
@@ -259,7 +266,7 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(rejected.reason, "protection_policy_requires_risk_reduction")
         allowed = service.admit(
             admission_id="a2", policy_id="protect", intent_hash="h2",
-            account_id="paper-1", environment="PAPER", instrument="ABC",
+            account_id="paper-1", environment="PAPER", instrument_version=INSTRUMENT_V1,
             action="ORDER.CANCEL", notional="0", state_version=1,
             risk_admitted=True, risk_reducing=True,
             now="2026-09-24T18:01:00Z",
@@ -270,12 +277,12 @@ class AuthorityTests(unittest.TestCase):
         service = AuthorityService()
         service.register_policy(policy(autonomous=True))
         cases = [
-            dict(account_id="other", environment="PAPER", instrument="ABC", action="ORDER.SUBMIT", notional="10", risk_admitted=True, reason="account_out_of_scope"),
-            dict(account_id="paper-1", environment="LIVE", instrument="ABC", action="ORDER.SUBMIT", notional="10", risk_admitted=True, reason="environment_out_of_scope"),
-            dict(account_id="paper-1", environment="PAPER", instrument="XYZ", action="ORDER.SUBMIT", notional="10", risk_admitted=True, reason="instrument_out_of_scope"),
-            dict(account_id="paper-1", environment="PAPER", instrument="ABC", action="WITHDRAW", notional="10", risk_admitted=True, reason="action_out_of_scope"),
-            dict(account_id="paper-1", environment="PAPER", instrument="ABC", action="ORDER.SUBMIT", notional="1001", risk_admitted=True, reason="notional_out_of_scope"),
-            dict(account_id="paper-1", environment="PAPER", instrument="ABC", action="ORDER.SUBMIT", notional="10", risk_admitted=False, reason="risk_rejected"),
+            dict(account_id="other", environment="PAPER", instrument_version=INSTRUMENT_V1, action="ORDER.SUBMIT", notional="10", risk_admitted=True, reason="account_out_of_scope"),
+            dict(account_id="paper-1", environment="LIVE", instrument_version=INSTRUMENT_V1, action="ORDER.SUBMIT", notional="10", risk_admitted=True, reason="environment_out_of_scope"),
+            dict(account_id="paper-1", environment="PAPER", instrument_version=OTHER_INSTRUMENT_V1, action="ORDER.SUBMIT", notional="10", risk_admitted=True, reason="instrument_version_out_of_scope"),
+            dict(account_id="paper-1", environment="PAPER", instrument_version=INSTRUMENT_V1, action="WITHDRAW", notional="10", risk_admitted=True, reason="action_out_of_scope"),
+            dict(account_id="paper-1", environment="PAPER", instrument_version=INSTRUMENT_V1, action="ORDER.SUBMIT", notional="1001", risk_admitted=True, reason="notional_out_of_scope"),
+            dict(account_id="paper-1", environment="PAPER", instrument_version=INSTRUMENT_V1, action="ORDER.SUBMIT", notional="10", risk_admitted=False, reason="risk_rejected"),
         ]
         for index, case in enumerate(cases):
             with self.subTest(reason=case["reason"]):
@@ -297,14 +304,14 @@ class AuthorityTests(unittest.TestCase):
             intent_hash="h1",
             account_id="paper-1",
             environment="PAPER",
-            instrument="ABC",
+            instrument_version=INSTRUMENT_V1,
             action="ORDER.SUBMIT",
             notional="100",
             expires_at="2026-09-24T23:00:00Z",
         )
         kwargs = dict(
             admission_id="a1", policy_id="p1", intent_hash="h1",
-            account_id="paper-1", environment="PAPER", instrument="ABC",
+            account_id="paper-1", environment="PAPER", instrument_version=INSTRUMENT_V1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
             risk_admitted=True, now="2026-09-24T18:00:00Z",
             confirmation_id="c1",
@@ -319,7 +326,7 @@ class AuthorityTests(unittest.TestCase):
         service.register_policy(policy(autonomous=True))
         base = dict(
             admission_id="a1", policy_id="p1", intent_hash="h1",
-            account_id="paper-1", environment="PAPER", instrument="ABC",
+            account_id="paper-1", environment="PAPER", instrument_version=INSTRUMENT_V1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
             risk_admitted=True, now="2026-09-24T18:00:00Z",
         )
@@ -327,6 +334,106 @@ class AuthorityTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "admission_id"):
             service.admit(**{**base, "notional": "101"})
 
+
+
+    def test_symbol_text_cannot_be_used_as_authority_identity(self):
+        with self.assertRaisesRegex(ValueError, "instrument_version"):
+            policy(instrument_versions={"ABC"})
+
+    def test_policy_for_one_instrument_version_does_not_admit_next_version(self):
+        service = AuthorityService()
+        service.register_policy(policy(autonomous=True))
+        rejected = service.admit(
+            admission_id="version-policy",
+            policy_id="p1",
+            intent_hash="same-symbol-new-contract",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument_version=INSTRUMENT_V2,
+            action="ORDER.SUBMIT",
+            notional="100",
+            state_version=1,
+            risk_admitted=True,
+            now="2026-09-24T18:00:00Z",
+        )
+        self.assertEqual(rejected.outcome, "REJECTED")
+        self.assertEqual(rejected.reason, "instrument_version_out_of_scope")
+
+    def test_confirmation_and_dispatch_are_bound_to_exact_instrument_version(self):
+        service = AuthorityService()
+        service.register_policy(
+            policy(instrument_versions={INSTRUMENT_V1, INSTRUMENT_V2})
+        )
+        service.add_confirmation(
+            confirmation_id="version-confirmation",
+            policy_id="p1",
+            intent_hash="intent-hash",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument_version=INSTRUMENT_V1,
+            action="ORDER.SUBMIT",
+            notional="100",
+            expires_at="2026-09-24T23:00:00Z",
+        )
+        rejected = service.admit(
+            admission_id="version-mismatch",
+            policy_id="p1",
+            intent_hash="intent-hash",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument_version=INSTRUMENT_V2,
+            action="ORDER.SUBMIT",
+            notional="100",
+            state_version=1,
+            risk_admitted=True,
+            now="2026-09-24T18:00:00Z",
+            confirmation_id="version-confirmation",
+        )
+        self.assertEqual(rejected.reason, "confirmation_scope_mismatch")
+
+        autonomous = AuthorityService()
+        autonomous.register_policy(
+            policy(autonomous=True, instrument_versions={INSTRUMENT_V1, INSTRUMENT_V2})
+        )
+        first = autonomous.admit(
+            admission_id="version-dispatch",
+            policy_id="p1",
+            intent_hash="dispatch-hash",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument_version=INSTRUMENT_V1,
+            action="ORDER.SUBMIT",
+            notional="100",
+            state_version=1,
+            risk_admitted=True,
+            now="2026-09-24T18:00:00Z",
+        )
+        repeated = autonomous.admit(
+            admission_id="version-dispatch",
+            policy_id="p1",
+            intent_hash="dispatch-hash",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument_version=INSTRUMENT_V1,
+            action="ORDER.SUBMIT",
+            notional="100",
+            state_version=1,
+            risk_admitted=True,
+            now="2026-09-24T18:00:00Z",
+        )
+        self.assertEqual(first, repeated)
+        self.assertEqual(
+            autonomous.dispatch_allowed(
+                "version-dispatch",
+                intent_hash="dispatch-hash",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_version=INSTRUMENT_V2,
+                action="ORDER.SUBMIT",
+                now="2026-09-24T18:01:00Z",
+            ),
+            (False, "admission_scope_changed"),
+        )
 
 
 if __name__ == "__main__":

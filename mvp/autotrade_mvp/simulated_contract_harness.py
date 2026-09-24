@@ -59,6 +59,11 @@ def _decimal_text(value: Decimal) -> str:
 
 
 def _evidence(kind: str, key: str, observed_at: str, payload: object) -> dict[str, str]:
+    canonical_observed_at = (
+        _instant(observed_at, name="observed_at")
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
     encoded = json.dumps(
         payload,
         sort_keys=True,
@@ -75,7 +80,7 @@ def _evidence(kind: str, key: str, observed_at: str, payload: object) -> dict[st
         ),
         "sha256": "sha256:" + sha256(encoded).hexdigest(),
         "source_uri": f"https://sim.autotrade.local/harness/{kind}/{key}",
-        "observed_at": observed_at,
+        "observed_at": canonical_observed_at,
         "rights_id": "simulated-first-party",
     }
 
@@ -249,11 +254,18 @@ class SimulatedProviderContractHarness:
         """Respect scripted history lag before delegating to complete coverage."""
 
         cid = _text(client_order_id, name="client_order_id")
+        start = _instant(coverage_start, name="coverage_start")
+        end = _instant(coverage_end, name="coverage_end")
+        current = _instant(now, name="now")
+        if end < start:
+            raise ValueError("coverage_end must not precede coverage_start")
+        if not isinstance(pagination_complete, bool):
+            raise TypeError("pagination_complete must be boolean")
         directive = self._submission_directives.get(cid)
         if (
             directive is not None
             and directive.history_visible_at is not None
-            and _instant(now, name="now")
+            and current
             < _instant(directive.history_visible_at, name="history_visible_at")
         ):
             core = {

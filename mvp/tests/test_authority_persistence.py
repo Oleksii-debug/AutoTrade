@@ -107,6 +107,72 @@ class AuthorityPersistenceTests(unittest.TestCase):
                 ),
             )
 
+    def test_lost_reply_retry_reuses_original_authority_event_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite")
+            service = self._service()
+            first = persist_authority_snapshot(
+                store,
+                service,
+                authority_id="runtime-authority",
+                event_id="authority-snapshot-1",
+                committed_at="2026-09-25T01:00:01Z",
+            )
+            retried = persist_authority_snapshot(
+                store,
+                service,
+                authority_id="runtime-authority",
+                event_id="authority-snapshot-1",
+                committed_at="2026-09-25T01:00:02Z",
+            )
+            self.assertTrue(first.inserted)
+            self.assertFalse(retried.inserted)
+            self.assertEqual(first.aggregate_version, 1)
+            self.assertEqual(retried.aggregate_version, 1)
+            self.assertEqual(
+                len(
+                    store.load_events(
+                        "financial-authority",
+                        "runtime-authority",
+                    )
+                ),
+                1,
+            )
+
+    def test_lost_reply_retry_with_changed_state_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite")
+            service = self._service()
+            persist_authority_snapshot(
+                store,
+                service,
+                authority_id="runtime-authority",
+                event_id="authority-snapshot-1",
+                committed_at="2026-09-25T01:00:01Z",
+            )
+            service.revoke_policy(
+                "policy-1",
+                reason="operator-revoked",
+                revoked_at="2026-09-25T01:05:00Z",
+            )
+            with self.assertRaisesRegex(ValueError, "conflicts"):
+                persist_authority_snapshot(
+                    store,
+                    service,
+                    authority_id="runtime-authority",
+                    event_id="authority-snapshot-1",
+                    committed_at="2026-09-25T01:05:01Z",
+                )
+            self.assertEqual(
+                len(
+                    store.load_events(
+                        "financial-authority",
+                        "runtime-authority",
+                    )
+                ),
+                1,
+            )
+
     def test_confirmation_remains_consumed_after_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite")

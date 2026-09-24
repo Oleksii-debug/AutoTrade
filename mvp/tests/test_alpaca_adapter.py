@@ -466,6 +466,38 @@ class AlpacaMlegFoundationTests(unittest.TestCase):
                 legs=(first, first, first, first, first),
             )
 
+    def test_duplicate_leg_identity_must_use_ratio_quantity(self):
+        first = self.leg(
+            "AAPL261218C00200000", 1, "BUY", "buy_to_open"
+        )
+        with self.assertRaisesRegex(AlpacaAdapterError, "instrument versions"):
+            AlpacaMlegOrderIntent.create(
+                underlying_version="AAPL:v1",
+                quantity=1,
+                order_type="LIMIT",
+                time_in_force="DAY",
+                limit_price="1",
+                legs=(first, first),
+            )
+
+        duplicate_symbol = AlpacaMlegLeg.create(
+            instrument_version="AAPL261218C00200000:v2",
+            underlying_version="AAPL:v1",
+            symbol="AAPL261218C00200000",
+            ratio_quantity=1,
+            side="SELL",
+            position_intent="sell_to_open",
+        )
+        with self.assertRaisesRegex(AlpacaAdapterError, "provider symbols"):
+            AlpacaMlegOrderIntent.create(
+                underlying_version="AAPL:v1",
+                quantity=1,
+                order_type="LIMIT",
+                time_in_force="DAY",
+                limit_price="1",
+                legs=(first, duplicate_symbol),
+            )
+
     def test_ratio_quantities_must_be_whole_positive_and_reduced(self):
         with self.assertRaisesRegex(AlpacaAdapterError, "whole"):
             self.leg("AAPL261218C00200000", "1.5", "BUY", "buy_to_open")

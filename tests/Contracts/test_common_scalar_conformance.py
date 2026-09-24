@@ -29,7 +29,8 @@ class CommonScalarConformanceTests(unittest.TestCase):
             self.corpus["contract_version"],
             self.manifest["contract_version"],
         )
-        self.assertEqual(self.corpus["corpus_version"], "1.0.0")
+        self.assertEqual(self.corpus["corpus_version"], "1.1.0")
+        self.assertEqual(self.corpus["source_schema_id"], self.common["$id"])
         self.assertEqual(self.corpus["scope"], "common-scalar-subset")
 
     def test_python_binding_and_json_schema_accept_identical_corpus(self):

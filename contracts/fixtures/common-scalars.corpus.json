@@ -1,6 +1,7 @@
 {
-  "corpus_version": "1.0.0",
+  "corpus_version": "1.1.0",
   "contract_version": "1.0.0",
+  "source_schema_id": "https://schemas.autotrade.local/1.0.0/common.schema.json",
   "scope": "common-scalar-subset",
   "cases": [
     {
@@ -142,6 +143,18 @@
       "expected": false
     },
     {
+      "name": "currency-max-length",
+      "type": "CurrencyId",
+      "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expected": true
+    },
+    {
+      "name": "currency-too-long",
+      "type": "CurrencyId",
+      "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expected": false
+    },
+    {
       "name": "unit-simple",
       "type": "UnitId",
       "value": "shares",
@@ -158,6 +171,12 @@
       "type": "UnitId",
       "value": "base units",
       "expected": false
+    },
+    {
+      "name": "unit-max-length",
+      "type": "UnitId",
+      "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expected": true
     },
     {
       "name": "unit-too-long",

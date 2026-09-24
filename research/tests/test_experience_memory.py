@@ -79,6 +79,7 @@ class ExperienceMemoryTests(unittest.TestCase):
             )
             store.append_correction(
                 episode,
+                available_at=BASE,
                 payload={
                     "supersedes_fields": ["outcome"],
                     "outcome": {"label": "reconciled"},
@@ -93,6 +94,71 @@ class ExperienceMemoryTests(unittest.TestCase):
             )
             self.assertEqual(retrieved[0]["payload"]["outcome"]["label"], "pending")
             self.assertEqual(retrieved[0]["corrections"][0]["outcome"]["label"], "reconciled")
+
+
+    def test_future_correction_is_not_visible_before_its_evidenced_availability(self):
+        with TemporaryDirectory() as directory:
+            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("pending"),
+            )
+            correction_time = BASE + timedelta(days=2)
+            store.append_correction(
+                episode,
+                available_at=correction_time,
+                payload={
+                    "supersedes_fields": ["outcome"],
+                    "outcome": {"label": "reconciled-later"},
+                    "evidence_ref": "artifact:later-correction",
+                },
+            )
+
+            before = store.retrieve(
+                information_cutoff=BASE + timedelta(days=1),
+                granted_permissions={"research"},
+            )
+            self.assertEqual(before[0]["corrections"], [])
+
+            at_availability = store.retrieve(
+                information_cutoff=correction_time,
+                granted_permissions={"research"},
+            )
+            self.assertEqual(
+                at_availability[0]["corrections"][0]["outcome"]["label"],
+                "reconciled-later",
+            )
+
+    def test_default_correction_availability_is_append_time_not_historical_episode_time(self):
+        with TemporaryDirectory() as directory:
+            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("pending"),
+            )
+            store.append_correction(
+                episode,
+                payload={
+                    "supersedes_fields": ["outcome"],
+                    "outcome": {"label": "late-observation"},
+                    "evidence_ref": "artifact:late",
+                },
+            )
+            historical = store.retrieve(
+                information_cutoff=BASE,
+                granted_permissions={"research"},
+            )
+            self.assertEqual(historical[0]["corrections"], [])
 
     def test_tombstone_hides_episode_but_keeps_auditable_record(self):
         with TemporaryDirectory() as directory:

@@ -1,20 +1,25 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import unittest
 
 from mvp.autotrade_mvp.accounting import EconomicBook
 from mvp.autotrade_mvp.options import (
     DeliverableLeg,
+    ExpiryScenarioLeg,
+    FiniteDifferenceGrid,
     OptionContract,
+    OptionGreekEstimate,
     OptionError,
     book_cash_option_settlement,
     book_physical_option_settlement,
     exercise_gate,
     expiration_cash_settlement,
     expiration_pnl_after_premium,
+    finite_difference_greeks,
     interim_multi_leg_reservation,
     intrinsic_value_per_unit,
     physical_exercise_obligation,
+    portfolio_expiration_scenario_pnl,
     require_holder_exercise_open,
     require_physical_resources,
 )
@@ -195,6 +200,70 @@ class OptionLifecycleTests(unittest.TestCase):
                 exercise_cutoff=at(19),
                 expiry=at(20),
             )
+
+    def test_finite_difference_greeks_are_model_bound_and_exact_decimal(self):
+        grid = FiniteDifferenceGrid(
+            model_id="valuation-model-v1",
+            observed_at=at(18),
+            base_value="10000",
+            spot_down_value="9801",
+            spot_up_value="10201",
+            spot_step="1",
+            vol_down_value="9",
+            vol_up_value="11",
+            vol_step="0.01",
+            time_forward_value="9999.5",
+            time_step_years="0.002739726027397260273972602740",
+        )
+        greeks = finite_difference_greeks(grid)
+        self.assertIsInstance(greeks, OptionGreekEstimate)
+        self.assertEqual(greeks.model_id, "valuation-model-v1")
+        self.assertEqual(greeks.delta, Decimal("200"))
+        self.assertEqual(greeks.gamma, Decimal("2"))
+        self.assertEqual(greeks.vega, Decimal("100"))
+        self.assertEqual(
+            greeks.theta_per_year.quantize(Decimal("0.0001")),
+            Decimal("-182.5000"),
+        )
+
+    def test_greek_freshness_fails_closed_for_future_or_stale_estimate(self):
+        estimate = finite_difference_greeks(
+            FiniteDifferenceGrid(
+                model_id="valuation-model-v1",
+                observed_at=at(18),
+                base_value="10",
+                spot_down_value="9",
+                spot_up_value="11",
+                spot_step="1",
+            )
+        )
+        estimate.require_fresh(at(18), max_age=timedelta(minutes=5))
+        with self.assertRaises(OptionError):
+            estimate.require_fresh(at(17), max_age=timedelta(minutes=5))
+        with self.assertRaises(OptionError):
+            estimate.require_fresh(at(19), max_age=timedelta(minutes=5))
+
+    def test_multi_leg_expiration_scenario_reports_interim_economic_risk(self):
+        long_call = self._cash_call()
+        short_call = OptionContract(
+            instrument="OPT:CALL:110",
+            right="CALL",
+            strike=Decimal("110"),
+            multiplier=Decimal("100"),
+            settlement_currency="USD",
+            settlement_method="CASH",
+            exercise_style="EUROPEAN",
+            exercise_cutoff=at(19),
+            expiry=at(20),
+            exercise_opens_at=at(18),
+        )
+        total = portfolio_expiration_scenario_pnl(
+            (
+                ExpiryScenarioLeg(long_call, "1", "5", "120"),
+                ExpiryScenarioLeg(short_call, "-1", "2", "120"),
+            )
+        )
+        self.assertEqual(total, Decimal("700"))
 
     def test_exercise_cutoff_and_expiry_are_hard_gates(self):
         contract = self._cash_call()

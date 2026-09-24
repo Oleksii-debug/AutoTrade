@@ -394,18 +394,18 @@ class MarketNormalizer:
             update.source_sequence,
         ) if update.source_sequence is not None else None
 
-        duplicate_event_id: str | None = None
+        new_sequence = False
         if update.source_sequence is not None:
             existing = self._seen_sequence.get(sequence_identity)
             if existing is not None:
-                existing_digest, existing_event_id = existing
+                existing_digest, _ = existing
                 if existing_digest != payload_digest:
                     raise SequenceConflict(
                         "source sequence was reused with different normalized content"
                     )
                 flags.add("DUPLICATE")
-                duplicate_event_id = existing_event_id
             else:
+                new_sequence = True
                 last = self._last_sequence.get(stream_key)
                 if last is not None:
                     if update.source_sequence > last + 1:
@@ -427,11 +427,15 @@ class MarketNormalizer:
                 str(update.source_sequence) if update.source_sequence is not None else "-",
                 str(update.revision),
                 payload_digest,
+                _utc_text(update.source_event_at),
+                _utc_text(update.available_at),
+                _utc_text(update.ingested_at),
+                ",".join(sorted(flags)),
                 _canonical(dict(update.raw_evidence_ref)),
             ]
         )
-        event_id = duplicate_event_id or str(uuid5(NAMESPACE_URL, identity_material))
-        if update.source_sequence is not None and duplicate_event_id is None:
+        event_id = str(uuid5(NAMESPACE_URL, identity_material))
+        if update.source_sequence is not None and new_sequence:
             self._seen_sequence[sequence_identity] = (payload_digest, event_id)
 
         return NormalizedMarketEvent(

@@ -305,37 +305,108 @@ class IbkrExecutionEvidence:
 
 @dataclass(frozen=True)
 class IbkrAbsenceEvidence:
+    exact_client_order_lookup_complete: bool
+    exact_client_order_absent: bool
     open_orders_complete: bool
     completed_orders_complete: bool
     executions_complete: bool
     account_activity_complete: bool
     consistency_horizon_satisfied: bool
+    exclusion_semantics_qualified: bool
     order_found: bool
 
     def __post_init__(self) -> None:
         for field in (
+            "exact_client_order_lookup_complete",
+            "exact_client_order_absent",
             "open_orders_complete",
             "completed_orders_complete",
             "executions_complete",
             "account_activity_complete",
             "consistency_horizon_satisfied",
+            "exclusion_semantics_qualified",
             "order_found",
         ):
             if type(getattr(self, field)) is not bool:
                 raise TypeError(f"{field} must be boolean")
+        if self.order_found and self.exact_client_order_absent:
+            raise IbkrWebAdapterError(
+                "order_found conflicts with exact_client_order_absent"
+            )
+        if self.exact_client_order_absent and not self.exact_client_order_lookup_complete:
+            raise IbkrWebAdapterError(
+                "exact absence requires a completed exact client-order lookup"
+            )
 
     def verdict(self) -> str:
         if self.order_found:
             return "FOUND"
         if (
-            self.open_orders_complete
+            self.exact_client_order_lookup_complete
+            and self.exact_client_order_absent
+            and self.open_orders_complete
             and self.completed_orders_complete
             and self.executions_complete
             and self.account_activity_complete
             and self.consistency_horizon_satisfied
+            and self.exclusion_semantics_qualified
         ):
             return "PROVEN_ABSENT"
         return "INCONCLUSIVE"
+
+
+@dataclass(frozen=True)
+class IbkrCancelOutcome:
+    """Cancel endpoint acknowledgement; never proof of terminal cancellation."""
+
+    provider_order_id: str
+    acknowledged: bool
+    message: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "provider_order_id",
+            _text(self.provider_order_id, name="provider_order_id"),
+        )
+        if type(self.acknowledged) is not bool:
+            raise TypeError("acknowledged must be boolean")
+        if self.message is not None:
+            object.__setattr__(self, "message", _text(self.message, name="message"))
+
+    @property
+    def terminal_cancel_proven(self) -> bool:
+        return False
+
+
+def parse_cancel_response(
+    *,
+    provider_order_id: str,
+    payload: object,
+) -> IbkrCancelOutcome:
+    """Classify an observed cancel response without inventing terminal state.
+
+    A successful request means only that IBKR acknowledged the cancel request.
+    Order truth still comes from subsequent order/execution/reconciliation
+    evidence because cancellation can race with fills.
+    """
+
+    order_id = _text(provider_order_id, name="provider_order_id")
+    if not isinstance(payload, Mapping):
+        raise TypeError("cancel response must be an object")
+    error = payload.get("error")
+    if error not in {None, ""}:
+        return IbkrCancelOutcome(
+            provider_order_id=order_id,
+            acknowledged=False,
+            message=_text(str(error), name="error"),
+        )
+    message = payload.get("msg", payload.get("message"))
+    return IbkrCancelOutcome(
+        provider_order_id=order_id,
+        acknowledged=True,
+        message=None if message in {None, ""} else _text(str(message), name="message"),
+    )
 
 
 @dataclass(frozen=True)

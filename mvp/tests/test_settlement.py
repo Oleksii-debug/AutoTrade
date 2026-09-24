@@ -2,6 +2,7 @@ from datetime import date
 from decimal import Decimal
 import unittest
 
+from mvp.autotrade_mvp.reservations import ReservationBook
 from mvp.autotrade_mvp.settlement import (
     SettlementBook,
     SettlementConflict,
@@ -206,6 +207,78 @@ class SettlementBookTests(unittest.TestCase):
                 settled_cash={"USD": "100"},
                 settled_obligation_ids=("missing",),
             )
+
+
+    def test_reservation_to_settlement_handoff_never_double_locks_same_fill(self):
+        reservations = ReservationBook()
+        settlement = SettlementBook(settled_cash={"USD": "1000"})
+        reservations.reserve(
+            reservation_id="reservation-buy-1",
+            intent_id="intent-buy-1",
+            requirements={"CASH:USD": "201"},
+            available={"CASH:USD": "1000"},
+        )
+
+        before_fill_reserve = reservations.total_reserved("CASH:USD")
+        self.assertEqual(before_fill_reserve, Decimal("201"))
+        self.assertEqual(
+            settlement.available_to_spend("USD", reserve=before_fill_reserve),
+            Decimal("799"),
+        )
+        self.assertEqual(settlement.snapshot("USD").unsettled_payable, Decimal("0"))
+
+        reservations.consume("reservation-buy-1", {"CASH:USD": "201"})
+        filled = reservations.mark_terminal(
+            "reservation-buy-1",
+            outcome="FILLED",
+            resolution_evidence="provider-execution-fill-1",
+        )
+        self.assertEqual(filled.state, "FILLED")
+        self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("0"))
+
+        settlement.add(
+            equity_cash_obligation(
+                obligation_id="settlement-buy-1",
+                cause_event_id="provider-execution-fill-1",
+                settlement_currency="USD",
+                side="BUY",
+                quantity="2",
+                price="100",
+                fee="1",
+                trade_date=date(2026, 9, 24),
+                settlement_date=date(2026, 9, 26),
+            )
+        )
+        after_fill_reserve = reservations.total_reserved("CASH:USD")
+        self.assertEqual(after_fill_reserve, Decimal("0"))
+        self.assertEqual(settlement.snapshot("USD").unsettled_payable, Decimal("201"))
+        self.assertEqual(
+            settlement.available_to_spend("USD", reserve=after_fill_reserve),
+            Decimal("799"),
+        )
+        self.assertNotEqual(
+            settlement.available_to_spend("USD", reserve=after_fill_reserve),
+            Decimal("598"),
+        )
+
+    def test_working_or_unknown_reservation_does_not_create_settlement_payable(self):
+        reservations = ReservationBook()
+        settlement = SettlementBook(settled_cash={"USD": "1000"})
+        reservations.reserve(
+            reservation_id="reservation-unknown",
+            intent_id="intent-unknown",
+            requirements={"CASH:USD": "201"},
+            available={"CASH:USD": "1000"},
+        )
+        reservations.mark_unknown("reservation-unknown")
+
+        reserve = reservations.total_reserved("CASH:USD")
+        self.assertEqual(reserve, Decimal("201"))
+        self.assertEqual(settlement.snapshot("USD").unsettled_payable, Decimal("0"))
+        self.assertEqual(
+            settlement.available_to_spend("USD", reserve=reserve),
+            Decimal("799"),
+        )
 
 
 if __name__ == "__main__":

@@ -342,6 +342,34 @@ class ChampionRegistryTests(unittest.TestCase):
                     open_position_count=2, existing_position_policy=None,
                 )
 
+    def test_rollback_rejects_boolean_or_invalid_generation_inputs(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            registry.promote(
+                approval(science, "candidate-a"),
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            for kwargs in (
+                {"target_generation": True, "expected_generation": 1, "open_position_count": 0},
+                {"target_generation": 1, "expected_generation": True, "open_position_count": 0},
+                {"target_generation": 1, "expected_generation": 1, "open_position_count": True},
+                {"target_generation": 1, "expected_generation": -1, "open_position_count": 0},
+            ):
+                with self.subTest(kwargs=kwargs):
+                    with self.assertRaises(ValueError):
+                        registry.rollback(
+                            now=BASE,
+                            existing_position_policy=None,
+                            **kwargs,
+                        )
+
     def test_rollback_changes_future_pointer_without_erasing_history(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")

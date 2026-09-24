@@ -24,21 +24,43 @@ REQUIRED_FIELDS = (
 
 _SENSITIVE_KEYS = {
     "authorization",
+    "authorization_header",
+    "bearer_token",
     "cookie",
     "password",
+    "password_hash",
     "secret",
+    "client_secret",
     "session",
+    "session_id",
+    "session_token",
     "token",
+    "access_token",
+    "refresh_token",
+    "id_token",
     "api_key",
+    "x_api_key",
     "private_key",
+    "private_key_pem",
 }
+
+
+def _normalized_key(value: object) -> str:
+    return "_".join(
+        part
+        for part in "".join(
+            character.lower() if character.isalnum() else "_"
+            for character in str(value).strip()
+        ).split("_")
+        if part
+    )
 
 
 def _redact(value: Any) -> Any:
     if isinstance(value, Mapping):
         result: dict[str, Any] = {}
         for key, item in value.items():
-            normalized = str(key).strip().lower()
+            normalized = _normalized_key(key)
             result[str(key)] = "[REDACTED]" if normalized in _SENSITIVE_KEYS else _redact(item)
         return result
     if isinstance(value, list):
@@ -158,9 +180,8 @@ class DecisionTraceStore:
         prepared = _redact(trace)
         self._validate_input(prepared)
         records = self._load()
-        # Integrity verification must precede idempotency handling.  Otherwise
-        # an identical retry could silently succeed against a tampered chain
-        # merely because its trace_id and semantic payload still match.
+        # Integrity verification must precede idempotency handling. Otherwise an
+        # identical retry could silently succeed against a tampered hash chain.
         if records and not self.verify():
             raise ValueError("Existing decision trace chain is corrupt")
 

@@ -150,11 +150,35 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             self.assertTrue(store.append(item))
 
             records = path.read_text(encoding="utf-8")
-            records = records.replace('"previous_hash":"' + "0" * 64 + '"', '"previous_hash":"' + "1" * 64 + '"')
+            records = records.replace(
+                '"previous_hash":"' + "0" * 64 + '"',
+                '"previous_hash":"' + "1" * 64 + '"',
+            )
             path.write_text(records, encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "chain is corrupt"):
                 store.append(item)
+
+    def test_secret_aliases_remain_redacted_after_semantic_merge(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = evidence_trace()
+            item["attributes"].update(
+                {
+                    "Authorization-Header": "Bearer hidden",
+                    "client.secret": "hidden-client",
+                    "refresh-token": "hidden-refresh",
+                    "private key pem": "hidden-key",
+                }
+            )
+            store.append(item)
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+            attrs = persisted["attributes"]
+            self.assertEqual(attrs["Authorization-Header"], "[REDACTED]")
+            self.assertEqual(attrs["client.secret"], "[REDACTED]")
+            self.assertEqual(attrs["refresh-token"], "[REDACTED]")
+            self.assertEqual(attrs["private key pem"], "[REDACTED]")
 
     def test_metric_backlog_is_bounded_and_redacts_labels(self):
         backlog = BoundedMetricBacklog(max_items=2)

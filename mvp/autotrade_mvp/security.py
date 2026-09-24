@@ -41,11 +41,21 @@ def _authenticated_origin(value: object) -> str:
         raise ValueError("Origin must be an absolute origin without query or fragment")
     if parsed.path not in ("", "/"):
         raise ValueError("Origin must not contain a path")
-    if parsed.scheme == "https":
-        return origin[:-1] if origin.endswith("/") else origin
-    if parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
-        return origin[:-1] if origin.endswith("/") else origin
-    raise ValueError("Origin must use HTTPS or loopback HTTP")
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("Origin port is invalid") from error
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname.lower()
+    if scheme == "https":
+        default_port = 443
+    elif scheme == "http" and host in {"localhost", "127.0.0.1", "::1"}:
+        default_port = 80
+    else:
+        raise ValueError("Origin must use HTTPS or loopback HTTP")
+    rendered_host = f"[{host}]" if ":" in host else host
+    suffix = "" if port is None or port == default_port else f":{port}"
+    return f"{scheme}://{rendered_host}{suffix}"
 
 
 @dataclass(frozen=True)
@@ -326,12 +336,16 @@ class SecurityBoundary:
         known.sort(key=len, reverse=True)
 
         def scrub(item: object) -> object:
-            if isinstance(item, dict):
+            if isinstance(item, Mapping):
                 return {key: scrub(child) for key, child in item.items()}
             if isinstance(item, list):
                 return [scrub(child) for child in item]
             if isinstance(item, tuple):
                 return tuple(scrub(child) for child in item)
+            if isinstance(item, set):
+                return {scrub(child) for child in item}
+            if isinstance(item, frozenset):
+                return frozenset(scrub(child) for child in item)
             if isinstance(item, str):
                 result = item
                 for secret_value in known:

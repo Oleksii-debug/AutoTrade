@@ -1,0 +1,41 @@
+{
+  "corpus_version": "1.0.0",
+  "fixtures": [
+    {
+      "path": "dataset-manifest.valid.json",
+      "schema": "data.schema.json",
+      "definition": "DatasetManifest",
+      "expected": "valid"
+    },
+    {
+      "path": "event-envelope.valid.json",
+      "schema": "event.schema.json",
+      "definition": "EventEnvelope",
+      "expected": "valid"
+    },
+    {
+      "path": "instrument-version.valid.json",
+      "schema": "market.schema.json",
+      "definition": "InstrumentVersion",
+      "expected": "valid"
+    },
+    {
+      "path": "model-request.valid.json",
+      "schema": "model.schema.json",
+      "definition": "ModelRequest",
+      "expected": "valid"
+    },
+    {
+      "path": "order-intent.valid.json",
+      "schema": "execution.schema.json",
+      "definition": "OrderIntent",
+      "expected": "valid"
+    },
+    {
+      "path": "ui-command.valid.json",
+      "schema": "ui.schema.json",
+      "definition": "UiCommand",
+      "expected": "valid"
+    }
+  ]
+}

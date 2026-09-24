@@ -1,4 +1,5 @@
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -6,13 +7,18 @@ from referencing import Registry, Resource
 from jsonschema import Draft202012Validator, FormatChecker
 
 ROOT = Path(__file__).resolve().parents[2]
-SCHEMAS = ROOT / "contracts" / "jsonschema"
-FIXTURES = ROOT / "contracts" / "fixtures"
+CONTRACTS = ROOT / "contracts"
+SCHEMAS = CONTRACTS / "jsonschema"
+FIXTURES = CONTRACTS / "fixtures"
+MANIFEST = CONTRACTS / "manifest.json"
+FIXTURE_MANIFEST = FIXTURES / "manifest.json"
 
 
 class ContractSchemaTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls.contract_manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        cls.fixture_manifest = json.loads(FIXTURE_MANIFEST.read_text(encoding="utf-8"))
         cls.schemas = {p.name: json.loads(p.read_text(encoding="utf-8")) for p in SCHEMAS.glob("*.json")}
         cls.registry = Registry().with_resources(
             [(s["$id"], Resource.from_contents(s)) for s in cls.schemas.values()]
@@ -25,6 +31,73 @@ class ContractSchemaTests(unittest.TestCase):
             registry=self.registry,
             format_checker=FormatChecker(),
         ).validate(fixture)
+
+    def test_contract_manifest_covers_exact_schema_set(self):
+        expected = set(self.contract_manifest["schemas"])
+        observed = set(self.schemas)
+        self.assertEqual(observed, expected)
+
+    def test_schema_ids_and_draft_match_contract_version(self):
+        version = self.contract_manifest["contract_version"]
+        draft = self.contract_manifest["json_schema_draft"]
+        base_uri = self.contract_manifest["schema_base_uri"]
+        self.assertEqual(base_uri, f"https://schemas.autotrade.local/{version}/")
+        ids = []
+        for name in self.contract_manifest["schemas"]:
+            schema = self.schemas[name]
+            with self.subTest(schema=name):
+                self.assertEqual(schema["$schema"], draft)
+                self.assertEqual(schema["$id"], f"{base_uri}{name}")
+                self.assertNotIn("latest", schema["$id"].lower())
+                ids.append(schema["$id"])
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_language_anchor_and_openapi_version_match_manifest(self):
+        version = self.contract_manifest["contract_version"]
+        csharp_path = ROOT / self.contract_manifest["language_anchors"]["csharp"]
+        csharp = csharp_path.read_text(encoding="utf-8")
+        match = re.search(r'\bVersion\s*=\s*"([^"]+)"', csharp)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(1), version)
+
+        openapi_path = ROOT / self.contract_manifest["openapi"]["path"]
+        openapi = openapi_path.read_text(encoding="utf-8")
+        self.assertRegex(openapi, r"(?m)^openapi:\s*3\.1\.0\s*$")
+        info_version = re.search(r"(?m)^\s{2}version:\s*([^\s#]+)\s*$", openapi)
+        self.assertIsNotNone(info_version)
+        self.assertEqual(info_version.group(1), version)
+        self.assertEqual(self.contract_manifest["openapi"]["version"], version)
+
+    def test_openapi_json_schema_references_resolve(self):
+        openapi_path = ROOT / self.contract_manifest["openapi"]["path"]
+        text = openapi_path.read_text(encoding="utf-8")
+        refs = re.findall(r"(?m)^\s*\$ref:\s*([^\s#]+)(#[^\s]+)?\s*$", text)
+        self.assertTrue(refs)
+        for relative_path, fragment in refs:
+            with self.subTest(ref=f"{relative_path}{fragment}"):
+                target = (openapi_path.parent / relative_path).resolve()
+                self.assertTrue(target.is_relative_to(ROOT.resolve()))
+                self.assertTrue(target.is_file())
+                document = json.loads(target.read_text(encoding="utf-8"))
+                if fragment:
+                    self.assertTrue(fragment.startswith("#/$defs/"))
+                    definition = fragment.removeprefix("#/$defs/")
+                    self.assertIn(definition, document.get("$defs", {}))
+
+    def test_fixture_manifest_is_complete_and_valid(self):
+        entries = self.fixture_manifest["fixtures"]
+        listed = [entry["path"] for entry in entries]
+        self.assertEqual(len(listed), len(set(listed)))
+        observed = {p.name for p in FIXTURES.glob("*.json") if p.name != "manifest.json"}
+        self.assertEqual(observed, set(listed))
+        self.assertEqual(self.fixture_manifest["corpus_version"], self.contract_manifest["contract_version"])
+
+        for entry in entries:
+            with self.subTest(fixture=entry["path"]):
+                self.assertEqual(entry["expected"], "valid")
+                self.assertIn(entry["schema"], self.schemas)
+                fixture = json.loads((FIXTURES / entry["path"]).read_text(encoding="utf-8"))
+                self.validate(entry["schema"], entry["definition"], fixture)
 
     def test_all_schemas_are_2020_12_valid(self):
         for name, schema in self.schemas.items():

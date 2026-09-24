@@ -1,10 +1,15 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import tempfile
 import unittest
 
+from research.autotrade_research.artifacts.store import ArtifactStore
+
 from mvp.autotrade_mvp.capabilities import (
+    ArtifactCapabilityEvidenceVerifier,
     CapabilityClaim,
     CapabilityError,
+    CapabilityEvidenceCheck,
     CapabilityRegistry,
     derive_capability_snapshot,
 )
@@ -58,6 +63,68 @@ def complete_claims(**overrides):
     )
 
 
+class _UnitEvidenceVerifier:
+    def verify(self, claim):
+        return CapabilityEvidenceCheck("VALID", "non-artifact unit fixture")
+
+
+UNIT_EVIDENCE_VERIFIER = _UnitEvidenceVerifier()
+
+
+def derive(**kwargs):
+    return derive_capability_snapshot(
+        evidence_verifier=UNIT_EVIDENCE_VERIFIER,
+        **kwargs,
+    )
+
+
+_ARTIFACT_IDS = {
+    "DOCUMENTED": "40000000-0000-4000-8000-000000000001",
+    "API": "40000000-0000-4000-8000-000000000002",
+    "ACCOUNT": "40000000-0000-4000-8000-000000000003",
+    "INSTRUMENT": "40000000-0000-4000-8000-000000000004",
+}
+_PRODUCERS = {
+    "DOCUMENTED": "PROVIDER_DOCUMENTATION",
+    "API": "PROVIDER_API",
+    "ACCOUNT": "ACCOUNT_CAPABILITY",
+    "INSTRUMENT": "INSTRUMENT_CAPABILITY",
+}
+
+
+def publish_evidenced_claim(store, source, *, metadata_overrides=None):
+    base = claim(source)
+    observed = base.observed_at.isoformat().replace("+00:00", "Z")
+    metadata = {
+        "capability_evidence_version": 1,
+        "evidence_type": "CAPABILITY_CLAIM",
+        "producer_kind": _PRODUCERS[source],
+        "capability_source": source,
+        "provider_id": base.provider_id,
+        "account_id": base.account_id,
+        "entity_id": base.entity_id,
+        "environment": base.environment,
+        "instrument_version": base.instrument_version,
+        "observed_at": observed,
+    }
+    metadata.update(metadata_overrides or {})
+    manifest = store.publish_bytes(
+        artifact_id=_ARTIFACT_IDS[source],
+        data=("capability-evidence:" + source).encode("utf-8"),
+        media_type="application/vnd.autotrade.capability-evidence+json",
+        rights={"storage": True, "export": False},
+        metadata=metadata,
+    )
+    return replace(
+        base,
+        evidence_ref={
+            "artifact_id": manifest["artifact_id"],
+            "sha256": manifest["sha256"],
+            "observed_at": observed,
+        },
+    )
+
+
 class CapabilityFoundationTests(unittest.TestCase):
     def test_verified_snapshot_is_exact_intersection(self):
         claims = (
@@ -66,7 +133,7 @@ class CapabilityFoundationTests(unittest.TestCase):
             claim("ACCOUNT", order_types=("LIMIT",), tif=("DAY",)),
             claim("INSTRUMENT", order_types=("LIMIT", "STOP"), tif=("DAY", "IOC")),
         )
-        snapshot = derive_capability_snapshot(
+        snapshot = derive(
             snapshot_id=SNAPSHOT_1,
             claims=claims,
             observed_at=NOW,
@@ -92,7 +159,7 @@ class CapabilityFoundationTests(unittest.TestCase):
         )
 
     def test_missing_required_source_is_unknown(self):
-        snapshot = derive_capability_snapshot(
+        snapshot = derive(
             snapshot_id=SNAPSHOT_1,
             claims=(
                 claim("DOCUMENTED"),
@@ -118,7 +185,7 @@ class CapabilityFoundationTests(unittest.TestCase):
             observed_at=NOW - timedelta(minutes=20),
             expires_at=NOW - timedelta(seconds=1),
         )
-        snapshot = derive_capability_snapshot(
+        snapshot = derive(
             snapshot_id=SNAPSHOT_1,
             claims=claims,
             observed_at=NOW,
@@ -132,7 +199,7 @@ class CapabilityFoundationTests(unittest.TestCase):
             claim("ACCOUNT", order_types=("LIMIT", "MARKET")),
             claim("INSTRUMENT", order_types=("LIMIT", "MARKET")),
         )
-        first = derive_capability_snapshot(
+        first = derive(
             snapshot_id=SNAPSHOT_1,
             claims=order_conflict,
             observed_at=NOW,
@@ -141,7 +208,7 @@ class CapabilityFoundationTests(unittest.TestCase):
 
         mode_conflict = list(complete_claims())
         mode_conflict[-1] = claim("INSTRUMENT", position_mode="HEDGE")
-        second = derive_capability_snapshot(
+        second = derive(
             snapshot_id=SNAPSHOT_2,
             claims=mode_conflict,
             observed_at=NOW,
@@ -152,7 +219,7 @@ class CapabilityFoundationTests(unittest.TestCase):
         claims = list(complete_claims())
         claims[-1] = claim("INSTRUMENT", instrument_version="instrument-v2")
         with self.assertRaisesRegex(CapabilityError, "different identities"):
-            derive_capability_snapshot(
+            derive(
                 snapshot_id=SNAPSHOT_1,
                 claims=claims,
                 observed_at=NOW,
@@ -160,13 +227,13 @@ class CapabilityFoundationTests(unittest.TestCase):
 
     def test_registry_uses_latest_snapshot_and_expiry(self):
         registry = CapabilityRegistry()
-        first = derive_capability_snapshot(
+        first = derive(
             snapshot_id=SNAPSHOT_1,
             claims=complete_claims(expires_at=NOW + timedelta(minutes=2)),
             observed_at=NOW,
         )
         second_at = NOW + timedelta(minutes=1)
-        second = derive_capability_snapshot(
+        second = derive(
             snapshot_id=SNAPSHOT_2,
             claims=complete_claims(
                 observed_at=NOW,
@@ -210,7 +277,7 @@ class CapabilityFoundationTests(unittest.TestCase):
             )
 
     def test_snapshot_id_is_immutable(self):
-        snapshot = derive_capability_snapshot(
+        snapshot = derive(
             snapshot_id=SNAPSHOT_1,
             claims=complete_claims(),
             observed_at=NOW,
@@ -231,7 +298,7 @@ class CapabilityFoundationTests(unittest.TestCase):
                 expires_at=NOW - timedelta(minutes=10),
             )
         )
-        snapshot = derive_capability_snapshot(
+        snapshot = derive(
             snapshot_id=SNAPSHOT_1,
             claims=claims,
             observed_at=NOW,
@@ -245,7 +312,7 @@ class CapabilityFoundationTests(unittest.TestCase):
     def test_overlapping_live_claims_from_same_source_are_intersected(self):
         claims = list(complete_claims())
         claims.append(claim("ACCOUNT", order_types=("LIMIT",)))
-        snapshot = derive_capability_snapshot(
+        snapshot = derive(
             snapshot_id=SNAPSHOT_1,
             claims=claims,
             observed_at=NOW,
@@ -261,7 +328,7 @@ class CapabilityFoundationTests(unittest.TestCase):
             claim("ACCOUNT", order_types=("MARKET",)),
             claim("INSTRUMENT", order_types=("LIMIT", "MARKET")),
         ]
-        snapshot = derive_capability_snapshot(
+        snapshot = derive(
             snapshot_id=SNAPSHOT_1,
             claims=claims,
             observed_at=NOW,
@@ -297,7 +364,7 @@ class CapabilityFoundationTests(unittest.TestCase):
             observed_at=NOW + timedelta(seconds=1),
             expires_at=NOW + timedelta(minutes=10),
         )
-        snapshot = derive_capability_snapshot(
+        snapshot = derive(
             snapshot_id=SNAPSHOT_1,
             claims=claims,
             observed_at=NOW,
@@ -305,7 +372,7 @@ class CapabilityFoundationTests(unittest.TestCase):
         self.assertEqual(snapshot.status, "CONFLICTED")
 
     def test_evidence_reference_is_strict_and_immutable(self):
-        snapshot = derive_capability_snapshot(
+        snapshot = derive(
             snapshot_id=SNAPSHOT_1,
             claims=complete_claims(),
             observed_at=NOW,
@@ -338,7 +405,7 @@ class CapabilityFoundationTests(unittest.TestCase):
             )
 
     def test_contract_projection_contains_current_fail_closed_status(self):
-        snapshot = derive_capability_snapshot(
+        snapshot = derive(
             snapshot_id=SNAPSHOT_1,
             claims=complete_claims(),
             observed_at=NOW,
@@ -349,6 +416,93 @@ class CapabilityFoundationTests(unittest.TestCase):
         self.assertEqual(payload["supported_order_types"], ["LIMIT", "MARKET"])
         self.assertEqual(payload["observed_at"], "2026-09-24T16:00:00Z")
         self.assertEqual(len(payload["evidence"]), 4)
+
+
+    def test_verified_requires_an_evidence_verifier(self):
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(),
+            observed_at=NOW,
+        )
+        self.assertEqual(snapshot.status, "UNKNOWN")
+        self.assertFalse(
+            snapshot.admits(
+                at=NOW,
+                order_type="LIMIT",
+                time_in_force="DAY",
+                permission_scope="ORDER.WRITE",
+            )
+        )
+
+    def test_syntactically_valid_but_missing_artifacts_cannot_verify(self):
+        with tempfile.TemporaryDirectory() as directory:
+            verifier = ArtifactCapabilityEvidenceVerifier(ArtifactStore(directory))
+            snapshot = derive_capability_snapshot(
+                snapshot_id=SNAPSHOT_1,
+                claims=complete_claims(),
+                observed_at=NOW,
+                evidence_verifier=verifier,
+            )
+        self.assertEqual(snapshot.status, "UNKNOWN")
+
+    def test_artifact_digest_mismatch_is_conflicted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            claims = [publish_evidenced_claim(store, source) for source in (
+                "DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"
+            )]
+            bad = claims[-1]
+            claims[-1] = replace(
+                bad,
+                evidence_ref={
+                    **dict(bad.evidence_ref),
+                    "sha256": "sha256:" + "f" * 64,
+                },
+            )
+            snapshot = derive_capability_snapshot(
+                snapshot_id=SNAPSHOT_1,
+                claims=claims,
+                observed_at=NOW,
+                evidence_verifier=ArtifactCapabilityEvidenceVerifier(store),
+            )
+        self.assertEqual(snapshot.status, "CONFLICTED")
+
+    def test_wrong_identity_or_producer_artifact_is_conflicted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            claims = [
+                publish_evidenced_claim(store, "DOCUMENTED"),
+                publish_evidenced_claim(store, "API"),
+                publish_evidenced_claim(
+                    store,
+                    "ACCOUNT",
+                    metadata_overrides={"account_id": "other-account"},
+                ),
+                publish_evidenced_claim(store, "INSTRUMENT"),
+            ]
+            snapshot = derive_capability_snapshot(
+                snapshot_id=SNAPSHOT_1,
+                claims=claims,
+                observed_at=NOW,
+                evidence_verifier=ArtifactCapabilityEvidenceVerifier(store),
+            )
+        self.assertEqual(snapshot.status, "CONFLICTED")
+
+    def test_exact_immutable_artifacts_all_sources_are_verified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            claims = tuple(
+                publish_evidenced_claim(store, source)
+                for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+            )
+            snapshot = derive_capability_snapshot(
+                snapshot_id=SNAPSHOT_1,
+                claims=claims,
+                observed_at=NOW,
+                evidence_verifier=ArtifactCapabilityEvidenceVerifier(store),
+            )
+        self.assertEqual(snapshot.status, "VERIFIED")
+        self.assertEqual(len(snapshot.evidence), 4)
 
 
 if __name__ == "__main__":

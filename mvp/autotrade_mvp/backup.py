@@ -685,7 +685,11 @@ def restore_requires_reconciliation(destination_root: str | Path) -> bool:
         return True
     if proof.get("backup_manifest_sha256") != marker.get("backup_manifest_sha256"):
         return True
-    if not proof.get("owner_id") or not isinstance(proof.get("owner_epoch"), int):
+    if (
+        not proof.get("owner_id")
+        or type(proof.get("owner_epoch")) is not int
+        or proof["owner_epoch"] < 1
+    ):
         return True
     if not isinstance(proof.get("fencing_evidence"), list) or not proof["fencing_evidence"]:
         return True
@@ -704,4 +708,21 @@ def restore_requires_reconciliation(destination_root: str | Path) -> bool:
         return True
     if proof.get("blocking_resources") != []:
         return True
+    resolutions = proof.get("submission_resolutions")
+    if not isinstance(resolutions, list):
+        return True
+    for item in resolutions:
+        if not isinstance(item, dict):
+            return True
+        outcome = item.get("outcome")
+        if not isinstance(outcome, str) or not outcome:
+            return True
+        if outcome == "UNKNOWN":
+            return True
+        execution_ids = item.get("provider_execution_ids")
+        if not isinstance(execution_ids, list) or any(
+            not isinstance(value, str) or not value
+            for value in execution_ids
+        ):
+            return True
     return False

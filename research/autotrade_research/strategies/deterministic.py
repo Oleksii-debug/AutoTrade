@@ -160,10 +160,18 @@ class ReturnThresholdBaseline:
 
     def snapshot(self) -> str:
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "lookback": self.lookback,
             "threshold": str(self.threshold),
             "proposal_quantity": str(self.proposal_quantity),
+            "seen_events": {
+                event_id: {
+                    "symbol": item.symbol,
+                    "available_at": item.available_at.isoformat(),
+                    "price": str(item.price),
+                }
+                for event_id, item in sorted(self._observations_by_id.items())
+            },
             "history": {
                 symbol: [
                     {
@@ -184,11 +192,16 @@ class ReturnThresholdBaseline:
             payload = json.loads(snapshot)
         except (TypeError, json.JSONDecodeError) as error:
             raise ValueError("strategy snapshot is invalid") from error
-        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        if not isinstance(payload, dict) or payload.get("schema_version") not in {1, 2}:
             raise ValueError("unsupported strategy snapshot")
+        version = payload["schema_version"]
         expected = {"schema_version", "lookback", "threshold", "proposal_quantity", "history"}
+        if version == 2:
+            expected.add("seen_events")
         if set(payload) != expected or not isinstance(payload["history"], dict):
             raise ValueError("strategy snapshot structure is invalid")
+        if version == 2 and not isinstance(payload["seen_events"], dict):
+            raise ValueError("strategy seen-event snapshot is invalid")
         strategy = cls(
             lookback=payload["lookback"],
             threshold=payload["threshold"],
@@ -211,6 +224,37 @@ class ReturnThresholdBaseline:
                     price=row["price"],
                 )
                 strategy.ingest(observation, simulation_time=observation.available_at)
+
+        if version == 2:
+            declared_seen: set[str] = set()
+            for event_id, row in sorted(payload["seen_events"].items()):
+                if not isinstance(row, dict) or set(row) != {"symbol", "available_at", "price"}:
+                    raise ValueError("strategy seen-event snapshot is invalid")
+                try:
+                    available_at = datetime.fromisoformat(row["available_at"])
+                except (TypeError, ValueError) as error:
+                    raise ValueError("snapshot timestamp is invalid") from error
+                observation = CausalObservation.create(
+                    event_id=event_id,
+                    symbol=row["symbol"],
+                    available_at=available_at,
+                    price=row["price"],
+                )
+                existing = strategy._observations_by_id.get(event_id)
+                if existing is not None and existing != observation:
+                    raise ValueError(
+                        "seen-event snapshot conflicts with retained history"
+                    )
+                strategy._observations_by_id[event_id] = observation
+                declared_seen.add(event_id)
+
+            retained_ids = {
+                item.event_id
+                for rows in strategy._history.values()
+                for item in rows
+            }
+            if not retained_ids.issubset(declared_seen):
+                raise ValueError("seen-event snapshot is missing retained history")
         return strategy
 
 

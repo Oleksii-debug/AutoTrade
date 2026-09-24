@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import json
 import unittest
 
 from research.autotrade_research.strategies.deterministic import (
@@ -130,6 +131,92 @@ class DeterministicStrategyTests(unittest.TestCase):
         strategy.ingest(original, simulation_time=original.available_at)
         with self.assertRaisesRegex(ValueError, "different observation content"):
             strategy.ingest(conflicting, simulation_time=conflicting.available_at)
+
+
+    def test_snapshot_remembers_evicted_event_for_restart_idempotency(self):
+        strategy = ReturnThresholdBaseline(lookback=2, threshold="0.01", proposal_quantity="1")
+        first, second, third = obs(0, "100"), obs(1, "101"), obs(2, "102")
+        for item in (first, second, third):
+            strategy.ingest(item, simulation_time=item.available_at)
+
+        restored = ReturnThresholdBaseline.restore(strategy.snapshot())
+        self.assertFalse(restored.ingest(first, simulation_time=third.available_at))
+        proposal = restored.propose(symbol="AAA", decision_time=third.available_at)
+        self.assertEqual(proposal.evidence_event_ids, ("event-1", "event-2"))
+
+    def test_snapshot_remembers_evicted_event_content_and_rejects_conflict(self):
+        strategy = ReturnThresholdBaseline(lookback=2, threshold="0.01", proposal_quantity="1")
+        first, second, third = obs(0, "100"), obs(1, "101"), obs(2, "102")
+        for item in (first, second, third):
+            strategy.ingest(item, simulation_time=item.available_at)
+
+        restored = ReturnThresholdBaseline.restore(strategy.snapshot())
+        conflicting = CausalObservation.create(
+            event_id=first.event_id,
+            symbol=first.symbol,
+            available_at=first.available_at,
+            price="999",
+        )
+        with self.assertRaisesRegex(ValueError, "different observation content"):
+            restored.ingest(conflicting, simulation_time=third.available_at)
+
+    def test_snapshot_rejects_seen_event_that_conflicts_with_retained_history(self):
+        strategy = ReturnThresholdBaseline(lookback=2, threshold="0.01", proposal_quantity="1")
+        first, second = obs(0, "100"), obs(1, "101")
+        for item in (first, second):
+            strategy.ingest(item, simulation_time=item.available_at)
+        payload = json.loads(strategy.snapshot())
+        payload["seen_events"][first.event_id]["price"] = "999"
+
+        with self.assertRaisesRegex(ValueError, "conflicts with retained history"):
+            ReturnThresholdBaseline.restore(
+                json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            )
+
+    def test_snapshot_rejects_missing_seen_event_for_retained_history(self):
+        strategy = ReturnThresholdBaseline(lookback=2, threshold="0.01", proposal_quantity="1")
+        first, second = obs(0, "100"), obs(1, "101")
+        for item in (first, second):
+            strategy.ingest(item, simulation_time=item.available_at)
+        payload = json.loads(strategy.snapshot())
+        del payload["seen_events"][first.event_id]
+
+        with self.assertRaisesRegex(ValueError, "missing retained history"):
+            ReturnThresholdBaseline.restore(
+                json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            )
+
+    def test_schema_v1_snapshot_remains_readable(self):
+        snapshot_v1 = json.dumps(
+            {
+                "schema_version": 1,
+                "lookback": 2,
+                "threshold": "0.01",
+                "proposal_quantity": "1",
+                "history": {
+                    "AAA": [
+                        {
+                            "event_id": "event-0",
+                            "available_at": BASE.isoformat(),
+                            "price": "100",
+                        },
+                        {
+                            "event_id": "event-1",
+                            "available_at": (BASE + timedelta(minutes=1)).isoformat(),
+                            "price": "101",
+                        },
+                    ]
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        restored = ReturnThresholdBaseline.restore(snapshot_v1)
+        proposal = restored.propose(
+            symbol="AAA",
+            decision_time=BASE + timedelta(minutes=1),
+        )
+        self.assertEqual(proposal.evidence_event_ids, ("event-0", "event-1"))
 
     def test_out_of_order_availability_is_rejected(self):
         strategy = ReturnThresholdBaseline(lookback=2, threshold="0.01", proposal_quantity="1")

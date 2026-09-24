@@ -295,6 +295,29 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertNotIn("top-secret", repr(redacted))
         self.assertIn("[REDACTED]", repr(redacted))
 
+    def test_rotated_and_revoked_secret_values_remain_redacted(self):
+        old_handle = self._credential()
+        new_handle = self.boundary.rotate_secret(
+            self.owner.token,
+            origin=self.owner.origin,
+            handle_id=old_handle.handle_id,
+            owner_identity="windows-user-1",
+            new_secret_value="new-secret",
+        )
+        self.boundary.revoke_secret(
+            self.owner.token,
+            origin=self.owner.origin,
+            handle_id=new_handle.handle_id,
+            owner_identity="windows-user-1",
+        )
+        redacted = self.boundary.redact_for_diagnostics(
+            {"message": "old=top-secret new=new-secret"}
+        )
+        rendered = repr(redacted)
+        self.assertNotIn("top-secret", rendered)
+        self.assertNotIn("new-secret", rendered)
+        self.assertIn("[REDACTED]", rendered)
+
     def test_stale_origin_session_is_invalid_even_without_origin_argument(self):
         paired = self.boundary.pair_origin(
             self.owner.token,

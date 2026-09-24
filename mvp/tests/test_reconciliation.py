@@ -223,6 +223,33 @@ class ReconciliationTests(unittest.TestCase):
         self.assertTrue(result.complete)
         self.assertEqual(dict(result.cash_differences), {})
 
+    def test_unknown_send_resolves_to_observed_working_order_without_retry(self):
+        unknown = UnknownSubmission.create(
+            attempt_id="attempt-working",
+            client_order_id="client-working",
+            started_at="2026-09-24T18:00:00Z",
+        )
+        order = ProviderWorkingOrderEvidence.create(
+            provider_order_id="provider-working",
+            client_order_id="client-working",
+            instrument="ABC",
+            remaining_quantity="1",
+        )
+        result = self.base(
+            local_working_client_order_ids=["client-working"],
+            provider_working_orders=[order],
+            unknown_submissions=[unknown],
+            searched_client_order_ids=["client-working"],
+        )
+        resolution = result.submission_resolutions[0]
+        self.assertEqual(resolution.outcome, "OBSERVED_WORKING_ORDER")
+        self.assertEqual(resolution.provider_order_ids, ("provider-working",))
+        self.assertTrue(result.complete)
+        self.assertIn(
+            "previously UNKNOWN submission has provider working-order evidence",
+            result.reasons,
+        )
+
     def test_missing_snapshot_consistency_evidence_blocks_ready_state(self):
         result = self.base(snapshot_consistency=None)
         self.assertFalse(result.complete)

@@ -53,6 +53,7 @@ class RuntimeSafetySignals:
     emergency_disk_reserve_available: bool
     schema_compatible: bool
     provider_authenticated: bool
+    provider_reconciled: bool
     market_data_fresh: bool
     sender_ownership_proven: bool
     old_sender_fenced: bool
@@ -72,6 +73,7 @@ class RuntimeSafetySignals:
             "emergency_disk_reserve_available",
             "schema_compatible",
             "provider_authenticated",
+            "provider_reconciled",
             "market_data_fresh",
             "sender_ownership_proven",
             "old_sender_fenced",
@@ -137,6 +139,8 @@ def evaluate_readiness(signals: RuntimeSafetySignals) -> RuntimeReadiness:
         blockers.append("emergency_disk_reserve_unavailable")
     if not signals.provider_authenticated:
         blockers.append("provider_not_authenticated")
+    if not signals.provider_reconciled:
+        blockers.append("provider_reconciliation_incomplete")
     if not signals.market_data_fresh:
         blockers.append("market_data_stale")
     if signals.unknown_send_count:

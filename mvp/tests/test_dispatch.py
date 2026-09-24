@@ -5,6 +5,10 @@ from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id
 from mvp.autotrade_mvp.persistence import JournalStore
 
 
+class SimulatedProcessDeath(BaseException):
+    """Model abrupt process termination that normal error recovery cannot catch."""
+
+
 class DispatchTests(unittest.TestCase):
     def store(self, directory):
         return JournalStore(f"{directory}/journal.sqlite3")
@@ -107,8 +111,8 @@ class DispatchTests(unittest.TestCase):
             outbound = 0
 
             def crashing_append(envelope, *, outbox_topic=None):
-                if envelope["event_type"] in {"SubmissionSent", "SubmissionUnknown"}:
-                    raise RuntimeError("simulated process death before terminal journal")
+                if envelope["event_type"] == "SubmissionSent":
+                    raise SimulatedProcessDeath("simulated process death before terminal journal")
                 return real_append(envelope, outbox_topic=outbox_topic)
 
             store.append_event = crashing_append
@@ -122,7 +126,7 @@ class DispatchTests(unittest.TestCase):
                 outbound += 1
                 return {"provider_order_id": "p1"}
 
-            with self.assertRaisesRegex(RuntimeError, "simulated process death"):
+            with self.assertRaisesRegex(SimulatedProcessDeath, "simulated process death"):
                 dispatcher.dispatch(
                     attempt_id="a1", intent_id="i1", intent_hash="h1",
                     provider="sim", request={}, now="2026-09-24T18:00:00Z",

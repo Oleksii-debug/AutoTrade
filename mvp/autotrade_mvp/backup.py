@@ -147,37 +147,24 @@ def _backup_sqlite(source: Path, destination: Path) -> tuple[str, int, int]:
             with closing(sqlite3.connect(destination)) as destination_db:
                 source_db.backup(destination_db)
                 destination_db.commit()
-                # A backup bundle must contain one self-contained SQLite payload.
-                # Do not leave WAL/SHM sidecars that are absent from the manifest.
-                destination_db.execute("PRAGMA journal_mode=DELETE")
+                # SQLite backup preserves the source journal mode. A portable
+                # backup bundle must be a self-contained database, not a main
+                # file whose latest pages live in undeclared WAL sidecars.
+                destination_db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                journal_mode = destination_db.execute(
+                    "PRAGMA journal_mode=DELETE"
+                ).fetchone()[0]
+                if str(journal_mode).lower() != "delete":
+                    raise BackupIntegrityError(
+                        "SQLite backup could not be finalized as a standalone snapshot"
+                    )
+                destination_db.commit()
     except sqlite3.Error as error:
         raise BackupError("SQLite backup failed") from error
     copied_schema = _sqlite_schema_version(destination)
     if copied_schema != schema_version:
         raise BackupIntegrityError("SQLite backup changed the journal schema")
     return _sha256_file(destination), destination.stat().st_size, schema_version
-
-
-def _normalize_sqlite_snapshot(path: Path) -> tuple[str, int]:
-    """Fold transient WAL state into one stable backup payload before hashing."""
-
-    try:
-        with closing(sqlite3.connect(path)) as connection:
-            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            mode = connection.execute("PRAGMA journal_mode=DELETE").fetchone()
-            connection.commit()
-    except sqlite3.Error as error:
-        raise BackupError("SQLite snapshot normalization failed") from error
-    if mode is None or str(mode[0]).lower() != "delete":
-        raise BackupError("SQLite snapshot could not leave WAL mode")
-    for suffix in ("-wal", "-shm"):
-        sidecar = Path(str(path) + suffix)
-        if sidecar.exists():
-            try:
-                sidecar.unlink()
-            except OSError as error:
-                raise BackupError("SQLite snapshot retained transient sidecar state") from error
-    return _sha256_file(path), path.stat().st_size
 
 
 def _entry(path: str, digest: str, size: int, kind: str) -> dict[str, Any]:
@@ -265,8 +252,16 @@ def create_backup(
     try:
         journal_source = state / "journal.sqlite3"
         journal_target = stage / "state" / "journal.sqlite3"
-        _, _, journal_schema = _backup_sqlite(
+        journal_digest, journal_size, journal_schema = _backup_sqlite(
             journal_source, journal_target
+        )
+        entries.append(
+            _entry(
+                "state/journal.sqlite3",
+                journal_digest,
+                journal_size,
+                "sqlite-journal",
+            )
         )
 
         for source in [
@@ -301,24 +296,26 @@ def create_backup(
             stage / "state" / "learning-evidence.jsonl"
         ).is_file():
             try:
-                build_diagnostic_snapshot(stage / "state")
+                # Diagnostic reconstruction opens the journal in WAL mode. Run it
+                # against an isolated byte-for-byte verification copy so SQLite
+                # sidecars can never become undeclared backup payloads.
+                with tempfile.TemporaryDirectory(
+                    prefix=".autotrade-backup-check-",
+                    dir=target.parent,
+                ) as verification_directory:
+                    verification_state = Path(verification_directory) / "state"
+                    verification_state.mkdir()
+                    for name in (
+                        "journal.sqlite3",
+                        "checkpoint.json",
+                        "learning-evidence.jsonl",
+                    ):
+                        shutil.copy2(stage / "state" / name, verification_state / name)
+                    build_diagnostic_snapshot(verification_state)
             except ValueError as error:
                 raise BackupIntegrityError(
                     "Runtime state, journal and evidence are not one consistent snapshot"
                 ) from error
-
-        # Diagnostic reconstruction opens the copied journal through JournalStore,
-        # whose runtime policy is WAL. Fold that transient representation back
-        # into one stable database before recording immutable backup evidence.
-        journal_digest, journal_size = _normalize_sqlite_snapshot(journal_target)
-        entries.append(
-            _entry(
-                "state/journal.sqlite3",
-                journal_digest,
-                journal_size,
-                "sqlite-journal",
-            )
-        )
 
         manifest = {
             "schema_version": BACKUP_SCHEMA_VERSION,
@@ -409,7 +406,11 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
         if path.is_file() and path.name not in {MANIFEST_NAME, MANIFEST_DIGEST_NAME}
     }
     if observed_paths != expected_paths:
-        raise BackupIntegrityError("Backup contains untracked or missing payload files")
+        raise BackupIntegrityError(
+            "Backup contains untracked or missing payload files; "
+            f"extra={sorted(observed_paths - expected_paths)}; "
+            f"missing={sorted(expected_paths - observed_paths)}"
+        )
 
     journal_relative = "state/journal.sqlite3"
     if journal_relative not in expected_paths:

@@ -10,8 +10,8 @@ from unittest.mock import patch
 
 from mvp.autotrade_mvp.backup import (
     BACKUP_SCHEMA_VERSION,
-    BackupError,
     BackupCompatibilityError,
+    BackupError,
     BackupIntegrityError,
     create_backup,
     restore_backup,
@@ -69,6 +69,8 @@ class BackupRestoreTests(unittest.TestCase):
             manifest = verify_backup(backup)
             self.assertEqual(manifest["schema_version"], BACKUP_SCHEMA_VERSION)
             self.assertTrue(manifest["reconciliation_required_after_restore"])
+            self.assertFalse((backup / "state" / "journal.sqlite3-wal").exists())
+            self.assertFalse((backup / "state" / "journal.sqlite3-shm").exists())
 
             restored = restore_backup(backup, root / "restored")
             self.assertTrue(restore_requires_reconciliation(restored))
@@ -137,6 +139,7 @@ class BackupRestoreTests(unittest.TestCase):
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (99, "2026-09-24T00:00:00Z"),
                 )
+                connection.commit()
             with self.assertRaises(BackupCompatibilityError):
                 create_backup(state, artifacts, root / "backup")
 

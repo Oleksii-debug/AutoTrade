@@ -1,8 +1,7 @@
-"""Exact option lifecycle, scenario-risk and model-bound sensitivity primitives.
+"""Exact option expiry, exercise and adjusted-deliverable primitives.
 
-No valuation model or trade authority is embedded here. Pre-expiry model values
-must be supplied with explicit evidence time; deterministic settlement remains
-separate from model-dependent Greeks and scenario analysis.
+No volatility model, Greeks or trade authority are implied. Pre-expiry value is
+model-dependent and deliberately outside this deterministic settlement layer.
 """
 
 from __future__ import annotations
@@ -116,32 +115,14 @@ class OptionContract:
 
 @dataclass(frozen=True)
 class OptionGreekEstimate:
-    """Model-bound finite-difference Greeks with explicit evidence time."""
+    """Model-dependent finite-difference Greeks with explicit evidence time."""
 
     model_id: str
     observed_at: datetime
     delta: Decimal
     gamma: Decimal
-    vega: Decimal | None = None
-    theta_per_year: Decimal | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "model_id", _text(self.model_id, "model_id"))
-        object.__setattr__(
-            self,
-            "observed_at",
-            _utc(self.observed_at, "observed_at"),
-        )
-        object.__setattr__(self, "delta", _decimal(self.delta, "delta"))
-        object.__setattr__(self, "gamma", _decimal(self.gamma, "gamma"))
-        if self.vega is not None:
-            object.__setattr__(self, "vega", _decimal(self.vega, "vega"))
-        if self.theta_per_year is not None:
-            object.__setattr__(
-                self,
-                "theta_per_year",
-                _decimal(self.theta_per_year, "theta_per_year"),
-            )
+    vega: Decimal | None
+    theta_per_year: Decimal | None
 
     def require_fresh(self, at: datetime, *, max_age: timedelta) -> None:
         point = _utc(at, "at")
@@ -157,8 +138,9 @@ class OptionGreekEstimate:
 class FiniteDifferenceGrid:
     """Explicit same-model valuation grid used to derive local Greeks.
 
-    These values are model outputs rather than authoritative cash or evidence
-    of economic edge. The grid is only a deterministic sensitivity boundary.
+    Values are model outputs, not authoritative cash. AutoTrade derives local
+    sensitivities from the supplied grid but does not treat them as exact payoff
+    or evidence of profitability.
     """
 
     model_id: str
@@ -175,46 +157,30 @@ class FiniteDifferenceGrid:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model_id", _text(self.model_id, "model_id"))
-        object.__setattr__(
-            self,
-            "observed_at",
-            _utc(self.observed_at, "observed_at"),
-        )
+        object.__setattr__(self, "observed_at", _utc(self.observed_at, "observed_at"))
         for name in ("base_value", "spot_down_value", "spot_up_value"):
             value = _decimal(getattr(self, name), name)
             if value < 0:
                 raise OptionError(f"{name} cannot be negative")
             object.__setattr__(self, name, value)
-        object.__setattr__(
-            self,
-            "spot_step",
-            _decimal(self.spot_step, "spot_step", positive=True),
-        )
+        object.__setattr__(self, "spot_step", _decimal(self.spot_step, "spot_step", positive=True))
 
         vol_values = (self.vol_down_value, self.vol_up_value, self.vol_step)
         if any(value is not None for value in vol_values):
             if not all(value is not None for value in vol_values):
-                raise OptionError(
-                    "vega grid requires vol_down_value, vol_up_value and vol_step together"
-                )
+                raise OptionError("vega grid requires vol_down_value, vol_up_value and vol_step together")
             vol_down = _decimal(self.vol_down_value, "vol_down_value")
             vol_up = _decimal(self.vol_up_value, "vol_up_value")
             if vol_down < 0 or vol_up < 0:
                 raise OptionError("volatility scenario option values cannot be negative")
             object.__setattr__(self, "vol_down_value", vol_down)
             object.__setattr__(self, "vol_up_value", vol_up)
-            object.__setattr__(
-                self,
-                "vol_step",
-                _decimal(self.vol_step, "vol_step", positive=True),
-            )
+            object.__setattr__(self, "vol_step", _decimal(self.vol_step, "vol_step", positive=True))
 
         time_values = (self.time_forward_value, self.time_step_years)
         if any(value is not None for value in time_values):
             if not all(value is not None for value in time_values):
-                raise OptionError(
-                    "theta grid requires time_forward_value and time_step_years together"
-                )
+                raise OptionError("theta grid requires time_forward_value and time_step_years together")
             forward = _decimal(self.time_forward_value, "time_forward_value")
             if forward < 0:
                 raise OptionError("time_forward_value cannot be negative")
@@ -285,9 +251,7 @@ class ExpiryScenarioLeg:
         )
 
 
-def portfolio_expiration_scenario_pnl(
-    legs: Iterable[ExpiryScenarioLeg],
-) -> Decimal:
+def portfolio_expiration_scenario_pnl(legs: Iterable[ExpiryScenarioLeg]) -> Decimal:
     scenario = tuple(legs)
     if not scenario:
         raise OptionError("at least one option scenario leg is required")

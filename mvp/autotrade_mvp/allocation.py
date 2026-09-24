@@ -245,6 +245,14 @@ def allocate_targets(
     if unknown:
         raise ValueError(f"stress scenarios reference unknown symbols: {', '.join(unknown)}")
 
+    required_symbols = set(symbols)
+    for scenario_name, scenario in normalized_stress.items():
+        missing = sorted(required_symbols - set(scenario))
+        if missing:
+            raise ValueError(
+                f"stress scenario {scenario_name} is missing explicit shocks for: {', '.join(missing)}"
+            )
+
     requested = _evaluate(candidates, policy, normalized_stress, Decimal("1"))
     if requested.status == "ALLOCATED":
         return requested

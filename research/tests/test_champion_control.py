@@ -9,7 +9,7 @@ from research.autotrade_research.learning.champion import (
     ChampionRegistry,
     PromotionConflict,
 )
-from research.autotrade_research.science.registry import (
+from autotrade_research.science.registry import (
     ProtocolViolation,
     ScientificRegistry,
 )
@@ -27,13 +27,28 @@ def protocol():
         "strategy": "candidate",
         "features": ["registered"],
         "search_space": {"variant": ["fixed"]},
-        "train_period": "t0-t1",
-        "validation_period": "t1-t2",
-        "test_period": "t2-t3",
-        "forward_period": "future",
+        "train_period": {
+            "start": "2025-01-01T00:00:00Z",
+            "end": "2025-12-31T23:59:59Z",
+        },
+        "validation_period": {
+            "start": "2026-01-02T00:00:00Z",
+            "end": "2026-03-31T23:59:59Z",
+        },
+        "test_period": {
+            "start": "2026-04-02T00:00:00Z",
+            "end": "2026-06-30T23:59:59Z",
+        },
+        "forward_period": {
+            "start": "2026-07-02T00:00:00Z",
+            "end": "2026-09-30T23:59:59Z",
+        },
         "labels": ["net_return"],
-        "horizons": ["1d"],
-        "purge_embargo": {"purge": "1d", "embargo": "1d"},
+        "horizons": [86400],
+        "purge_embargo": {
+            "purge_seconds": 86400,
+            "embargo_seconds": 86400,
+        },
         "universe": ["AAA"],
         "cost_fill_model": "base-v1",
         "baselines": ["cash"],

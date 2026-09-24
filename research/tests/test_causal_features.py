@@ -5,6 +5,7 @@ import unittest
 from research.autotrade_research.features.causal import (
     CausalFold,
     FeaturePoint,
+    LabelPoint,
     SourceValue,
     causal_cross_market_point,
     fit_fold_normalizer,
@@ -65,6 +66,55 @@ class CausalFeatureTests(unittest.TestCase):
         second = fit_normalizer(points, fit_cutoff=BASE + timedelta(days=1))
         self.assertEqual(first.provenance_hash, second.provenance_hash)
         self.assertEqual(first.transform("3"), Decimal("1"))
+
+    def test_training_row_rejects_mismatched_feature_and_label_anchor(self):
+        feature = rolling_return(
+            [source(0, "100"), source(1, "101")],
+            symbol="AAA",
+            decision_time=BASE + timedelta(days=1),
+            count=2,
+        )
+        future = source(3, "103")
+        label = make_forward_label(
+            symbol="AAA",
+            anchor_time=BASE + timedelta(days=2),
+            anchor_value="102",
+            future=future,
+        )
+        with self.assertRaisesRegex(ValueError, "decision_time"):
+            training_row(
+                feature=feature,
+                label=label,
+                training_cutoff=BASE + timedelta(days=4),
+            )
+
+    def test_direct_feature_and_label_construction_cannot_bypass_invariants(self):
+        with self.assertRaises(ValueError):
+            FeaturePoint(
+                "AAA",
+                BASE,
+                Decimal("1"),
+                ("same", "same"),
+                ("r1", "r1"),
+                "x",
+            )
+        with self.assertRaises(ValueError):
+            FeaturePoint(
+                "AAA",
+                BASE,
+                Decimal("1"),
+                ("a",),
+                (),
+                "x",
+            )
+        with self.assertRaises(ValueError):
+            LabelPoint(
+                symbol="AAA",
+                anchor_time=BASE,
+                label_available_at=BASE,
+                value=Decimal("0.1"),
+                source_revision="r1",
+            )
 
     def test_delayed_label_cannot_enter_training_early(self):
         feature = rolling_return(

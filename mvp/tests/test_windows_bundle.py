@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 import zipfile
 
-from tools.build_windows_bundle import BundleError, build_bundle
+from tools.build_windows_bundle import BundleError, _windows_path_key, build_bundle
 
 
 SOURCE_SHA = "a" * 40
@@ -265,6 +265,44 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             build_bundle(
                 staging=self.staging,
                 output=self.root / "bad-link.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
+    def test_windows_path_validation_rejects_ambiguous_or_reserved_names(self):
+        self.assertEqual(
+            _windows_path_key("Payload/Readme.TXT"),
+            _windows_path_key("payload/readme.txt"),
+        )
+        for relative in (
+            "CON.txt",
+            "folder/NUL",
+            "folder/name.",
+            "folder/name ",
+            "folder/bad?.txt",
+        ):
+            with self.subTest(relative=relative):
+                with self.assertRaises(BundleError):
+                    _windows_path_key(relative)
+
+    def test_case_insensitive_path_collision_is_rejected_when_host_can_represent_it(self):
+        first = self.staging / "CaseCollision.txt"
+        second = self.staging / "casecollision.TXT"
+        first.write_bytes(b"one")
+        second.write_bytes(b"two")
+        represented = [
+            path.name
+            for path in self.staging.iterdir()
+            if path.name.casefold() == "casecollision.txt"
+        ]
+        if len(represented) < 2:
+            self.skipTest("host filesystem is already case-insensitive")
+        with self.assertRaisesRegex(BundleError, "case-insensitive path collision"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "collision.zip",
                 version="0.1.0-dev",
                 source_sha=SOURCE_SHA,
                 mode="diagnostics",

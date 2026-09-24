@@ -11,31 +11,16 @@ H = "sha256:" + "a" * 64
 
 
 def gate(name, status="PASS", reasons=()):
-    return QualificationGate(name, status, (H,), tuple(reasons))
+    return QualificationGate(name, status, (H,), H, H, H, tuple(reasons))
 
 
 def complete_gates(**statuses):
     names = ("protocol", "leakage", "holdout", "retention", "promotion", "ablation", "uncertainty", "forward_evidence")
-    return tuple(
-        gate(
-            name,
-            statuses.get(name, "PASS"),
-            (("X." + name.upper()),) if statuses.get(name) == "FAIL" else (),
-        )
-        for name in names
-    )
+    return tuple(gate(name, statuses.get(name, "PASS"), (("X." + name.upper()),) if statuses.get(name) == "FAIL" else ()) for name in names)
 
 
 def evidence(gates=None, claim="NONE", holdout_used=False, future_used=False):
-    return ScientificQualificationInput(
-        H,
-        H,
-        H,
-        complete_gates() if gates is None else tuple(gates),
-        claim,
-        holdout_used,
-        future_used,
-    )
+    return ScientificQualificationInput(H, H, H, complete_gates() if gates is None else tuple(gates), claim, holdout_used, future_used)
 
 
 class ScientificQualificationTests(unittest.TestCase):
@@ -69,20 +54,13 @@ class ScientificQualificationTests(unittest.TestCase):
         self.assertIn("SCIENCE.MISSING_GATE:uncertainty", result.reason_codes)
 
     def test_visually_good_backtest_cannot_override_invalid_protocol(self):
-        result = qualify_scientific_learning(
-            evidence(complete_gates(protocol="FAIL"), claim="RESEARCH_CANDIDATE")
-        )
+        result = qualify_scientific_learning(evidence(complete_gates(protocol="FAIL"), claim="RESEARCH_CANDIDATE"))
         self.assertEqual(result.status, "FAIL")
         self.assertFalse(result.economic_claim_accepted)
         self.assertIn("SCIENCE.CLAIM_EXCEEDS_EVIDENCE", result.reason_codes)
 
     def test_edge_claim_requires_forward_evidence(self):
-        result = qualify_scientific_learning(
-            evidence(
-                complete_gates(forward_evidence="INCONCLUSIVE"),
-                claim="ECONOMIC_EDGE_QUALIFIED",
-            )
-        )
+        result = qualify_scientific_learning(evidence(complete_gates(forward_evidence="INCONCLUSIVE"), claim="ECONOMIC_EDGE_QUALIFIED"))
         self.assertEqual(result.status, "FAIL")
         self.assertFalse(result.economic_claim_accepted)
         self.assertIn("SCIENCE.CLAIM_EXCEEDS_EVIDENCE", result.reason_codes)
@@ -91,6 +69,13 @@ class ScientificQualificationTests(unittest.TestCase):
         result = qualify_scientific_learning(evidence(future_used=True))
         self.assertEqual(result.status, "FAIL")
         self.assertIn("SCIENCE.FUTURE_LEAKAGE", result.reason_codes)
+
+    def test_gate_evidence_must_bind_same_candidate_protocol_and_snapshot(self):
+        bad = QualificationGate("leakage", "PASS", (H,), "sha256:" + "b" * 64, H, H)
+        gates = [g for g in complete_gates() if g.gate_id != "leakage"] + [bad]
+        result = qualify_scientific_learning(evidence(gates))
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn("SCIENCE.EVIDENCE_BINDING_MISMATCH:leakage", result.reason_codes)
 
     def test_exact_hash_identity_required(self):
         with self.assertRaises(ValueError):

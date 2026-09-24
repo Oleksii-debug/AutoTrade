@@ -26,6 +26,24 @@ def _positive(value, *, name: str, allow_zero: bool = False) -> Decimal:
     return result
 
 
+def _identity_key(value, *, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} keys must be non-empty strings")
+    return value.strip()
+
+
+def _normalize_mapping(values, *, name: str, parser) -> dict[str, Decimal]:
+    if not isinstance(values, Mapping):
+        raise TypeError(f"{name} must be a mapping")
+    normalized: dict[str, Decimal] = {}
+    for raw_key, raw_value in values.items():
+        key = _identity_key(raw_key, name=name)
+        if key in normalized:
+            raise ValueError(f"{name} keys must be unique after normalization")
+        normalized[key] = parser(raw_value, key)
+    return normalized
+
+
 @dataclass(frozen=True)
 class RiskIntent:
     symbol: str
@@ -146,19 +164,48 @@ class RiskContext:
     ) -> "RiskContext":
         if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
-        normalized_positions = {k: _decimal(v, name=f"position {k}") for k, v in positions.items()}
-        normalized_marks = {k: _positive(v, name=f"mark {k}") for k, v in marks.items()}
-        normalized_reserved = {
-            k: _decimal(v, name=f"reserved position {k}")
-            for k, v in (reserved_position_delta or {}).items()
-        }
-        normalized_fx = {
-            k: _positive(v, name=f"FX age {k}", allow_zero=True)
-            for k, v in (fx_age_seconds or {}).items()
-        }
+        normalized_positions = _normalize_mapping(
+            positions,
+            name="positions",
+            parser=lambda value, key: _decimal(value, name=f"position {key}"),
+        )
+        normalized_marks = _normalize_mapping(
+            marks,
+            name="marks",
+            parser=lambda value, key: _positive(value, name=f"mark {key}"),
+        )
+        normalized_reserved = _normalize_mapping(
+            reserved_position_delta or {},
+            name="reserved_position_delta",
+            parser=lambda value, key: _decimal(
+                value,
+                name=f"reserved position {key}",
+            ),
+        )
+        normalized_fx = _normalize_mapping(
+            fx_age_seconds or {},
+            name="fx_age_seconds",
+            parser=lambda value, key: _positive(
+                value,
+                name=f"FX age {key}",
+                allow_zero=True,
+            ),
+        )
+        if not isinstance(stress_scenarios, Sequence) or isinstance(
+            stress_scenarios,
+            (str, bytes),
+        ):
+            raise TypeError("stress_scenarios must be a sequence of mappings")
         scenarios = tuple(
-            {k: _decimal(v, name=f"stress shock {k}") for k, v in scenario.items()}
-            for scenario in stress_scenarios
+            _normalize_mapping(
+                scenario,
+                name=f"stress_scenarios[{index}]",
+                parser=lambda value, key: _decimal(
+                    value,
+                    name=f"stress shock {key}",
+                ),
+            )
+            for index, scenario in enumerate(stress_scenarios)
         )
         normalized_drawdown = _positive(
             drawdown_fraction,

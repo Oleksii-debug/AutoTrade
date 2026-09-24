@@ -187,6 +187,73 @@ class MarginSnapshot:
             raise PerpetualError("margin snapshot is stale")
 
 
+@dataclass(frozen=True)
+class LiquidationSnapshot:
+    """Provider-qualified liquidation boundary for one current margin tier."""
+
+    side: Literal["LONG", "SHORT"]
+    liquidation_price: Decimal
+    tier_id: str
+    evidence_ref: str
+    observed_at: datetime
+    max_age: timedelta
+
+    def __post_init__(self) -> None:
+        if self.side not in {"LONG", "SHORT"}:
+            raise PerpetualError("side must be LONG or SHORT")
+        object.__setattr__(
+            self,
+            "liquidation_price",
+            _decimal(self.liquidation_price, "liquidation_price", positive=True),
+        )
+        object.__setattr__(self, "tier_id", _text(self.tier_id, "tier_id"))
+        object.__setattr__(self, "evidence_ref", _text(self.evidence_ref, "evidence_ref"))
+        object.__setattr__(self, "observed_at", _utc(self.observed_at, "observed_at"))
+        if not isinstance(self.max_age, timedelta) or self.max_age <= timedelta(0):
+            raise PerpetualError("max_age must be positive")
+
+    def require_fresh(self, at: datetime) -> None:
+        point = _utc(at, "at")
+        if point < self.observed_at:
+            raise PerpetualError("liquidation snapshot cannot come from the future")
+        if point - self.observed_at > self.max_age:
+            raise PerpetualError("liquidation snapshot is stale")
+
+    def headroom_fraction(self, mark_price: Decimal | str | int) -> Decimal:
+        mark = _decimal(mark_price, "mark_price", positive=True)
+        if self.side == "LONG":
+            if self.liquidation_price >= mark:
+                raise PerpetualError("long liquidation boundary must be below current mark")
+            return (mark - self.liquidation_price) / mark
+        if self.liquidation_price <= mark:
+            raise PerpetualError("short liquidation boundary must be above current mark")
+        return (self.liquidation_price - mark) / mark
+
+
+def require_liquidation_headroom(
+    *,
+    liquidation: LiquidationSnapshot,
+    market: MarketSnapshot,
+    minimum_headroom_fraction: Decimal | str | int,
+    at: datetime,
+) -> Decimal:
+    """Require fresh provider-tier evidence and a bounded liquidation buffer."""
+
+    if not isinstance(liquidation, LiquidationSnapshot):
+        raise TypeError("liquidation must be LiquidationSnapshot")
+    if not isinstance(market, MarketSnapshot):
+        raise TypeError("market must be MarketSnapshot")
+    liquidation.require_fresh(at)
+    market.require_valid(at)
+    minimum = _decimal(minimum_headroom_fraction, "minimum_headroom_fraction")
+    if minimum < 0:
+        raise PerpetualError("minimum_headroom_fraction cannot be negative")
+    headroom = liquidation.headroom_fraction(market.mark_price)
+    if headroom < minimum:
+        raise PerpetualError("liquidation headroom is below configured minimum")
+    return headroom
+
+
 def linear_notional(
     *,
     signed_contracts: Decimal | str | int,

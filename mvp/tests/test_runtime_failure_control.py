@@ -1,5 +1,9 @@
+import sqlite3
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
+from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.recovery import (
     HostState,
     OutboundAttempt,
@@ -121,6 +125,101 @@ class RuntimeRecoveryTests(unittest.TestCase):
             controller.validate_sender(new_owner.owner_id, new_owner.epoch)
         controller.record_reconciliation(consistent=True)
         controller.validate_sender(new_owner.owner_id, new_owner.epoch)
+
+    def test_durable_owner_epoch_survives_restart_and_fences_old_process(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            first = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="paper-account",
+            )
+            first_owner = first.start("host-a")
+            first.record_reconciliation(consistent=True)
+            first.validate_sender(first_owner.owner_id, first_owner.epoch)
+            self.assertEqual(first_owner.epoch, 1)
+
+            second = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="paper-account",
+            )
+            second_owner = second.start("host-b")
+            self.assertEqual(second_owner.epoch, 2)
+            self.assertEqual(second.state, HostState.RECOVERING)
+
+            with self.assertRaisesRegex(PermissionError, "Durable sender fence"):
+                first.validate_sender(first_owner.owner_id, first_owner.epoch)
+            with self.assertRaisesRegex(PermissionError, "Durable sender fence"):
+                first.validate_admission(first_owner.epoch)
+            with self.assertRaisesRegex(PermissionError, "Durable sender fence"):
+                first.record_reconciliation(consistent=True)
+
+            second.record_reconciliation(consistent=True)
+            second.validate_sender(second_owner.owner_id, second_owner.epoch)
+
+            restarted = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="paper-account",
+            )
+            third_owner = restarted.start("host-c")
+            self.assertEqual(third_owner.epoch, 3)
+
+    def test_durable_owner_transfer_is_visible_to_other_controller(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            first = RecoveryController(
+                owner_store=store,
+                owner_scope="paper-account",
+            )
+            first_owner = first.start("host-a")
+            first.record_reconciliation(consistent=True)
+
+            observer = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="other-scope",
+            )
+            observer_owner = observer.start("independent-host")
+            observer.record_reconciliation(consistent=True)
+
+            transferred = first.transfer_owner(
+                new_owner_id="host-b",
+                old_sender_fenced=True,
+                reconciled=True,
+            )
+            self.assertEqual(transferred.epoch, first_owner.epoch + 1)
+            self.assertEqual(observer_owner.epoch, 1)
+            observer.validate_sender(observer_owner.owner_id, observer_owner.epoch)
+
+            durable_events = store.load_events("recovery_owner", "paper-account")
+            self.assertEqual(
+                [event["aggregate_version"] for event in durable_events],
+                [1, 2],
+            )
+            self.assertEqual(
+                [event["payload"]["owner_id"] for event in durable_events],
+                ["host-a", "host-b"],
+            )
+
+    def test_tampered_durable_owner_record_blocks_sender_validation(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            controller = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="paper-account",
+            )
+            owner = controller.start("host-a")
+            controller.record_reconciliation(consistent=True)
+
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "UPDATE events SET payload_json = ? "
+                    "WHERE aggregate_type = 'recovery_owner'",
+                    ('{"owner_epoch":"1","owner_id":"attacker"}',),
+                )
+                connection.commit()
+
+            with self.assertRaisesRegex(RuntimeError, "payload hash mismatch"):
+                controller.validate_sender(owner.owner_id, owner.epoch)
 
     def test_provider_uncertainty_prevents_false_ready(self):
         controller = RecoveryController()

@@ -102,6 +102,41 @@ class OptionLifecycleTests(unittest.TestCase):
             Decimal("-1400"),
         )
 
+    def test_adjusted_deliverable_rejects_duplicate_asset_identity(self):
+        with self.assertRaisesRegex(OptionError, "asset_id values must be unique"):
+            OptionContract(
+                instrument="OPT:ADJUSTED",
+                right="CALL",
+                strike=Decimal("50"),
+                multiplier=Decimal("100"),
+                settlement_currency="USD",
+                settlement_method="PHYSICAL",
+                exercise_style="AMERICAN",
+                expiry=at(20),
+                exercise_cutoff=at(19),
+                deliverable=(
+                    DeliverableLeg("SHARES:ADJUSTED", Decimal("60")),
+                    DeliverableLeg("SHARES:ADJUSTED", Decimal("40")),
+                ),
+                exercise_cash_per_contract=Decimal("5000"),
+            )
+
+    def test_adjusted_deliverable_requires_typed_legs(self):
+        with self.assertRaisesRegex(OptionError, "DeliverableLeg"):
+            OptionContract(
+                instrument="OPT:ADJUSTED",
+                right="CALL",
+                strike=Decimal("50"),
+                multiplier=Decimal("100"),
+                settlement_currency="USD",
+                settlement_method="PHYSICAL",
+                exercise_style="AMERICAN",
+                expiry=at(20),
+                exercise_cutoff=at(19),
+                deliverable=(("SHARES:ADJUSTED", Decimal("100")),),
+                exercise_cash_per_contract=Decimal("5000"),
+            )
+
     def test_adjusted_deliverable_never_assumes_one_hundred_shares(self):
         call = self._physical("CALL")
         obligation = physical_exercise_obligation(call, signed_contracts=2)

@@ -84,6 +84,12 @@ class JournalStoreTests(unittest.TestCase):
                     state_version=8,
                 )
 
+    def test_non_finite_payload_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaises(ValueError):
+                store.append_event(event(payload={"price": float("nan")}))
+
     def test_reopen_preserves_events_outbox_and_dedupe(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

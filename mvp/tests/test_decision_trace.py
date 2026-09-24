@@ -69,6 +69,44 @@ class DecisionTraceStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must not contain duplicates"):
                 store.append(item)
 
+    def test_common_secret_aliases_are_redacted_before_persistence(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = trace("trace-secret-aliases")
+            item["attributes"] = {
+                "access-token": "access-value",
+                "refresh_token": "refresh-value",
+                "client secret": "client-value",
+                "Authorization-Header": "Bearer value",
+                "x-api-key": "key-value",
+                "private-key-pem": "pem-value",
+                "token_budget": 100,
+            }
+            store.append(item)
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+            attributes = persisted["attributes"]
+            for key in (
+                "access-token",
+                "refresh_token",
+                "client secret",
+                "Authorization-Header",
+                "x-api-key",
+                "private-key-pem",
+            ):
+                self.assertEqual(attributes[key], "[REDACTED]")
+            self.assertEqual(attributes["token_budget"], 100)
+            raw = path.read_text(encoding="utf-8")
+            for leaked in (
+                "access-value",
+                "refresh-value",
+                "client-value",
+                "Bearer value",
+                "key-value",
+                "pem-value",
+            ):
+                self.assertNotIn(leaked, raw)
+
     def test_corrupt_existing_chain_blocks_append(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "decision-traces.jsonl"

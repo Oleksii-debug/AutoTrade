@@ -1433,3 +1433,91 @@ def provider_collateral_borrow(
             )
         borrowed[observation.asset] = observation.borrowed
     return MappingProxyType(dict(sorted(borrowed.items())))
+
+
+@dataclass(frozen=True)
+class WhiteBitSpotBalanceObservation:
+    asset: str
+    available: Decimal
+    frozen: Decimal
+
+    @property
+    def total(self) -> Decimal:
+        return self.available + self.frozen
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        asset: str,
+        payload: Mapping[str, object],
+    ) -> "WhiteBitSpotBalanceObservation":
+        if not isinstance(payload, Mapping):
+            raise TypeError("payload must be a mapping")
+        if set(payload) != {"available", "freeze"}:
+            raise WhiteBitAdapterError(
+                "spot balance record must contain available and freeze"
+            )
+        available = _decimal(payload["available"], name="available")
+        frozen = _decimal(payload["freeze"], name="freeze")
+        if available < 0 or frozen < 0:
+            raise WhiteBitAdapterError(
+                "spot available and frozen balances cannot be negative"
+            )
+        return cls(
+            asset=_text(asset, name="asset").upper(),
+            available=available,
+            frozen=frozen,
+        )
+
+
+def spot_balance_request(
+    *,
+    asset: str | None = None,
+) -> WhiteBitLookupRequest:
+    body: dict[str, object] = {}
+    if asset is not None:
+        body["ticker"] = _text(asset, name="asset").upper()
+    return WhiteBitLookupRequest(
+        "SPOT_BALANCE",
+        "/api/v4/trade-account/balance",
+        body,
+    )
+
+
+def parse_spot_balances(
+    payload: Mapping[str, object],
+) -> tuple[WhiteBitSpotBalanceObservation, ...]:
+    if not isinstance(payload, Mapping):
+        raise TypeError("payload must be a mapping")
+    by_asset: dict[str, WhiteBitSpotBalanceObservation] = {}
+    for raw_asset, record in payload.items():
+        observation = WhiteBitSpotBalanceObservation.create(
+            asset=str(raw_asset),
+            payload=record,
+        )
+        if observation.asset in by_asset:
+            raise WhiteBitAdapterError(
+                "spot balance contains duplicate normalized asset"
+            )
+        by_asset[observation.asset] = observation
+    return tuple(by_asset[key] for key in sorted(by_asset))
+
+
+def provider_spot_cash(
+    observations: list[WhiteBitSpotBalanceObservation]
+    | tuple[WhiteBitSpotBalanceObservation, ...],
+) -> Mapping[str, Decimal]:
+    """Provider-owned spot cash includes both free and order-frozen holdings."""
+    cash: dict[str, Decimal] = {}
+    for observation in observations:
+        if not isinstance(observation, WhiteBitSpotBalanceObservation):
+            raise TypeError(
+                "observations must contain WhiteBitSpotBalanceObservation"
+            )
+        if observation.asset in cash:
+            raise WhiteBitAdapterError(
+                "duplicate spot asset after normalization"
+            )
+        cash[observation.asset] = observation.total
+    return MappingProxyType(dict(sorted(cash.items())))

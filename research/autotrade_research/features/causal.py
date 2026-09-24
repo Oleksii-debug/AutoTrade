@@ -100,6 +100,35 @@ class Normalizer:
         return (item - self.mean) / self.scale
 
 
+def _latest_known_vintages(
+    observations: Iterable[SourceValue],
+    *,
+    symbol: str,
+    cutoff: datetime,
+) -> tuple[SourceValue, ...]:
+    latest_by_event_time: dict[datetime, SourceValue] = {}
+    for item in observations:
+        if item.symbol != symbol or item.available_at > cutoff:
+            continue
+        current = latest_by_event_time.get(item.event_time)
+        if current is None or (
+            item.available_at,
+            item.source_revision,
+            item.observation_id,
+        ) > (
+            current.available_at,
+            current.source_revision,
+            current.observation_id,
+        ):
+            latest_by_event_time[item.event_time] = item
+    return tuple(
+        sorted(
+            latest_by_event_time.values(),
+            key=lambda item: (item.event_time, item.available_at, item.observation_id),
+        )
+    )
+
+
 def causal_window(
     observations: Iterable[SourceValue],
     *,
@@ -111,12 +140,11 @@ def causal_window(
         raise ValueError("count must be a positive integer")
     name = _text(symbol, name="symbol")
     cutoff = _time(decision_time, name="decision_time")
-    eligible = [
-        item
-        for item in observations
-        if item.symbol == name and item.available_at <= cutoff
-    ]
-    eligible.sort(key=lambda item: (item.available_at, item.event_time, item.observation_id))
+    eligible = _latest_known_vintages(
+        observations,
+        symbol=name,
+        cutoff=cutoff,
+    )
     if len(eligible) < count:
         raise ValueError("insufficient causally available observations")
     return tuple(eligible[-count:])
@@ -244,9 +272,9 @@ def require_universe_members(
         if item.available_at > cutoff:
             continue
         current = latest.get(item.symbol)
-        if current is None or (item.available_at, item.event_time, item.observation_id) > (
-            current.available_at,
+        if current is None or (item.event_time, item.available_at, item.observation_id) > (
             current.event_time,
+            current.available_at,
             current.observation_id,
         ):
             latest[item.symbol] = item

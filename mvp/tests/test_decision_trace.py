@@ -107,6 +107,16 @@ class DecisionTraceStoreTests(unittest.TestCase):
             ):
                 self.assertNotIn(leaked, raw)
 
+    def test_non_finite_diagnostic_numbers_cannot_enter_durable_trace(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = trace("trace-nonfinite")
+            item["attributes"] = {"score": float("nan")}
+            with self.assertRaises(ValueError):
+                store.append(item)
+            self.assertFalse(path.exists())
+
     def test_corrupt_existing_chain_blocks_append(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "decision-traces.jsonl"

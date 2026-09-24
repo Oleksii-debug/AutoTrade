@@ -25,9 +25,9 @@ jobs:
         python-version: ["3.12"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -r requirements-dev.txt
-      - run: python -m unittest discover -s tests/Contracts -v
+      - run: python -m unittest discover -s tests/Contracts -v\n      - if: github.event_name == 'pull_request'\n        run: python tools/contract_version_guard.py --base-ref origin/${{ github.base_ref }}

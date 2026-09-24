@@ -95,6 +95,10 @@ class SettlementBook:
         self._settled_cash: dict[str, Decimal] = {}
         for currency, amount in (settled_cash or {}).items():
             unit = _text(currency, name="currency")
+            if unit in self._settled_cash:
+                raise SettlementConflict(
+                    "settled_cash contains duplicate normalized currency codes"
+                )
             self._settled_cash[unit] = _decimal(amount, name="settled_cash")
         self._obligations: dict[str, SettlementObligation] = {}
         self._settled_ids: set[str] = set()

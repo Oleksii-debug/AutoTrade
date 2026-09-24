@@ -118,7 +118,10 @@ class BackupRestoreTests(unittest.TestCase):
             root = Path(directory)
             state, artifacts = self._build_sources(root)
             with sqlite3.connect(state / "journal.sqlite3") as connection:
-                connection.execute("PRAGMA user_version = 99")
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (99, "2026-09-24T00:00:00Z"),
+                )
             with self.assertRaises(BackupCompatibilityError):
                 create_backup(state, artifacts, root / "backup")
 

@@ -80,6 +80,7 @@ class SpecialistSpec:
 @dataclass(frozen=True)
 class SpecialistRun:
     role_id: str
+    input_snapshot_id: str
     direction: Literal["LONG", "SHORT", "FLAT"]
     score: Decimal
     confidence: Decimal
@@ -90,6 +91,11 @@ class SpecialistRun:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "role_id", _text(self.role_id, "role_id"))
+        object.__setattr__(
+            self,
+            "input_snapshot_id",
+            _text(self.input_snapshot_id, "input_snapshot_id"),
+        )
         if self.direction not in {"LONG", "SHORT", "FLAT"}:
             raise SpecialistDagError("direction must be LONG, SHORT or FLAT")
         score = _decimal(self.score, "score")
@@ -118,6 +124,7 @@ class SpecialistRun:
 
 @dataclass(frozen=True)
 class DagPlan:
+    input_snapshot_id: str
     scheduled_roles: tuple[str, ...]
     skipped_roles: tuple[tuple[str, str], ...]
     reserved_cost: Decimal
@@ -137,11 +144,13 @@ class AggregatedProposal:
 def plan_specialists(
     specs: Iterable[SpecialistSpec],
     *,
+    input_snapshot_id: str,
     available_inputs: Iterable[str],
     total_budget,
 ) -> DagPlan:
     """Choose useful dependency-satisfied roles without exceeding the hard budget."""
 
+    snapshot_id = _text(input_snapshot_id, "input_snapshot_id")
     budget = _decimal(total_budget, "total_budget", non_negative=True)
     items = tuple(specs)
     by_id = {item.role_id: item for item in items}
@@ -185,7 +194,7 @@ def plan_specialists(
         if not progressed:
             raise SpecialistDagError("specialist dependency graph contains a cycle")
 
-    return DagPlan(tuple(scheduled), tuple(skipped), reserved)
+    return DagPlan(snapshot_id, tuple(scheduled), tuple(skipped), reserved)
 
 
 def aggregate_specialists(
@@ -213,6 +222,7 @@ def aggregate_specialists(
     if not isinstance(plan, DagPlan):
         raise SpecialistDagError("plan must be a DagPlan")
 
+    snapshot_id = _text(plan.input_snapshot_id, "plan.input_snapshot_id")
     scheduled = tuple(plan.scheduled_roles)
     skipped_ids = tuple(role_id for role_id, _ in plan.skipped_roles)
     if len(set(scheduled)) != len(scheduled) or len(set(skipped_ids)) != len(skipped_ids):
@@ -241,6 +251,9 @@ def aggregate_specialists(
             continue
         if run.role_id not in scheduled_set:
             rejected.append((run.role_id, "not_scheduled"))
+            continue
+        if run.input_snapshot_id != snapshot_id:
+            rejected.append((run.role_id, "input_snapshot_mismatch"))
             continue
         if run.completed_at > deadline:
             rejected.append((run.role_id, "late"))

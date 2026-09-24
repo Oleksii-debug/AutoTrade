@@ -236,7 +236,20 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
     net_leverage = net / context.equity
     mark_notional = abs(resulting * context.marks[intent.symbol])
     intent_notional = intent.quantity * intent.price
-    single_notional = max(mark_notional, intent_notional)
+    reduces_absolute_exposure = (
+        abs(resulting) <= abs(base_position)
+        and base_position * resulting >= 0
+    )
+    strict_risk_reduction = intent.reduce_only and reduces_absolute_exposure
+    # A validated reduce-only action is bounded by the exposure that remains
+    # after the action. Using the full closing order notional here can trap an
+    # already oversized position by rejecting the very action that shrinks it.
+    # Crossing through flat never qualifies for this treatment.
+    single_notional = (
+        mark_notional
+        if strict_risk_reduction
+        else max(mark_notional, intent_notional)
+    )
 
     worst_stress_loss = Decimal("0")
     for scenario in context.stress_scenarios:
@@ -351,10 +364,6 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         "new or increased short exposure requires affirmative borrow evidence",
     )
 
-    reduces_absolute_exposure = (
-        abs(resulting) <= abs(base_position)
-        and base_position * resulting >= 0
-    )
     reduce_only_ok = not intent.reduce_only or reduces_absolute_exposure
     add(
         "reduce_only",

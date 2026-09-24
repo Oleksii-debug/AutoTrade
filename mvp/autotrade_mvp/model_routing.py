@@ -83,7 +83,11 @@ class ModelDescriptor:
     revision: str | None
     location: str
     supported_task_schemas: frozenset[str]
+    modalities: frozenset[str]
     tool_permissions: frozenset[str]
+    privacy_region: str | None
+    license_id: str
+    deterministic_limitations: tuple[str, ...]
     max_context_tokens: int
     max_output_tokens: int
     expected_latency_ms: int
@@ -103,7 +107,11 @@ class ModelDescriptor:
         revision: str | None,
         location: str,
         supported_task_schemas: Iterable[str],
+        modalities: Iterable[str] = ("TEXT",),
         tool_permissions: Iterable[str] = (),
+        privacy_region: str | None = None,
+        license_id: str,
+        deterministic_limitations: Sequence[str] = (),
         max_context_tokens: int,
         max_output_tokens: int,
         expected_latency_ms: int,
@@ -119,7 +127,21 @@ class ModelDescriptor:
         schemas = _set(supported_task_schemas, name="supported_task_schemas")
         if not schemas:
             raise ModelRoutingError("supported_task_schemas cannot be empty")
+        modalities_set = _set(modalities, name="modalities", upper=True)
+        if not modalities_set:
+            raise ModelRoutingError("modalities cannot be empty")
         tools = _set(tool_permissions, name="tool_permissions")
+        normalized_region = None
+        if privacy_region is not None:
+            normalized_region = _text(privacy_region, name="privacy_region").upper()
+        if loc == "REMOTE" and normalized_region is None:
+            raise ModelRoutingError("remote model requires an explicit privacy_region")
+        limitations = tuple(
+            _text(value, name="deterministic_limitation")
+            for value in deterministic_limitations
+        )
+        if len(limitations) != len(set(limitations)):
+            raise ModelRoutingError("deterministic_limitations contains duplicates")
         quality = _decimal(measured_quality, name="measured_quality")
         if quality > 1:
             raise ModelRoutingError("measured_quality must be within [0, 1]")
@@ -133,7 +155,11 @@ class ModelDescriptor:
             revision=normalized_revision,
             location=loc,
             supported_task_schemas=schemas,
+            modalities=modalities_set,
             tool_permissions=tools,
+            privacy_region=normalized_region,
+            license_id=_text(license_id, name="license_id"),
+            deterministic_limitations=limitations,
             max_context_tokens=_positive_int(max_context_tokens, name="max_context_tokens"),
             max_output_tokens=_positive_int(max_output_tokens, name="max_output_tokens"),
             expected_latency_ms=_positive_int(
@@ -152,9 +178,10 @@ class ModelDescriptor:
 
     @property
     def reproducibility_limitations(self) -> tuple[str, ...]:
+        limitations = list(self.deterministic_limitations)
         if self.revision is None:
-            return ("UNKNOWN_MODEL_REVISION",)
-        return ()
+            limitations.append("UNKNOWN_MODEL_REVISION")
+        return tuple(limitations)
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +189,7 @@ class ModelRoutingPolicy:
     policy_id: str
     mode: str
     allowed_model_ids: frozenset[str]
+    allowed_remote_regions: frozenset[str]
     max_total_cost: Decimal
     max_input_tokens: int
     max_output_tokens: int
@@ -175,6 +203,7 @@ class ModelRoutingPolicy:
         policy_id: str,
         mode: str,
         allowed_model_ids: Iterable[str] = (),
+        allowed_remote_regions: Iterable[str] = (),
         max_total_cost,
         max_input_tokens: int,
         max_output_tokens: int,
@@ -191,6 +220,11 @@ class ModelRoutingPolicy:
             raise ModelRoutingError("FIXED requires exactly one allowed model")
         if normalized_mode in {"LOCAL_ONLY", "ALLOWLIST", "DYNAMIC"} and not allowed:
             raise ModelRoutingError(f"{normalized_mode} requires an explicit model allowlist")
+        regions = _set(
+            allowed_remote_regions,
+            name="allowed_remote_regions",
+            upper=True,
+        )
         normalized_fallback = _text(fallback, name="fallback").upper()
         if normalized_fallback not in _FALLBACKS:
             raise ModelRoutingError("fallback must be DETERMINISTIC or NO_TRADE")
@@ -198,6 +232,7 @@ class ModelRoutingPolicy:
             policy_id=_text(policy_id, name="policy_id"),
             mode=normalized_mode,
             allowed_model_ids=allowed,
+            allowed_remote_regions=regions,
             max_total_cost=_decimal(max_total_cost, name="max_total_cost"),
             max_input_tokens=_positive_int(max_input_tokens, name="max_input_tokens"),
             max_output_tokens=_positive_int(max_output_tokens, name="max_output_tokens"),
@@ -213,6 +248,7 @@ class ModelTask:
     input_hash: str
     input_tokens: int
     max_output_tokens: int
+    required_modalities: frozenset[str]
     required_tools: frozenset[str]
 
     @classmethod
@@ -224,6 +260,7 @@ class ModelTask:
         input_hash: str,
         input_tokens: int,
         max_output_tokens: int,
+        required_modalities: Iterable[str] = ("TEXT",),
         required_tools: Iterable[str] = (),
     ) -> "ModelTask":
         return cls(
@@ -233,6 +270,9 @@ class ModelTask:
             input_tokens=_positive_int(input_tokens, name="input_tokens", allow_zero=True),
             max_output_tokens=_positive_int(
                 max_output_tokens, name="max_output_tokens", allow_zero=True
+            ),
+            required_modalities=_set(
+                required_modalities, name="required_modalities", upper=True
             ),
             required_tools=_set(required_tools, name="required_tools"),
         )
@@ -420,7 +460,14 @@ def route_model(
             continue
         if policy.mode == "LOCAL_ONLY" and model.location != "LOCAL":
             continue
+        if (
+            model.location == "REMOTE"
+            and model.privacy_region not in policy.allowed_remote_regions
+        ):
+            continue
         if task.task_schema not in model.supported_task_schemas:
+            continue
+        if not task.required_modalities <= model.modalities:
             continue
         if not task.required_tools <= model.tool_permissions:
             continue

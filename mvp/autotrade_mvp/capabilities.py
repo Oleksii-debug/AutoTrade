@@ -33,8 +33,9 @@ def _instant(value: datetime, field: str) -> datetime:
 
 
 def _set(values: Iterable[str], field: str) -> frozenset[str]:
-    result = frozenset(_text(value, field) for value in values)
-    return result
+    if isinstance(values, (str, bytes)):
+        raise CapabilityError(f"{field} must be a collection")
+    return frozenset(_text(value, field) for value in values)
 
 
 def _freeze_evidence(value: Mapping[str, object]) -> Mapping[str, object]:
@@ -236,11 +237,8 @@ def derive_capability_snapshot(
     if required != SOURCES:
         raise CapabilityError("all canonical capability sources are required for verification")
 
-    by_source: dict[str, CapabilityClaim] = {}
-    for claim in records:
-        if claim.source in by_source:
-            raise CapabilityError(f"duplicate capability source: {claim.source}")
-        by_source[claim.source] = claim
+    if any(not isinstance(claim, CapabilityClaim) for claim in records):
+        raise TypeError("claims must contain CapabilityClaim values")
 
     first = records[0]
     identity = (
@@ -261,33 +259,40 @@ def derive_capability_snapshot(
         if other != identity:
             raise CapabilityError("capability claims describe different identities")
 
-    order_types = _intersection(records, "supported_order_types")
-    tif = _intersection(records, "time_in_force")
-    scopes = _intersection(records, "permission_scopes")
-    protection = _intersection(records, "native_protection")
-    entitlements = _intersection(records, "data_entitlements")
-
-    position_modes = {claim.position_mode for claim in records}
-    rate_policies = {claim.rate_limit_policy_id for claim in records}
-    sources = frozenset(by_source)
-    missing_sources = required - sources
+    all_sources = frozenset(claim.source for claim in records)
+    missing_sources = required - all_sources
     future_evidence = any(claim.observed_at > point for claim in records)
-    expired = any(point >= claim.expires_at for claim in records)
-    set_conflict = not order_types or not tif or not scopes
-    scalar_conflict = len(position_modes) != 1 or len(rate_policies) != 1
+    live = tuple(claim for claim in records if claim.observed_at <= point < claim.expires_at)
+    live_sources = frozenset(claim.source for claim in live)
+    expired_sources = frozenset(
+        source
+        for source in required - live_sources
+        if any(claim.source == source and claim.expires_at <= point for claim in records)
+    )
+
+    order_types = _intersection(live, "supported_order_types")
+    tif = _intersection(live, "time_in_force")
+    scopes = _intersection(live, "permission_scopes")
+    protection = _intersection(live, "native_protection")
+    entitlements = _intersection(live, "data_entitlements")
+    position_modes = {claim.position_mode for claim in live}
+    rate_policies = {claim.rate_limit_policy_id for claim in live}
+
+    set_conflict = bool(live) and (not order_types or not tif or not scopes)
+    scalar_conflict = len(position_modes) > 1 or len(rate_policies) > 1
 
     if missing_sources:
         status = "UNKNOWN"
     elif future_evidence:
         status = "CONFLICTED"
-    elif expired:
+    elif expired_sources:
         status = "EXPIRED"
     elif set_conflict or scalar_conflict:
         status = "CONFLICTED"
     else:
         status = "VERIFIED"
 
-    expires_at = min(claim.expires_at for claim in records)
+    expires_at = min((claim.expires_at for claim in live), default=point)
     return CapabilitySnapshot(
         snapshot_id=snapshot_id,
         provider_id=identity[0],
@@ -306,7 +311,7 @@ def derive_capability_snapshot(
         data_entitlements=entitlements,
         evidence=tuple(claim.evidence_ref for claim in records),
         status=status,
-        sources=sources,
+        sources=live_sources,
     )
 
 

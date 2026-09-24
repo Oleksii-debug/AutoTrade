@@ -19,6 +19,7 @@ from mvp.autotrade_mvp.whitebit import (
     collateral_balance_request,
     decode_whitebit_json,
     execution_history_coverage,
+    funding_history_request,
     market_fee_request,
     open_order_coverage,
     open_positions_request,
@@ -1024,6 +1025,129 @@ class WhiteBitAdapterTests(unittest.TestCase):
         request = market_fee_request()
         self.assertEqual(request.endpoint, "/api/v4/market/fee")
         self.assertEqual(dict(request.body), {})
+
+    def test_funding_history_preserves_signed_cash_effect_without_fake_event_id(self):
+        page = parse_funding_page(
+            {
+                "records": [
+                    {
+                        "market": "BTC_PERP",
+                        "fundingTime": "1734451200",
+                        "fundingRate": "0.00017674",
+                        "fundingAmount": "-0.171053531892",
+                        "positionAmount": "0.019",
+                        "settlementPrice": "50938.2",
+                        "rateCalculatedTime": "1734364800",
+                    }
+                ],
+                "limit": 100,
+                "offset": 0,
+            },
+            expected_offset=0,
+            expected_limit=100,
+        )
+        self.assertEqual(len(page.records), 1)
+        observation = page.records[0]
+        self.assertEqual(
+            observation.funding_amount,
+            Decimal("-0.171053531892"),
+        )
+        self.assertEqual(
+            observation.position_amount,
+            Decimal("0.019"),
+        )
+        self.assertTrue(
+            observation.observation_fingerprint.startswith("sha256:")
+        )
+        self.assertFalse(
+            observation.economic_event_identity_authoritative
+        )
+        self.assertTrue(page.short_page)
+
+    def test_funding_fingerprint_is_deterministic_but_changes_with_correction(self):
+        record = {
+            "market": "BTC_PERP",
+            "fundingTime": "1734451200",
+            "fundingRate": "0.00017674",
+            "fundingAmount": "-0.171053531892",
+            "positionAmount": "0.019",
+            "settlementPrice": "50938.2",
+            "rateCalculatedTime": "1734364800",
+        }
+        first = parse_funding_page(
+            {"records": [record], "limit": 100, "offset": 0},
+            expected_offset=0,
+            expected_limit=100,
+        ).records[0]
+        second = parse_funding_page(
+            {"records": [dict(record)], "limit": 100, "offset": 0},
+            expected_offset=0,
+            expected_limit=100,
+        ).records[0]
+        self.assertEqual(
+            first.observation_fingerprint,
+            second.observation_fingerprint,
+        )
+        corrected = dict(record)
+        corrected["fundingAmount"] = "-0.17"
+        changed = parse_funding_page(
+            {"records": [corrected], "limit": 100, "offset": 0},
+            expected_offset=0,
+            expected_limit=100,
+        ).records[0]
+        self.assertNotEqual(
+            first.observation_fingerprint,
+            changed.observation_fingerprint,
+        )
+
+    def test_funding_page_must_match_requested_pagination(self):
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "pagination does not match",
+        ):
+            parse_funding_page(
+                {"records": [], "limit": 50, "offset": 100},
+                expected_offset=0,
+                expected_limit=50,
+            )
+        request = funding_history_request(
+            market="btc_perp",
+            offset=100,
+            limit=50,
+        )
+        self.assertEqual(
+            request.endpoint,
+            "/api/v4/collateral-account/funding-history",
+        )
+        self.assertEqual(
+            dict(request.body),
+            {"market": "BTC_PERP", "offset": 100, "limit": 50},
+        )
+
+    def test_funding_rate_calculation_time_cannot_follow_payment(self):
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "cannot follow",
+        ):
+            parse_funding_page(
+                {
+                    "records": [
+                        {
+                            "market": "BTC_PERP",
+                            "fundingTime": "1734451200",
+                            "fundingRate": "0.0001",
+                            "fundingAmount": "-0.1",
+                            "positionAmount": "0.01",
+                            "settlementPrice": "50000",
+                            "rateCalculatedTime": "1734451201",
+                        }
+                    ],
+                    "limit": 100,
+                    "offset": 0,
+                },
+                expected_offset=0,
+                expected_limit=100,
+            )
 
     def test_private_signer_uses_exact_body_and_caller_owned_nonce(self):
         nonce = 1_790_280_000_123

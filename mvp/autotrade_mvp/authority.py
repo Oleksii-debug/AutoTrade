@@ -84,6 +84,11 @@ class Confirmation:
     policy_id: str
     policy_version: int
     intent_hash: str
+    environment: str
+    action: str
+    provider_id: str
+    account_id: str
+    instrument_id: str
     issued_at: datetime
     expires_at: datetime
     revoked_at: datetime | None = None
@@ -145,6 +150,11 @@ def issue_confirmation(
     actor_id: str,
     policy: AuthorityPolicy,
     intent: Mapping[str, Any],
+    environment: str,
+    action: str,
+    provider_id: str,
+    account_id: str,
+    instrument_id: str,
     issued_at: datetime,
     expires_at: datetime,
 ) -> Confirmation:
@@ -159,12 +169,32 @@ def issue_confirmation(
     actor = _text(actor_id, name="actor_id")
     if actor != policy.actor_id:
         raise PermissionError("confirmation actor does not own the policy")
+    normalized_environment = _text(environment, name="environment").upper()
+    normalized_action = _text(action, name="action").upper()
+    normalized_provider = _text(provider_id, name="provider_id")
+    normalized_account = _text(account_id, name="account_id")
+    normalized_instrument = _text(instrument_id, name="instrument_id")
+    if normalized_environment != policy.environment:
+        raise PermissionError("confirmation environment is outside policy scope")
+    if normalized_action not in policy.allowed_actions:
+        raise PermissionError("confirmation action is outside policy scope")
+    if normalized_provider not in policy.provider_ids:
+        raise PermissionError("confirmation provider is outside policy scope")
+    if normalized_account not in policy.account_ids:
+        raise PermissionError("confirmation account is outside policy scope")
+    if normalized_instrument not in policy.instrument_ids:
+        raise PermissionError("confirmation instrument is outside policy scope")
     return Confirmation(
         confirmation_id=_text(confirmation_id, name="confirmation_id"),
         actor_id=actor,
         policy_id=policy.policy_id,
         policy_version=policy.version,
         intent_hash=canonical_intent_hash(intent),
+        environment=normalized_environment,
+        action=normalized_action,
+        provider_id=normalized_provider,
+        account_id=normalized_account,
+        instrument_id=normalized_instrument,
         issued_at=issued,
         expires_at=min(expiry, policy.valid_until),
     )
@@ -190,15 +220,20 @@ def evaluate_authority(
         reasons.append("AUTH.POLICY_EXPIRED")
     if policy.revoked_at is not None and now >= policy.revoked_at:
         reasons.append("AUTH.POLICY_REVOKED")
-    if _text(environment, name="environment").upper() != policy.environment:
+    requested_environment = _text(environment, name="environment").upper()
+    requested_action = _text(action, name="action").upper()
+    requested_provider = _text(provider_id, name="provider_id")
+    requested_account = _text(account_id, name="account_id")
+    requested_instrument = _text(instrument_id, name="instrument_id")
+    if requested_environment != policy.environment:
         reasons.append("AUTH.ENVIRONMENT_MISMATCH")
-    if _text(action, name="action").upper() not in policy.allowed_actions:
+    if requested_action not in policy.allowed_actions:
         reasons.append("AUTH.ACTION_OUT_OF_SCOPE")
-    if _text(provider_id, name="provider_id") not in policy.provider_ids:
+    if requested_provider not in policy.provider_ids:
         reasons.append("AUTH.PROVIDER_OUT_OF_SCOPE")
-    if _text(account_id, name="account_id") not in policy.account_ids:
+    if requested_account not in policy.account_ids:
         reasons.append("AUTH.ACCOUNT_OUT_OF_SCOPE")
-    if _text(instrument_id, name="instrument_id") not in policy.instrument_ids:
+    if requested_instrument not in policy.instrument_ids:
         reasons.append("AUTH.INSTRUMENT_OUT_OF_SCOPE")
 
     barrier = policy.valid_until
@@ -213,6 +248,14 @@ def evaluate_authority(
                 reasons.append("AUTH.CONFIRMATION_POLICY_MISMATCH")
             if confirmation.intent_hash != digest:
                 reasons.append("AUTH.CONFIRMATION_INTENT_MISMATCH")
+            if (
+                confirmation.environment != requested_environment
+                or confirmation.action != requested_action
+                or confirmation.provider_id != requested_provider
+                or confirmation.account_id != requested_account
+                or confirmation.instrument_id != requested_instrument
+            ):
+                reasons.append("AUTH.CONFIRMATION_SCOPE_MISMATCH")
             if now < confirmation.issued_at or now >= confirmation.expires_at:
                 reasons.append("AUTH.CONFIRMATION_EXPIRED")
             if confirmation.revoked_at is not None and now >= confirmation.revoked_at:

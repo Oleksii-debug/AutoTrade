@@ -353,6 +353,7 @@ def parse_executions(
     response: Mapping[str, Any],
     *,
     instrument_versions: Mapping[str, str],
+    qualified_fee_currencies: Mapping[str, str] | None = None,
 ) -> tuple[ProviderFillEvidence, ...]:
     """Map recorded /v5/execution/list rows to reconciliation fill evidence."""
 
@@ -365,6 +366,10 @@ def parse_executions(
         raise ProviderCoreError("result.list must be an array")
     if not isinstance(instrument_versions, Mapping):
         raise ProviderCoreError("instrument_versions must be a mapping")
+    if qualified_fee_currencies is not None and not isinstance(
+        qualified_fee_currencies, Mapping
+    ):
+        raise ProviderCoreError("qualified_fee_currencies must be a mapping")
 
     by_execution: dict[str, ProviderFillEvidence] = {}
     for index, value in enumerate(rows):
@@ -384,6 +389,33 @@ def parse_executions(
         if link not in (None, ""):
             client_id = _client_order_id(link)
 
+        extra_fees = row.get("extraFees")
+        if extra_fees not in (None, "", [], {}):
+            raise ProviderCoreError(
+                "Bybit execution has extraFees that are not yet represented "
+                "in canonical fill economics"
+            )
+
+        provider_fee_currency = row.get("feeCurrency")
+        if isinstance(provider_fee_currency, str) and provider_fee_currency.strip():
+            fee_currency = provider_fee_currency.strip()
+        else:
+            if qualified_fee_currencies is None:
+                raise ProviderCoreError(
+                    "Bybit execution fee currency is unresolved; qualified "
+                    "fee-currency evidence is required"
+                )
+            try:
+                fee_currency = qualified_fee_currencies[instrument]
+            except KeyError as error:
+                raise ProviderCoreError(
+                    "Bybit execution fee currency is unresolved for instrument"
+                ) from error
+            fee_currency = _text(
+                fee_currency,
+                name="qualified fee currency",
+            )
+
         fill = ProviderFillEvidence.create(
             provider_execution_id=execution_id,
             client_order_id=client_id,
@@ -391,7 +423,7 @@ def parse_executions(
             quantity=row.get("execQty"),
             price=row.get("execPrice"),
             fee_amount=row.get("execFee"),
-            fee_currency=_text(row.get("feeCurrency"), name="feeCurrency"),
+            fee_currency=fee_currency,
             trade_time=_millis_to_utc(row.get("execTime"), name="execTime"),
         )
         previous = by_execution.get(execution_id)

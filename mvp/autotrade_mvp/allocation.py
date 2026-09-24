@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
@@ -30,6 +31,18 @@ def _positive(value, *, name: str, allow_zero: bool = False) -> Decimal:
     if result < 0 or (result == 0 and not allow_zero):
         raise ValueError(f"{name} must be {'non-negative' if allow_zero else 'positive'}")
     return result
+
+
+def _fraction(value: Decimal) -> Fraction:
+    sign, digits, exponent = value.as_tuple()
+    integer = 0
+    for digit in digits:
+        integer = integer * 10 + digit
+    if sign:
+        integer = -integer
+    if exponent >= 0:
+        return Fraction(integer * (10**exponent), 1)
+    return Fraction(integer, 10 ** (-exponent))
 
 
 def _text(value: str, *, name: str) -> str:
@@ -409,9 +422,10 @@ class ObjectiveAllocationResult:
 def _round_quantity(notional: Decimal, price: Decimal, lot_size: Decimal) -> Decimal:
     if notional == 0:
         return Decimal("0")
-    absolute_quantity = abs(notional) / price
-    lots = (absolute_quantity / lot_size).to_integral_value(rounding=ROUND_DOWN)
-    quantity = lots * lot_size
+    lot_notional = _fraction(price) * _fraction(lot_size)
+    exact_lots = _fraction(abs(notional)) / lot_notional
+    lots = exact_lots.numerator // exact_lots.denominator
+    quantity = Decimal(lots) * lot_size
     return quantity if notional > 0 else -quantity
 
 

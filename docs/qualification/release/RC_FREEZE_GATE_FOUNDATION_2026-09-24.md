@@ -23,6 +23,7 @@ Required roles are currently:
 - DEPENDENCY_RIGHTS
 - ACCESSIBILITY
 - API_COMPATIBILITY
+- CLEAN_INSTALL
 - LICENSE_NOTICES
 
 HOST, WEB and DESKTOP must carry verified signatures. Every required artifact

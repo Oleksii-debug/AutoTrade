@@ -156,6 +156,11 @@ def evaluate_readiness(signals: RuntimeSafetySignals) -> RuntimeReadiness:
         blockers.append("clock_skew_exceeded")
     if signals.recovery_in_progress:
         blockers.append("recovery_in_progress")
+    if (
+        not signals.provider_native_protection_present
+        and not signals.emergency_execution_path_qualified
+    ):
+        blockers.append("no_qualified_protection_path")
 
     protection_only = (
         signals.provider_authenticated

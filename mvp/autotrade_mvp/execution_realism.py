@@ -368,6 +368,7 @@ class SimulatedOrder:
 
 @dataclass(frozen=True)
 class LiquidityObservation:
+    instrument_version: str
     market_time: str
     available_at: str
     available_volume: Decimal
@@ -377,6 +378,9 @@ class LiquidityObservation:
     bar_low: Decimal | None = None
 
     def __post_init__(self) -> None:
+        instrument_version = _text(
+            self.instrument_version, name="instrument_version"
+        )
         market = _instant(self.market_time, name="market_time")
         available = _instant(self.available_at, name="available_at")
         if available < market:
@@ -394,6 +398,7 @@ class LiquidityObservation:
         )
         if high is not None and low is not None and high < low:
             raise ExecutionRealismError("bar_high cannot be below bar_low")
+        object.__setattr__(self, "instrument_version", instrument_version)
         object.__setattr__(self, "market_time", _utc(market))
         object.__setattr__(self, "available_at", _utc(available))
         object.__setattr__(self, "available_volume", volume)
@@ -406,6 +411,7 @@ class LiquidityObservation:
     def create(
         cls,
         *,
+        instrument_version: str,
         market_time: str,
         available_at: str,
         available_volume,
@@ -441,6 +447,9 @@ class LiquidityObservation:
         if high is not None and low is not None and high < low:
             raise ExecutionRealismError("bar_high cannot be below bar_low")
         return cls(
+            instrument_version=_text(
+                instrument_version, name="instrument_version"
+            ),
             market_time=_utc(market),
             available_at=_utc(available),
             available_volume=_non_negative(
@@ -589,6 +598,10 @@ def simulate_execution(
         raise TypeError("observation must be LiquidityObservation")
     if not isinstance(model, ExecutionModel):
         raise TypeError("model must be ExecutionModel")
+    if observation.instrument_version != order.instrument_version:
+        raise ExecutionRealismError(
+            "liquidity instrument_version must exactly match order instrument_version"
+        )
 
     submitted = _instant(order.submitted_at, name="submitted_at")
     arrival = submitted + timedelta(milliseconds=model.latency_ms)

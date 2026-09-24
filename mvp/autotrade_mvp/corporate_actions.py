@@ -174,7 +174,12 @@ class CorporateActionBook:
         denominator = _positive(event.payload.get("denominator"), name="denominator")
         ratio = numerator / denominator
         before = self.state
-        after = replace(before, quantity=before.quantity * ratio)
+        after = replace(
+            before,
+            quantity=before.quantity * ratio,
+            borrowed_quantity=before.borrowed_quantity * ratio,
+            recalled_quantity=before.recalled_quantity * ratio,
+        )
         return Transition(
             event_id=event.event_id,
             before=before,

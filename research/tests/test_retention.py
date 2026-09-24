@@ -52,6 +52,41 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(result.status, "FAIL")
         self.assertTrue(any("protected-regime" in row.reason for row in result.regimes))
 
+    def test_recent_average_cannot_hide_another_recent_regime_regression(self):
+        result = evaluate_retention(
+            {
+                "old": metric("old", "0.10", "0.10"),
+                "new-a": metric("new-a", "0.10", "0.16"),
+                "new-b": metric("new-b", "0.10", "0.09"),
+            },
+            policy(recent_regimes=["new-a", "new-b"]),
+        )
+        self.assertEqual(result.recent_improvement, Decimal("0.025"))
+        self.assertFalse(result.promotable)
+        self.assertEqual(result.status, "FAIL")
+        failed = {row.regime: row.reason for row in result.regimes if not row.passed}
+        self.assertIn("recent-regime degradation exceeds tolerance", failed["new-b"])
+
+    def test_registered_recent_degradation_tolerance_is_explicit(self):
+        result = evaluate_retention(
+            {
+                "old": metric("old", "0.10", "0.10"),
+                "new-a": metric("new-a", "0.10", "0.16"),
+                "new-b": metric("new-b", "0.10", "0.09"),
+            },
+            policy(
+                recent_regimes=["new-a", "new-b"],
+                max_recent_degradation="0.01",
+                min_recent_improvement="0.02",
+            ),
+        )
+        self.assertTrue(result.promotable)
+        self.assertEqual(result.status, "PASS")
+
+    def test_negative_recent_degradation_tolerance_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "max_recent_degradation must be non-negative"):
+            policy(max_recent_degradation="-0.001")
+
     def test_delayed_labels_are_inconclusive_not_failure_or_pass(self):
         result = evaluate_retention(
             {"old": metric("old", "0.10", "0.10"), "new": metric("new", "0.05", "0.20", label_complete=False)},

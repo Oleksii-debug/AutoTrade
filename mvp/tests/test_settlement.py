@@ -16,7 +16,7 @@ class SettlementBookTests(unittest.TestCase):
         obligation = SettlementObligation(
             " obligation-1 ",
             " fill-1 ",
-            " USD ",
+            " usd ",
             "10.50",
             date(2026, 9, 24),
             date(2026, 9, 25),
@@ -29,7 +29,7 @@ class SettlementBookTests(unittest.TestCase):
 
         book = SettlementBook(obligations=(obligation,))
         self.assertEqual(
-            book.snapshot("USD").unsettled_receivable,
+            book.snapshot("usd").unsettled_receivable,
             Decimal("10.50"),
         )
 
@@ -52,7 +52,7 @@ class SettlementBookTests(unittest.TestCase):
             SettlementBook(
                 settled_cash={
                     "USD": "100",
-                    " USD ": "999",
+                    " usd ": "999",
                 }
             )
 

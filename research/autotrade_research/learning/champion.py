@@ -172,9 +172,23 @@ class ChampionRegistry:
 
     def rollback(self, *, target_generation: int, expected_generation: int, now: datetime,
                  open_position_count: int, existing_position_policy: str | None) -> RoutingState:
-        if target_generation < 1:
+        if (
+            not isinstance(target_generation, int)
+            or isinstance(target_generation, bool)
+            or target_generation < 1
+        ):
             raise ValueError("target_generation must reference a prior promoted generation")
-        if open_position_count < 0:
+        if (
+            not isinstance(expected_generation, int)
+            or isinstance(expected_generation, bool)
+            or expected_generation < 0
+        ):
+            raise ValueError("expected_generation must be non-negative")
+        if (
+            not isinstance(open_position_count, int)
+            or isinstance(open_position_count, bool)
+            or open_position_count < 0
+        ):
             raise ValueError("open_position_count must be non-negative")
         policy = existing_position_policy.strip() if isinstance(existing_position_policy, str) else None
         if open_position_count > 0 and not policy:

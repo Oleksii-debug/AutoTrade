@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import json
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from uuid import uuid4
@@ -123,6 +124,22 @@ class CapabilityArtifactEvidenceTests(unittest.TestCase):
             self.assertEqual(snapshot.status, "UNKNOWN")
             self.assertEqual(snapshot.sources, frozenset())
             self.assertEqual(snapshot.evidence, ())
+
+    def test_existing_artifact_bytes_corruption_is_conflicted(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            refs = {source: _publish(store, source) for source in SOURCES}
+            digest = str(refs["API"]["sha256"]).removeprefix("sha256:")
+            object_path = Path(directory) / "objects" / "sha256" / digest[:2] / digest
+            object_path.write_bytes(b"corrupted-after-publish")
+            snapshot = derive_capability_snapshot(
+                snapshot_id=SNAPSHOT,
+                claims=tuple(_claim(source, refs[source]) for source in SOURCES),
+                observed_at=NOW,
+                evidence_verifier=artifact_store_evidence_verifier(store),
+            )
+            self.assertEqual(snapshot.status, "CONFLICTED")
+            self.assertNotIn("API", snapshot.sources)
 
     def test_existing_artifact_digest_mismatch_is_conflicted(self):
         with TemporaryDirectory() as directory:

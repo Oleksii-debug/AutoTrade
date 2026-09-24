@@ -65,7 +65,6 @@ class AllocationCandidate:
             capital_requirement_rate=_positive(
                 capital_requirement_rate,
                 name="capital_requirement_rate",
-                allow_zero=True,
             ),
         )
 

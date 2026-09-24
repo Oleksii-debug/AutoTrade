@@ -9,6 +9,8 @@ from mvp.autotrade_mvp.whitebit import (
     WhiteBitAdapterError,
     WhiteBitOrderIntent,
     order_lookup_requests,
+    parse_execution_deal,
+    parse_execution_history,
     parse_order_snapshot,
     prepare_order_request,
     validate_client_order_id,
@@ -246,6 +248,117 @@ class WhiteBitAdapterTests(unittest.TestCase):
                     "dealStock": "0",
                 }
             )
+
+    def test_unique_execution_deal_maps_to_reconciliation_fill(self):
+        deal = parse_execution_deal(
+            {
+                "id": 123,
+                "clientOrderId": "at-order-123",
+                "time": "1593233939.123456",
+                "side": "buy",
+                "role": 2,
+                "amount": "0.001",
+                "price": "40000",
+                "deal": "40",
+                "fee": "0.04",
+                "orderId": 456,
+                "feeAsset": "USDT",
+            },
+            market="BTC_USDT",
+        )
+        self.assertEqual(deal.provider_execution_id, "123")
+        self.assertEqual(deal.provider_order_id, "456")
+        self.assertEqual(deal.role, "TAKER")
+        self.assertEqual(deal.trade_time, "2020-06-27T07:38:59.123456Z")
+        fill = deal.to_reconciliation_fill()
+        self.assertEqual(fill.provider_execution_id, "123")
+        self.assertEqual(fill.quantity, Decimal("0.001"))
+        self.assertEqual(fill.price, Decimal("40000"))
+        self.assertEqual(fill.fee_amount, Decimal("0.04"))
+
+    def test_execution_deal_without_client_id_remains_reconcilable(self):
+        deal = parse_execution_deal(
+            {
+                "id": "manual-1",
+                "clientOrderId": "",
+                "time": "1593233939",
+                "side": "sell",
+                "role": 1,
+                "amount": "0.001",
+                "price": "40000",
+                "deal": "40",
+                "fee": "0",
+                "orderId": "external-order",
+                "feeAsset": "USDT",
+            },
+            market="BTC_USDT",
+        )
+        self.assertIsNone(deal.client_order_id)
+        self.assertIsNone(deal.to_reconciliation_fill().client_order_id)
+
+    def test_execution_deal_requires_exact_economic_identity(self):
+        with self.assertRaisesRegex(WhiteBitAdapterError, "multiplied by price"):
+            parse_execution_deal(
+                {
+                    "id": 123,
+                    "time": "1593233939",
+                    "side": "buy",
+                    "role": 1,
+                    "amount": "0.001",
+                    "price": "40000",
+                    "deal": "41",
+                    "fee": "0",
+                    "orderId": 456,
+                    "feeAsset": "USDT",
+                },
+                market="BTC_USDT",
+            )
+
+    def test_execution_history_deduplicates_exact_rows_and_rejects_conflicts(self):
+        row = {
+            "id": 123,
+            "clientOrderId": "at-order-123",
+            "time": "1593233939",
+            "side": "buy",
+            "role": 1,
+            "amount": "0.001",
+            "price": "40000",
+            "deal": "40",
+            "fee": "0.04",
+            "orderId": 456,
+            "feeAsset": "USDT",
+        }
+        self.assertEqual(
+            len(parse_execution_history([row, dict(row)], market="BTC_USDT")),
+            1,
+        )
+        conflicting = dict(row)
+        conflicting["price"] = "41000"
+        conflicting["deal"] = "41"
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "conflicting observations",
+        ):
+            parse_execution_history([row, conflicting], market="BTC_USDT")
+
+    def test_execution_time_rejects_binary_float_and_excess_precision(self):
+        row = {
+            "id": 123,
+            "time": 1593233939.123456,
+            "side": "sell",
+            "role": 2,
+            "amount": "0.001",
+            "price": "40000",
+            "deal": "40",
+            "fee": "0",
+            "orderId": 456,
+            "feeAsset": "USDT",
+        }
+        with self.assertRaisesRegex(WhiteBitAdapterError, "exact decimal"):
+            parse_execution_deal(row, market="BTC_USDT")
+        row["time"] = "1593233939.1234567"
+        with self.assertRaisesRegex(WhiteBitAdapterError, "microsecond"):
+            parse_execution_deal(row, market="BTC_USDT")
 
     def test_exact_id_lookup_uses_active_and_history_surfaces(self):
         requests = order_lookup_requests(market="btc_usdt", client_order_id="at-lookup-1")

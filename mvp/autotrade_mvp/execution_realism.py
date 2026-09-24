@@ -104,6 +104,62 @@ class ExecutionModel:
     bar_half_spread_bps: Decimal
     scenario_cost_multiplier: Decimal
 
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.latency_ms, bool)
+            or not isinstance(self.latency_ms, int)
+            or self.latency_ms < 0
+        ):
+            raise ExecutionRealismError("latency_ms must be a non-negative integer")
+        fidelity = _text(self.data_fidelity, name="data_fidelity").upper()
+        if fidelity not in {"BAR", "TOP_OF_BOOK", "BOOK"}:
+            raise ExecutionRealismError("unsupported data_fidelity")
+        scenario = _text(self.scenario, name="scenario").upper()
+        if scenario not in {"OPTIMISTIC", "BASE", "ADVERSE"}:
+            raise ExecutionRealismError("unsupported execution scenario")
+        participation = _non_negative(
+            self.max_participation, name="max_participation"
+        )
+        if participation > 1:
+            raise ExecutionRealismError("max_participation cannot exceed 1")
+        multiplier = _positive(
+            self.scenario_cost_multiplier, name="scenario_cost_multiplier"
+        )
+        if scenario == "ADVERSE" and multiplier < 1:
+            raise ExecutionRealismError(
+                "ADVERSE scenario_cost_multiplier cannot be below 1"
+            )
+        object.__setattr__(self, "model_version", _text(self.model_version, name="model_version"))
+        object.__setattr__(
+            self,
+            "calibration_sha256",
+            _digest(self.calibration_sha256, name="calibration_sha256"),
+        )
+        object.__setattr__(self, "data_fidelity", fidelity)
+        object.__setattr__(self, "scenario", scenario)
+        object.__setattr__(self, "fee_rate", _non_negative(self.fee_rate, name="fee_rate"))
+        object.__setattr__(
+            self, "minimum_fee", _non_negative(self.minimum_fee, name="minimum_fee")
+        )
+        object.__setattr__(self, "max_participation", participation)
+        object.__setattr__(
+            self, "slippage_bps", _non_negative(self.slippage_bps, name="slippage_bps")
+        )
+        object.__setattr__(
+            self,
+            "impact_bps_at_max_participation",
+            _non_negative(
+                self.impact_bps_at_max_participation,
+                name="impact_bps_at_max_participation",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "bar_half_spread_bps",
+            _non_negative(self.bar_half_spread_bps, name="bar_half_spread_bps"),
+        )
+        object.__setattr__(self, "scenario_cost_multiplier", multiplier)
+
     @classmethod
     def create(
         cls,
@@ -205,6 +261,48 @@ class SimulatedOrder:
     stop_price: Decimal | None = None
     already_triggered: bool = False
 
+    def __post_init__(self) -> None:
+        side = _text(self.side, name="side").upper()
+        if side not in {"BUY", "SELL"}:
+            raise ExecutionRealismError("side must be BUY or SELL")
+        order_type = _text(self.order_type, name="order_type").upper()
+        if order_type not in {"MARKET", "LIMIT", "STOP_LIMIT"}:
+            raise ExecutionRealismError("unsupported order_type")
+        if type(self.already_triggered) is not bool:
+            raise TypeError("already_triggered must be boolean")
+        quantity = _positive(self.quantity, name="quantity")
+        lot_size = _positive(self.lot_size, name="lot_size")
+        if quantity % lot_size != 0:
+            raise ExecutionRealismError("quantity must be an exact multiple of lot_size")
+        limit = None if self.limit_price is None else _positive(
+            self.limit_price, name="limit_price"
+        )
+        stop = None if self.stop_price is None else _positive(
+            self.stop_price, name="stop_price"
+        )
+        if order_type == "MARKET" and (limit is not None or stop is not None):
+            raise ExecutionRealismError("MARKET order cannot carry limit/stop price")
+        if order_type == "LIMIT" and (limit is None or stop is not None):
+            raise ExecutionRealismError("LIMIT order requires only limit_price")
+        if order_type == "STOP_LIMIT" and (limit is None or stop is None):
+            raise ExecutionRealismError(
+                "STOP_LIMIT order requires stop_price and limit_price"
+            )
+        submitted = _instant(self.submitted_at, name="submitted_at")
+        object.__setattr__(self, "order_id", _text(self.order_id, name="order_id"))
+        object.__setattr__(
+            self,
+            "instrument_version",
+            _text(self.instrument_version, name="instrument_version"),
+        )
+        object.__setattr__(self, "side", side)
+        object.__setattr__(self, "order_type", order_type)
+        object.__setattr__(self, "quantity", quantity)
+        object.__setattr__(self, "submitted_at", _utc(submitted))
+        object.__setattr__(self, "lot_size", lot_size)
+        object.__setattr__(self, "limit_price", limit)
+        object.__setattr__(self, "stop_price", stop)
+
     @classmethod
     def create(
         cls,
@@ -277,6 +375,32 @@ class LiquidityObservation:
     ask: Decimal | None = None
     bar_high: Decimal | None = None
     bar_low: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        market = _instant(self.market_time, name="market_time")
+        available = _instant(self.available_at, name="available_at")
+        if available < market:
+            raise ExecutionRealismError("available_at cannot precede market_time")
+        volume = _non_negative(self.available_volume, name="available_volume")
+        bid = None if self.bid is None else _positive(self.bid, name="bid")
+        ask = None if self.ask is None else _positive(self.ask, name="ask")
+        if bid is not None and ask is not None and ask < bid:
+            raise ExecutionRealismError("ask cannot be below bid")
+        high = None if self.bar_high is None else _positive(
+            self.bar_high, name="bar_high"
+        )
+        low = None if self.bar_low is None else _positive(
+            self.bar_low, name="bar_low"
+        )
+        if high is not None and low is not None and high < low:
+            raise ExecutionRealismError("bar_high cannot be below bar_low")
+        object.__setattr__(self, "market_time", _utc(market))
+        object.__setattr__(self, "available_at", _utc(available))
+        object.__setattr__(self, "available_volume", volume)
+        object.__setattr__(self, "bid", bid)
+        object.__setattr__(self, "ask", ask)
+        object.__setattr__(self, "bar_high", high)
+        object.__setattr__(self, "bar_low", low)
 
     @classmethod
     def create(

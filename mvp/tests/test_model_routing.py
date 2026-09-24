@@ -37,7 +37,11 @@ def model(
         revision=revision,
         location=location,
         supported_task_schemas=schemas,
+        modalities=("TEXT",),
         tool_permissions=tools,
+        privacy_region=("EU" if location == "REMOTE" else None),
+        license_id="test-license",
+        deterministic_limitations=(),
         max_context_tokens=context,
         max_output_tokens=1024,
         expected_latency_ms=latency,
@@ -53,6 +57,7 @@ def policy(
     *,
     mode="DYNAMIC",
     allowed=("local-fast",),
+    remote_regions=(),
     max_total_cost="1",
     deadline=1000,
     fallback="NO_TRADE",
@@ -61,6 +66,7 @@ def policy(
         policy_id="policy-1",
         mode=mode,
         allowed_model_ids=allowed,
+        allowed_remote_regions=remote_regions,
         max_total_cost=max_total_cost,
         max_input_tokens=3000,
         max_output_tokens=500,
@@ -186,6 +192,49 @@ class ModelRoutingTests(unittest.TestCase):
         self.assertEqual(decision.reason, "policy_input_token_limit")
         self.assertEqual(decision.outcome, "NO_TRADE")
 
+
+    def test_remote_model_requires_explicit_privacy_region_allowance(self):
+        remote = model("remote", location="REMOTE")
+        blocked_budget = ModelBudgetLedger(ceiling="1")
+        blocked = route_model(
+            policy=policy(allowed=("remote",), remote_regions=()),
+            task=task(),
+            models=[remote],
+            budget=blocked_budget,
+        )
+        self.assertEqual(blocked.outcome, "NO_TRADE")
+        self.assertEqual(blocked_budget.snapshot().committed, Decimal("0"))
+
+        allowed_budget = ModelBudgetLedger(ceiling="1")
+        allowed = route_model(
+            policy=policy(allowed=("remote",), remote_regions=("EU",)),
+            task=task(),
+            models=[remote],
+            budget=allowed_budget,
+        )
+        self.assertEqual(allowed.outcome, "MODEL")
+        self.assertEqual(allowed.model_id, "remote")
+
+    def test_remote_descriptor_without_privacy_region_is_invalid(self):
+        with self.assertRaisesRegex(ModelRoutingError, "privacy_region"):
+            ModelDescriptor.create(
+                model_id="remote-unsafe",
+                provider="remote",
+                model_name="remote-unsafe",
+                revision="r1",
+                location="REMOTE",
+                supported_task_schemas={"decision.explain.v1"},
+                license_id="test-license",
+                max_context_tokens=1000,
+                max_output_tokens=100,
+                expected_latency_ms=50,
+                input_token_price="0",
+                output_token_price="0",
+                price_evidence_sha256=HASH_A,
+                measured_quality="0.5",
+                quality_evidence_sha256=HASH_B,
+            )
+
     def test_user_allowlist_is_hard_boundary(self):
         budget = ModelBudgetLedger(ceiling="10")
         better_but_unapproved = model("unapproved", quality="1")
@@ -277,6 +326,7 @@ class ModelRoutingTests(unittest.TestCase):
                 revision="r",
                 location="LOCAL",
                 supported_task_schemas={"decision.explain.v1"},
+                license_id="test-license",
                 max_context_tokens=100,
                 max_output_tokens=10,
                 expected_latency_ms=1,

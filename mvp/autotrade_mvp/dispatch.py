@@ -63,6 +63,7 @@ def _envelope(
     version: int,
     payload: dict[str, Any],
     now: str,
+    owner_epoch: int,
 ) -> dict[str, Any]:
     timestamp = _instant(now).isoformat().replace("+00:00", "Z")
     return {
@@ -73,7 +74,7 @@ def _envelope(
         "aggregate_id": attempt_id,
         "aggregate_version": str(version),
         "host_id": "local-mvp",
-        "owner_epoch": "1",
+        "owner_epoch": str(owner_epoch),
         "environment": "SIMULATION",
         "occurred_at": timestamp,
         "observed_at": timestamp,
@@ -130,6 +131,7 @@ class GuardedDispatcher:
                 version=version,
                 payload=payload,
                 now=now,
+                owner_epoch=self.owner_epoch,
             ),
             outbox_topic="autotrade.submission.events",
         )

@@ -223,7 +223,53 @@ class CapabilityFoundationTests(unittest.TestCase):
                 snapshot_id=SNAPSHOT_2,
                 claims=(claim("API"), claim("API")),
                 observed_at=NOW,
-                required_sources=frozenset({"API"}),
+            )
+
+    def test_future_dated_evidence_is_conflicted_not_expired(self):
+        claims = list(complete_claims())
+        claims[-1] = claim(
+            "INSTRUMENT",
+            observed_at=NOW + timedelta(seconds=1),
+            expires_at=NOW + timedelta(minutes=10),
+        )
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=claims,
+            observed_at=NOW,
+        )
+        self.assertEqual(snapshot.status, "CONFLICTED")
+
+    def test_evidence_reference_is_strict_and_immutable(self):
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(),
+            observed_at=NOW,
+        )
+        with self.assertRaises(TypeError):
+            snapshot.evidence[0]["sha256"] = "sha256:" + "b" * 64
+        original = claim("API")
+        with self.assertRaisesRegex(CapabilityError, "sha256"):
+            CapabilityClaim(
+                source=original.source,
+                provider_id=original.provider_id,
+                account_id=original.account_id,
+                entity_id=original.entity_id,
+                environment=original.environment,
+                instrument_version=original.instrument_version,
+                observed_at=original.observed_at,
+                expires_at=original.expires_at,
+                supported_order_types=original.supported_order_types,
+                time_in_force=original.time_in_force,
+                permission_scopes=original.permission_scopes,
+                position_mode=original.position_mode,
+                native_protection=original.native_protection,
+                rate_limit_policy_id=original.rate_limit_policy_id,
+                data_entitlements=original.data_entitlements,
+                evidence_ref={
+                    "artifact_id": "33333333-3333-4333-8333-333333333333",
+                    "sha256": "bad",
+                    "observed_at": "2026-09-24T15:59:00Z",
+                },
             )
 
     def test_contract_projection_contains_current_fail_closed_status(self):

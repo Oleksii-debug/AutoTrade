@@ -156,6 +156,40 @@ class ExportBoundaryTests(unittest.TestCase):
         )
         self.assertFalse(verify_prepared_export(forged))
 
+    def test_forged_payload_cannot_bypass_hard_byte_or_depth_budgets(self):
+        export = self.prepare({"value": "ok"})
+
+        oversized_data = (
+            b'{"value":"' +
+            (b"x" * (4 * 1024 * 1024)) +
+            b'"}\n'
+        )
+        oversized = replace(
+            export,
+            data=oversized_data,
+            sha256="sha256:" + sha256(oversized_data).hexdigest(),
+        )
+        self.assertFalse(verify_prepared_export(oversized))
+
+        nested = "0"
+        for _ in range(34):
+            nested = "[" + nested + "]"
+        nested_data = (nested + "\n").encode("utf-8")
+        too_deep = replace(
+            export,
+            data=nested_data,
+            sha256="sha256:" + sha256(nested_data).hexdigest(),
+        )
+        self.assertFalse(verify_prepared_export(too_deep))
+
+    def test_callers_cannot_raise_export_boundary_hard_limits(self):
+        with self.assertRaisesRegex(ExportBoundaryError, "hard limit"):
+            self.prepare({"x": 1}, max_bytes=4 * 1024 * 1024 + 1)
+        with self.assertRaisesRegex(ExportBoundaryError, "hard limit"):
+            self.prepare({"x": 1}, max_depth=33)
+        with self.assertRaisesRegex(ExportBoundaryError, "hard limit"):
+            self.prepare({"x": 1}, maximum_items=100_001)
+
     def test_atomic_write_stays_under_caller_directory(self):
         export = self.prepare({"value": "ok"}, filename="safe.json")
         with TemporaryDirectory() as directory:

@@ -159,8 +159,16 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
                 purpose="TRADE",
             )
 
-    def test_withdrawal_and_external_transfer_credentials_are_absent(self):
-        for purpose in ("WITHDRAWAL", "TRANSFER", "EXTERNAL_TRANSFER"):
+    def test_only_explicit_read_and_trade_credential_purposes_are_allowed(self):
+        for purpose in (
+            "WITHDRAWAL",
+            "WITHDRAW",
+            "TRANSFER",
+            "EXTERNAL_TRANSFER",
+            "PAYOUT",
+            "ADMIN",
+            "UNKNOWN",
+        ):
             with self.subTest(purpose=purpose), self.assertRaises(PermissionError):
                 self.vault.register(
                     owner_identity="windows-user-1",
@@ -169,6 +177,16 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
                     purpose=purpose,
                     secret_value="must-not-store",
                 )
+
+        read_handle = self.vault.register(
+            handle_id="cred-read",
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            purpose="read",
+            secret_value="read-secret",
+        )
+        self.assertEqual(read_handle.purpose, "READ")
 
     def test_duplicate_handle_and_corrupt_vault_fail_closed(self):
         self.register()

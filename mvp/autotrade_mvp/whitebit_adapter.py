@@ -8,12 +8,14 @@ dispatch, retry, journal, reconciliation, credentials, or live authority.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import re
 from types import MappingProxyType
 from typing import Any, Mapping
 
 from .provider_core import ProviderCoreError, WriteOutcome, classify_write_outcome
+from .reconciliation import ProviderFillEvidence
 
 
 _CLIENT_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -548,3 +550,140 @@ def parse_market_rules(record: Mapping[str, Any]) -> WhiteBitMarketRules:
         minimum_total=minimum_total,
         maximum_total=record.get("maxTotal"),
     )
+
+
+def _unix_instant(value: Any, *, name: str) -> str:
+    """Convert an exact Unix timestamp to canonical UTC without binary float."""
+
+    instant = _decimal(value, name=name)
+    if instant < 0:
+        raise ProviderCoreError(f"{name} cannot be negative")
+    whole = int(instant)
+    fractional = instant - Decimal(whole)
+    micros_exact = fractional * Decimal("1000000")
+    if micros_exact != micros_exact.to_integral_value():
+        raise ProviderCoreError(f"{name} exceeds microsecond precision")
+    parsed = datetime.fromtimestamp(whole, tz=timezone.utc).replace(
+        microsecond=int(micros_exact)
+    )
+    return parsed.isoformat().replace("+00:00", "Z")
+
+
+@dataclass(frozen=True)
+class WhiteBitDealObservation:
+    provider_execution_id: str
+    provider_order_id: str
+    client_order_id: str | None
+    market: str
+    side: str
+    role: str
+    quantity: Decimal
+    price: Decimal
+    deal_value: Decimal
+    fee_amount: Decimal
+    fee_currency: str
+    trade_time: str
+
+    def to_reconciliation_fill(self) -> ProviderFillEvidence:
+        return ProviderFillEvidence.create(
+            provider_execution_id=self.provider_execution_id,
+            client_order_id=self.client_order_id,
+            instrument=self.market,
+            quantity=self.quantity,
+            price=self.price,
+            fee_amount=self.fee_amount,
+            fee_currency=self.fee_currency,
+            trade_time=self.trade_time,
+        )
+
+
+def normalize_execution_deal(
+    record: Mapping[str, Any],
+    *,
+    market: str,
+) -> WhiteBitDealObservation:
+    """Normalize one matching-engine deal with its unique provider deal id."""
+
+    if not isinstance(record, Mapping):
+        raise TypeError("record must be a mapping")
+    try:
+        deal_id = record["id"]
+        order_id = record["orderId"]
+        side_raw = record["side"]
+        role_raw = record["role"]
+        quantity_raw = record["amount"]
+        price_raw = record["price"]
+        deal_value_raw = record["deal"]
+        fee_raw = record["fee"]
+        fee_asset_raw = record["feeAsset"]
+        time_raw = record["time"]
+    except KeyError as error:
+        raise ProviderCoreError(
+            f"execution deal missing required field: {error.args[0]}"
+        ) from error
+
+    if isinstance(deal_id, bool) or isinstance(order_id, bool):
+        raise ProviderCoreError("deal and order identifiers must not be boolean")
+    provider_execution_id = _text(str(deal_id), name="deal id")
+    provider_order_id = _text(str(order_id), name="order id")
+    market_name = _text(market, name="market")
+    side = _text(str(side_raw), name="side").upper()
+    if side not in {"BUY", "SELL"}:
+        raise ProviderCoreError("execution side must be buy or sell")
+    if role_raw == 1 or str(role_raw) == "1":
+        role = "MAKER"
+    elif role_raw == 2 or str(role_raw) == "2":
+        role = "TAKER"
+    else:
+        raise ProviderCoreError("execution role must be 1 (maker) or 2 (taker)")
+
+    quantity = _decimal(quantity_raw, name="amount", positive=True)
+    price = _decimal(price_raw, name="price", positive=True)
+    deal_value = _decimal(deal_value_raw, name="deal", positive=True)
+    fee = _decimal(fee_raw, name="fee")
+    if fee < 0:
+        raise ProviderCoreError("execution fee cannot be negative")
+    if deal_value != quantity * price:
+        raise ProviderCoreError("execution deal value does not equal amount * price")
+
+    raw_client = record.get("clientOrderId")
+    client_order_id = (
+        None
+        if raw_client is None or raw_client == ""
+        else _text(str(raw_client), name="clientOrderId")
+    )
+    return WhiteBitDealObservation(
+        provider_execution_id=provider_execution_id,
+        provider_order_id=provider_order_id,
+        client_order_id=client_order_id,
+        market=market_name,
+        side=side,
+        role=role,
+        quantity=quantity,
+        price=price,
+        deal_value=deal_value,
+        fee_amount=fee,
+        fee_currency=_text(str(fee_asset_raw), name="feeAsset").upper(),
+        trade_time=_unix_instant(time_raw, name="time"),
+    )
+
+
+def normalize_execution_history(
+    records: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
+    *,
+    market: str,
+) -> tuple[WhiteBitDealObservation, ...]:
+    if not isinstance(records, (list, tuple)):
+        raise TypeError("records must be a list or tuple")
+    by_id: dict[str, WhiteBitDealObservation] = {}
+    for record in records:
+        observed = normalize_execution_deal(record, market=market)
+        existing = by_id.get(observed.provider_execution_id)
+        if existing is not None:
+            if existing != observed:
+                raise ProviderCoreError(
+                    "provider deal id has conflicting observations"
+                )
+            continue
+        by_id[observed.provider_execution_id] = observed
+    return tuple(by_id[key] for key in sorted(by_id))

@@ -189,6 +189,7 @@ def aggregate_specialists(
     specs: Iterable[SpecialistSpec],
     runs: Iterable[SpecialistRun],
     *,
+    plan: DagPlan,
     decision_deadline: datetime,
     blocking_critique_terms: Iterable[str] = (),
 ) -> AggregatedProposal:
@@ -198,6 +199,22 @@ def aggregate_specialists(
     by_id = {spec.role_id: spec for spec in specs}
     if not by_id:
         raise SpecialistDagError("at least one specialist specification is required")
+    if not isinstance(plan, DagPlan):
+        raise SpecialistDagError("aggregation requires the exact DagPlan")
+    scheduled_roles = set(plan.scheduled_roles)
+    if len(scheduled_roles) != len(plan.scheduled_roles):
+        raise SpecialistDagError("DagPlan scheduled roles must be unique")
+    unknown_scheduled = scheduled_roles - set(by_id)
+    if unknown_scheduled:
+        raise SpecialistDagError(
+            f"DagPlan contains unknown scheduled roles: {sorted(unknown_scheduled)}"
+        )
+    expected_reserved = sum(
+        (by_id[role_id].max_cost for role_id in scheduled_roles),
+        Decimal("0"),
+    )
+    if plan.reserved_cost != expected_reserved:
+        raise SpecialistDagError("DagPlan reserved cost does not match scheduled roles")
 
     seen: set[str] = set()
     accepted: list[tuple[SpecialistSpec, SpecialistRun]] = []
@@ -211,6 +228,9 @@ def aggregate_specialists(
         spec = by_id.get(run.role_id)
         if spec is None:
             rejected.append((run.role_id, "unknown_role"))
+            continue
+        if run.role_id not in scheduled_roles:
+            rejected.append((run.role_id, "not_scheduled"))
             continue
         if run.completed_at > deadline:
             rejected.append((run.role_id, "late"))

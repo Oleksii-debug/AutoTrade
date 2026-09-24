@@ -127,6 +127,31 @@ class ProviderWorkingOrderEvidence:
     instrument: str
     remaining_quantity: Decimal
 
+    def __post_init__(self) -> None:
+        remaining = _decimal(self.remaining_quantity, name="remaining_quantity")
+        if remaining <= 0:
+            raise ValueError("remaining_quantity must be positive")
+        object.__setattr__(
+            self,
+            "provider_order_id",
+            _text(self.provider_order_id, name="provider_order_id"),
+        )
+        object.__setattr__(
+            self,
+            "client_order_id",
+            (
+                _text(self.client_order_id, name="client_order_id")
+                if self.client_order_id is not None
+                else None
+            ),
+        )
+        object.__setattr__(
+            self,
+            "instrument",
+            _text(self.instrument, name="instrument"),
+        )
+        object.__setattr__(self, "remaining_quantity", remaining)
+
     @classmethod
     def create(
         cls,
@@ -161,6 +186,41 @@ class ProviderFillEvidence:
     fee_amount: Decimal
     fee_currency: str
     trade_time: str
+
+    def __post_init__(self) -> None:
+        quantity = _decimal(self.quantity, name="quantity")
+        price = _decimal(self.price, name="price")
+        fee_amount = _decimal(self.fee_amount, name="fee_amount")
+        if quantity <= 0 or price <= 0:
+            raise ValueError("quantity and price must be positive")
+        _instant(self.trade_time, name="trade_time")
+        object.__setattr__(
+            self,
+            "provider_execution_id",
+            _text(self.provider_execution_id, name="provider_execution_id"),
+        )
+        object.__setattr__(
+            self,
+            "client_order_id",
+            (
+                _text(self.client_order_id, name="client_order_id")
+                if self.client_order_id is not None
+                else None
+            ),
+        )
+        object.__setattr__(
+            self,
+            "instrument",
+            _text(self.instrument, name="instrument"),
+        )
+        object.__setattr__(self, "quantity", quantity)
+        object.__setattr__(self, "price", price)
+        object.__setattr__(self, "fee_amount", fee_amount)
+        object.__setattr__(
+            self,
+            "fee_currency",
+            _text(self.fee_currency, name="fee_currency").upper(),
+        )
 
     @classmethod
     def create(
@@ -204,6 +264,19 @@ class UnknownSubmission:
     attempt_id: str
     client_order_id: str
     started_at: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "attempt_id",
+            _text(self.attempt_id, name="attempt_id"),
+        )
+        object.__setattr__(
+            self,
+            "client_order_id",
+            _text(self.client_order_id, name="client_order_id"),
+        )
+        _instant(self.started_at, name="started_at")
 
     @classmethod
     def create(

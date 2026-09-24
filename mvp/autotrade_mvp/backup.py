@@ -584,6 +584,26 @@ def complete_restore_reconciliation(
     if not isinstance(reconciliation, ReconciliationResult):
         raise TypeError("reconciliation must be ReconciliationResult")
     refs = _normalize_fencing_evidence(fencing_evidence)
+    if not any(item.get("rights_id") == "recovery:fencing" for item in refs):
+        raise BackupError(
+            "fencing evidence must include an explicit recovery:fencing proof"
+        )
+    restored_at = marker.get("restored_at")
+    if not isinstance(restored_at, str) or not restored_at.endswith("Z"):
+        raise BackupIntegrityError("Restore marker restored_at is invalid")
+    try:
+        restored = datetime.fromisoformat(restored_at.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise BackupIntegrityError("Restore marker restored_at is invalid") from error
+    if restored.tzinfo is None:
+        raise BackupIntegrityError("Restore marker restored_at is invalid")
+    restored_utc = restored.astimezone(timezone.utc)
+    if any(
+        datetime.fromisoformat(item["observed_at"].replace("Z", "+00:00"))
+        < restored_utc
+        for item in refs
+    ):
+        raise BackupError("fencing evidence cannot predate the restored runtime")
     if not isinstance(completed_at, str) or not completed_at.strip():
         raise BackupError("completed_at is required")
     try:
@@ -731,8 +751,18 @@ def restore_requires_reconciliation(destination_root: str | Path) -> bool:
         if not isinstance(completed_at, str) or not completed_at.endswith("Z"):
             return True
         completed = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        restored_at = marker.get("restored_at")
+        if not isinstance(restored_at, str) or not restored_at.endswith("Z"):
+            return True
+        restored = datetime.fromisoformat(restored_at.replace("Z", "+00:00"))
         if any(
             datetime.fromisoformat(item["observed_at"].replace("Z", "+00:00")) > completed
+            or datetime.fromisoformat(item["observed_at"].replace("Z", "+00:00")) < restored
+            for item in evidence
+        ):
+            return True
+        if not any(
+            item.get("rights_id") == "recovery:fencing"
             for item in evidence
         ):
             return True

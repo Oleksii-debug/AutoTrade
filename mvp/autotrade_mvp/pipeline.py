@@ -234,21 +234,34 @@ def _read_state(path: Path, initial_cash: Decimal) -> tuple[dict, bool]:
     return data, True
 
 
+def _find_evidence(path: Path, evidence_id: str) -> dict | None:
+    if not path.exists():
+        return None
+    found = None
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            recorded = json.loads(line)
+            if recorded["evidence_id"] == evidence_id:
+                if found is not None:
+                    raise ValueError("Duplicate learning evidence ID")
+                found = recorded
+    except (json.JSONDecodeError, KeyError) as error:
+        raise ValueError("Corrupt learning evidence") from error
+    return found
+
+
 def _append_evidence(path: Path, evidence: dict) -> bool:
     evidence_id = evidence["evidence_id"]
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                recorded = json.loads(line)
-                if recorded["evidence_id"] == evidence_id:
-                    comparable = {key: value for key, value in recorded.items() if key != "recorded_at"}
-                    expected = {key: value for key, value in evidence.items() if key != "recorded_at"}
-                    if comparable != expected:
-                        raise ValueError("Learning evidence conflicts with checkpoint")
-                    return False
-        except (json.JSONDecodeError, KeyError) as error:
-            raise ValueError("Corrupt learning evidence") from error
+    recorded = _find_evidence(path, evidence_id)
+    if recorded is not None:
+        comparable = {key: value for key, value in recorded.items() if key != "recorded_at"}
+        expected = {key: value for key, value in evidence.items() if key != "recorded_at"}
+        if comparable != expected:
+            raise ValueError("Learning evidence conflicts with checkpoint")
+        return False
     with path.open("a", encoding="utf-8", newline="\n") as handle:
         handle.write(json.dumps(evidence, sort_keys=True, ensure_ascii=False) + "\n")
         handle.flush()
@@ -327,21 +340,6 @@ def run_vertical_slice(
         raise ValueError("Cash, order quantity and risk limits must be positive")
     if not rate.is_finite() or rate < 0 or rate >= 1:
         raise ValueError("Fee rate must be finite and between zero and one")
-    normalized: list[Decimal] = []
-    for value in prices:
-        try:
-            numeric = Decimal(str(value))
-        except (ValueError, ArithmeticError) as error:
-            raise ValueError("Prices must be finite and positive") from error
-        if not numeric.is_finite() or numeric <= 0:
-            raise ValueError("Prices must be finite and positive")
-        normalized_price = _money(numeric)
-        if normalized_price <= 0:
-            raise ValueError("Price is smaller than supported precision")
-        normalized.append(normalized_price)
-    if not normalized:
-        raise ValueError("At least one price is required")
-
     root = Path(state_dir)
     checkpoint_path = root / "checkpoint.json"
     evidence_path = root / "learning-evidence.jsonl"
@@ -411,16 +409,14 @@ def run_vertical_slice(
         "reconciled": reconciled,
         "recorded_at": datetime.now(timezone.utc).isoformat(),
     }
-    evidence = evidence_records.get(evidence_id, fresh_evidence)
-    handle_learning_evidence(evidence, evidence_path, evidence_ids, evidence_records)
-    if evidence_id in evidence_ids and evidence_id not in evidence_records and evidence_path.exists():
-        # Upgrade a checkpoint written by the original MVP without changing
-        # the historical economic snapshot for an already completed episode.
-        for line in evidence_path.read_text(encoding="utf-8").splitlines():
-            recorded = json.loads(line)
-            if recorded.get("evidence_id") == evidence_id:
-                evidence = recorded
-                break
+    recorded_evidence = _find_evidence(evidence_path, evidence_id)
+    if evidence_id in evidence_records:
+        evidence = evidence_records[evidence_id]
+    elif recorded_evidence is not None:
+        # Adopt an evidence row left durable by an older interrupted build.
+        evidence = recorded_evidence
+    else:
+        evidence = fresh_evidence
     if (evidence.get("input_hash") != fresh_evidence["input_hash"]
             or evidence.get("order_id") != fresh_evidence["order_id"]
             or evidence.get("fill_id") != fresh_evidence["fill_id"]):
@@ -437,9 +433,9 @@ def run_vertical_slice(
         "evidence_records": evidence_records,
     }
     _atomic_json(checkpoint_path, checkpoint)
-    # If a previous run crashed after the checkpoint write, replay repairs the
-    # missing evidence entry instead of silently treating it as complete.
-    _append_evidence(evidence_path, evidence)
+    # The checkpoint is committed before the append-only evidence row. If the
+    # process stops here, replay repairs the missing row on the next run.
+    handle_learning_evidence(evidence, evidence_path, evidence_ids, evidence_records)
     if not verify_replay(root):
         raise ValueError("Learning evidence does not replay against checkpoint")
     return RunResult(

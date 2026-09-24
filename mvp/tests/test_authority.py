@@ -48,6 +48,11 @@ def confirmation(p=None, body=None):
         actor_id="user-1",
         policy=p,
         intent=body,
+        environment="SIM",
+        action="ORDER.SUBMIT",
+        provider_id="provider-a",
+        account_id="account-a",
+        instrument_id="instrument-a",
         issued_at=NOW - timedelta(seconds=10),
         expires_at=NOW + timedelta(minutes=5),
     )
@@ -86,6 +91,11 @@ class AuthorityFoundationTests(unittest.TestCase):
             actor_id="user-1",
             policy=p,
             intent=intent(),
+            environment="SIM",
+            action="ORDER.SUBMIT",
+            provider_id="provider-a",
+            account_id="account-a",
+            instrument_id="instrument-a",
             issued_at=NOW - timedelta(minutes=2),
             expires_at=NOW - timedelta(seconds=1),
         )
@@ -135,6 +145,47 @@ class AuthorityFoundationTests(unittest.TestCase):
         )
         self.assertFalse(barrier.allowed)
         self.assertIn("AUTH.POLICY_CHANGED_AFTER_ADMISSION", barrier.reason_codes)
+
+    def test_confirmation_cannot_be_replayed_in_another_allowed_account(self):
+        p = build_policy(
+            policy_id="policy-wide",
+            version=1,
+            actor_id="user-1",
+            environment="SIM",
+            allowed_actions=("ORDER.SUBMIT",),
+            provider_ids=("provider-a",),
+            account_ids=("account-a", "account-b"),
+            instrument_ids=("instrument-a",),
+            valid_from=NOW - timedelta(minutes=5),
+            valid_until=NOW + timedelta(minutes=30),
+            autonomous=False,
+        )
+        c = issue_confirmation(
+            confirmation_id="confirmation-a",
+            actor_id="user-1",
+            policy=p,
+            intent=intent(),
+            environment="SIM",
+            action="ORDER.SUBMIT",
+            provider_id="provider-a",
+            account_id="account-a",
+            instrument_id="instrument-a",
+            issued_at=NOW - timedelta(seconds=10),
+            expires_at=NOW + timedelta(minutes=5),
+        )
+        replay = evaluate_authority(
+            policy=p,
+            intent=intent(),
+            action="ORDER.SUBMIT",
+            environment="SIM",
+            provider_id="provider-a",
+            account_id="account-b",
+            instrument_id="instrument-a",
+            at=NOW,
+            confirmation=c,
+        )
+        self.assertFalse(replay.allowed)
+        self.assertIn("AUTH.CONFIRMATION_SCOPE_MISMATCH", replay.reason_codes)
 
     def test_scope_is_exact_not_provider_or_account_coerced(self):
         decision = evaluate(provider_id="provider-b")

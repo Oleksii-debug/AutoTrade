@@ -269,5 +269,15 @@ class ForwardPaperQualificationTests(unittest.TestCase):
 
 
 
+    def test_complete_cost_flag_with_empty_ledger_is_inconclusive(self):
+        result = assess_forward_paper(
+            self.protocol(),
+            self.evidence(costs_by_currency={}),
+        )
+        self.assertEqual(result.evidence_status, "INCONCLUSIVE")
+        self.assertIn("actual_cost_ledger_empty", result.reasons)
+
+
+
 if __name__ == "__main__":
     unittest.main()

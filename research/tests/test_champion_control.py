@@ -8,29 +8,96 @@ from research.autotrade_research.learning.champion import (
     ChampionRegistry,
     PromotionConflict,
 )
+from research.autotrade_research.science.registry import (
+    ProtocolViolation,
+    ScientificRegistry,
+)
 
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-def approval(candidate="candidate-a", valid_days=1, status="PASS"):
+def protocol():
+    return {
+        "hypothesis": "candidate improves registered net outcome",
+        "strategy": "candidate",
+        "features": ["registered"],
+        "search_space": {"variant": ["fixed"]},
+        "train_period": "t0-t1",
+        "validation_period": "t1-t2",
+        "test_period": "t2-t3",
+        "forward_period": "future",
+        "labels": ["net_return"],
+        "horizons": ["1d"],
+        "purge_embargo": {"purge": "1d", "embargo": "1d"},
+        "universe": ["AAA"],
+        "cost_fill_model": "base-v1",
+        "baselines": ["cash"],
+        "primary_metrics": ["net_advantage"],
+        "secondary_metrics": ["drawdown"],
+        "trial_budget": 1,
+        "stopping_rules": "one registered trial",
+        "statistical_estimator": "dependence-aware",
+        "multiplicity_treatment": "registered",
+        "minimum_practical_effect": "0.001",
+        "risk_constraints": {"max_drawdown": "0.10"},
+        "retention_tolerances": {"prior_regime_loss": "0.02"},
+        "promotion_rule": "all registered gates",
+    }
+
+
+def approval(science, candidate="candidate-a", valid_days=1, status="PASS", *, contaminate=False):
+    registered = science.register_protocol(protocol())
+    valid_until = BASE + timedelta(days=valid_days)
+    result = {
+        "candidate_id": candidate,
+        "artifact_hash": f"sha256:{candidate}",
+        "evaluation_status": status,
+        "retention_passed": True,
+        "risk_passed": True,
+        "authority_scope_id": "paper-scope",
+        "evidence_valid_until": valid_until.isoformat(),
+        "reproducible": True,
+        "causal_audit_passed": True,
+        "financial_invariants_passed": True,
+        "trial_log_complete": True,
+    }
+    if contaminate:
+        science.record_holdout_access(
+            registered.protocol_id,
+            holdout_id=f"holdout-{candidate}",
+            purpose="manual peek",
+        )
+    locked = science.register_evaluation(
+        registered.protocol_id,
+        holdout_id=f"holdout-{candidate}",
+        result=result,
+    )
     return CandidateApproval.create(
         candidate_id=candidate,
         artifact_hash=f"sha256:{candidate}",
         evidence_id=f"evidence:{candidate}",
-        evidence_valid_until=BASE + timedelta(days=valid_days),
+        evidence_valid_until=valid_until,
         evaluation_status=status,
         retention_passed=True,
         risk_passed=True,
         authority_scope_id="paper-scope",
+        protocol_id=registered.protocol_id,
+        protocol_hash=registered.protocol_hash,
+        evaluation_id=locked["evaluation_id"],
+        evaluation_result_hash=locked["result_hash"],
     )
 
 
 class ChampionRegistryTests(unittest.TestCase):
     def test_atomic_initial_promotion_changes_future_pointer(self):
         with TemporaryDirectory() as directory:
-            registry = ChampionRegistry(Path(directory) / "champion.sqlite3")
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
             state = registry.promote(
-                approval(), expected_generation=0, now=BASE,
+                approval(science), expected_generation=0, now=BASE,
                 open_position_count=0, existing_position_policy=None,
             )
             self.assertEqual(state.generation, 1)
@@ -38,48 +105,116 @@ class ChampionRegistryTests(unittest.TestCase):
 
     def test_stale_generation_cannot_overwrite_new_champion(self):
         with TemporaryDirectory() as directory:
-            registry = ChampionRegistry(Path(directory) / "champion.sqlite3")
-            registry.promote(approval(), expected_generation=0, now=BASE, open_position_count=0, existing_position_policy=None)
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            registry.promote(approval(science), expected_generation=0, now=BASE, open_position_count=0, existing_position_policy=None)
             with self.assertRaises(PromotionConflict):
-                registry.promote(approval("candidate-b"), expected_generation=0, now=BASE, open_position_count=0, existing_position_policy=None)
+                registry.promote(approval(science, "candidate-b"), expected_generation=0, now=BASE, open_position_count=0, existing_position_policy=None)
 
     def test_expired_evidence_blocks_promotion(self):
         with TemporaryDirectory() as directory:
-            registry = ChampionRegistry(Path(directory) / "champion.sqlite3")
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
             with self.assertRaises(ValueError):
                 registry.promote(
-                    approval(valid_days=0), expected_generation=0,
+                    approval(science, valid_days=0), expected_generation=0,
                     now=BASE + timedelta(seconds=1),
                     open_position_count=0, existing_position_policy=None,
                 )
 
     def test_failed_evaluation_blocks_promotion(self):
         with TemporaryDirectory() as directory:
-            registry = ChampionRegistry(Path(directory) / "champion.sqlite3")
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
             with self.assertRaises(ValueError):
                 registry.promote(
-                    approval(status="FAIL"), expected_generation=0,
+                    approval(science, status="FAIL"), expected_generation=0,
                     now=BASE, open_position_count=0, existing_position_policy=None,
+                )
+
+    def test_fabricated_result_hash_cannot_promote(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            legitimate = approval(science)
+            forged = CandidateApproval.create(
+                candidate_id=legitimate.candidate_id,
+                artifact_hash=legitimate.artifact_hash,
+                evidence_id=legitimate.evidence_id,
+                evidence_valid_until=legitimate.evidence_valid_until,
+                evaluation_status=legitimate.evaluation_status,
+                retention_passed=legitimate.retention_passed,
+                risk_passed=legitimate.risk_passed,
+                authority_scope_id=legitimate.authority_scope_id,
+                protocol_id=legitimate.protocol_id,
+                protocol_hash=legitimate.protocol_hash,
+                evaluation_id=legitimate.evaluation_id,
+                evaluation_result_hash="sha256:forged",
+            )
+            with self.assertRaises(ProtocolViolation):
+                registry.promote(
+                    forged,
+                    expected_generation=0,
+                    now=BASE,
+                    open_position_count=0,
+                    existing_position_policy=None,
+                )
+
+    def test_contaminated_holdout_cannot_promote_even_with_pass_text(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            contaminated = approval(science, contaminate=True)
+            with self.assertRaisesRegex(ProtocolViolation, "untouched"):
+                registry.promote(
+                    contaminated,
+                    expected_generation=0,
+                    now=BASE,
+                    open_position_count=0,
+                    existing_position_policy=None,
                 )
 
     def test_open_positions_require_explicit_policy(self):
         with TemporaryDirectory() as directory:
-            registry = ChampionRegistry(Path(directory) / "champion.sqlite3")
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
             with self.assertRaises(ValueError):
                 registry.promote(
-                    approval(), expected_generation=0, now=BASE,
+                    approval(science), expected_generation=0, now=BASE,
                     open_position_count=2, existing_position_policy=None,
                 )
 
     def test_rollback_changes_future_pointer_without_erasing_history(self):
         with TemporaryDirectory() as directory:
-            registry = ChampionRegistry(Path(directory) / "champion.sqlite3")
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
             registry.promote(
-                approval("candidate-a"), expected_generation=0, now=BASE,
+                approval(science, "candidate-a"), expected_generation=0, now=BASE,
                 open_position_count=0, existing_position_policy=None,
             )
             registry.promote(
-                approval("candidate-b"), expected_generation=1, now=BASE,
+                approval(science, "candidate-b"), expected_generation=1, now=BASE,
                 open_position_count=0, existing_position_policy=None,
             )
             state = registry.rollback(

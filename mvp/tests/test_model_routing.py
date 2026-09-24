@@ -28,6 +28,7 @@ def model(
     revision="rev-1",
     schemas=("decision.explain.v1",),
     tools=(),
+    context=4096,
 ):
     return ModelDescriptor.create(
         model_id=model_id,
@@ -37,7 +38,7 @@ def model(
         location=location,
         supported_task_schemas=schemas,
         tool_permissions=tools,
-        max_context_tokens=4096,
+        max_context_tokens=context,
         max_output_tokens=1024,
         expected_latency_ms=latency,
         input_token_price=input_price,
@@ -152,7 +153,7 @@ class ModelRoutingTests(unittest.TestCase):
             (
                 policy(),
                 task(input_tokens=3000, output_tokens=500),
-                model(),
+                model(context=3000),
             ),
             (
                 policy(),

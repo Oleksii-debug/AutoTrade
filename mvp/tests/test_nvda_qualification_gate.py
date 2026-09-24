@@ -28,6 +28,7 @@ def complete_evidence():
         "release_artifact": True,
         "environment": {
             "windows_version": "Windows 11 24H2",
+            "assistive_technology": "NVDA",
             "nvda_version": "2026.1",
             "input_mode": "keyboard-only",
         },
@@ -92,6 +93,35 @@ class NvdaQualificationGateTests(unittest.TestCase):
             with self.subTest(method=method), self.assertRaisesRegex(
                 NvdaQualificationError,
                 "not real NVDA",
+            ):
+                validate_evidence(evidence, REQUIREMENTS)
+
+    def test_wrong_assistive_technology_is_rejected(self):
+        evidence = complete_evidence()
+        evidence["environment"]["assistive_technology"] = "synthetic-reader"
+        with self.assertRaisesRegex(NvdaQualificationError, "assistive technology"):
+            validate_evidence(evidence, REQUIREMENTS)
+
+    def test_malformed_or_duplicate_requirements_fail_closed(self):
+        malformed = dict(REQUIREMENTS)
+        malformed["workflows"] = [*REQUIREMENTS["workflows"], "not-an-object"]
+        with self.assertRaisesRegex(NvdaQualificationError, "must be an object"):
+            validate_evidence(complete_evidence(), malformed)
+
+        duplicated = dict(REQUIREMENTS)
+        duplicated["workflows"] = [*REQUIREMENTS["workflows"], REQUIREMENTS["workflows"][0]]
+        evidence = complete_evidence()
+        evidence["workflows"].append(dict(evidence["workflows"][0]))
+        with self.assertRaisesRegex(NvdaQualificationError, "duplicate workflow evidence|must be unique"):
+            validate_evidence(evidence, duplicated)
+
+    def test_observed_at_requires_timezone_aware_iso_timestamp(self):
+        for value in ("not-a-time", "2026-09-24T20:00:00"):
+            evidence = complete_evidence()
+            evidence["observed_at"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(
+                NvdaQualificationError,
+                "observed_at",
             ):
                 validate_evidence(evidence, REQUIREMENTS)
 

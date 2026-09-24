@@ -189,5 +189,27 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         )
 
 
+    def test_nonbinary_missing_or_invalid_signature_status_is_unresolved(self):
+        for status in ("MISSING", "INVALID"):
+            with self.subTest(status=status):
+                artifacts = [
+                    (
+                        artifact("SBOM", signature_status=status)
+                        if item.role == "SBOM"
+                        else item
+                    )
+                    for item in self.candidate().artifacts
+                ]
+                decision = freeze_release_candidate(
+                    self.candidate(artifacts=artifacts)
+                )
+                self.assertEqual(decision.status, "BLOCKED")
+                self.assertIn(
+                    "signature_status_unresolved:SBOM",
+                    decision.reasons,
+                )
+
+
+
 if __name__ == "__main__":
     unittest.main()

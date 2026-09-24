@@ -118,6 +118,8 @@ class DagPlan:
     scheduled_roles: tuple[str, ...]
     skipped_roles: tuple[tuple[str, str], ...]
     reserved_cost: Decimal
+    available_inputs: tuple[str, ...]
+    total_budget: Decimal
 
 
 @dataclass(frozen=True)
@@ -182,7 +184,13 @@ def plan_specialists(
         if not progressed:
             raise SpecialistDagError("specialist dependency graph contains a cycle")
 
-    return DagPlan(tuple(scheduled), tuple(skipped), reserved)
+    return DagPlan(
+        tuple(scheduled),
+        tuple(skipped),
+        reserved,
+        tuple(sorted(available)),
+        budget,
+    )
 
 
 def aggregate_specialists(
@@ -201,6 +209,20 @@ def aggregate_specialists(
         raise SpecialistDagError("at least one specialist specification is required")
     if not isinstance(plan, DagPlan):
         raise SpecialistDagError("aggregation requires the exact DagPlan")
+    # Re-run the canonical planner from the context embedded in the plan.
+    # Merely checking reserved_cost is insufficient: a forged DagPlan could
+    # otherwise schedule a role whose required inputs or dependencies were
+    # never eligible.  Aggregation accepts only a plan that is exactly the
+    # deterministic output for the current specs, inputs and hard budget.
+    canonical_plan = plan_specialists(
+        by_id.values(),
+        available_inputs=plan.available_inputs,
+        total_budget=plan.total_budget,
+    )
+    if plan != canonical_plan:
+        raise SpecialistDagError(
+            "DagPlan does not match canonical planner output for this context"
+        )
     scheduled_roles = set(plan.scheduled_roles)
     if len(scheduled_roles) != len(plan.scheduled_roles):
         raise SpecialistDagError("DagPlan scheduled roles must be unique")

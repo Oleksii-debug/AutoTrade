@@ -1,6 +1,19 @@
+import json
+from pathlib import Path
 import unittest
 
-from mvp.autotrade_mvp.host_api import EventGap, HostCommandStore
+from jsonschema import Draft202012Validator
+from referencing import Registry, Resource
+
+from mvp.autotrade_mvp.host_api import (
+    EventGap,
+    HostCommandStore,
+    command_result_payload,
+    operation_result_payload,
+)
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class HostCommandStateTests(unittest.TestCase):
@@ -9,6 +22,7 @@ class HostCommandStateTests(unittest.TestCase):
         self.store = HostCommandStore(
             session_validator=lambda session, actor: (session, actor) in self.sessions,
             max_events=3,
+            now=lambda: "2026-09-24T18:00:00Z",
         )
 
     @staticmethod
@@ -88,8 +102,9 @@ class HostCommandStateTests(unittest.TestCase):
         accepted = self.store.submit(self.command())
         completed = self.store.update_operation(accepted.operation_id, "SUCCEEDED")
         self.assertEqual(completed.phase, "SUCCEEDED")
-        self.assertEqual(completed.state_version, "2")
         self.assertEqual(self.store.snapshot()["state_version"], "2")
+        self.assertEqual(completed.started_at, "2026-09-24T18:00:00Z")
+        self.assertEqual(completed.updated_at, "2026-09-24T18:00:00Z")
         with self.assertRaises(ValueError):
             self.store.update_operation(accepted.operation_id, "FAILED")
 
@@ -131,6 +146,44 @@ class HostCommandStateTests(unittest.TestCase):
                 "FAILED",
                 remaining_uncertainty=("provider_outcome_unresolved",),
             )
+
+    def test_results_serialize_against_canonical_ui_schema(self):
+        common = json.loads(
+            (ROOT / "contracts/jsonschema/common.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        ui = json.loads(
+            (ROOT / "contracts/jsonschema/ui.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        registry = Registry().with_resources(
+            [
+                (common["$id"], Resource.from_contents(common)),
+                (ui["$id"], Resource.from_contents(ui)),
+            ]
+        )
+        accepted = self.store.submit(self.command())
+        operation = self.store.get_operation(accepted.operation_id)
+        command_payload = command_result_payload(accepted)
+        operation_payload = operation_result_payload(operation)
+
+        Draft202012Validator(
+            {"$ref": f"{ui['$id']}#/$defs/CommandResult"},
+            registry=registry,
+        ).validate(command_payload)
+        Draft202012Validator(
+            {"$ref": f"{ui['$id']}#/$defs/OperationResult"},
+            registry=registry,
+        ).validate(operation_payload)
+
+        self.assertEqual(command_payload["field_errors"], [])
+        self.assertNotIn("state_version", operation_payload)
+        self.assertEqual(
+            operation_payload["remaining_uncertainty"],
+            ["financial_outcome_not_completed"],
+        )
 
     def test_resumable_events_return_only_newer_items(self):
         accepted = self.store.submit(self.command())

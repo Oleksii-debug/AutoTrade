@@ -1115,3 +1115,195 @@ def absence_evidence_from_coverages(
         activities_complete=activities_complete,
         consistency_horizon_satisfied=consistency_horizon_satisfied,
     )
+
+
+@dataclass(frozen=True)
+class WhiteBitPositionObservation:
+    position_id: str
+    market: str
+    position_side: str
+    amount: Decimal
+    base_price: Decimal
+    realized_pnl: Decimal
+    margin: Decimal
+    free_margin: Decimal
+    funding: Decimal
+    unrealized_funding: Decimal
+    unrealized_pnl: Decimal | None
+    liquidation_price: Decimal | None
+    liquidation_state: str | None
+    opened_at: str
+    modified_at: str
+
+
+def parse_open_position(payload: Mapping[str, object]) -> WhiteBitPositionObservation:
+    """Normalize one collateral/futures position without collapsing hedge semantics."""
+    if not isinstance(payload, Mapping):
+        raise TypeError("payload must be a mapping")
+    required = {
+        "positionId",
+        "market",
+        "openDate",
+        "modifyDate",
+        "amount",
+        "basePrice",
+        "pnl",
+        "margin",
+        "freeMargin",
+        "funding",
+        "unrealizedFunding",
+        "positionSide",
+    }
+    missing = sorted(required - set(payload))
+    if missing:
+        raise WhiteBitAdapterError(
+            "open position missing required fields: " + ", ".join(missing)
+        )
+
+    amount = _decimal(payload["amount"], name="amount")
+    if amount < 0:
+        raise WhiteBitAdapterError("position amount cannot be negative")
+    base_price = _decimal(payload["basePrice"], name="basePrice", positive=True)
+    margin = _decimal(payload["margin"], name="margin")
+    free_margin = _decimal(payload["freeMargin"], name="freeMargin")
+    if margin < 0 or free_margin < 0:
+        raise WhiteBitAdapterError("position margin values cannot be negative")
+    side = _text(str(payload["positionSide"]), name="positionSide").upper()
+    if side not in {"LONG", "SHORT", "BOTH"}:
+        raise WhiteBitAdapterError("unsupported positionSide")
+
+    liquidation_price_raw = payload.get("liquidationPrice")
+    liquidation_price = (
+        None
+        if liquidation_price_raw is None
+        else _decimal(
+            liquidation_price_raw,
+            name="liquidationPrice",
+            positive=True,
+        )
+    )
+    liquidation_state_raw = payload.get("liquidationState")
+    liquidation_state = (
+        None
+        if liquidation_state_raw is None
+        else _text(
+            str(liquidation_state_raw),
+            name="liquidationState",
+        ).lower()
+    )
+    if liquidation_state not in {None, "margin_call", "liquidation"}:
+        raise WhiteBitAdapterError("unsupported liquidationState")
+
+    unrealized_pnl_raw = payload.get("unrealizedPnl")
+    unrealized_pnl = (
+        None
+        if unrealized_pnl_raw is None
+        else _decimal(unrealized_pnl_raw, name="unrealizedPnl")
+    )
+
+    return WhiteBitPositionObservation(
+        position_id=_text(str(payload["positionId"]), name="positionId"),
+        market=_text(str(payload["market"]), name="market").upper(),
+        position_side=side,
+        amount=amount,
+        base_price=base_price,
+        realized_pnl=_decimal(payload["pnl"], name="pnl"),
+        margin=margin,
+        free_margin=free_margin,
+        funding=_decimal(payload["funding"], name="funding"),
+        unrealized_funding=_decimal(
+            payload["unrealizedFunding"],
+            name="unrealizedFunding",
+        ),
+        unrealized_pnl=unrealized_pnl,
+        liquidation_price=liquidation_price,
+        liquidation_state=liquidation_state,
+        opened_at=_unix_instant(payload["openDate"], name="openDate"),
+        modified_at=_unix_instant(payload["modifyDate"], name="modifyDate"),
+    )
+
+
+def parse_open_positions(
+    records: list[Mapping[str, object]] | tuple[Mapping[str, object], ...],
+) -> tuple[WhiteBitPositionObservation, ...]:
+    if not isinstance(records, (list, tuple)):
+        raise TypeError("records must be a list or tuple")
+    by_id: dict[str, WhiteBitPositionObservation] = {}
+    for payload in records:
+        position = parse_open_position(payload)
+        existing = by_id.get(position.position_id)
+        if existing is not None:
+            if existing != position:
+                raise WhiteBitAdapterError(
+                    "provider position id has conflicting observations"
+                )
+            continue
+        by_id[position.position_id] = position
+    return tuple(by_id[key] for key in sorted(by_id))
+
+
+def open_positions_request(*, market: str | None = None) -> WhiteBitLookupRequest:
+    body: dict[str, object] = {}
+    if market is not None:
+        body["market"] = _text(market, name="market").upper()
+    return WhiteBitLookupRequest(
+        "OPEN_POSITIONS",
+        "/api/v4/collateral-account/positions/open",
+        body,
+    )
+
+
+def hedge_mode_request() -> WhiteBitLookupRequest:
+    return WhiteBitLookupRequest(
+        "HEDGE_MODE",
+        "/api/v4/collateral-account/hedge-mode",
+        {},
+    )
+
+
+def parse_hedge_mode(payload: Mapping[str, object]) -> bool:
+    if not isinstance(payload, Mapping):
+        raise TypeError("payload must be a mapping")
+    if set(payload) != {"hedgeMode"}:
+        raise WhiteBitAdapterError(
+            "hedge-mode response must contain only hedgeMode"
+        )
+    value = payload["hedgeMode"]
+    if type(value) is not bool:
+        raise WhiteBitAdapterError("hedgeMode must be boolean")
+    return value
+
+
+def signed_position_quantities(
+    positions: list[WhiteBitPositionObservation]
+    | tuple[WhiteBitPositionObservation, ...],
+    *,
+    hedge_mode: bool,
+) -> Mapping[str, Decimal]:
+    """Project provider positions only when side semantics are unambiguous."""
+    if type(hedge_mode) is not bool:
+        raise TypeError("hedge_mode must be boolean")
+    totals: dict[str, Decimal] = {}
+    for position in positions:
+        if not isinstance(position, WhiteBitPositionObservation):
+            raise TypeError("positions contain invalid observation")
+        if hedge_mode:
+            if position.position_side == "BOTH":
+                raise WhiteBitAdapterError(
+                    "hedge-mode position cannot use ambiguous BOTH side"
+                )
+            signed = (
+                position.amount
+                if position.position_side == "LONG"
+                else -position.amount
+            )
+        else:
+            if position.position_side != "BOTH":
+                raise WhiteBitAdapterError(
+                    "one-way position must use BOTH side before signed projection"
+                )
+            raise WhiteBitAdapterError(
+                "WhiteBIT one-way BOTH amount sign semantics are not qualified"
+            )
+        totals[position.market] = totals.get(position.market, Decimal("0")) + signed
+    return MappingProxyType(dict(sorted(totals.items())))

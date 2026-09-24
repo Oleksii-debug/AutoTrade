@@ -151,6 +151,27 @@ class AccountingFoundationTests(unittest.TestCase):
         self.assertEqual(book.position("ABC"), Decimal("0"))
         self.assertEqual(book.fee_expense("USD"), Decimal("0"))
 
+    def test_same_transaction_cannot_be_reversed_twice(self):
+        book = EconomicBook()
+        original = book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="deposit",
+            currency="USD",
+            amount="100",
+        )
+        book.append(original)
+        book.append(reverse_transaction(
+            original,
+            transaction_id="reverse-1",
+            cause_event_id="correction-1",
+        ))
+        with self.assertRaises(AccountingConflict):
+            book.append(reverse_transaction(
+                original,
+                transaction_id="reverse-2",
+                cause_event_id="correction-2",
+            ))
+
     def test_duplicate_transaction_is_idempotent_but_changed_content_conflicts(self):
         book = EconomicBook()
         original = book_external_cash_flow(

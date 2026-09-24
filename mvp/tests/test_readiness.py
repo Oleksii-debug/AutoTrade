@@ -21,6 +21,8 @@ def healthy(**overrides):
         "old_sender_fenced": True,
         "provider_native_protection_present": True,
         "emergency_execution_path_qualified": True,
+        "protection_required_for_new_exposure": True,
+        "new_exposure_protection_path_qualified": True,
         "unknown_send_count": 0,
         "reconciliation_lag_seconds": "1",
         "maximum_reconciliation_lag_seconds": "5",
@@ -166,24 +168,67 @@ class RuntimeReadinessTests(unittest.TestCase):
         self.assertIn("provider_native_protection_absent", result.warnings)
         self.assertIn("emergency_execution_path_unqualified", result.warnings)
 
-    def test_no_protection_path_blocks_new_exposure_even_if_everything_else_is_green(self):
+    def test_required_new_protection_path_blocks_new_exposure_when_unqualified(self):
         result = evaluate_readiness(
             healthy(
                 provider_native_protection_present=False,
                 emergency_execution_path_qualified=False,
+                protection_required_for_new_exposure=True,
+                new_exposure_protection_path_qualified=False,
             )
         )
         self.assertEqual(result.mode, RuntimeMode.DEGRADED)
         self.assertFalse(result.ready)
         self.assertFalse(result.ready_for_new_exposure)
         self.assertFalse(result.protection_only_available)
-        self.assertIn("no_qualified_protection_path", result.blockers)
+        self.assertIn(
+            "new_exposure_protection_path_unqualified",
+            result.blockers,
+        )
         self.assertIn("provider_native_protection_absent", result.warnings)
         self.assertIn("emergency_execution_path_unqualified", result.warnings)
+
+    def test_existing_native_protection_does_not_authorize_new_intent_protection(self):
+        result = evaluate_readiness(
+            healthy(
+                provider_native_protection_present=True,
+                emergency_execution_path_qualified=False,
+                protection_required_for_new_exposure=True,
+                new_exposure_protection_path_qualified=False,
+            )
+        )
+        self.assertFalse(result.ready_for_new_exposure)
+        self.assertTrue(result.protection_only_available)
+        self.assertEqual(result.mode, RuntimeMode.PROTECTION_ONLY)
+        self.assertIn(
+            "new_exposure_protection_path_unqualified",
+            result.blockers,
+        )
+
+    def test_policy_can_explicitly_allow_new_exposure_without_protection(self):
+        result = evaluate_readiness(
+            healthy(
+                provider_native_protection_present=False,
+                emergency_execution_path_qualified=False,
+                protection_required_for_new_exposure=False,
+                new_exposure_protection_path_qualified=False,
+            )
+        )
+        self.assertTrue(result.ready)
+        self.assertTrue(result.ready_for_new_exposure)
+        self.assertEqual(result.mode, RuntimeMode.READY)
+        self.assertNotIn(
+            "new_exposure_protection_path_unqualified",
+            result.blockers,
+        )
 
     def test_boolean_and_count_fields_fail_closed_on_truthy_values(self):
         with self.assertRaisesRegex(ReadinessError, "boolean"):
             healthy(journal_writable=1)
+        with self.assertRaisesRegex(ReadinessError, "boolean"):
+            healthy(protection_required_for_new_exposure=1)
+        with self.assertRaisesRegex(ReadinessError, "boolean"):
+            healthy(new_exposure_protection_path_qualified=1)
         with self.assertRaisesRegex(ReadinessError, "non-negative integer"):
             healthy(unknown_send_count=True)
         with self.assertRaisesRegex(ReadinessError, "non-negative integer"):

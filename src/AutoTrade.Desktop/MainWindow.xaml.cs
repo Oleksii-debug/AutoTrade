@@ -28,7 +28,6 @@ public partial class MainWindow : Window
     private void MainWindow_Closed(object? sender, EventArgs e)
     {
         _lifetime.Cancel();
-        _lifetime.Dispose();
     }
 
     private async void RefreshHostStatus_Click(object sender, RoutedEventArgs e)

@@ -133,6 +133,19 @@ class ExportBoundaryTests(unittest.TestCase):
             with self.assertRaisesRegex(ExportBoundaryError, "integrity"):
                 write_prepared_export(forged, directory)
 
+    def test_duplicate_serialized_secret_key_cannot_hide_raw_value(self):
+        export = self.prepare({"authorization": "safe-placeholder"})
+        forged_data = (
+            b'{"authorization":"Bearer raw-secret",'
+            b'"authorization":"[REDACTED]"}\n'
+        )
+        forged = replace(
+            export,
+            data=forged_data,
+            sha256="sha256:" + sha256(forged_data).hexdigest(),
+        )
+        self.assertFalse(verify_prepared_export(forged))
+
     def test_rehashed_fractional_json_number_cannot_bypass_exact_decimal_boundary(self):
         export = self.prepare({"money": Decimal("1.25")})
         forged_data = b'{"money":1.25}\n'

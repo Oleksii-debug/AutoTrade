@@ -115,7 +115,15 @@ def _freeze_stream_value(value: object) -> object:
         )
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_stream_value(item) for item in value)
-    return value
+    if isinstance(value, float):
+        raise TypeError("stream financial values must not use binary float")
+    if isinstance(value, Decimal):
+        return _decimal(value, name="stream decimal")
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    raise TypeError(
+        "stream payload values must be immutable JSON scalars, exact Decimal, mappings or sequences"
+    )
 
 
 @dataclass(frozen=True)

@@ -155,13 +155,17 @@ def apply_split(
     numerator: Decimal | str | int,
     denominator: Decimal | str | int = 1,
 ) -> SplitResult:
-    qty = _non_negative(quantity, name="quantity")
+    qty = _decimal(quantity, name="quantity")
     basis = _non_negative(unit_basis, name="unit_basis")
     num = _positive(numerator, name="numerator")
     den = _positive(denominator, name="denominator")
-    total_basis = qty * basis
+    total_basis = abs(qty) * basis
     new_quantity = qty * num / den
-    new_unit_basis = total_basis / new_quantity if new_quantity else Decimal("0")
+    new_unit_basis = (
+        total_basis / abs(new_quantity)
+        if new_quantity
+        else Decimal("0")
+    )
     return SplitResult(
         quantity=new_quantity,
         unit_basis=new_unit_basis,

@@ -226,6 +226,22 @@ class AuthorityFoundationTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             require_admission(decision, risk_verdict="REJECT")
 
+    def test_autonomous_flag_must_be_an_actual_boolean(self):
+        with self.assertRaises(TypeError):
+            build_policy(
+                policy_id="policy-bad",
+                version=1,
+                actor_id="user-1",
+                environment="SIM",
+                allowed_actions=("ORDER.SUBMIT",),
+                provider_ids=("provider-a",),
+                account_ids=("account-a",),
+                instrument_ids=("instrument-a",),
+                valid_from=NOW - timedelta(minutes=5),
+                valid_until=NOW + timedelta(minutes=30),
+                autonomous="false",
+            )
+
     def test_binary_float_in_intent_is_rejected_before_hashing(self):
         p = policy(autonomous=True)
         bad = intent()

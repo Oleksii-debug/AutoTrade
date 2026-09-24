@@ -208,6 +208,62 @@ class ModelGatewayTests(unittest.TestCase):
                 deadline_utc=NOW + timedelta(minutes=1),
             )
 
+    def test_authority_identifiers_are_canonical_and_allowlists_are_exact(self):
+        descriptor = ModelDescriptor(
+            model_id=" local ",
+            provider_id=" provider ",
+            revision=" r1 ",
+            remote=False,
+            estimated_cost="0",
+            latency_ms=1,
+            quality_score="0.5",
+        )
+        self.assertEqual(descriptor.model_id, "local")
+        self.assertEqual(descriptor.provider_id, "provider")
+        self.assertEqual(descriptor.revision, "r1")
+
+        policy = RoutingPolicy(
+            RoutingMode.ALLOWLIST,
+            allowed_model_ids=(" local ",),
+            maximum_cost="1",
+        )
+        req = ModelRequest(
+            request_id=" req ",
+            allowed_model_ids=(" local ",),
+            privacy_remote_allowed=False,
+            budget_remaining="1",
+            deadline_utc=NOW + timedelta(minutes=1),
+        )
+        self.assertEqual(policy.allowed_model_ids, ("local",))
+        self.assertEqual(req.request_id, "req")
+        decision = route_model(policy, req, [descriptor], now_utc=NOW)
+        self.assertEqual(RouteStatus.ADMITTED, decision.status)
+
+        with self.assertRaisesRegex(ValueError, "duplicates"):
+            RoutingPolicy(
+                RoutingMode.ALLOWLIST,
+                allowed_model_ids=("local", " local "),
+                maximum_cost="1",
+            )
+        with self.assertRaises(TypeError):
+            ModelRequest(
+                request_id="req-list",
+                allowed_model_ids=["local"],
+                privacy_remote_allowed=False,
+                budget_remaining="1",
+                deadline_utc=NOW + timedelta(minutes=1),
+            )
+        with self.assertRaises(ValueError):
+            ModelDescriptor(
+                model_id="   ",
+                provider_id="provider",
+                revision="r1",
+                remote=False,
+                estimated_cost="0",
+                latency_ms=1,
+                quality_score="0.5",
+            )
+
     def test_duplicate_descriptor_is_rejected(self):
         with self.assertRaises(ValueError):
             route_model(

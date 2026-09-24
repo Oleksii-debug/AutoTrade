@@ -14,6 +14,7 @@ class ZeroModelQualificationTests(unittest.TestCase):
         self.assertIsNone(route["model_id"])
         self.assertIsNone(route["provider_id"])
         self.assertEqual(route["reserved_cost"], "0")
+        self.assertFalse(route["model_inventory_touched"])
 
         financial = evidence["deterministic_financial_slice"]
         self.assertTrue(financial["resumed"])
@@ -27,6 +28,16 @@ class ZeroModelQualificationTests(unittest.TestCase):
         self.assertEqual(economics["evidence_count"], 1)
         self.assertEqual(economics["trade_count"], 1)
         self.assertGreaterEqual(float(economics["total_fees"]), 0)
+
+        small = evidence["small_capital"]
+        self.assertEqual(small["status"], "risk_rejected")
+        self.assertTrue(small["resumed"])
+        self.assertIsNone(small["order_id"])
+        self.assertIsNone(small["fill_id"])
+        self.assertTrue(small["reconciled"])
+        self.assertTrue(small["replay_verified"])
+        self.assertEqual(small["economics"]["trade_count"], 0)
+        self.assertEqual(small["economics"]["net_pnl"], "0E-8")
 
         claims = evidence["claims"]
         self.assertFalse(claims["network_or_model_call_performed"])

@@ -45,6 +45,28 @@ class CorporateSettlementTests(unittest.TestCase):
         self.assertEqual(result.economic_pnl, Decimal("0"))
         self.assertEqual(book.apply(event), result)
 
+    def test_split_scales_short_borrow_and_recall_obligations(self):
+        book = CorporateActionBook(
+            state(
+                quantity="-10",
+                total_basis="1000",
+                borrowed_quantity="10",
+                recalled_quantity="4",
+            )
+        )
+        event = CorporateEvent.create(
+            event_id="short-split-1",
+            kind="SPLIT",
+            effective_date=date(2026, 1, 2),
+            source_revision="r1",
+            payload={"numerator": 2, "denominator": 1},
+        )
+        result = book.apply(event)
+        self.assertEqual(result.after.quantity, Decimal("-20"))
+        self.assertEqual(result.after.borrowed_quantity, Decimal("20"))
+        self.assertEqual(result.after.recalled_quantity, Decimal("8"))
+        self.assertEqual(result.after.total_basis, Decimal("1000"))
+
     def test_cash_dividend_stays_unsettled_until_explicit_settlement(self):
         book = CorporateActionBook(state())
         event = CorporateEvent.create(
@@ -60,6 +82,41 @@ class CorporateSettlementTests(unittest.TestCase):
         settled = settle_cash(result.after, "15")
         self.assertEqual(settled.unsettled_cash, Decimal("0.00"))
         self.assertEqual(settled.settled_cash, Decimal("1015"))
+
+    def test_short_dividend_payable_can_settle_without_sign_inversion(self):
+        book = CorporateActionBook(
+            state(
+                quantity="-10",
+                total_basis="1000",
+                borrowed_quantity="10",
+            )
+        )
+        event = CorporateEvent.create(
+            event_id="short-div-1",
+            kind="CASH_DIVIDEND",
+            effective_date=date(2026, 1, 2),
+            source_revision="r1",
+            payload={"per_share": "1.50"},
+        )
+        result = book.apply(event)
+        self.assertEqual(result.after.unsettled_cash, Decimal("-15.00"))
+        self.assertEqual(result.economic_pnl, Decimal("-15.00"))
+        settled = settle_cash(result.after, "-15")
+        self.assertEqual(settled.unsettled_cash, Decimal("0.00"))
+        self.assertEqual(settled.settled_cash, Decimal("985"))
+
+    def test_cash_settlement_rejects_wrong_sign_and_crossing_zero(self):
+        receivable = state(unsettled_cash="10")
+        with self.assertRaises(ValueError):
+            settle_cash(receivable, "-1")
+        with self.assertRaises(ValueError):
+            settle_cash(receivable, "11")
+
+        payable = state(unsettled_cash="-10")
+        with self.assertRaises(ValueError):
+            settle_cash(payable, "1")
+        with self.assertRaises(ValueError):
+            settle_cash(payable, "-11")
 
     def test_cash_merger_extinguishes_position_once(self):
         book = CorporateActionBook(state())

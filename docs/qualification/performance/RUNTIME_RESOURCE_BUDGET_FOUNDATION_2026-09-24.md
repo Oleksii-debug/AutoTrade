@@ -9,6 +9,9 @@ This foundation adds a fail-closed evaluator for measured runtime-load evidence.
 
 A declared scenario binds:
 
+- exact release commit SHA;
+- SHA-256 configuration identity;
+- privacy-preserving SHA-256 target-host fingerprint;
 - strategy horizon;
 - maximum p95 financial-processing latency;
 - maximum financial-state staleness;
@@ -17,7 +20,7 @@ A declared scenario binds:
 
 An observation records the expected and recovered financial-event counts, latency and staleness samples, research interference and remaining reconnect backlog. A scenario cannot pass if any financial event is lost, reconnect backlog remains, measured bounds are exceeded, or the evidence sample is too small.
 
-The percentile implementation uses integer nearest-rank arithmetic. Performance evidence is never extrapolated from one scenario to another.
+The percentile implementation uses integer nearest-rank arithmetic. Performance evidence is never extrapolated from one scenario to another, another release commit, another configuration or another target host.
 
 ## Test evidence encoded in the repository
 
@@ -31,6 +34,7 @@ The percentile implementation uses integer nearest-rank arithmetic. Performance 
 - research/model interference above the declared budget;
 - insufficient samples as `INCONCLUSIVE`, never `PASS`;
 - scenario identity preventing evidence reuse across another workload;
+- exact release/configuration/host binding preventing evidence reuse across another binary or target environment;
 - a real `JournalStore` burst probe that persists and reconstructs every financial probe event and its outbox row.
 
 The CI burst thresholds are intentionally generous. They prove that the measurement wiring works on the CI host and that financial events survive the probe. They do **not** qualify production throughput or latency.

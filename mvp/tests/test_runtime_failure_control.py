@@ -54,6 +54,22 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.assertEqual(controller.state, HostState.READY)
         self.assertEqual(attempt.retry_disposition, "NEVER")
 
+    def test_unknown_send_resolves_from_execution_even_when_ack_is_lost(self):
+        controller, owner = self._ready()
+        attempt = OutboundAttempt("a-fill", "intent-fill", owner.epoch)
+        attempt.persist()
+        attempt.mark_send_started("journal:send-started")
+        controller.note_unknown_send(attempt)
+
+        attempt.observe_execution("exec-7", "provider:execution:exec-7")
+        controller.resolve_attempt(attempt)
+        controller.record_reconciliation(consistent=True)
+
+        self.assertEqual(attempt.phase, SendPhase.EXECUTION_OBSERVED)
+        self.assertEqual(attempt.provider_execution_id, "exec-7")
+        self.assertEqual(attempt.retry_disposition, "NEVER")
+        self.assertEqual(controller.state, HostState.READY)
+
     def test_absence_requires_complete_provider_surfaces_before_retry(self):
         attempt = OutboundAttempt("a1", "intent-1", 1)
         attempt.persist()

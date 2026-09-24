@@ -1,7 +1,13 @@
 from decimal import Decimal
 import unittest
 
-from mvp.autotrade_mvp.risk import RiskContext, RiskIntent, RiskPolicy, evaluate_risk
+from mvp.autotrade_mvp.risk import (
+    RiskContext,
+    RiskIntent,
+    RiskPolicy,
+    evaluate_risk,
+    risk_decision_fingerprint,
+)
 
 
 def policy(**overrides):
@@ -19,6 +25,14 @@ def policy(**overrides):
         max_asset_concentration_fraction=None,
         max_venue_concentration_fraction=None,
         max_order_participation_fraction=None,
+        max_abs_factor_exposure=None,
+        max_spread_fraction=None,
+        max_slippage_fraction=None,
+        max_clock_age_seconds=None,
+        allowed_actions=None,
+        require_settlement_evidence=False,
+        require_option_exercise_evidence=False,
+        min_futures_delivery_headroom_seconds=None,
     )
     values.update(overrides)
     return RiskPolicy.create(**values)
@@ -523,6 +537,367 @@ class IndependentRiskTests(unittest.TestCase):
             policy(max_asset_concentration_fraction="1.01")
         with self.assertRaises(ValueError):
             policy(max_venue_concentration_fraction="1.01")
+
+    def test_factor_exposure_aggregates_correlated_positions(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(
+                positions={"ABC": "2", "XYZ": "4"},
+                factor_loadings={
+                    "ABC": {"EQUITY": "1"},
+                    "XYZ": {"EQUITY": "0.8"},
+                },
+                stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.10"},),
+            ),
+            policy(max_abs_factor_exposure="450"),
+        )
+        rule = next(item for item in decision.rules if item.rule == "factor_exposure")
+        self.assertFalse(rule.passed)
+        self.assertEqual(rule.observed, "460.0")
+        self.assertFalse(decision.admitted)
+
+    def test_factor_exposure_recognizes_signed_hedge(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(
+                positions={"ABC": "1", "XYZ": "-4"},
+                factor_loadings={
+                    "ABC": {"EQUITY": "1"},
+                    "XYZ": {"EQUITY": "1"},
+                },
+                stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.10"},),
+            ),
+            policy(max_abs_factor_exposure="50"),
+        )
+        rule = next(item for item in decision.rules if item.rule == "factor_exposure")
+        self.assertTrue(rule.passed)
+        self.assertEqual(rule.observed, "0")
+
+    def test_factor_exposure_fails_closed_on_missing_loading(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(
+                positions={"ABC": "1", "XYZ": "1"},
+                factor_loadings={"ABC": {"EQUITY": "1"}},
+                stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.10"},),
+            ),
+            policy(max_abs_factor_exposure="1000"),
+        )
+        rule = next(item for item in decision.rules if item.rule == "factor_exposure")
+        self.assertFalse(rule.passed)
+        self.assertEqual(rule.observed, "MISSING:XYZ")
+
+    def test_factor_loading_rejects_binary_float(self):
+        with self.assertRaises(TypeError):
+            context(factor_loadings={"ABC": {"EQUITY": 1.0}})
+
+    def test_execution_quality_limits_fail_closed_on_missing_evidence(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(spread_fraction={}, slippage_fraction={}),
+            policy(max_spread_fraction="0.01", max_slippage_fraction="0.02"),
+        )
+        failed = {item.rule: item.observed for item in decision.rules if not item.passed}
+        self.assertEqual(failed["spread"], "UNKNOWN")
+        self.assertEqual(failed["slippage"], "UNKNOWN")
+
+    def test_execution_quality_limits_block_excess_cost(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(
+                spread_fraction={"ABC": "0.005"},
+                slippage_fraction={"ABC": "0.03"},
+            ),
+            policy(max_spread_fraction="0.01", max_slippage_fraction="0.02"),
+        )
+        spread = next(item for item in decision.rules if item.rule == "spread")
+        slippage = next(item for item in decision.rules if item.rule == "slippage")
+        self.assertTrue(spread.passed)
+        self.assertFalse(slippage.passed)
+        self.assertFalse(decision.admitted)
+
+    def test_execution_quality_evidence_rejects_binary_float(self):
+        with self.assertRaises(TypeError):
+            context(spread_fraction={"ABC": 0.01})
+        with self.assertRaises(TypeError):
+            context(slippage_fraction={"ABC": 0.01})
+
+    def test_clock_freshness_fails_closed_when_required_evidence_missing(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(clock_age_seconds=None),
+            policy(max_clock_age_seconds="2"),
+        )
+        rule = next(item for item in decision.rules if item.rule == "clock_freshness")
+        self.assertFalse(rule.passed)
+        self.assertEqual(rule.observed, "UNKNOWN")
+
+    def test_clock_freshness_boundary_is_exact(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        exact = evaluate_risk(
+            intent,
+            context(clock_age_seconds="2"),
+            policy(max_clock_age_seconds="2"),
+        )
+        stale = evaluate_risk(
+            intent,
+            context(clock_age_seconds="2.0001"),
+            policy(max_clock_age_seconds="2"),
+        )
+        self.assertTrue(next(x for x in exact.rules if x.rule == "clock_freshness").passed)
+        self.assertFalse(next(x for x in stale.rules if x.rule == "clock_freshness").passed)
+
+    def test_clock_age_rejects_binary_float(self):
+        with self.assertRaises(TypeError):
+            context(clock_age_seconds=0.1)
+
+    def test_action_policy_blocks_disallowed_action_class(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7, action="HEDGE",
+            ),
+            context(),
+            policy(allowed_actions=("TRADE", "REDUCE")),
+        )
+        rule = next(item for item in decision.rules if item.rule == "allowed_action")
+        self.assertFalse(rule.passed)
+        self.assertEqual(rule.observed, "HEDGE")
+        self.assertFalse(decision.admitted)
+
+    def test_reduce_and_flatten_labels_require_reduce_only_semantics(self):
+        with self.assertRaisesRegex(ValueError, "requires reduce_only"):
+            RiskIntent.create(
+                symbol="ABC", side="SELL", quantity="1", price="100",
+                expected_state_version=7, action="REDUCE",
+            )
+        with self.assertRaisesRegex(ValueError, "requires reduce_only"):
+            RiskIntent.create(
+                symbol="ABC", side="SELL", quantity="1", price="100",
+                expected_state_version=7, action="FLATTEN",
+            )
+
+    def test_action_label_does_not_override_numeric_risk(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="20", price="100",
+                expected_state_version=7, action="HEDGE",
+            ),
+            context(),
+            policy(allowed_actions=("HEDGE",)),
+        )
+        self.assertFalse(decision.admitted)
+        self.assertIn("position_limit", {x.rule for x in decision.rules if not x.passed})
+
+    def test_allowed_action_configuration_rejects_duplicates_and_unknowns(self):
+        with self.assertRaises(ValueError):
+            policy(allowed_actions=("TRADE", "trade"))
+        with self.assertRaises(ValueError):
+            policy(allowed_actions=("MAGIC",))
+
+    def test_settlement_policy_fails_closed_without_affirmative_evidence(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        missing = evaluate_risk(
+            intent,
+            context(settlement_allowed=None),
+            policy(require_settlement_evidence=True),
+        )
+        blocked = evaluate_risk(
+            intent,
+            context(settlement_allowed=False),
+            policy(require_settlement_evidence=True),
+        )
+        self.assertEqual(
+            next(x for x in missing.rules if x.rule == "settlement").observed,
+            "UNKNOWN",
+        )
+        self.assertFalse(next(x for x in missing.rules if x.rule == "settlement").passed)
+        self.assertFalse(next(x for x in blocked.rules if x.rule == "settlement").passed)
+
+    def test_settlement_policy_accepts_only_explicit_true(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(settlement_allowed=True),
+            policy(require_settlement_evidence=True),
+        )
+        self.assertTrue(next(x for x in decision.rules if x.rule == "settlement").passed)
+
+    def test_settlement_inputs_require_real_booleans(self):
+        with self.assertRaises(TypeError):
+            context(settlement_allowed="true")
+        with self.assertRaises(TypeError):
+            policy(require_settlement_evidence="true")
+
+    def test_option_exercise_requires_verified_deliverable_and_buying_power(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="5",
+                expected_state_version=7,
+                action="EXERCISE", instrument_type="OPTION",
+            ),
+            context(
+                option_deliverable_verified=None,
+                option_exercise_cash_required="5000",
+                option_exercise_cash_available="4999.99",
+            ),
+            policy(
+                max_single_notional="10000",
+                require_option_exercise_evidence=True,
+            ),
+        )
+        failed = {item.rule for item in decision.rules if not item.passed}
+        self.assertIn("option_deliverable", failed)
+        self.assertIn("option_exercise_funding", failed)
+
+    def test_option_exercise_accepts_exact_buying_power_boundary(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="5",
+                expected_state_version=7,
+                action="EXERCISE", instrument_type="OPTION",
+            ),
+            context(
+                option_deliverable_verified=True,
+                option_exercise_cash_required="5000",
+                option_exercise_cash_available="5000",
+            ),
+            policy(
+                max_single_notional="10000",
+                require_option_exercise_evidence=True,
+            ),
+        )
+        option_rules = {
+            item.rule: item.passed
+            for item in decision.rules
+            if item.rule.startswith("option_")
+        }
+        self.assertEqual(
+            option_rules,
+            {"option_deliverable": True, "option_exercise_funding": True},
+        )
+
+    def test_exercise_action_cannot_be_labeled_on_non_option(self):
+        with self.assertRaisesRegex(ValueError, "requires OPTION"):
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+                action="EXERCISE", instrument_type="EQUITY",
+            )
+
+    def test_option_obligation_inputs_reject_binary_float_and_fake_booleans(self):
+        with self.assertRaises(TypeError):
+            context(option_exercise_cash_required=5000.0)
+        with self.assertRaises(TypeError):
+            context(option_deliverable_verified="true")
+        with self.assertRaises(TypeError):
+            policy(require_option_exercise_evidence="true")
+
+    def test_future_new_risk_requires_delivery_headroom_evidence(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7, instrument_type="FUTURE",
+        )
+        missing = evaluate_risk(
+            intent,
+            context(futures_delivery_headroom_seconds={}),
+            policy(min_futures_delivery_headroom_seconds="3600"),
+        )
+        too_close = evaluate_risk(
+            intent,
+            context(futures_delivery_headroom_seconds={"ABC": "3599.9"}),
+            policy(min_futures_delivery_headroom_seconds="3600"),
+        )
+        self.assertEqual(
+            next(x for x in missing.rules if x.rule == "futures_delivery_cutoff").observed,
+            "UNKNOWN",
+        )
+        self.assertFalse(
+            next(x for x in too_close.rules if x.rule == "futures_delivery_cutoff").passed
+        )
+
+    def test_future_reduce_only_can_flatten_inside_delivery_cutoff(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="SELL", quantity="2", price="100",
+                expected_state_version=7, reduce_only=True,
+                action="FLATTEN", instrument_type="FUTURE",
+            ),
+            context(
+                positions={"ABC": "2"},
+                futures_delivery_headroom_seconds={"ABC": "-10"},
+                stress_scenarios=(),
+            ),
+            policy(
+                min_futures_delivery_headroom_seconds="3600",
+                allowed_actions=("FLATTEN",),
+            ),
+        )
+        rule = next(x for x in decision.rules if x.rule == "futures_delivery_cutoff")
+        self.assertTrue(rule.passed)
+        self.assertEqual(rule.observed, "RISK_REDUCTION")
+
+    def test_future_delivery_headroom_rejects_binary_float(self):
+        with self.assertRaises(TypeError):
+            context(futures_delivery_headroom_seconds={"ABC": 3600.0})
+        with self.assertRaises(TypeError):
+            policy(min_futures_delivery_headroom_seconds=3600.0)
+
+    def test_risk_decision_fingerprint_is_deterministic_and_evidence_sensitive(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        configured = policy(max_clock_age_seconds="5")
+        first = evaluate_risk(
+            intent,
+            context(clock_age_seconds="1"),
+            configured,
+        )
+        repeated = evaluate_risk(
+            intent,
+            context(clock_age_seconds="1"),
+            configured,
+        )
+        changed = evaluate_risk(
+            intent,
+            context(clock_age_seconds="2"),
+            configured,
+        )
+        first_hash = risk_decision_fingerprint(first)
+        self.assertEqual(first_hash, risk_decision_fingerprint(repeated))
+        self.assertNotEqual(first_hash, risk_decision_fingerprint(changed))
+        self.assertEqual(len(first_hash), 64)
+
+    def test_risk_decision_fingerprint_rejects_wrong_type(self):
+        with self.assertRaises(TypeError):
+            risk_decision_fingerprint({"admitted": True})
 
 
 if __name__ == "__main__":

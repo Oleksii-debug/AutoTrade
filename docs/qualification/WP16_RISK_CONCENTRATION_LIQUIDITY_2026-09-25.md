@@ -19,7 +19,6 @@ Deliberate boundary:
 - correlation/factor limits, spread/slippage bounds, settlement restrictions and derivative-specific obligations remain further WP-16 integration work;
 - no provider network calls, credentials, withdrawals or real-money sends are enabled by this change.
 
-
 Additional fail-closed authority boundary:
 - `RiskContext.create` no longer assumes permission, margin headroom, or borrow availability when evidence is omitted;
 - callers must explicitly supply `capability_allowed`, `margin_headroom`, and `borrow_available`;

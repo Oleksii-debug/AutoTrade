@@ -134,6 +134,22 @@ class SupplyChainQualificationTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             evidence(model_data_rights=(object(),))
 
+    def test_qualification_identity_binds_exact_component_evidence(self):
+        baseline = qualify_supply_chain(evidence())
+        changed = qualify_supply_chain(
+            evidence(comp=component(source_revision="commit:abcdef"))
+        )
+        self.assertEqual(baseline.status, changed.status)
+        self.assertNotEqual(baseline.qualification_id, changed.qualification_id)
+
+    def test_equivalent_rights_order_has_stable_identity(self):
+        first = rights(artifact_id="model:a")
+        second = rights(artifact_id="data:b", use_scope="train")
+        left = qualify_supply_chain(evidence(model_rights=(first, second)))
+        right = qualify_supply_chain(evidence(model_rights=(second, first)))
+        self.assertEqual(left.status, right.status)
+        self.assertEqual(left.qualification_id, right.qualification_id)
+
 
 if __name__ == "__main__":
     unittest.main()

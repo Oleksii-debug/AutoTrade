@@ -80,12 +80,14 @@ def _safe_filename(value: object) -> str:
         raise ExportBoundaryError("filename is too long")
     if name in {".", ".."} or "/" in name or "\\" in name or "\x00" in name:
         raise ExportBoundaryError("filename must be a single safe path component")
+    if any(ord(ch) < 32 for ch in name) or any(ch in '<>:"|?*' for ch in name):
+        raise ExportBoundaryError("filename contains a Windows-invalid character")
     if name != name.strip(" ."):
         raise ExportBoundaryError("filename cannot start or end with a space or dot")
     if not name.lower().endswith(".json"):
         raise ExportBoundaryError("this boundary exports JSON files only")
-    stem = name.rsplit(".", 1)[0].upper()
-    if stem in _WINDOWS_RESERVED:
+    device_stem = name.split(".", 1)[0].upper()
+    if device_stem in _WINDOWS_RESERVED:
         raise ExportBoundaryError("filename is reserved on Windows")
     return name
 

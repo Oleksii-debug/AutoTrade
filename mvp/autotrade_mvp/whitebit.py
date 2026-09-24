@@ -1521,3 +1521,152 @@ def provider_spot_cash(
             )
         cash[observation.asset] = observation.total
     return MappingProxyType(dict(sorted(cash.items())))
+
+
+WHITEBIT_WEBSOCKET_ENDPOINT = "wss://wss.whitebit.com/ws"
+WHITEBIT_DEPRECATED_WEBSOCKET_ENDPOINT = "wss://api.whitebit.com/ws"
+
+
+@dataclass(frozen=True)
+class WhiteBitStreamRecoveryPolicy:
+    channel: str
+    state_model: str
+    query_method: str | None
+    subscribe_method: str
+    reconnect_action: str
+    requires_backfill: bool
+    full_snapshot_on_subscribe: bool
+
+    def __post_init__(self) -> None:
+        channel = _text(self.channel, name="channel").upper()
+        object.__setattr__(self, "channel", channel)
+        state_model = _text(self.state_model, name="state_model").upper()
+        if state_model not in {
+            "INCREMENTAL_DELTA",
+            "PERIODIC_FULL_SNAPSHOT",
+            "EVENT_STREAM",
+        }:
+            raise WhiteBitAdapterError("unsupported stream state model")
+        object.__setattr__(self, "state_model", state_model)
+        if self.query_method is not None:
+            object.__setattr__(
+                self,
+                "query_method",
+                _text(self.query_method, name="query_method"),
+            )
+        object.__setattr__(
+            self,
+            "subscribe_method",
+            _text(self.subscribe_method, name="subscribe_method"),
+        )
+        object.__setattr__(
+            self,
+            "reconnect_action",
+            _text(self.reconnect_action, name="reconnect_action"),
+        )
+        if type(self.requires_backfill) is not bool:
+            raise WhiteBitAdapterError("requires_backfill must be boolean")
+        if type(self.full_snapshot_on_subscribe) is not bool:
+            raise WhiteBitAdapterError(
+                "full_snapshot_on_subscribe must be boolean"
+            )
+
+
+_WHITEBIT_STREAM_RECOVERY = MappingProxyType(
+    {
+        "BALANCE_SPOT": WhiteBitStreamRecoveryPolicy(
+            channel="BALANCE_SPOT",
+            state_model="INCREMENTAL_DELTA",
+            query_method="balanceSpot_request",
+            subscribe_method="balanceSpot_subscribe",
+            reconnect_action="QUERY_THEN_SUBSCRIBE",
+            requires_backfill=True,
+            full_snapshot_on_subscribe=False,
+        ),
+        "POSITIONS": WhiteBitStreamRecoveryPolicy(
+            channel="POSITIONS",
+            state_model="PERIODIC_FULL_SNAPSHOT",
+            query_method=None,
+            subscribe_method="positions_subscribe",
+            reconnect_action="SUBSCRIBE_AND_WAIT_FOR_FULL_SNAPSHOT",
+            requires_backfill=False,
+            full_snapshot_on_subscribe=True,
+        ),
+        "DEALS": WhiteBitStreamRecoveryPolicy(
+            channel="DEALS",
+            state_model="EVENT_STREAM",
+            query_method="deals_request",
+            subscribe_method="deals_subscribe",
+            reconnect_action="BACKFILL_AND_RESUBSCRIBE",
+            requires_backfill=True,
+            full_snapshot_on_subscribe=False,
+        ),
+        "ORDERS_EXECUTED": WhiteBitStreamRecoveryPolicy(
+            channel="ORDERS_EXECUTED",
+            state_model="EVENT_STREAM",
+            query_method="ordersExecuted_request",
+            subscribe_method="ordersExecuted_subscribe",
+            reconnect_action="BACKFILL_AND_RESUBSCRIBE",
+            requires_backfill=True,
+            full_snapshot_on_subscribe=False,
+        ),
+    }
+)
+
+
+def websocket_recovery_policy(channel: str) -> WhiteBitStreamRecoveryPolicy:
+    normalized = _text(channel, name="channel").upper()
+    try:
+        return _WHITEBIT_STREAM_RECOVERY[normalized]
+    except KeyError as error:
+        raise WhiteBitAdapterError(
+            f"unqualified WhiteBIT stream channel: {normalized}"
+        ) from error
+
+
+def validate_websocket_endpoint(endpoint: str) -> str:
+    value = _text(endpoint, name="endpoint")
+    if value == WHITEBIT_DEPRECATED_WEBSOCKET_ENDPOINT:
+        raise WhiteBitAdapterError(
+            "deprecated WhiteBIT WebSocket host is forbidden"
+        )
+    if value != WHITEBIT_WEBSOCKET_ENDPOINT:
+        raise WhiteBitAdapterError(
+            "unqualified WhiteBIT WebSocket endpoint"
+        )
+    return value
+
+
+@dataclass(frozen=True)
+class WhiteBitRecoveryCheckpoint:
+    channel: str
+    baseline_observed: bool
+    subscription_confirmed: bool
+    backfill_complete: bool
+    full_snapshot_observed: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "channel",
+            _text(self.channel, name="channel").upper(),
+        )
+        for field in (
+            "baseline_observed",
+            "subscription_confirmed",
+            "backfill_complete",
+            "full_snapshot_observed",
+        ):
+            if type(getattr(self, field)) is not bool:
+                raise WhiteBitAdapterError(f"{field} must be boolean")
+
+    @property
+    def recovered(self) -> bool:
+        policy = websocket_recovery_policy(self.channel)
+        if not self.subscription_confirmed:
+            return False
+        if policy.full_snapshot_on_subscribe:
+            return self.full_snapshot_observed
+        if policy.requires_backfill:
+            return self.baseline_observed and self.backfill_complete
+        return self.baseline_observed

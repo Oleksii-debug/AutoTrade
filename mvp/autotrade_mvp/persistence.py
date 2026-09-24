@@ -110,6 +110,40 @@ class JournalStore:
             raise ValueError(f"{name} must be non-empty text")
         return value
 
+    def get_event(self, event_id: str) -> dict[str, Any] | None:
+        self._require_text(event_id, "event_id")
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT event_id, event_type, aggregate_type, aggregate_id,
+                       aggregate_version, payload_json, payload_hash, committed_at
+                FROM events WHERE event_id = ?
+                """,
+                (event_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "event_id": row["event_id"],
+            "event_type": row["event_type"],
+            "aggregate_type": row["aggregate_type"],
+            "aggregate_id": row["aggregate_id"],
+            "aggregate_version": row["aggregate_version"],
+            "payload": json.loads(row["payload_json"]),
+            "payload_hash": row["payload_hash"],
+            "committed_at": row["committed_at"],
+        }
+
+    def next_aggregate_version(self, aggregate_type: str, aggregate_id: str) -> int:
+        self._require_text(aggregate_type, "aggregate_type")
+        self._require_text(aggregate_id, "aggregate_id")
+        with closing(self._connect()) as connection:
+            current = connection.execute(
+                "SELECT MAX(aggregate_version) FROM events WHERE aggregate_type = ? AND aggregate_id = ?",
+                (aggregate_type, aggregate_id),
+            ).fetchone()[0]
+        return 1 if current is None else int(current) + 1
+
     def append_event(self, envelope: dict[str, Any], *, outbox_topic: str | None = None) -> AppendResult:
         event_id = self._require_text(envelope.get("event_id"), "event_id")
         event_type = self._require_text(envelope.get("event_type"), "event_type")

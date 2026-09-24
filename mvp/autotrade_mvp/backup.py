@@ -623,6 +623,46 @@ def complete_restore_reconciliation(
     ):
         raise BackupError("Recovery controller is not READY after reconciliation")
 
+    resolution_proof: list[dict[str, Any]] = []
+    allowed_resolution_outcomes = {
+        "PROVEN_ABSENT",
+        "OBSERVED_EXECUTION",
+        "OBSERVED_WORKING_ORDER",
+    }
+    for item in reconciliation.submission_resolutions:
+        outcome = item.outcome
+        if outcome not in allowed_resolution_outcomes:
+            raise BackupError(
+                "Restore reconciliation contains a non-canonical submission outcome"
+            )
+        execution_ids = tuple(getattr(item, "provider_execution_ids", ()))
+        provider_order_ids = tuple(getattr(item, "provider_order_ids", ()))
+        for values, label in (
+            (execution_ids, "provider execution"),
+            (provider_order_ids, "provider order"),
+        ):
+            if any(not isinstance(value, str) or not value.strip() for value in values):
+                raise BackupError(f"{label} identities must be non-empty strings")
+            if len(values) != len(set(values)):
+                raise BackupError(f"{label} identities must be unique")
+        if outcome == "OBSERVED_EXECUTION" and not execution_ids:
+            raise BackupError(
+                "Observed execution cannot clear restore without exact provider execution identity"
+            )
+        if outcome == "OBSERVED_WORKING_ORDER" and not provider_order_ids:
+            raise BackupError(
+                "Observed working order cannot clear restore without exact provider order identity"
+            )
+        resolution_proof.append(
+            {
+                "attempt_id": item.attempt_id,
+                "client_order_id": item.client_order_id,
+                "outcome": outcome,
+                "provider_execution_ids": list(execution_ids),
+                "provider_order_ids": list(provider_order_ids),
+            }
+        )
+
     proof = {
         "schema_version": 1,
         "backup_manifest_sha256": marker["backup_manifest_sha256"],
@@ -631,15 +671,7 @@ def complete_restore_reconciliation(
         "owner_epoch": controller.owner.epoch,
         "fencing_evidence": [dict(item) for item in refs],
         "matched_execution_ids": list(reconciliation.matched_execution_ids),
-        "submission_resolutions": [
-            {
-                "attempt_id": item.attempt_id,
-                "client_order_id": item.client_order_id,
-                "outcome": item.outcome,
-                "provider_execution_ids": list(item.provider_execution_ids),
-            }
-            for item in reconciliation.submission_resolutions
-        ],
+        "submission_resolutions": resolution_proof,
         "blocking_resources": list(reconciliation.blocking_resources),
     }
     proof_bytes = _canonical_json(proof)
@@ -715,14 +747,23 @@ def restore_requires_reconciliation(destination_root: str | Path) -> bool:
         if not isinstance(item, dict):
             return True
         outcome = item.get("outcome")
-        if not isinstance(outcome, str) or not outcome:
-            return True
-        if outcome == "UNKNOWN":
+        if outcome not in {
+            "PROVEN_ABSENT",
+            "OBSERVED_EXECUTION",
+            "OBSERVED_WORKING_ORDER",
+        }:
             return True
         execution_ids = item.get("provider_execution_ids")
-        if not isinstance(execution_ids, list) or any(
-            not isinstance(value, str) or not value
-            for value in execution_ids
-        ):
+        provider_order_ids = item.get("provider_order_ids")
+        for values in (execution_ids, provider_order_ids):
+            if (
+                not isinstance(values, list)
+                or any(not isinstance(value, str) or not value for value in values)
+                or len(values) != len(set(values))
+            ):
+                return True
+        if outcome == "OBSERVED_EXECUTION" and not execution_ids:
+            return True
+        if outcome == "OBSERVED_WORKING_ORDER" and not provider_order_ids:
             return True
     return False

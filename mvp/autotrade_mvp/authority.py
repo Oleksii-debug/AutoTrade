@@ -202,6 +202,35 @@ class Confirmation:
     notional: Decimal
     expires_at: str
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "confirmation_id", _text(self.confirmation_id, name="confirmation_id")
+        )
+        object.__setattr__(self, "policy_id", _text(self.policy_id, name="policy_id"))
+        object.__setattr__(
+            self, "intent_hash", _text(self.intent_hash, name="intent_hash")
+        )
+        object.__setattr__(
+            self, "account_id", _text(self.account_id, name="account_id")
+        )
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"SIMULATION", "PAPER", "LIVE"}:
+            raise ValueError("confirmation environment is unsupported")
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(
+            self,
+            "instrument_version",
+            _instrument_identity(self.instrument_version, name="instrument_version"),
+        )
+        object.__setattr__(self, "action", _text(self.action, name="action").upper())
+        notional = _decimal(self.notional, name="notional")
+        if notional < 0:
+            raise ValueError("confirmation notional must be non-negative")
+        object.__setattr__(self, "notional", notional)
+        expires_at = _text(self.expires_at, name="expires_at")
+        _instant(expires_at, name="confirmation.expires_at")
+        object.__setattr__(self, "expires_at", expires_at)
+
 
 @dataclass(frozen=True)
 class AdmissionRecord:
@@ -221,6 +250,67 @@ class AdmissionRecord:
     confirmation_id: str | None
     reason: str
     request_fingerprint: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "admission_id", _text(self.admission_id, name="admission_id")
+        )
+        object.__setattr__(self, "policy_id", _text(self.policy_id, name="policy_id"))
+        object.__setattr__(
+            self, "intent_hash", _text(self.intent_hash, name="intent_hash")
+        )
+        object.__setattr__(
+            self, "account_id", _text(self.account_id, name="account_id")
+        )
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"SIMULATION", "PAPER", "LIVE"}:
+            raise ValueError("admission environment is unsupported")
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(
+            self,
+            "instrument_version",
+            _instrument_identity(self.instrument_version, name="instrument_version"),
+        )
+        object.__setattr__(self, "action", _text(self.action, name="action").upper())
+        notional = _decimal(self.notional, name="notional")
+        if notional < 0:
+            raise ValueError("admission notional must be non-negative")
+        object.__setattr__(self, "notional", notional)
+        if not isinstance(self.risk_reducing, bool):
+            raise TypeError("admission risk_reducing must be boolean")
+        if (
+            not isinstance(self.state_version, int)
+            or isinstance(self.state_version, bool)
+            or self.state_version < 0
+        ):
+            raise ValueError("admission state_version is invalid")
+        if (
+            not isinstance(self.authority_epoch, int)
+            or isinstance(self.authority_epoch, bool)
+            or self.authority_epoch < 0
+        ):
+            raise ValueError("admission authority_epoch is invalid")
+        outcome = _text(self.outcome, name="outcome").upper()
+        if outcome not in {"ADMITTED", "REJECTED"}:
+            raise ValueError("admission outcome is invalid")
+        object.__setattr__(self, "outcome", outcome)
+        admitted_at = _text(self.admitted_at, name="admitted_at")
+        _instant(admitted_at, name="admitted_at")
+        object.__setattr__(self, "admitted_at", admitted_at)
+        if self.confirmation_id is not None:
+            confirmation_id = _text(self.confirmation_id, name="confirmation_id")
+            if outcome != "ADMITTED":
+                raise ValueError("rejected admission cannot consume confirmation")
+            object.__setattr__(self, "confirmation_id", confirmation_id)
+        object.__setattr__(self, "reason", _text(self.reason, name="reason"))
+        fingerprint = _text(
+            self.request_fingerprint, name="request_fingerprint"
+        ).lower()
+        if len(fingerprint) != 64 or any(
+            character not in "0123456789abcdef" for character in fingerprint
+        ):
+            raise ValueError("request_fingerprint must be a SHA-256 hex digest")
+        object.__setattr__(self, "request_fingerprint", fingerprint)
 
 
 class AuthorityConflict(ValueError):
@@ -358,12 +448,18 @@ class AuthorityService:
                     self._policies[policy.policy_id] = policy
                     self._epoch += 1
             elif event_type == "AuthorityPolicyRevoked":
-                value = (payload["reason"], payload["revoked_at"])
-                existing = self._revocations.get(payload["policy_id"])
+                policy_id = _text(payload.get("policy_id"), name="policy_id")
+                if policy_id not in self._policies:
+                    raise AuthorityConflict("durable revocation references missing policy")
+                reason = _text(payload.get("reason"), name="reason")
+                revoked_at = _text(payload.get("revoked_at"), name="revoked_at")
+                _instant(revoked_at, name="revoked_at")
+                value = (reason, revoked_at)
+                existing = self._revocations.get(policy_id)
                 if existing is not None and existing != value:
                     raise AuthorityConflict("durable revocation history conflicts")
                 if existing is None:
-                    self._revocations[payload["policy_id"]] = value
+                    self._revocations[policy_id] = value
                     self._epoch += 1
             elif event_type == "AuthorityConfirmationAdded":
                 instrument = payload.get("instrument")
@@ -382,6 +478,8 @@ class AuthorityService:
                     notional=_decimal(payload["notional"], name="notional"),
                     expires_at=payload["expires_at"],
                 )
+                if confirmation.policy_id not in self._policies:
+                    raise AuthorityConflict("durable confirmation references missing policy")
                 existing = self._confirmations.get(confirmation.confirmation_id)
                 if existing is not None and existing != confirmation:
                     raise AuthorityConflict("durable confirmation history conflicts")
@@ -410,6 +508,19 @@ class AuthorityService:
                     reason=payload["reason"],
                     request_fingerprint=payload["request_fingerprint"],
                 )
+                if record.policy_id not in self._policies:
+                    raise AuthorityConflict("durable admission references missing policy")
+                if record.authority_epoch > self._epoch:
+                    raise AuthorityConflict("durable admission authority epoch is from the future")
+                if record.confirmation_id is not None:
+                    if record.confirmation_id not in self._confirmations:
+                        raise AuthorityConflict(
+                            "durable admission references missing confirmation"
+                        )
+                    if record.confirmation_id in self._used_confirmations:
+                        raise AuthorityConflict(
+                            "durable confirmation was consumed by multiple admissions"
+                        )
                 existing = self._admissions.get(record.admission_id)
                 if existing is not None and existing != record:
                     raise AuthorityConflict("durable admission history conflicts")

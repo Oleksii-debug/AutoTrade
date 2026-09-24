@@ -42,6 +42,17 @@ class EconomicOracleExactnessTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             corrected_fill_cash_difference("1", "100", 100.5)
 
+    def test_split_oracle_preserves_basis_for_long_and_short_quantities(self):
+        long_result = apply_split("10", "100", numerator="2", denominator="1")
+        short_result = apply_split("-10", "100", numerator="2", denominator="1")
+
+        self.assertEqual(long_result.quantity, Decimal("20"))
+        self.assertEqual(short_result.quantity, Decimal("-20"))
+        self.assertEqual(long_result.total_basis, Decimal("1000"))
+        self.assertEqual(short_result.total_basis, Decimal("1000"))
+        self.assertEqual(long_result.unit_basis, Decimal("50"))
+        self.assertEqual(short_result.unit_basis, Decimal("50"))
+
     def test_exact_decimal_inputs_preserve_expected_reference_result(self):
         result = cash_round_trip(
             start_cash=Decimal("1000"),

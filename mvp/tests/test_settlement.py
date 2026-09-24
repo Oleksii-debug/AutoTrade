@@ -131,6 +131,44 @@ class SettlementBookTests(unittest.TestCase):
         with self.assertRaises(SettlementConflict):
             book.add(changed)
 
+    def test_same_economic_cause_cannot_create_two_settlement_obligations(self):
+        first = SettlementObligation(
+            "obligation-a",
+            " provider-fill-1 ",
+            "USD",
+            Decimal("-201"),
+            date(2026, 9, 24),
+            date(2026, 9, 26),
+        )
+        duplicate_cause = SettlementObligation(
+            "obligation-b",
+            "provider-fill-1",
+            "USD",
+            Decimal("-201"),
+            date(2026, 9, 24),
+            date(2026, 9, 26),
+        )
+        book = SettlementBook(settled_cash={"USD": "1000"})
+        self.assertTrue(book.add(first))
+        with self.assertRaisesRegex(SettlementConflict, "cause_event_id"):
+            book.add(duplicate_cause)
+        self.assertEqual(book.snapshot("USD").unsettled_payable, Decimal("201"))
+        self.assertEqual(book.available_to_spend("USD"), Decimal("799"))
+
+    def test_restart_constructor_rejects_duplicate_economic_causes(self):
+        obligations = (
+            SettlementObligation(
+                "a", "same-fill", "USD", Decimal("-10"),
+                date(2026, 9, 24), date(2026, 9, 25),
+            ),
+            SettlementObligation(
+                "b", "same-fill", "USD", Decimal("-10"),
+                date(2026, 9, 24), date(2026, 9, 25),
+            ),
+        )
+        with self.assertRaisesRegex(SettlementConflict, "cause_event_id"):
+            SettlementBook(obligations=obligations)
+
     def test_reserve_reduces_only_settled_spendable_cash(self):
         book = SettlementBook(settled_cash={"USD": "100"})
         book.add(SettlementObligation(

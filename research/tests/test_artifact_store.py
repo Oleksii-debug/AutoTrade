@@ -137,6 +137,40 @@ class ArtifactStoreTests(unittest.TestCase):
             target = store.export(artifact_id, Path(directory) / "after.txt")
             self.assertEqual(target.read_bytes(), b"public")
 
+    def test_legacy_manifest_must_be_rebound_before_read(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"evidence",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                source_refs=["source:fixture"],
+                metadata={"kind": "legacy-read-upgrade"},
+            )
+            path = store._manifest_path(artifact_id)
+            legacy = dict(manifest)
+            legacy.pop("manifest_hash")
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "lacks integrity binding",
+            ):
+                store.read_bytes(artifact_id)
+
+            upgraded = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"evidence",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                source_refs=["source:fixture"],
+                metadata={"kind": "legacy-read-upgrade"},
+            )
+            self.assertIn("manifest_hash", upgraded)
+            self.assertEqual(store.read_bytes(artifact_id), b"evidence")
+
     def test_recovery_removes_only_unreferenced_objects(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)

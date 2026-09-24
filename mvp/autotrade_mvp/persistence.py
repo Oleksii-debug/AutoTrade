@@ -750,15 +750,16 @@ class JournalStore:
             aggregate_type = self._require_text(envelope.get("aggregate_type"), "aggregate_type")
             aggregate_id = self._require_text(envelope.get("aggregate_id"), "aggregate_id")
             try:
-                aggregate_version = envelope["aggregate_version"]
+                raw_aggregate_version = envelope["aggregate_version"]
             except KeyError as error:
-                raise ValueError("aggregate_version must be a positive integer") from error
-            if (
-                not isinstance(aggregate_version, int)
-                or isinstance(aggregate_version, bool)
-                or aggregate_version <= 0
-            ):
-                raise ValueError("aggregate_version must be a positive integer")
+                raise ValueError(
+                    "aggregate_version must be a positive canonical integer sequence string"
+                ) from error
+            aggregate_version = _sequence(
+                raw_aggregate_version,
+                name="aggregate_version",
+                positive=True,
+            )
             payload = envelope.get("payload")
             payload_json = canonical_json(payload)
             supplied_hash = envelope.get("payload_hash")

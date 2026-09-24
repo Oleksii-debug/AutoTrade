@@ -400,6 +400,50 @@ class JournalStoreTests(unittest.TestCase):
             )
             self.assertEqual(str(rebuilt), checkpoint["state"]["net_quantity"])
 
+    def test_projection_checkpoint_identity_cannot_split_on_whitespace(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            state = {"net_quantity": "1"}
+
+            self.assertTrue(
+                store.save_projection_checkpoint(
+                    projection_name=" position ",
+                    aggregate_type=" account ",
+                    aggregate_id=" paper-1 ",
+                    aggregate_version=1,
+                    state=state,
+                )
+            )
+            self.assertFalse(
+                store.save_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                    aggregate_version=1,
+                    state=state,
+                )
+            )
+
+            checkpoint = store.load_projection_checkpoint(
+                projection_name=" position ",
+                aggregate_type=" account ",
+                aggregate_id=" paper-1 ",
+            )
+            self.assertEqual(checkpoint["projection_name"], "position")
+            self.assertEqual(checkpoint["aggregate_type"], "account")
+            self.assertEqual(checkpoint["aggregate_id"], "paper-1")
+
+            connection = sqlite3.connect(path)
+            try:
+                count = connection.execute(
+                    "SELECT COUNT(*) FROM projection_checkpoints"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(count, 1)
+
     def test_projection_checkpoint_tamper_is_detected(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

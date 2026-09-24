@@ -247,6 +247,10 @@ class SimulatedOrder:
                 "STOP_LIMIT order requires stop_price and limit_price"
             )
         _instant(submitted_at, name="submitted_at")
+        normalized_quantity = _positive(quantity, name="quantity")
+        normalized_lot_size = _positive(lot_size, name="lot_size")
+        if normalized_quantity % normalized_lot_size != 0:
+            raise ExecutionRealismError("quantity must be an exact multiple of lot_size")
         return cls(
             order_id=_text(order_id, name="order_id"),
             instrument_version=_text(
@@ -255,9 +259,9 @@ class SimulatedOrder:
             ),
             side=normalized_side,
             order_type=normalized_type,
-            quantity=_positive(quantity, name="quantity"),
+            quantity=normalized_quantity,
             submitted_at=submitted_at,
-            lot_size=_positive(lot_size, name="lot_size"),
+            lot_size=normalized_lot_size,
             limit_price=limit,
             stop_price=stop,
             already_triggered=already_triggered,

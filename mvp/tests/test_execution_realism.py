@@ -99,6 +99,10 @@ class ExecutionRealismTests(unittest.TestCase):
         self.assertEqual(result.status, "PARTIAL")
         self.assertEqual(result.filled_quantity, Decimal("5"))
 
+    def test_order_quantity_must_match_lot_quantum(self):
+        with self.assertRaisesRegex(ExecutionRealismError, "multiple of lot_size"):
+            order(quantity="1.5", lot_size="1")
+
     def test_capacity_is_rounded_down_to_lot_and_never_rounded_up(self):
         result = simulate_execution(
             order(quantity="10", lot_size="2"),

@@ -126,6 +126,7 @@ def point_in_time_market_events(
 
     point = _utc(cutoff, "cutoff")
     selected: dict[str, tuple[int, bytes, dict[str, Any]]] = {}
+    visible_revisions: dict[str, dict[int, tuple[datetime, bytes]]] = {}
     for raw in events:
         if not isinstance(raw, Mapping):
             raise HistoricalDataError("market event must be an object")
@@ -138,10 +139,27 @@ def point_in_time_market_events(
         ingested = _utc(event.get("ingested_at"), "ingested_at")
         if ingested < available:
             raise HistoricalDataError("ingested_at cannot precede evidenced available_at")
+        raw_evidence = _evidence(event.get("raw_evidence_ref"))
+        evidence_observed = _utc(raw_evidence["observed_at"], "raw evidence observed_at")
+        if evidence_observed > ingested:
+            raise HistoricalDataError("raw evidence cannot be observed after event ingestion")
         if available > point:
             continue
 
         canonical = _canonical_bytes(event)
+        history = visible_revisions.setdefault(event_id, {})
+        same_revision = history.get(revision)
+        if same_revision is not None:
+            if same_revision[1] != canonical:
+                raise HistoricalConflict("same event revision has conflicting bytes")
+        else:
+            for other_revision, (other_available, _) in history.items():
+                if revision > other_revision and available < other_available:
+                    raise HistoricalConflict("higher event revision cannot backdate availability")
+                if revision < other_revision and available > other_available:
+                    raise HistoricalConflict("higher event revision cannot predate lower revision availability")
+            history[revision] = (available, canonical)
+
         previous = selected.get(event_id)
         if previous is None or revision > previous[0]:
             selected[event_id] = (revision, canonical, event)

@@ -29,6 +29,7 @@ class ResearchJobStoreTests(unittest.TestCase):
             dedupe_key=key,
             input_hashes=[digest("dataset")],
             resource_budget={"wall_seconds": 60, "memory_bytes": 1024},
+            lease_requeueable=True,
             now=self.now,
         )
 
@@ -85,6 +86,52 @@ class ResearchJobStoreTests(unittest.TestCase):
                     now=self.now + timedelta(seconds=12),
                 )
             )
+
+    def test_expired_non_idempotent_job_is_not_requeued(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            job, _ = store.enqueue(
+                kind="research.external_annotation",
+                dedupe_key="external-side-effect",
+                input_hashes=[digest("dataset")],
+                resource_budget={"wall_seconds": 60},
+                now=self.now,
+            )
+            claimed = store.claim("worker-a", now=self.now, lease_seconds=10)
+            self.assertFalse(claimed["lease_requeueable"])
+
+            self.assertEqual(
+                store.requeue_expired(now=self.now + timedelta(seconds=11)),
+                0,
+            )
+            waiting = store.get(job["job_id"])
+            self.assertEqual(waiting["state"], "WAITING_EXTERNAL")
+            self.assertEqual(waiting["generation"], "2")
+            self.assertEqual(
+                waiting["error"]["code"],
+                "LEASE_EXPIRED_NON_IDEMPOTENT",
+            )
+            self.assertIsNone(
+                store.claim(
+                    "worker-b",
+                    now=self.now + timedelta(seconds=12),
+                    lease_seconds=30,
+                )
+            )
+
+    def test_requeueability_is_part_of_dedupe_identity(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            self._enqueue(store, "retry-contract")
+            with self.assertRaises(JobConflictError):
+                store.enqueue(
+                    kind="research.replay",
+                    dedupe_key="retry-contract",
+                    input_hashes=[digest("dataset")],
+                    resource_budget={"wall_seconds": 60, "memory_bytes": 1024},
+                    lease_requeueable=False,
+                    now=self.now,
+                )
 
     def test_cancellation_blocks_late_publication(self):
         with TemporaryDirectory() as directory:

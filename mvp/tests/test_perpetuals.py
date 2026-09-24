@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from fractions import Fraction
 import unittest
 
 from mvp.autotrade_mvp.perpetuals import (
@@ -11,6 +12,9 @@ from mvp.autotrade_mvp.perpetuals import (
     PerpetualContract,
     PerpetualError,
     funding_cashflow,
+    inverse_funding_cashflow_exact,
+    inverse_perpetual_pnl_exact,
+    inverse_stressed_loss_exact,
     linear_notional,
     require_new_risk_capacity,
     stressed_loss,
@@ -66,6 +70,62 @@ class PerpetualLifecycleTests(unittest.TestCase):
     def test_excessive_mark_index_deviation_fails_closed(self):
         with self.assertRaises(PerpetualError):
             self.market(mark="102000", index="100000").require_valid(NOW)
+
+    def test_inverse_contract_exact_pnl_funding_and_stress(self):
+        contract = PerpetualContract(
+            instrument_id="BTC-USD-INVERSE-PERP",
+            settlement_currency="BTC",
+            collateral_currency="BTC",
+            multiplier=Decimal("1"),
+            payoff="INVERSE",
+            face_currency="USD",
+        )
+        self.assertEqual(
+            inverse_perpetual_pnl_exact(
+                contract=contract,
+                signed_contracts="100",
+                entry_price="10000",
+                exit_price="11000",
+            ),
+            Fraction(1, 1100),
+        )
+        currency, funding = inverse_funding_cashflow_exact(
+            contract=contract,
+            signed_contracts="100",
+            funding_rate="0.001",
+            snapshot=self.market(mark="10000", index="10000"),
+            convention=FundingConvention("LONG_PAYS", "MARK"),
+            at=NOW,
+        )
+        self.assertEqual(currency, "BTC")
+        self.assertEqual(funding, Fraction(-1, 100000))
+        self.assertEqual(
+            inverse_stressed_loss_exact(
+                contract=contract,
+                signed_contracts="100",
+                mark_price="10000",
+                adverse_move_fraction="0.1",
+            ),
+            Fraction(1, 900),
+        )
+        self.assertEqual(
+            inverse_stressed_loss_exact(
+                contract=contract,
+                signed_contracts="-100",
+                mark_price="10000",
+                adverse_move_fraction="0.1",
+            ),
+            Fraction(1, 1100),
+        )
+
+    def test_inverse_exact_math_requires_face_currency_evidence(self):
+        with self.assertRaises(PerpetualError):
+            inverse_perpetual_pnl_exact(
+                contract=self.contract("INVERSE"),
+                signed_contracts="1",
+                entry_price="10000",
+                exit_price="11000",
+            )
 
     def test_inverse_contract_needs_provider_specific_qualification(self):
         with self.assertRaises(PerpetualError):

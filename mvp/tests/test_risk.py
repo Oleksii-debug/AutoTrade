@@ -313,6 +313,29 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertTrue(coverage.passed)
         self.assertTrue(decision.admitted)
 
+    def test_semantically_duplicate_identity_keys_fail_closed(self):
+        with self.assertRaisesRegex(ValueError, "unique after normalization"):
+            context(
+                positions={"ABC": "1", " ABC ": "2"},
+                marks={"ABC": "100"},
+            )
+        with self.assertRaisesRegex(ValueError, "unique after normalization"):
+            context(
+                marks={"ABC": "100", " ABC ": "101"},
+            )
+        with self.assertRaisesRegex(ValueError, "unique after normalization"):
+            context(
+                stress_scenarios=(
+                    {"ABC": "-0.1", " ABC ": "-0.2", "XYZ": "-0.2"},
+                ),
+            )
+
+    def test_risk_mapping_and_scenario_container_types_fail_closed(self):
+        with self.assertRaisesRegex(TypeError, "positions must be a mapping"):
+            context(positions=[("ABC", "1")])
+        with self.assertRaisesRegex(TypeError, "stress_scenarios must be a sequence"):
+            context(stress_scenarios="ABC:-0.1")
+
     def test_float_inputs_are_rejected(self):
         with self.assertRaises(TypeError):
             RiskPolicy.create(

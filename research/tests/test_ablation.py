@@ -70,6 +70,32 @@ class AblationTests(unittest.TestCase):
         self.assertEqual(summary.deadline_mismatch_pairs, 1)
         self.assertEqual(summary.full_deadline_misses, 1)
 
+    def test_both_deadline_misses_are_not_scored_as_useful_contribution(self):
+        pair = AblationPair(
+            "model",
+            outcome(variant="FULL", utility="1", cost="0.20", elapsed=130,
+                    components=("base", "model")),
+            outcome(variant="ABLATED", utility="0.4", cost="0", elapsed=120,
+                    components=("base",)),
+        )
+        summary = summarize_ablation("model", [pair])
+        self.assertEqual(summary.status, "INCONCLUSIVE")
+        self.assertEqual(summary.comparable_pairs, 0)
+        self.assertEqual(summary.deadline_mismatch_pairs, 0)
+        self.assertEqual(summary.both_deadline_miss_pairs, 1)
+        self.assertIsNone(summary.mean_utility_delta)
+
+    def test_duplicate_matched_case_cannot_be_double_counted(self):
+        pair = AblationPair(
+            "agent",
+            outcome(variant="FULL", utility="0.8", cost="0.1", elapsed=50,
+                    components=("base", "agent")),
+            outcome(variant="ABLATED", utility="0.5", cost="0", elapsed=40,
+                    components=("base",)),
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate matched ablation case"):
+            summarize_ablation("agent", [pair, pair])
+
     def test_syndicated_duplicates_require_canonical_deduplication(self):
         with self.assertRaisesRegex(ValueError, "deduplicated"):
             outcome(
@@ -78,6 +104,81 @@ class AblationTests(unittest.TestCase):
                 cost=1,
                 elapsed=10,
                 components=("wire-story-group-7", "wire-story-group-7"),
+            )
+
+    def test_components_must_be_immutable_tuple(self):
+        mutable = ["base", "agent"]
+        with self.assertRaisesRegex(TypeError, "immutable tuple"):
+            AblationOutcome(
+                case_id="case-mutable-components",
+                input_fingerprint="same",
+                variant="FULL",
+                utility=Decimal("0.1"),
+                cost=Decimal("0.01"),
+                elapsed_ms=10,
+                deadline_ms=100,
+                components=mutable,
+            )
+
+    def test_elapsed_and_deadline_reject_boolean_pseudo_integers(self):
+        with self.assertRaisesRegex(TypeError, "must be integers"):
+            AblationOutcome(
+                case_id="case-bool-elapsed",
+                input_fingerprint="same",
+                variant="FULL",
+                utility=Decimal("0.1"),
+                cost=Decimal("0.01"),
+                elapsed_ms=True,
+                deadline_ms=100,
+                components=("base",),
+            )
+        with self.assertRaisesRegex(TypeError, "must be integers"):
+            AblationOutcome(
+                case_id="case-bool-deadline",
+                input_fingerprint="same",
+                variant="FULL",
+                utility=Decimal("0.1"),
+                cost=Decimal("0.01"),
+                elapsed_ms=10,
+                deadline_ms=True,
+                components=("base",),
+            )
+
+    def test_case_identity_must_be_explicit_string(self):
+        with self.assertRaisesRegex(ValueError, "case_id"):
+            AblationOutcome(
+                case_id=1,
+                input_fingerprint="same",
+                variant="FULL",
+                utility=Decimal("0.1"),
+                cost=Decimal("0.01"),
+                elapsed_ms=10,
+                deadline_ms=100,
+                components=("base",),
+            )
+
+    def test_binary_float_utility_and_cost_are_rejected(self):
+        with self.assertRaises(TypeError):
+            AblationOutcome(
+                case_id="case-float-utility",
+                input_fingerprint="same",
+                variant="FULL",
+                utility=0.1,
+                cost=Decimal("0.01"),
+                elapsed_ms=10,
+                deadline_ms=100,
+                components=("base",),
+            )
+        with self.assertRaises(TypeError):
+            AblationOutcome(
+                case_id="case-float-cost",
+                input_fingerprint="same",
+                variant="FULL",
+                utility=Decimal("0.1"),
+                cost=0.01,
+                elapsed_ms=10,
+                deadline_ms=100,
+                components=("base",),
             )
 
     def test_negative_cost_is_rejected(self):

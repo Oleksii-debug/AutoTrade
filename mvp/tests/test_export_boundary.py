@@ -1,6 +1,7 @@
 from dataclasses import replace
 from decimal import Decimal
 import json
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -118,6 +119,29 @@ class ExportBoundaryTests(unittest.TestCase):
         self.assertFalse(verify_prepared_export(tampered))
         wrong_media = replace(export, media_type="text/html")
         self.assertFalse(verify_prepared_export(wrong_media))
+
+    def test_rehashed_forged_secret_payload_is_rejected_before_write(self):
+        export = self.prepare({"authorization": "safe-placeholder"})
+        forged_data = b'{"authorization":"Bearer raw-secret"}\n'
+        forged = replace(
+            export,
+            data=forged_data,
+            sha256="sha256:" + sha256(forged_data).hexdigest(),
+        )
+        self.assertFalse(verify_prepared_export(forged))
+        with TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ExportBoundaryError, "integrity"):
+                write_prepared_export(forged, directory)
+
+    def test_rehashed_fractional_json_number_cannot_bypass_exact_decimal_boundary(self):
+        export = self.prepare({"money": Decimal("1.25")})
+        forged_data = b'{"money":1.25}\n'
+        forged = replace(
+            export,
+            data=forged_data,
+            sha256="sha256:" + sha256(forged_data).hexdigest(),
+        )
+        self.assertFalse(verify_prepared_export(forged))
 
     def test_atomic_write_stays_under_caller_directory(self):
         export = self.prepare({"value": "ok"}, filename="safe.json")

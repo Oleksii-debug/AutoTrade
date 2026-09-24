@@ -300,6 +300,41 @@ class ExecutionRealismTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             top(available_volume=100.0)
 
+    def test_direct_construction_cannot_bypass_execution_model_invariants(self):
+        with self.assertRaises(TypeError):
+            ExecutionModel(
+                model_version="v1",
+                calibration_sha256=CALIBRATION,
+                data_fidelity="TOP_OF_BOOK",
+                scenario="BASE",
+                latency_ms=0,
+                fee_rate=0.001,
+                minimum_fee=Decimal("0"),
+                max_participation=Decimal("0.1"),
+                slippage_bps=Decimal("0"),
+                impact_bps_at_max_participation=Decimal("0"),
+                bar_half_spread_bps=Decimal("0"),
+                scenario_cost_multiplier=Decimal("1"),
+            )
+        with self.assertRaises(ExecutionRealismError):
+            SimulatedOrder(
+                order_id="direct-order",
+                instrument_version="ABC@v1",
+                side="BUY",
+                order_type="MARKET",
+                quantity=Decimal("1.5"),
+                submitted_at="2026-09-24T10:00:00Z",
+                lot_size=Decimal("1"),
+            )
+        with self.assertRaises(ExecutionRealismError):
+            LiquidityObservation(
+                market_time="2026-09-24T10:00:01Z",
+                available_at="2026-09-24T10:00:00Z",
+                available_volume=Decimal("1"),
+                bid=Decimal("100"),
+                ask=Decimal("101"),
+            )
+
     def test_invalid_calibration_digest_is_rejected(self):
         with self.assertRaisesRegex(ExecutionRealismError, "SHA-256"):
             model(calibration_sha256="not-a-digest")

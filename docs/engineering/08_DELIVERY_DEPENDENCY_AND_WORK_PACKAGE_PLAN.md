@@ -125,8 +125,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Persistence/ and its contract/qualification evidence.
 - **Forbidden scope:** Network send inside DB transaction; mutable source facts; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PERSISTENCE / journal-outbox; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** SQLite WAL journal/outbox and command-dedupe primitive implemented in mvp/autotrade_mvp/persistence.py with focused tests covering atomic event/outbox commit, idempotent replay, payload tamper rejection, aggregate-version gaps, event-ID conflicts, command idempotency conflicts and reopen persistence. Focused standalone suite passed 5/5 locally before commit. Remaining WP-05 work: integrate canonical EventEnvelope/UiCommand validation into the runtime, crash-at-each-commit-boundary qualification, projection rebuild equivalence, migration rollback/upgrade tests, Windows/exact-head CI and production placement under src/AutoTrade.Persistence/.
 
 ### WP-06 — immutable-store
 

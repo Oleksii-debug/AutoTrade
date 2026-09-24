@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import unittest
 
@@ -8,13 +9,26 @@ from autotrade_research.evaluation.ablation import (
 )
 
 
-def outcome(*, variant, utility, cost, elapsed, components, fingerprint="same"):
+CUTOFF = datetime(2026, 9, 24, 16, 0, tzinfo=timezone.utc)
+
+
+def outcome(
+    *,
+    variant,
+    utility,
+    cost,
+    elapsed,
+    components,
+    fingerprint="same",
+    cutoff=CUTOFF,
+):
     return AblationOutcome(
         case_id="case-1",
         input_fingerprint=fingerprint,
         variant=variant,
-        utility=Decimal(str(utility)),
-        cost=Decimal(str(cost)),
+        information_cutoff=cutoff,
+        utility=utility if isinstance(utility, Decimal) else Decimal(str(utility)),
+        cost=cost if isinstance(cost, Decimal) else Decimal(str(cost)),
         elapsed_ms=elapsed,
         deadline_ms=100,
         components=tuple(components),
@@ -44,6 +58,65 @@ class AblationTests(unittest.TestCase):
                         components=("base", "agent"), fingerprint="a"),
                 outcome(variant="ABLATED", utility=1, cost=0, elapsed=10,
                         components=("base",), fingerprint="b"),
+            )
+
+    def test_matched_pair_must_share_information_cutoff(self):
+        with self.assertRaisesRegex(ValueError, "information_cutoff"):
+            AblationPair(
+                "agent",
+                outcome(
+                    variant="FULL",
+                    utility=Decimal("1"),
+                    cost=Decimal("1"),
+                    elapsed=10,
+                    components=("base", "agent"),
+                    cutoff=CUTOFF,
+                ),
+                outcome(
+                    variant="ABLATED",
+                    utility=Decimal("1"),
+                    cost=Decimal("0"),
+                    elapsed=10,
+                    components=("base",),
+                    cutoff=CUTOFF + timedelta(seconds=1),
+                ),
+            )
+
+    def test_information_cutoff_must_be_timezone_aware(self):
+        with self.assertRaisesRegex(ValueError, "timezone-aware"):
+            outcome(
+                variant="FULL",
+                utility=Decimal("1"),
+                cost=Decimal("1"),
+                elapsed=10,
+                components=("base",),
+                cutoff=datetime(2026, 9, 24, 16, 0),
+            )
+
+    def test_binary_float_metrics_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "exact decimal"):
+            AblationOutcome(
+                case_id="case-1",
+                input_fingerprint="same",
+                variant="FULL",
+                information_cutoff=CUTOFF,
+                utility=0.1,
+                cost=Decimal("0"),
+                elapsed_ms=10,
+                deadline_ms=100,
+                components=("base",),
+            )
+        with self.assertRaisesRegex(ValueError, "exact decimal"):
+            AblationOutcome(
+                case_id="case-1",
+                input_fingerprint="same",
+                variant="FULL",
+                information_cutoff=CUTOFF,
+                utility=Decimal("1"),
+                cost=0.1,
+                elapsed_ms=10,
+                deadline_ms=100,
+                components=("base",),
             )
 
     def test_pair_may_only_remove_target_component(self):

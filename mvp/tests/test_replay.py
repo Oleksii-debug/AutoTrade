@@ -80,6 +80,43 @@ class CausalReplayTests(unittest.TestCase):
                 checkpoint=checkpoint,
             )
 
+    def test_checkpoint_cannot_skip_event_from_the_future(self):
+        events = [
+            event(1, "2026-09-24T10:00:00Z", 1),
+            event(2, "2026-09-24T10:01:00Z", 2),
+        ]
+        checkpoint = ReplayCheckpoint(
+            dataset_digest=dataset_digest(events),
+            cursor=2,
+            clock="2026-09-24T10:00:00Z",
+        )
+        with self.assertRaisesRegex(ReplayError, "unavailable at checkpoint clock"):
+            CausalReplay(
+                events,
+                start_at="2026-09-24T09:59:00Z",
+                checkpoint=checkpoint,
+            )
+
+    def test_checkpoint_may_preserve_visible_but_not_yet_consumed_event(self):
+        events = [
+            event(1, "2026-09-24T10:00:00Z", 1),
+            event(2, "2026-09-24T10:01:00Z", 2),
+        ]
+        checkpoint = ReplayCheckpoint(
+            dataset_digest=dataset_digest(events),
+            cursor=0,
+            clock="2026-09-24T10:00:00Z",
+        )
+        replay = CausalReplay(
+            events,
+            start_at="2026-09-24T09:59:00Z",
+            checkpoint=checkpoint,
+        )
+        self.assertEqual(
+            [item.sequence for item in replay.advance_to("2026-09-24T10:00:00Z")],
+            [1],
+        )
+
     def test_clock_cannot_move_backwards(self):
         replay = CausalReplay(
             [event(1, "2026-09-24T10:00:00Z", 1)],

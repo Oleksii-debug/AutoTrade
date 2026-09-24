@@ -71,6 +71,26 @@ class HistoricalVintageTests(unittest.TestCase):
         self.assertEqual(late[0]["revision"], "2")
         self.assertEqual(late[0]["payload"]["close"], "101")
 
+    def test_point_in_time_view_rejects_availability_before_source_event(self):
+        event = {
+            "event_id": str(uuid4()),
+            "instrument_version": "instrument:v1",
+            "kind": "TRADE",
+            "source_event_at": "2026-01-01T10:00:02Z",
+            "available_at": "2026-01-01T10:00:01Z",
+            "ingested_at": "2026-01-01T10:00:03Z",
+            "revision": "1",
+            "availability_basis": "provider",
+            "payload": {"price": "10"},
+            "quality_flags": [],
+            "raw_evidence_ref": evidence("2026-01-01T10:00:03Z"),
+        }
+        with self.assertRaisesRegex(HistoricalDataError, "source_event_at"):
+            point_in_time_market_events(
+                [event],
+                datetime(2026, 1, 2, tzinfo=timezone.utc),
+            )
+
     def test_conflicting_same_revision_is_rejected(self):
         event_id = str(uuid4())
         common = {

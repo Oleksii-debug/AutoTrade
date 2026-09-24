@@ -136,6 +136,8 @@ def point_in_time_market_events(
         available = _utc(event.get("available_at"), "available_at")
         source_at = _utc(event.get("source_event_at"), "source_event_at")
         ingested = _utc(event.get("ingested_at"), "ingested_at")
+        if source_at > available:
+            raise HistoricalDataError("source_event_at cannot be after evidenced available_at")
         if ingested < available:
             raise HistoricalDataError("ingested_at cannot precede evidenced available_at")
         if available > point:

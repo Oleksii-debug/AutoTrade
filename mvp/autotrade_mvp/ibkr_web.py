@@ -471,9 +471,18 @@ def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
     """
 
     item = _single_submission_item(payload)
-    has_order = item.get("order_id") not in {None, ""}
-    has_reply = item.get("id") not in {None, ""} and item.get("message") not in {None, ""}
-    has_error = item.get("error") not in {None, ""}
+    order_value = item.get("order_id")
+    reply_value = item.get("id")
+    message_value = item.get("message")
+    error_value = item.get("error")
+    has_order = order_value is not None and order_value != ""
+    has_reply = (
+        reply_value is not None
+        and reply_value != ""
+        and message_value is not None
+        and message_value != ""
+    )
+    has_error = error_value is not None and error_value != ""
 
     if sum(bool(value) for value in (has_order, has_reply, has_error)) != 1:
         raise IbkrWebAdapterError("submission response shape is ambiguous or unsupported")

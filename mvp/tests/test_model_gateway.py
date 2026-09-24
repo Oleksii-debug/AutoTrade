@@ -264,6 +264,44 @@ class ModelGatewayTests(unittest.TestCase):
                 quality_score="0.5",
             )
 
+    def test_cancelled_request_rejects_before_inventory_access(self):
+        class ExplodingInventory:
+            def __iter__(self):
+                raise AssertionError("cancelled request must not inspect model inventory")
+
+        req = ModelRequest(
+            request_id="cancelled",
+            allowed_model_ids=("remote",),
+            privacy_remote_allowed=True,
+            budget_remaining="10",
+            deadline_utc=NOW + timedelta(minutes=1),
+            cancelled=True,
+        )
+        decision = route_model(
+            RoutingPolicy(
+                RoutingMode.ALLOWLIST,
+                allowed_model_ids=("remote",),
+                allow_remote=True,
+                maximum_cost="10",
+            ),
+            req,
+            ExplodingInventory(),
+            now_utc=NOW,
+        )
+        self.assertEqual(RouteStatus.REJECTED, decision.status)
+        self.assertEqual("request_cancelled", decision.reason)
+        self.assertEqual(Decimal("0"), decision.reserved_cost)
+
+        with self.assertRaises(TypeError):
+            ModelRequest(
+                request_id="bad-cancel",
+                allowed_model_ids=(),
+                privacy_remote_allowed=False,
+                budget_remaining="0",
+                deadline_utc=NOW + timedelta(minutes=1),
+                cancelled=1,
+            )
+
     def test_duplicate_descriptor_is_rejected(self):
         with self.assertRaises(ValueError):
             route_model(

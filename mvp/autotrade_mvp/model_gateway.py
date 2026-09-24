@@ -27,6 +27,21 @@ class RouteStatus(StrEnum):
     REJECTED = "REJECTED"
 
 
+def _identifier(value: str, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be non-empty text")
+    return value.strip()
+
+
+def _identifier_tuple(values: tuple[str, ...], field: str) -> tuple[str, ...]:
+    if not isinstance(values, tuple):
+        raise TypeError(f"{field} must be a tuple")
+    normalized = tuple(_identifier(value, field) for value in values)
+    if len(normalized) != len(set(normalized)):
+        raise ValueError(f"{field} must not contain duplicates")
+    return normalized
+
+
 def _exact_decimal(value: Decimal | str | int, field: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise ValueError(f"{field} must use exact decimal input")
@@ -50,8 +65,10 @@ class ModelDescriptor:
     quality_score: Decimal
 
     def __post_init__(self) -> None:
-        if not self.model_id or not self.provider_id:
-            raise ValueError("model and provider identifiers are required")
+        object.__setattr__(self, "model_id", _identifier(self.model_id, "model_id"))
+        object.__setattr__(self, "provider_id", _identifier(self.provider_id, "provider_id"))
+        if self.revision is not None:
+            object.__setattr__(self, "revision", _identifier(self.revision, "revision"))
         if type(self.remote) is not bool:
             raise TypeError("remote must be boolean")
         if (
@@ -88,6 +105,17 @@ class RoutingPolicy:
     def __post_init__(self) -> None:
         if not isinstance(self.mode, RoutingMode):
             raise TypeError("mode must be a RoutingMode")
+        object.__setattr__(
+            self,
+            "allowed_model_ids",
+            _identifier_tuple(self.allowed_model_ids, "allowed_model_ids"),
+        )
+        if self.fixed_model_id is not None:
+            object.__setattr__(
+                self,
+                "fixed_model_id",
+                _identifier(self.fixed_model_id, "fixed_model_id"),
+            )
         if type(self.allow_remote) is not bool:
             raise TypeError("allow_remote must be boolean")
         object.__setattr__(
@@ -116,8 +144,12 @@ class ModelRequest:
     deadline_utc: datetime
 
     def __post_init__(self) -> None:
-        if not self.request_id:
-            raise ValueError("request_id is required")
+        object.__setattr__(self, "request_id", _identifier(self.request_id, "request_id"))
+        object.__setattr__(
+            self,
+            "allowed_model_ids",
+            _identifier_tuple(self.allowed_model_ids, "allowed_model_ids"),
+        )
         if type(self.privacy_remote_allowed) is not bool:
             raise TypeError("privacy_remote_allowed must be boolean")
         if not isinstance(self.deadline_utc, datetime) or self.deadline_utc.tzinfo is None:

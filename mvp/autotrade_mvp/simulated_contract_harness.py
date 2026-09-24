@@ -187,6 +187,7 @@ class SimulatedProviderContractHarness:
         )
         self.clock_guard = ClockGuard(timedelta(seconds=maximum_clock_skew_seconds))
         self._submission_directives: dict[str, SubmissionDirective] = {}
+        self._submission_started_at: dict[str, str] = {}
         self._stream_events: list[StreamEvent] = []
         self._corrections: dict[str, dict[str, object]] = {}
 
@@ -219,6 +220,10 @@ class SimulatedProviderContractHarness:
         if not isinstance(request, Mapping):
             raise TypeError("request must be a mapping")
         cid = _text(client_order_id, name="client_order_id")
+        if cid in self._submission_started_at:
+            raise SimulatedProviderConflict(
+                "client_order_id already crossed the transport boundary; blind retry is forbidden"
+            )
         host_time = _instant(request["now"], name="now")
         provider_time = _instant(request.get("provider_now", request["now"]), name="provider_now")
         self.clock_guard.require_safe(host_time=host_time, provider_time=provider_time)
@@ -233,6 +238,9 @@ class SimulatedProviderContractHarness:
         except BaseException:
             self.quota.release(quota_amount)
             raise
+        self._submission_started_at[cid] = (
+            host_time.isoformat().replace("+00:00", "Z")
+        )
         self.provider.outbound_request_count += 1
 
         directive = self._submission_directives.get(
@@ -304,6 +312,36 @@ class SimulatedProviderContractHarness:
             raise ValueError("coverage_end must not precede coverage_start")
         if not isinstance(pagination_complete, bool):
             raise TypeError("pagination_complete must be boolean")
+        if end > current:
+            core = {
+                "verdict": "INCONCLUSIVE",
+                "searched_surfaces": ["orders-by-client-id", "activity-fills"],
+                "time_window": {"start": coverage_start, "end": coverage_end},
+                "pagination_complete": pagination_complete,
+                "consistency_horizon": coverage_end,
+                "reason_codes": ["coverage_end_after_query_time"],
+            }
+            return {
+                **core,
+                "evidence": [_evidence("future-coverage", cid, now, core)],
+            }
+        submission_started_at = self._submission_started_at.get(cid)
+        if submission_started_at is not None:
+            sent_at = _instant(submission_started_at, name="submission_started_at")
+            if not (start <= sent_at <= end):
+                core = {
+                    "verdict": "INCONCLUSIVE",
+                    "searched_surfaces": ["orders-by-client-id", "activity-fills"],
+                    "time_window": {"start": coverage_start, "end": coverage_end},
+                    "pagination_complete": pagination_complete,
+                    "consistency_horizon": coverage_end,
+                    "reason_codes": ["submission_outside_coverage"],
+                    "submission_started_at": submission_started_at,
+                }
+                return {
+                    **core,
+                    "evidence": [_evidence("coverage-gap", cid, now, core)],
+                }
         directive = self._submission_directives.get(cid)
         if (
             directive is not None

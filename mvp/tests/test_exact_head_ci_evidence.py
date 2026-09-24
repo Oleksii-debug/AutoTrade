@@ -118,6 +118,14 @@ class ExactHeadCiEvidenceTests(unittest.TestCase):
                 text = (ROOT / relative).read_text(encoding="utf-8")
                 push_section = text.split("  pull_request:", 1)[0]
                 self.assertIn("  push:\n    branches: [main]\n", push_section)
+    def test_baseline_and_full_verify_have_distinct_scopes(self):
+        baseline = (ROOT / ".github/workflows/baseline.yml").read_text(encoding="utf-8")
+        verify = (ROOT / ".github/workflows/verify.yml").read_text(encoding="utf-8")
+        self.assertIn("python tools/baseline.py check", baseline)
+        self.assertNotIn("python tools/verify.py", baseline)
+        self.assertIn("python tools/verify.py", verify)
+        self.assertIn('--suite baseline --command "python tools/baseline.py check"', baseline)
+
     def test_ci_evidence_writer_rejects_non_exact_source_identifier(self):
         environment = self.env(source="main", pr_head="main")
         with patch.dict(os.environ, environment, clear=True), patch(

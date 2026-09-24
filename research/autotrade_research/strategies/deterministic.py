@@ -44,6 +44,18 @@ class CausalObservation:
     available_at: datetime
     price: Decimal
 
+    def __post_init__(self) -> None:
+        event_id = _text(self.event_id, name="event_id")
+        symbol = _text(self.symbol, name="symbol")
+        available_at = _time(self.available_at, name="available_at")
+        price = _decimal(self.price, name="price")
+        if price <= 0:
+            raise ValueError("price must be positive")
+        object.__setattr__(self, "event_id", event_id)
+        object.__setattr__(self, "symbol", symbol)
+        object.__setattr__(self, "available_at", available_at)
+        object.__setattr__(self, "price", price)
+
     @classmethod
     def create(cls, *, event_id: str, symbol: str, available_at: datetime, price) -> "CausalObservation":
         value = _decimal(price, name="price")
@@ -83,13 +95,16 @@ class ReturnThresholdBaseline:
         if self.proposal_quantity <= 0:
             raise ValueError("proposal_quantity must be positive")
         self._history: dict[str, list[CausalObservation]] = {}
-        self._seen_event_ids: set[str] = set()
+        self._observations_by_id: dict[str, CausalObservation] = {}
 
     def ingest(self, observation: CausalObservation, *, simulation_time: datetime) -> bool:
         cutoff = _time(simulation_time, name="simulation_time")
         if observation.available_at > cutoff:
             raise ValueError("observation is not causally available at simulation_time")
-        if observation.event_id in self._seen_event_ids:
+        existing = self._observations_by_id.get(observation.event_id)
+        if existing is not None:
+            if existing != observation:
+                raise ValueError("event_id already exists with different observation content")
             return False
         history = self._history.setdefault(observation.symbol, [])
         if history and observation.available_at < history[-1].available_at:
@@ -97,7 +112,7 @@ class ReturnThresholdBaseline:
         history.append(observation)
         if len(history) > self.lookback:
             del history[:-self.lookback]
-        self._seen_event_ids.add(observation.event_id)
+        self._observations_by_id[observation.event_id] = observation
         return True
 
     def propose(self, *, symbol: str, decision_time: datetime) -> DeterministicProposal:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 import json
 from pathlib import Path
 import sqlite3
@@ -77,6 +78,57 @@ def _require_immutable_artifact_ref(value: Any, name: str) -> str:
     if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
         raise ValueError(f"{name} must use a canonical lowercase SHA-256 digest")
     return reference
+
+
+def _verify_external_resolution_artifact(
+    *,
+    artifact_store: ArtifactStore,
+    evidence_ref: str,
+    job_id: str,
+    generation: int,
+    verdict: str,
+) -> bool:
+    if not isinstance(artifact_store, ArtifactStore):
+        raise TypeError("artifact_store must be ArtifactStore")
+    reference = _require_immutable_artifact_ref(evidence_ref, "evidence_ref")
+    artifact_id, digest = reference[len("artifact:"):].split("@sha256:", 1)
+    expected_hash = "sha256:" + digest
+    try:
+        manifest = artifact_store.load_manifest(artifact_id)
+        payload = artifact_store.read_bytes(artifact_id)
+        proof = json.loads(payload.decode("utf-8"))
+    except (FileNotFoundError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+    if (
+        manifest.get("sha256") != expected_hash
+        or "sha256:" + sha256(payload).hexdigest() != expected_hash
+        or manifest.get("media_type") != "application/json"
+    ):
+        return False
+    manifest_hash = manifest.get("manifest_hash")
+    if (
+        not isinstance(manifest_hash, str)
+        or len(manifest_hash) != 71
+        or not manifest_hash.startswith("sha256:")
+        or any(ch not in "0123456789abcdef" for ch in manifest_hash[7:])
+    ):
+        return False
+    expected = {
+        "artifact_kind": "RESEARCH_JOB_EXTERNAL_RESOLUTION",
+        "job_id": job_id,
+        "generation": generation,
+        "verdict": verdict,
+    }
+    metadata = manifest.get("metadata")
+    if not isinstance(metadata, dict) or any(
+        metadata.get(key) != value for key, value in expected.items()
+    ):
+        return False
+    if not isinstance(proof, dict) or any(
+        proof.get(key) != value for key, value in expected.items()
+    ):
+        return False
+    return proof.get("schema_version") == "1.0.0"
 
 def _require_research_kind(kind: str) -> str:
     normalized = _require_text(kind, "kind")
@@ -398,6 +450,7 @@ class ResearchJobStore:
         generation: int,
         verdict: str,
         evidence_ref: str,
+        artifact_store: ArtifactStore | None = None,
         output_refs: list[str] | None = None,
         now: datetime | None = None,
     ) -> bool:
@@ -468,6 +521,18 @@ class ResearchJobStore:
                 connection.rollback()
                 raise JobConflictError(
                     "job is not waiting for the supplied external resolution"
+                )
+
+            if artifact_store is None or not _verify_external_resolution_artifact(
+                artifact_store=artifact_store,
+                evidence_ref=evidence,
+                job_id=identifier,
+                generation=generation,
+                verdict=normalized_verdict,
+            ):
+                connection.rollback()
+                raise JobConflictError(
+                    "external resolution requires matching immutable artifact evidence"
                 )
 
             if normalized_verdict == "PROVEN_NOT_RUN":

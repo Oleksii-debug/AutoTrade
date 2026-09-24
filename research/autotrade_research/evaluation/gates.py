@@ -55,6 +55,12 @@ class GateProfile:
     ) -> "GateProfile":
         if not isinstance(profile_id, str) or not profile_id.strip():
             raise ValueError("profile_id is required")
+        practical_advantage = _decimal(
+            minimum_net_advantage,
+            name="minimum_net_advantage",
+        )
+        if practical_advantage < 0:
+            raise ValueError("minimum_net_advantage must be non-negative")
         drawdown = _decimal(max_drawdown, name="max_drawdown")
         power = _decimal(min_power, name="min_power")
         if drawdown < 0 or drawdown > 1:
@@ -77,7 +83,10 @@ class GateProfile:
         primary_baseline = primary_baseline_id.strip()
         if isinstance(baseline_ids, (str, bytes)):
             raise TypeError("baseline_ids must be a collection")
-        baselines = tuple(str(value).strip() for value in baseline_ids)
+        materialized_baselines = tuple(baseline_ids)
+        if any(not isinstance(value, str) for value in materialized_baselines):
+            raise TypeError("baseline_ids must contain text values")
+        baselines = tuple(value.strip() for value in materialized_baselines)
         if not baselines or any(not value for value in baselines):
             raise ValueError("baseline_ids must be non-empty")
         if len(set(baselines)) != len(baselines):
@@ -91,7 +100,10 @@ class GateProfile:
             raise ValueError("max_trials must be a positive integer")
         if isinstance(required_regimes, (str, bytes)):
             raise TypeError("required_regimes must be a collection")
-        regimes = tuple(str(value).strip() for value in required_regimes)
+        materialized_regimes = tuple(required_regimes)
+        if any(not isinstance(value, str) for value in materialized_regimes):
+            raise TypeError("required_regimes must contain text values")
+        regimes = tuple(value.strip() for value in materialized_regimes)
         if not regimes or any(not value for value in regimes):
             raise ValueError("required_regimes must be non-empty")
         if len(set(regimes)) != len(regimes):
@@ -99,7 +111,7 @@ class GateProfile:
 
         return cls(
             profile_id=profile_id.strip(),
-            minimum_net_advantage=_decimal(minimum_net_advantage, name="minimum_net_advantage"),
+            minimum_net_advantage=practical_advantage,
             max_drawdown=drawdown,
             max_adverse_cost_loss=adverse_cost_limit,
             min_power=power,

@@ -193,8 +193,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Data/Market/ and its contract/qualification evidence.
 - **Forbidden scope:** Inventing ticks from OHLC; using future finalized bars; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: DATA / market-normalization; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Market normalization foundation is present on main in mvp/autotrade_mvp/market_data.py with raw evidence binding, canonical normalized events, explicit causal timestamps, exact decimal fields and sequence/conflict handling. Remaining work: provider-stream integration, broader gap/freshness qualification and production placement.
 
 ### WP-10 — historical-vintages
 
@@ -210,8 +210,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Data/History/ and its contract/qualification evidence.
 - **Forbidden scope:** Replacing old vintages with latest revised data; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: DATA / historical-vintages; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Immutable historical-vintage foundation is present on main in research/autotrade_research/data/vintages.py with point-in-time revisions/universes, explicit missingness, raw/adjusted consistency, rights-aware manifests and append-only version storage. Remaining work: deeper causal lineage hardening, large-dataset storage integration and production qualification.
 
 ### WP-11 — news-macro-claims
 
@@ -227,8 +227,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Information/ and its contract/qualification evidence.
 - **Forbidden scope:** Unlicensed redistribution; source popularity as evidence of edge; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: INFORMATION / news-macro-claims; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Evidence-bound information-claim foundation is present on main in mvp/autotrade_mvp/information_claims.py with source documents, availability times, provenance digests, immutable claim identity and store ingestion. Remaining work: source-policy breadth, contradiction/supersession qualification and production information pipelines.
 
 ### WP-12 — causal-feeder
 
@@ -244,8 +244,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through research/autotrade_research/evaluation/replay/ and its contract/qualification evidence.
 - **Forbidden scope:** In-process conventions claimed as hostile-code isolation; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: REPLAY / causal-feeder; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Deterministic causal replay foundation is present on main in mvp/autotrade_mvp/replay.py with availability-time ordering, frozen dataset digest, monotonic simulation clock and checkpoint/resume primitives. Remaining work: pending-event/RNG/strategy/account state completeness, hostile-process isolation and exact resume-equivalence qualification.
 
 ### WP-13 — execution-realism
 
@@ -516,8 +516,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Portfolio/Futures/ and its contract/qualification evidence.
 - **Forbidden scope:** Continuous backadjusted series used as executable contract; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: FINANCE / futures-lifecycle; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Futures lifecycle foundation is present on main in mvp/autotrade_mvp/futures.py with exact linear/inverse P&L, variation margin, settlement fractions, lifecycle gates and balanced accounting vectors. Remaining work: provider contract metadata, exchange calendars/rolls, settlement edge cases and qualification.
 
 ### WP-29 — perpetual-lifecycle
 
@@ -533,8 +533,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Portfolio/Perpetuals/ and its contract/qualification evidence.
 - **Forbidden scope:** One universal funding convention assumed across venues; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: FINANCE / perpetual-lifecycle; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Perpetual lifecycle foundation is present on main in mvp/autotrade_mvp/perpetuals.py with exact notional/funding, collateral and margin snapshots, stressed loss, risk-capacity checks and funding ledger primitives. Remaining work: provider funding schedules, liquidation/ADL semantics, inverse variants and qualification.
 
 ### WP-30 — options-lifecycle
 
@@ -601,8 +601,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through research/autotrade_research/strategies/ and its contract/qualification evidence.
 - **Forbidden scope:** Hard-coded daily return/trade-count targets; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: STRATEGY / deterministic-path; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Deterministic strategy baseline is present on main in research/autotrade_research/strategies/deterministic.py with causal observations, exact-decimal thresholds and reproducible proposals independent of language models. Remaining work: broader baselines, transaction-cost/capacity integration and scientific qualification.
 
 ### WP-34 — causal-features
 
@@ -618,8 +618,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through research/autotrade_research/features/ and its contract/qualification evidence.
 - **Forbidden scope:** Global fit on train+test; future regime classifier labels; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: FEATURE / causal-features; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Causal feature/label foundation is present on main in research/autotrade_research/features/causal.py with availability-aware source values, causal windows, fold-fitted normalization, forward-label timing and universe-membership guards. Remaining work: broader feature families, leakage sentinels and walk-forward integration.
 
 ### WP-35 — protocol-registry
 
@@ -686,8 +686,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through research/autotrade_research/learning/ and its contract/qualification evidence.
 - **Forbidden scope:** Archive existence claimed as proof of no forgetting; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: LEARNING / continual-candidates; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Continual-candidate retention foundation is present on main in research/autotrade_research/learning/retention.py with protected/recent regime matrices, delayed-label inconclusive handling and independent science/risk promotion gates. Remaining work: actual bounded update pipelines, drift calibration, evidence-bound gate references and production candidate generation.
 
 ### WP-39 — routing-budgets
 
@@ -873,8 +873,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Persistence/Backup/ and its contract/qualification evidence.
 - **Forbidden scope:** Copying only live DB main file; promising zero loss after unbacked disk destruction; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: RECOVERY / backup-restore; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Backup/restore foundation is present on main in mvp/autotrade_mvp/backup.py with SQLite backup API use, content verification, artifact integrity, atomic staging restore and fail-closed post-restore reconciliation requirement. Remaining work: qualified gate clearing, sender fencing integration, interrupted/power-loss drills and clean-machine release evidence.
 
 ### WP-50 — windows-packaging
 
@@ -1111,8 +1111,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through research/autotrade_research/evaluation/ablation/ and its contract/qualification evidence.
 - **Forbidden scope:** Self-reported model quality or popularity used as evidence; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: SCIENCE / source-agent-value; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Matched-input ablation foundation is present on main in research/autotrade_research/evaluation/ablation.py with exact-decimal utility/cost, component-difference checks and deadline accounting. Remaining work: causal cutoff hardening, duplicate-case controls, broader source/agent experiments and locked scientific evidence.
 
 ### WP-64 — release-supply-chain
 

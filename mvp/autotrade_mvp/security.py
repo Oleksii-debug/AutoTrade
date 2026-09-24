@@ -302,7 +302,7 @@ class SecurityBoundary:
 
     @staticmethod
     def redact(value: object) -> object:
-        if isinstance(value, dict):
+        if isinstance(value, Mapping):
             return {
                 key: "[REDACTED]"
                 if _REDACT_RE.search(str(key))
@@ -313,6 +313,10 @@ class SecurityBoundary:
             return [SecurityBoundary.redact(item) for item in value]
         if isinstance(value, tuple):
             return tuple(SecurityBoundary.redact(item) for item in value)
+        if isinstance(value, set):
+            return {SecurityBoundary.redact(item) for item in value}
+        if isinstance(value, frozenset):
+            return frozenset(SecurityBoundary.redact(item) for item in value)
         return value
 
     @staticmethod

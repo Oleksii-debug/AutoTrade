@@ -581,6 +581,18 @@ class ModelRoutingTests(unittest.TestCase):
             record.reproducibility_limitations,
         )
 
+    def test_invalid_unbilled_estimate_preserves_active_reservation(self):
+        budget = ModelBudgetLedger(ceiling="1")
+        self.assertTrue(budget.reserve("call-atomic", "0.1"))
+        before = budget.snapshot()
+
+        with self.assertRaisesRegex(ModelRoutingError, "exact"):
+            budget.mark_unbilled("call-atomic", estimated_cost=0.2)
+
+        self.assertEqual(budget.snapshot(), before)
+        self.assertFalse(budget.reserve("call-atomic", "0.1"))
+        self.assertEqual(budget.snapshot().reserved, Decimal("0.1"))
+
     def test_budget_identity_conflicts_fail_closed(self):
         budget = ModelBudgetLedger(ceiling="1")
         self.assertTrue(budget.reserve("call-1", "0.1"))

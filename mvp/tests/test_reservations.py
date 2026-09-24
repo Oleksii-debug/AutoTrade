@@ -129,6 +129,22 @@ class ReservationFoundationTests(unittest.TestCase):
                 available={"CASH:USD": "100"},
             )
 
+    def test_same_intent_cannot_receive_two_reservation_ids(self):
+        book = ReservationBook()
+        book.reserve(
+            reservation_id="r1",
+            intent_id="i1",
+            requirements={"CASH:USD": "10"},
+            available={"CASH:USD": "100"},
+        )
+        with self.assertRaises(ReservationConflict):
+            book.reserve(
+                reservation_id="r2",
+                intent_id="i1",
+                requirements={"CASH:USD": "10"},
+                available={"CASH:USD": "100"},
+            )
+
     def test_consumption_cannot_exceed_or_invent_reserved_resource(self):
         book = ReservationBook()
         book.reserve(

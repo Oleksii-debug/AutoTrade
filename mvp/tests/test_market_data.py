@@ -98,6 +98,75 @@ def raw(
 
 
 class MarketNormalizationTests(unittest.TestCase):
+    def test_raw_evidence_ref_must_match_canonical_contract(self):
+        with self.assertRaisesRegex(MarketDataError, "missing required fields"):
+            raw(
+                "TRADE",
+                {"price": "100", "quantity": "1"},
+            ).__class__(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                kind="TRADE",
+                source_event_at=at(),
+                available_at=at() + timedelta(milliseconds=100),
+                ingested_at=at() + timedelta(milliseconds=200),
+                availability_basis="PROVIDER_TIMESTAMP",
+                source_sequence=1,
+                revision=0,
+                payload={"price": "100", "quantity": "1"},
+                raw_evidence_ref={"artifact_id": EVIDENCE["artifact_id"]},
+            )
+
+        invalid = (
+            ({**EVIDENCE, "artifact_id": "not-a-uuid"}, "artifact_id must be a UUID"),
+            ({**EVIDENCE, "sha256": "bad"}, "canonical SHA-256"),
+            ({**EVIDENCE, "observed_at": "2026-09-24T16:00:00+00:00"}, "UTC and end in Z"),
+            ({**EVIDENCE, "source_uri": "relative/path"}, "absolute URI"),
+            ({**EVIDENCE, "unexpected": "x"}, "unknown fields"),
+        )
+        for evidence, message in invalid:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(MarketDataError, message):
+                    RawMarketUpdate(
+                        provider_id="provider-a",
+                        venue_id="venue-a",
+                        provider_symbol="ABC-USD",
+                        kind="TRADE",
+                        source_event_at=at(),
+                        available_at=at() + timedelta(milliseconds=100),
+                        ingested_at=at() + timedelta(milliseconds=200),
+                        availability_basis="PROVIDER_TIMESTAMP",
+                        source_sequence=1,
+                        revision=0,
+                        payload={"price": "100", "quantity": "1"},
+                        raw_evidence_ref=evidence,
+                    )
+
+    def test_raw_evidence_ref_is_normalized_and_immutable(self):
+        evidence = {
+            **EVIDENCE,
+            "source_uri": "https://example.test/raw/1",
+            "rights_id": "market-data-rights",
+        }
+        update = RawMarketUpdate(
+            provider_id="provider-a",
+            venue_id="venue-a",
+            provider_symbol="ABC-USD",
+            kind="TRADE",
+            source_event_at=at(),
+            available_at=at() + timedelta(milliseconds=100),
+            ingested_at=at() + timedelta(milliseconds=200),
+            availability_basis="PROVIDER_TIMESTAMP",
+            source_sequence=1,
+            revision=0,
+            payload={"price": "100", "quantity": "1"},
+            raw_evidence_ref=evidence,
+        )
+        self.assertEqual(update.raw_evidence_ref["rights_id"], "market-data-rights")
+        with self.assertRaises(TypeError):
+            update.raw_evidence_ref["rights_id"] = "changed"
+
     def test_trade_normalizes_to_contract_without_binary_numbers(self):
         normalizer = MarketNormalizer(registry())
         event = normalizer.normalize(

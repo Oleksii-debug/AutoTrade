@@ -160,10 +160,18 @@ class ReturnThresholdBaseline:
 
     def snapshot(self) -> str:
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "lookback": self.lookback,
             "threshold": str(self.threshold),
             "proposal_quantity": str(self.proposal_quantity),
+            "observation_archive": {
+                event_id: {
+                    "symbol": item.symbol,
+                    "available_at": item.available_at.isoformat(),
+                    "price": str(item.price),
+                }
+                for event_id, item in sorted(self._observations_by_id.items())
+            },
             "history": {
                 symbol: [
                     {
@@ -184,19 +192,58 @@ class ReturnThresholdBaseline:
             payload = json.loads(snapshot)
         except (TypeError, json.JSONDecodeError) as error:
             raise ValueError("strategy snapshot is invalid") from error
-        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        if not isinstance(payload, dict) or payload.get("schema_version") != 2:
             raise ValueError("unsupported strategy snapshot")
-        expected = {"schema_version", "lookback", "threshold", "proposal_quantity", "history"}
-        if set(payload) != expected or not isinstance(payload["history"], dict):
+        expected = {
+            "schema_version",
+            "lookback",
+            "threshold",
+            "proposal_quantity",
+            "observation_archive",
+            "history",
+        }
+        if (
+            set(payload) != expected
+            or not isinstance(payload["history"], dict)
+            or not isinstance(payload["observation_archive"], dict)
+        ):
             raise ValueError("strategy snapshot structure is invalid")
         strategy = cls(
             lookback=payload["lookback"],
             threshold=payload["threshold"],
             proposal_quantity=payload["proposal_quantity"],
         )
+
+        archive: dict[str, CausalObservation] = {}
+        for event_id, row in sorted(payload["observation_archive"].items()):
+            if (
+                not isinstance(event_id, str)
+                or not isinstance(row, dict)
+                or set(row) != {"symbol", "available_at", "price"}
+            ):
+                raise ValueError("strategy observation archive is invalid")
+            try:
+                available_at = datetime.fromisoformat(row["available_at"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("snapshot timestamp is invalid") from error
+            observation = CausalObservation.create(
+                event_id=event_id,
+                symbol=row["symbol"],
+                available_at=available_at,
+                price=row["price"],
+            )
+            if observation.event_id != event_id:
+                raise ValueError("strategy observation archive event_id is not canonical")
+            archive[event_id] = observation
+
+        restored_history: dict[str, list[CausalObservation]] = {}
         for symbol, rows in sorted(payload["history"].items()):
-            if not isinstance(rows, list):
+            normalized_symbol = _text(symbol, name="snapshot symbol")
+            if normalized_symbol != symbol or not isinstance(rows, list):
                 raise ValueError("strategy history is invalid")
+            if len(rows) > strategy.lookback:
+                raise ValueError("strategy history exceeds lookback")
+            restored_rows: list[CausalObservation] = []
             for row in rows:
                 if not isinstance(row, dict) or set(row) != {"event_id", "available_at", "price"}:
                     raise ValueError("strategy observation snapshot is invalid")
@@ -206,11 +253,27 @@ class ReturnThresholdBaseline:
                     raise ValueError("snapshot timestamp is invalid") from error
                 observation = CausalObservation.create(
                     event_id=row["event_id"],
-                    symbol=symbol,
+                    symbol=normalized_symbol,
                     available_at=available_at,
                     price=row["price"],
                 )
-                strategy.ingest(observation, simulation_time=observation.available_at)
+                archived = archive.get(observation.event_id)
+                if archived != observation:
+                    raise ValueError(
+                        "strategy history is not bound to observation archive"
+                    )
+                if (
+                    restored_rows
+                    and observation.available_at < restored_rows[-1].available_at
+                ):
+                    raise ValueError(
+                        "strategy history is not ordered by causal availability"
+                    )
+                restored_rows.append(observation)
+            restored_history[normalized_symbol] = restored_rows
+
+        strategy._observations_by_id = archive
+        strategy._history = restored_history
         return strategy
 
 

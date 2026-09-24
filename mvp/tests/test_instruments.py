@@ -1,6 +1,11 @@
 from datetime import datetime, timezone
 from decimal import Decimal
+import json
+from pathlib import Path
 import unittest
+
+from jsonschema import Draft202012Validator, FormatChecker
+from referencing import Registry, Resource
 
 from mvp.autotrade_mvp.instruments import (
     DeliverableLeg,
@@ -32,6 +37,7 @@ def spot(
     status: str = "ACTIVE",
     calendar_id: str = "CONTINUOUS_24_7",
     timezone_id: str = "UTC",
+    metadata_evidence=(),
 ) -> InstrumentVersion:
     return InstrumentVersion(
         instrument_id=instrument_id,
@@ -53,6 +59,7 @@ def spot(
         timezone_id=timezone_id,
         effective_from=effective_from,
         status=status,
+        metadata_evidence=metadata_evidence,
     )
 
 
@@ -233,6 +240,42 @@ class InstrumentRegistryTests(unittest.TestCase):
         self.assertEqual(projected["price_tick"], "0.01")
         self.assertEqual(projected["minimum_notional"], {"amount": "10", "currency": "USD"})
         self.assertEqual(projected["effective_from"], "2026-01-01T00:00:00Z")
+
+        root = Path(__file__).resolve().parents[2]
+        schema_dir = root / "contracts" / "jsonschema"
+        schemas = {
+            path.name: json.loads(path.read_text(encoding="utf-8"))
+            for path in schema_dir.glob("*.json")
+        }
+        registry = Registry().with_resources(
+            [(schema["$id"], Resource.from_contents(schema)) for schema in schemas.values()]
+        )
+        market = schemas["market.schema.json"]
+        Draft202012Validator(
+            {"$ref": f"{market['$id']}#/$defs/InstrumentVersion"},
+            registry=registry,
+            format_checker=FormatChecker(),
+        ).validate(projected)
+
+    def test_metadata_evidence_is_contract_shaped_and_immutable(self):
+        evidence = {
+            "artifact_id": B,
+            "sha256": "sha256:" + "a" * 64,
+            "observed_at": "2026-01-01T00:00:00Z",
+            "source_uri": "https://example.test/instrument",
+            "rights_id": "provider-metadata-rights",
+        }
+        instrument = spot(metadata_evidence=(evidence,))
+        self.assertEqual(instrument.metadata_evidence[0]["artifact_id"], B)
+        with self.assertRaises(TypeError):
+            instrument.metadata_evidence[0]["rights_id"] = "changed"
+
+        with self.assertRaisesRegex(InstrumentRegistryError, "unknown fields"):
+            spot(metadata_evidence=({**evidence, "unexpected": "x"},))
+        with self.assertRaisesRegex(InstrumentRegistryError, "sha256"):
+            spot(metadata_evidence=({**evidence, "sha256": "bad"},))
+        with self.assertRaisesRegex(InstrumentRegistryError, "observed_at"):
+            spot(metadata_evidence=({**evidence, "observed_at": "2026-01-01T00:00:00+00:00"},))
 
     def test_invalid_version_calendar_and_derivative_shape_fail_closed(self):
         registry = InstrumentRegistry()

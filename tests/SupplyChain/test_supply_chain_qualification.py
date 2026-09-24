@@ -107,6 +107,33 @@ class SupplyChainQualificationTests(unittest.TestCase):
         self.assertEqual(missing.status, "INCONCLUSIVE")
         self.assertEqual(unknown.status, "INCONCLUSIVE")
 
+    def test_hash_and_commit_identities_are_strictly_canonical(self):
+        with self.assertRaises(ValueError):
+            evidence(sbom_hash="sha256:" + "A" * 64)
+        with self.assertRaises(ValueError):
+            evidence(release_commit_sha="A" * 40)
+
+    def test_notice_flags_require_actual_booleans(self):
+        with self.assertRaises(TypeError):
+            component(notice_required=1)
+        with self.assertRaises(TypeError):
+            component(notice_present="yes")
+
+    def test_supply_chain_collections_are_typed_and_stable(self):
+        with self.assertRaises(TypeError):
+            SupplyChainEvidence(
+                release_commit_sha=R,
+                built_from_commit_sha=R,
+                sbom_hash=H,
+                provenance_hash=H,
+                dependency_lock_hash=H,
+                distributed_component_ids=["pkg:pypi/example@1.0"],
+                components=(component(),),
+                model_data_rights=(rights(),),
+            )
+        with self.assertRaises(TypeError):
+            evidence(model_data_rights=(object(),))
+
 
 if __name__ == "__main__":
     unittest.main()

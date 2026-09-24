@@ -108,6 +108,25 @@ class ReconciliationTests(unittest.TestCase):
         )
         self.assertTrue(result.complete)
 
+    def test_inconsistent_snapshot_cannot_prove_unknown_send_absent(self):
+        unknown = UnknownSubmission.create(
+            attempt_id="a-inconsistent-snapshot",
+            client_order_id="missing-order",
+            started_at="2026-09-24T18:00:00Z",
+        )
+        result = self.base(
+            snapshot_consistency=None,
+            unknown_submissions=[unknown],
+            searched_client_order_ids=["missing-order"],
+            absence_coverage=absence_coverage(),
+        )
+        self.assertEqual(result.submission_resolutions[0].outcome, "UNKNOWN")
+        self.assertEqual(
+            result.submission_resolutions[0].evidence_reason,
+            "provider_snapshot_consistency_not_evidenced",
+        )
+        self.assertIn("ACCOUNT", result.blocking_resources)
+
     def test_single_complete_activity_window_is_not_enough_for_proven_absence(self):
         unknown = UnknownSubmission.create(
             attempt_id="a-single-window",

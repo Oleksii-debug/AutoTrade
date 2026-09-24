@@ -251,7 +251,7 @@ class BudgetLedgerTests(unittest.TestCase):
             estimated_unbilled=Decimal("0.5"),
         )
         with self.assertRaisesRegex(ValueError, "exact decimal"):
-            ledger.reconcile_unbilled(billed=0.1)
+            ledger.reconcile_unbilled(billing_id="bill-float", billed=0.1)
 
     def test_reservation_is_idempotent(self):
         from mvp.autotrade_mvp.model_gateway import BudgetLedger
@@ -291,12 +291,29 @@ class BudgetLedgerTests(unittest.TestCase):
             ledger.settle("req", incurred=Decimal("1.01"))
         self.assertEqual(Decimal("1"), ledger.snapshot().reserved)
 
+    def test_unbilled_reconciliation_is_idempotent_by_billing_identity(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+        ledger = BudgetLedger(Decimal("2"))
+        ledger.reserve("req", Decimal("1"))
+        ledger.settle("req", incurred=Decimal("0.2"), estimated_unbilled=Decimal("0.5"))
+        ledger.reconcile_unbilled(billing_id="invoice-line-1", billed=Decimal("0.3"))
+        first = ledger.snapshot()
+        ledger.reconcile_unbilled(billing_id="invoice-line-1", billed=Decimal("0.3"))
+        second = ledger.snapshot()
+        self.assertEqual(first, second)
+        with self.assertRaisesRegex(ValueError, "conflict"):
+            ledger.reconcile_unbilled(
+                billing_id="invoice-line-1",
+                billed=Decimal("0.2"),
+            )
+        self.assertEqual(ledger.snapshot(), second)
+
     def test_unbilled_reconciliation_moves_cost_to_incurred(self):
         from mvp.autotrade_mvp.model_gateway import BudgetLedger
         ledger = BudgetLedger(Decimal("2"))
         ledger.reserve("req", Decimal("1"))
         ledger.settle("req", incurred=Decimal("0.2"), estimated_unbilled=Decimal("0.5"))
-        ledger.reconcile_unbilled(billed=Decimal("0.3"))
+        ledger.reconcile_unbilled(billing_id="bill-1", billed=Decimal("0.3"))
         snap = ledger.snapshot()
         self.assertEqual(Decimal("0.5"), snap.incurred)
         self.assertEqual(Decimal("0.2"), snap.estimated_unbilled)

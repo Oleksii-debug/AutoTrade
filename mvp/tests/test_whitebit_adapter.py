@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.whitebit import (
     WhiteBitMarketRules,
     WhiteBitOrderIntent,
     WhiteBitPageEvidence,
+    absence_evidence_from_coverages,
     execution_history_coverage,
     open_order_coverage,
     order_history_coverage,
@@ -669,6 +670,69 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertEqual(redacted["headers"]["X-TXC-APIKEY"], "<redacted>")
         self.assertEqual(redacted["nested"][0]["api_secret"], "<redacted>")
         self.assertEqual(redacted["nested"][0]["market"], "BTC_USDT")
+
+    def test_absence_builder_uses_surface_typed_complete_coverages(self):
+        open_orders = open_order_coverage()
+        order_history = order_history_coverage()
+        executions = execution_history_coverage()
+        open_orders.add_page(
+            WhiteBitPageEvidence(offset=0, limit=100, record_count=0)
+        )
+        order_history.add_page(
+            WhiteBitPageEvidence(offset=0, limit=500, record_count=0)
+        )
+        executions.add_page(
+            WhiteBitPageEvidence(offset=0, limit=500, record_count=0)
+        )
+        evidence = absence_evidence_from_coverages(
+            order_found=False,
+            open_orders=open_orders,
+            order_history=order_history,
+            executions=executions,
+            activities_complete=True,
+            consistency_horizon_satisfied=True,
+        )
+        self.assertEqual(evidence.verdict(), "PROVEN_ABSENT")
+
+    def test_absence_builder_stays_inconclusive_on_full_nonterminal_page(self):
+        open_orders = open_order_coverage()
+        order_history = order_history_coverage()
+        executions = execution_history_coverage()
+        open_orders.add_page(
+            WhiteBitPageEvidence(offset=0, limit=100, record_count=100)
+        )
+        order_history.add_page(
+            WhiteBitPageEvidence(offset=0, limit=500, record_count=0)
+        )
+        executions.add_page(
+            WhiteBitPageEvidence(offset=0, limit=500, record_count=0)
+        )
+        evidence = absence_evidence_from_coverages(
+            order_found=False,
+            open_orders=open_orders,
+            order_history=order_history,
+            executions=executions,
+            activities_complete=True,
+            consistency_horizon_satisfied=True,
+        )
+        self.assertEqual(evidence.verdict(), "INCONCLUSIVE")
+
+    def test_absence_builder_rejects_swapped_surface_evidence(self):
+        open_orders = open_order_coverage()
+        order_history = order_history_coverage()
+        executions = execution_history_coverage()
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "coverage surface mismatch",
+        ):
+            absence_evidence_from_coverages(
+                order_found=False,
+                open_orders=order_history,
+                order_history=open_orders,
+                executions=executions,
+                activities_complete=True,
+                consistency_horizon_satisfied=True,
+            )
 
     def test_one_or_two_empty_order_surfaces_do_not_prove_absence(self):
         evidence = WhiteBitAbsenceEvidence(

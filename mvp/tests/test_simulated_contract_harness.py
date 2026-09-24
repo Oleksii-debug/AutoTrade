@@ -223,6 +223,24 @@ class SimulatedProviderContractHarnessTests(unittest.TestCase):
         self.assertEqual(guard_calls, [])
         self.assertEqual(provider.outbound_request_count, 0)
 
+    def test_stream_event_cannot_be_mutated_after_observation(self):
+        harness = SimulatedProviderContractHarness()
+        source = {"kind": "book", "levels": [{"price": "100", "size": "2"}]}
+        event = harness.emit_stream_event(
+            sequence=1,
+            observed_at="2026-09-24T20:00:00+02:00",
+            payload=source,
+        )
+        source["kind"] = "tampered"
+        source["levels"][0]["price"] = "1"
+        self.assertEqual(event.observed_at, "2026-09-24T18:00:00Z")
+        self.assertEqual(event.payload["kind"], "book")
+        self.assertEqual(event.payload["levels"][0]["price"], "100")
+        with self.assertRaises(TypeError):
+            event.payload["kind"] = "tampered"
+        with self.assertRaises(TypeError):
+            event.payload["levels"][0]["price"] = "1"
+
     def test_stream_gap_is_explicit_even_when_first_event_is_contiguous(self):
         harness = SimulatedProviderContractHarness()
         harness.emit_stream_event(

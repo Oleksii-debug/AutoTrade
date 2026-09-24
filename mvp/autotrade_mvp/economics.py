@@ -8,6 +8,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, localcontext
+import json
+from pathlib import Path
+from typing import Any
 
 
 def _decimal(value: Decimal | str | int | float, *, name: str) -> Decimal:
@@ -190,3 +193,124 @@ def corrected_fill_cash_difference(
         raise ValueError("side must be BUY or SELL")
     price_difference = corrected - original
     return -qty * price_difference if normalized_side == "BUY" else qty * price_difference
+
+
+REPORT_QUANTUM = Decimal("0.00000001")
+
+
+@dataclass(frozen=True)
+class EconomicReport:
+    """Evidence-bound economics for one simulated state directory."""
+
+    initial_equity: Decimal
+    final_equity: Decimal
+    net_pnl: Decimal
+    gross_pnl_before_fees: Decimal
+    total_fees: Decimal
+    turnover: Decimal
+    net_return: Decimal
+    max_drawdown: Decimal
+    effective_fee_rate: Decimal
+    break_even_additional_cost: Decimal
+    trade_count: int
+    ending_position: Decimal
+    evidence_count: int
+    reconciled: bool
+    economic_edge_claim: str
+    fill_model: str
+
+    def as_jsonable(self) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in self.__dict__.items():
+            result[key] = str(value) if isinstance(value, Decimal) else value
+        return result
+
+
+def _report_value(value: Decimal) -> Decimal:
+    return value.quantize(REPORT_QUANTUM)
+
+
+def build_economic_report(state_dir: str | Path) -> EconomicReport:
+    """Summarize realized simulation economics without claiming strategy edge."""
+
+    root = Path(state_dir)
+    checkpoint_path = root / "checkpoint.json"
+    evidence_path = root / "learning-evidence.jsonl"
+    if not checkpoint_path.is_file() or not evidence_path.is_file():
+        raise ValueError("A completed simulated state with evidence is required")
+    try:
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        evidence = [
+            json.loads(line)
+            for line in evidence_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("Economic state is unreadable or corrupt") from error
+    if not evidence:
+        raise ValueError("At least one evidence record is required")
+
+    initial_equity = _decimal(checkpoint.get("initial_cash"), name="initial_cash")
+    final_equity = _decimal(evidence[-1].get("equity"), name="final_equity")
+    if initial_equity <= 0:
+        raise ValueError("Initial equity must be positive")
+
+    postings = checkpoint.get("postings")
+    fills = checkpoint.get("fills")
+    if not isinstance(postings, list) or not isinstance(fills, dict):
+        raise ValueError("Checkpoint ledger structure is corrupt")
+
+    total_fees = sum(
+        (_non_negative(row.get("fee"), name="posting fee") for row in postings),
+        Decimal("0"),
+    )
+    turnover = sum(
+        (
+            abs(
+                _decimal(fill.get("quantity"), name="fill quantity")
+                * _decimal(fill.get("price"), name="fill price")
+            )
+            for fill in fills.values()
+        ),
+        Decimal("0"),
+    )
+    net_pnl = final_equity - initial_equity
+    gross_pnl = net_pnl + total_fees
+    net_return = net_pnl / initial_equity
+
+    peak = initial_equity
+    maximum_drawdown = Decimal("0")
+    reconciled = True
+    for row in evidence:
+        equity = _decimal(row.get("equity"), name="evidence equity")
+        if equity > peak:
+            peak = equity
+        if peak > 0:
+            drawdown = (peak - equity) / peak
+            maximum_drawdown = max(maximum_drawdown, drawdown)
+        reconciled = reconciled and row.get("reconciled") is True
+
+    effective_fee_rate = total_fees / turnover if turnover > 0 else Decimal("0")
+    ending_position = sum(
+        (_decimal(row.get("position_delta"), name="position delta") for row in postings),
+        Decimal("0"),
+    )
+
+    return EconomicReport(
+        initial_equity=_report_value(initial_equity),
+        final_equity=_report_value(final_equity),
+        net_pnl=_report_value(net_pnl),
+        gross_pnl_before_fees=_report_value(gross_pnl),
+        total_fees=_report_value(total_fees),
+        turnover=_report_value(turnover),
+        net_return=_report_value(net_return),
+        max_drawdown=_report_value(maximum_drawdown),
+        effective_fee_rate=_report_value(effective_fee_rate),
+        break_even_additional_cost=_report_value(max(net_pnl, Decimal("0"))),
+        trade_count=len(fills),
+        ending_position=_report_value(ending_position),
+        evidence_count=len(evidence),
+        reconciled=reconciled,
+        economic_edge_claim="UNPROVEN_SIMULATION_ONLY",
+        fill_model="EXACT_INPUT_PRICE_WITH_EXPLICIT_FEE_NO_SLIPPAGE",
+    )

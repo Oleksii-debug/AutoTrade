@@ -131,16 +131,19 @@ class OrderProjectionTests(unittest.TestCase):
             )
         self.assertEqual(book.snapshot("old").ordered_quantity, Decimal("10"))
 
-    def test_rejection_cannot_erase_an_observed_fill(self):
+    def test_late_rejection_preserves_observed_fill_as_explicit_anomaly(self):
         book = OrderProjection()
         book.register_intent(intent_id="i1", side="BUY", quantity="1")
         book.observe_fill(
             fill_id="f1", provider_execution_id="exec-1", intent_id="i1",
             side="BUY", quantity="1", price="100",
         )
-        with self.assertRaises(OrderProjectionConflict):
-            book.reject("i1")
-        self.assertEqual(book.filled_quantity("i1"), Decimal("1"))
+        book.reject("i1")
+        state = book.snapshot("i1")
+        self.assertTrue(state.rejected)
+        self.assertEqual(state.filled_quantity, Decimal("1"))
+        self.assertEqual(state.remaining_quantity, Decimal("0"))
+        self.assertEqual(state.operational_state, "REJECTED_WITH_FILL")
 
     def test_binary_float_fill_is_rejected(self):
         book = OrderProjection()

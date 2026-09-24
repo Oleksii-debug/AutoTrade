@@ -3,7 +3,7 @@ import unittest
 
 from mvp.autotrade_mvp.durable_host_api import JournalBackedHostCommandStore
 from mvp.autotrade_mvp.host_api import EventGap
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 
 
 class JournalBackedHostApiTests(unittest.TestCase):
@@ -132,6 +132,63 @@ class JournalBackedHostApiTests(unittest.TestCase):
             store.submit(self.command(session="forged"))
         self.assertEqual(store.state_version, 0)
         self.assertEqual(store.cursor, 0)
+
+    def test_restart_rejects_operation_update_without_accepted_origin(self):
+        journal = JournalStore(self.path)
+        journal.append_event(
+            {
+                "event_id": "forged-update",
+                "event_type": "OPERATION_UPDATED",
+                "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
+                "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                "aggregate_version": 1,
+                "payload": {
+                    "operation_id": "ghost-operation",
+                    "phase": "SUCCEEDED",
+                    "remaining_uncertainty": [],
+                },
+                "payload_hash": payload_digest(
+                    {
+                        "operation_id": "ghost-operation",
+                        "phase": "SUCCEEDED",
+                        "remaining_uncertainty": [],
+                    }
+                ),
+                "committed_at": "2026-09-24T18:00:00Z",
+            }
+        )
+        restarted = self.store()
+        with self.assertRaisesRegex(
+            ValueError,
+            "cannot precede COMMAND_ACCEPTED",
+        ):
+            restarted.snapshot()
+
+    def test_restart_rejects_terminal_rewrite_in_journal_history(self):
+        store = self.store()
+        accepted = store.submit(self.command())
+        store.update_operation(accepted.operation_id, "SUCCEEDED")
+
+        journal = JournalStore(self.path)
+        payload = {
+            "operation_id": accepted.operation_id,
+            "phase": "FAILED",
+            "remaining_uncertainty": [],
+        }
+        journal.append_event(
+            {
+                "event_id": "forged-terminal-rewrite",
+                "event_type": "OPERATION_UPDATED",
+                "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
+                "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                "aggregate_version": 3,
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+                "committed_at": "2026-09-24T18:00:01Z",
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "rewrites a terminal"):
+            self.store().snapshot()
 
     def test_terminal_transition_is_persisted_and_cannot_be_rewritten(self):
         store = self.store()

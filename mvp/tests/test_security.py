@@ -312,14 +312,17 @@ class SecurityBoundaryTests(unittest.TestCase):
         redacted = self.boundary.redact_for_diagnostics(
             MappingProxyType(
                 {
+                    "api_key": "must-hide-by-key",
                     "safe": {"top-secret"},
                     "nested": MappingProxyType({"note": "prefix top-secret suffix"}),
                 }
             ),
             sensitive_values=("top-secret",),
         )
-        self.assertNotIn("top-secret", repr(redacted))
-        self.assertIn("[REDACTED]", repr(redacted))
+        rendered = repr(redacted)
+        self.assertNotIn("top-secret", rendered)
+        self.assertNotIn("must-hide-by-key", rendered)
+        self.assertIn("[REDACTED]", rendered)
 
     def test_unpair_then_repair_never_revives_old_token(self):
         paired = self.boundary.pair_origin(

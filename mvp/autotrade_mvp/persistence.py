@@ -370,10 +370,10 @@ class JournalStore:
     def _require_text(value: Any, name: str) -> str:
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{name} must be non-empty text")
-        return value
+        return value.strip()
 
     def get_event(self, event_id: str) -> dict[str, Any] | None:
-        self._require_text(event_id, "event_id")
+        event_id = self._require_text(event_id, "event_id")
         with self._connect() as connection:
             row = connection.execute(
                 """
@@ -397,8 +397,8 @@ class JournalStore:
         }
 
     def next_aggregate_version(self, aggregate_type: str, aggregate_id: str) -> int:
-        self._require_text(aggregate_type, "aggregate_type")
-        self._require_text(aggregate_id, "aggregate_id")
+        aggregate_type = self._require_text(aggregate_type, "aggregate_type")
+        aggregate_id = self._require_text(aggregate_id, "aggregate_id")
         with self._connect() as connection:
             current = connection.execute(
                 "SELECT MAX(aggregate_version) FROM events WHERE aggregate_type = ? AND aggregate_id = ?",
@@ -430,7 +430,7 @@ class JournalStore:
         payload_json = canonical_json(payload)
         committed_at = self._require_text(envelope.get("committed_at"), "committed_at")
         if outbox_topic is not None:
-            self._require_text(outbox_topic, "outbox_topic")
+            outbox_topic = self._require_text(outbox_topic, "outbox_topic")
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -493,8 +493,8 @@ class JournalStore:
         return AppendResult(event_id, aggregate_version, True)
 
     def load_events(self, aggregate_type: str, aggregate_id: str) -> list[dict[str, Any]]:
-        self._require_text(aggregate_type, "aggregate_type")
-        self._require_text(aggregate_id, "aggregate_id")
+        aggregate_type = self._require_text(aggregate_type, "aggregate_type")
+        aggregate_id = self._require_text(aggregate_id, "aggregate_id")
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -688,7 +688,7 @@ class JournalStore:
         ]
 
     def mark_outbox_delivered(self, outbox_id: str) -> bool:
-        self._require_text(outbox_id, "outbox_id")
+        outbox_id = self._require_text(outbox_id, "outbox_id")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -755,7 +755,7 @@ class JournalStore:
         result: Any,
         state_version: int,
     ) -> tuple[Any, bool]:
-        self._require_text(command_id, "command_id")
+        command_id = self._require_text(command_id, "command_id")
         actor, environment, idempotency_key = self._command_scope(
             actor=actor,
             environment=environment,
@@ -818,7 +818,7 @@ class JournalStore:
     ) -> tuple[Any, bool, tuple[AppendResult, ...]]:
         """Atomically commit command dedupe, ordered events and outbox rows."""
 
-        self._require_text(command_id, "command_id")
+        command_id = self._require_text(command_id, "command_id")
         actor, environment, idempotency_key = self._command_scope(
             actor=actor,
             environment=environment,

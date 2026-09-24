@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
+import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -118,6 +119,64 @@ class ResearchJobStoreTests(unittest.TestCase):
                     lease_seconds=30,
                 )
             )
+
+    def test_v1_migration_defaults_existing_jobs_to_non_requeueable(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "jobs.sqlite3"
+            job_id = str(uuid4())
+            with sqlite3.connect(path) as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE schema_migrations(
+                        version INTEGER PRIMARY KEY,
+                        applied_at TEXT NOT NULL
+                    );
+                    INSERT INTO schema_migrations(version, applied_at)
+                    VALUES(1, '2026-09-24T15:00:00Z');
+                    CREATE TABLE jobs (
+                        job_id TEXT PRIMARY KEY,
+                        kind TEXT NOT NULL,
+                        dedupe_key TEXT NOT NULL UNIQUE,
+                        input_hashes_json TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        generation INTEGER NOT NULL CHECK (generation > 0),
+                        attempt INTEGER NOT NULL CHECK (attempt >= 0),
+                        owner TEXT,
+                        lease_until TEXT,
+                        checkpoint_ref TEXT,
+                        resource_budget_json TEXT NOT NULL,
+                        resource_usage_json TEXT NOT NULL,
+                        output_refs_json TEXT NOT NULL,
+                        error_json TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO jobs(
+                        job_id, kind, dedupe_key, input_hashes_json, state, generation,
+                        attempt, owner, lease_until, checkpoint_ref, resource_budget_json,
+                        resource_usage_json, output_refs_json, error_json, created_at, updated_at
+                    ) VALUES(?, 'research.external_annotation', 'legacy', ?, 'RUNNING', 1,
+                             1, 'legacy-worker', ?, NULL, ?, '{}', '[]', NULL, ?, ?)
+                    """,
+                    (
+                        job_id,
+                        '["' + digest("dataset") + '"]',
+                        "2026-09-24T15:59:00Z",
+                        '{"wall_seconds":60.0}',
+                        "2026-09-24T15:00:00Z",
+                        "2026-09-24T15:00:00Z",
+                    ),
+                )
+
+            store = ResearchJobStore(path)
+            migrated = store.get(job_id)
+            self.assertFalse(migrated["lease_requeueable"])
+            self.assertEqual(store.requeue_expired(now=self.now), 0)
+            self.assertEqual(store.get(job_id)["state"], "WAITING_EXTERNAL")
 
     def test_requeueability_is_part_of_dedupe_identity(self):
         with TemporaryDirectory() as directory:

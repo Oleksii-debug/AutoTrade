@@ -1,3 +1,7 @@
+import base64
+import hashlib
+import hmac
+import json
 import unittest
 from decimal import Decimal
 
@@ -20,6 +24,7 @@ from mvp.autotrade_mvp.whitebit_adapter import (
     normalize_working_orders,
     parse_market_rules,
     redact_whitebit_debug,
+    sign_private_request,
 )
 
 
@@ -556,6 +561,67 @@ class WhiteBitAdapterTests(unittest.TestCase):
                     limit=50,
                     record_count=0,
                 )
+            )
+
+    def test_private_signing_uses_exact_payload_and_caller_nonce(self):
+        signed = sign_private_request(
+            endpoint="/api/v4/order/new",
+            parameters={
+                "market": "BTC_USDT",
+                "side": "buy",
+                "amount": "0.01",
+            },
+            nonce=1_764_000_000_001,
+            api_key="public-key",
+            api_secret="private-secret",
+            nonce_window=True,
+        )
+        body = json.loads(signed.body.decode("utf-8"))
+        self.assertEqual(body["request"], "/api/v4/order/new")
+        self.assertEqual(body["nonce"], 1_764_000_000_001)
+        self.assertTrue(body["nonceWindow"])
+
+        expected_payload = base64.b64encode(signed.body).decode("ascii")
+        expected_signature = hmac.new(
+            b"private-secret",
+            expected_payload.encode("ascii"),
+            hashlib.sha512,
+        ).hexdigest()
+        self.assertEqual(signed.headers["X-TXC-PAYLOAD"], expected_payload)
+        self.assertEqual(signed.headers["X-TXC-SIGNATURE"], expected_signature)
+        self.assertEqual(signed.headers["X-TXC-APIKEY"], "public-key")
+
+        debug = signed.safe_debug()
+        self.assertEqual(debug["headers"]["X-TXC-APIKEY"], "<redacted>")
+        self.assertEqual(debug["headers"]["X-TXC-PAYLOAD"], "<redacted>")
+        self.assertEqual(debug["headers"]["X-TXC-SIGNATURE"], "<redacted>")
+
+    def test_signer_never_allocates_or_accepts_conflicting_nonce(self):
+        with self.assertRaisesRegex(ProviderCoreError, "nonce must be"):
+            sign_private_request(
+                endpoint="/api/v4/orders",
+                parameters={},
+                nonce=0,
+                api_key="key",
+                api_secret="secret",
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "conflicts"):
+            sign_private_request(
+                endpoint="/api/v4/orders",
+                parameters={"nonce": 9},
+                nonce=10,
+                api_key="key",
+                api_secret="secret",
+            )
+
+    def test_signer_rejects_binary_float_before_financial_request(self):
+        with self.assertRaisesRegex(ProviderCoreError, "binary float"):
+            sign_private_request(
+                endpoint="/api/v4/order/new",
+                parameters={"amount": 0.01},
+                nonce=1,
+                api_key="key",
+                api_secret="secret",
             )
 
     def test_debug_redaction_covers_nested_auth_material(self):

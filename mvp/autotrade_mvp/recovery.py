@@ -274,16 +274,17 @@ class RecoveryController:
     ) -> OwnerFence:
         if self.owner is None:
             raise RuntimeError("No current owner to transfer")
-        if not new_owner_id:
+        if not isinstance(new_owner_id, str) or not new_owner_id.strip():
             raise ValueError("New owner identity is required")
-        if new_owner_id == self.owner.owner_id:
+        normalized_owner = new_owner_id.strip()
+        if normalized_owner == self.owner.owner_id:
             raise ValueError("New owner must differ from current owner")
         if not old_sender_fenced:
             raise PermissionError("Old sender must be externally fenced")
         if not reconciled or self.unresolved_attempts:
             raise PermissionError("Ownership transfer requires reconciliation")
         self._require_current_durable_owner()
-        candidate = OwnerFence(new_owner_id.strip(), self.owner.epoch + 1)
+        candidate = OwnerFence(normalized_owner, self.owner.epoch + 1)
         self._append_durable_owner(candidate)
         self.owner = candidate
         self.provider_reconciled = False

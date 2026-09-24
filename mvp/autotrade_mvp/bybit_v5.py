@@ -111,6 +111,17 @@ def _decimal_text(value: object, *, name: str, positive: bool = False) -> str:
     return rendered
 
 
+def _utc_text(value: object, *, name: str) -> str:
+    text = _text(value, name=name)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ProviderCoreError(f"{name} must be an ISO timestamp") from error
+    if parsed.tzinfo is None:
+        raise ProviderCoreError(f"{name} must include timezone")
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def _millis_to_utc(value: object, *, name: str) -> str:
     milliseconds = _integer(value, name=name, minimum=0)
     seconds, remainder = divmod(milliseconds, 1000)
@@ -294,7 +305,7 @@ def parse_submission_response(
     envelope = _mapping(response, name="response")
     code = _integer(envelope.get("retCode"), name="retCode")
     when = (
-        _text(observed_at, name="observed_at")
+        _utc_text(observed_at, name="observed_at")
         if observed_at is not None
         else _millis_to_utc(envelope.get("time"), name="response.time")
     )

@@ -412,20 +412,24 @@ class ResearchJobStore:
         if normalized_verdict not in allowed:
             raise ValueError("unsupported external-resolution verdict")
         evidence = _require_immutable_artifact_ref(evidence_ref, "evidence_ref")
+        if output_refs is not None and not isinstance(output_refs, list):
+            raise ValueError("output_refs must be a list when provided")
         outputs = [] if output_refs is None else [
             _require_text(value, "output_ref") for value in output_refs
         ]
-        if output_refs is not None and not isinstance(output_refs, list):
-            raise ValueError("output_refs must be a list when provided")
         if normalized_verdict == "PROVEN_SUCCEEDED" and not outputs:
             raise ValueError("PROVEN_SUCCEEDED requires output_refs")
         if normalized_verdict != "PROVEN_SUCCEEDED" and outputs:
             raise ValueError("output_refs are valid only for PROVEN_SUCCEEDED")
 
         current = _utc(now or datetime.now(timezone.utc))
-        resolution = {
+        semantic_resolution = {
             "verdict": normalized_verdict,
             "evidence_ref": evidence,
+            "output_refs": outputs,
+        }
+        resolution = {
+            **semantic_resolution,
             "resolved_at": _iso(current),
         }
         encoded_resolution = _json(resolution)
@@ -442,9 +446,16 @@ class ResearchJobStore:
 
             existing_resolution = row["external_resolution_json"]
             if row["state"] != "WAITING_EXTERNAL":
-                if existing_resolution == encoded_resolution:
-                    connection.commit()
-                    return False
+                if existing_resolution is not None:
+                    prior = json.loads(existing_resolution)
+                    prior_semantic = {
+                        "verdict": prior.get("verdict"),
+                        "evidence_ref": prior.get("evidence_ref"),
+                        "output_refs": prior.get("output_refs", []),
+                    }
+                    if prior_semantic == semantic_resolution:
+                        connection.commit()
+                        return False
                 connection.rollback()
                 raise JobConflictError(
                     "job is not waiting for the supplied external resolution"

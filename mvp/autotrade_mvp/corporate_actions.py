@@ -165,7 +165,12 @@ class CorporateActionBook:
         denominator = _positive(event.payload.get("denominator"), name="denominator")
         ratio = numerator / denominator
         before = self.state
-        after = replace(before, quantity=before.quantity * ratio)
+        after = replace(
+            before,
+            quantity=before.quantity * ratio,
+            borrowed_quantity=before.borrowed_quantity * ratio,
+            recalled_quantity=before.recalled_quantity * ratio,
+        )
         return Transition(
             event_id=event.event_id,
             before=before,
@@ -223,12 +228,26 @@ class CorporateActionBook:
 
 
 def settle_cash(state: EquityState, amount) -> EquityState:
-    value = _positive(amount, name="amount", allow_zero=True)
-    if value > state.unsettled_cash:
+    """Move evidenced receivable/payable cash from unsettled to settled.
+
+    Amount is signed in account-cash direction: positive settles a receivable,
+    negative settles a payable. The sign must match the unsettled balance and
+    the settlement cannot cross through zero.
+    """
+
+    value = _decimal(amount, name="amount")
+    if value == 0:
+        return state
+    unsettled = state.unsettled_cash
+    if unsettled == 0:
+        raise ValueError("cannot settle cash when no unsettled balance exists")
+    if (unsettled > 0) != (value > 0):
+        raise ValueError("settlement sign must match the unsettled cash balance")
+    if abs(value) > abs(unsettled):
         raise ValueError("cannot settle more cash than is currently unsettled")
     return replace(
         state,
-        unsettled_cash=state.unsettled_cash - value,
+        unsettled_cash=unsettled - value,
         settled_cash=state.settled_cash + value,
     )
 

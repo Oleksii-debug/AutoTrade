@@ -75,6 +75,16 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertTrue((restored / "state" / "journal.sqlite3").is_file())
             self.assertTrue((restored / "artifacts" / "objects" / "sha256").is_dir())
 
+    def test_backup_bundle_contains_no_sqlite_transient_sidecars(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+
+            self.assertFalse((backup / "state" / "journal.sqlite3-wal").exists())
+            self.assertFalse((backup / "state" / "journal.sqlite3-shm").exists())
+            verify_backup(backup)
+
     def test_logically_inconsistent_runtime_snapshot_is_rejected(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

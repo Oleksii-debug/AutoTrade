@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 
+from .host_actions import required_roles_for_host_action
 from .windows_secrets import PersistentCredentialHandle, ProtectedCredentialVault
 
 
@@ -74,8 +75,6 @@ class SecurityBoundary:
 
     _ROLES = {"OWNER", "OPERATOR", "RESEARCHER", "OBSERVER"}
     _EXECUTION_ROLES = {"OWNER", "OPERATOR"}
-    _HOST_COMMAND_ROLES = {"OWNER", "OPERATOR"}
-    _OWNER_ONLY_HOST_ACTIONS = {"SET_AUTHORITY", "REVOKE_AUTHORITY"}
     _CREDENTIAL_PURPOSES = {"TRADE", "READ"}
 
     def __init__(
@@ -198,12 +197,7 @@ class SecurityBoundary:
         try:
             normalized_actor = _required_text(actor, name="actor")
             normalized_origin = _authenticated_origin(origin)
-            normalized_action = _required_text(action, name="action").upper()
-            required_roles = (
-                {"OWNER"}
-                if normalized_action in self._OWNER_ONLY_HOST_ACTIONS
-                else self._HOST_COMMAND_ROLES
-            )
+            required_roles = set(required_roles_for_host_action(action))
             session = self.validate_session(
                 token,
                 required_roles=required_roles,

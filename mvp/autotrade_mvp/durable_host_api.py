@@ -14,6 +14,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from contracts.bindings.python.common_scalars import is_valid_common_scalar
 
+from .host_actions import canonical_host_action
 from .host_api import (
     CommandResult,
     EventGap,
@@ -207,7 +208,7 @@ class JournalBackedHostCommandStore:
             raise ValueError("environment must be a canonical Environment")
         if account_id != self.account_id or environment != self.environment:
             raise ValueError("command scope does not match active host account/environment")
-        action = self._required_text(command, "action")
+        action = canonical_host_action(command.get("action"))
         expected_raw = self._required_text(command, "expected_state_version")
         if "payload" not in command or not isinstance(command["payload"], dict):
             raise ValueError("payload must be an object")

@@ -133,6 +133,45 @@ class ReconciliationTests(unittest.TestCase):
         self.assertFalse(result.complete)
         self.assertIn("ACCOUNT", result.blocking_resources)
 
+    def test_observed_execution_retains_exact_provider_execution_identity(self):
+        unknown = UnknownSubmission.create(
+            attempt_id="attempt-execution-id",
+            intent_id="intent-execution-id",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            client_order_id="c1",
+            started_at="2026-09-24T17:30:00Z",
+        )
+        result = self.base(unknown_submissions=[unknown])
+        resolution = result.submission_resolutions[0]
+        self.assertEqual(resolution.outcome, "OBSERVED_EXECUTION")
+        self.assertEqual(resolution.provider_execution_ids, ("e1",))
+        self.assertEqual(resolution.provider_order_ids, ())
+
+    def test_multiple_causal_fills_retain_deterministic_execution_id_tuple(self):
+        unknown = UnknownSubmission.create(
+            attempt_id="attempt-multi-execution",
+            intent_id="intent-multi-execution",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            client_order_id="c1",
+            started_at="2026-09-24T17:30:00Z",
+        )
+        result = self.base(
+            unknown_submissions=[unknown],
+            local_execution_ids=["e1", "e2"],
+            provider_fills=[
+                fill(execution_id="e2", trade_time="2026-09-24T18:10:00Z"),
+                fill(execution_id="e1", trade_time="2026-09-24T18:00:00Z"),
+            ],
+        )
+        resolution = result.submission_resolutions[0]
+        self.assertEqual(resolution.outcome, "OBSERVED_EXECUTION")
+        self.assertEqual(resolution.provider_execution_ids, ("e1", "e2"))
+        self.assertEqual(resolution.provider_order_ids, ())
+
     def test_conflicting_same_unknown_attempt_id_fails_closed_before_resolution(self):
         first = UnknownSubmission.create(
             attempt_id="attempt-conflict",

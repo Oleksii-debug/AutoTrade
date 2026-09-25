@@ -152,6 +152,7 @@ class CorporateEvent:
     effective_date: date
     source_revision: str
     payload: Mapping[str, str]
+    source_sequence: int | None = None
 
     def __post_init__(self) -> None:
         kind = _text(self.kind, name="kind").upper()
@@ -200,6 +201,12 @@ class CorporateEvent:
             "source_revision",
             _text(self.source_revision, name="source_revision"),
         )
+        if self.source_sequence is not None and (
+            not isinstance(self.source_sequence, int)
+            or isinstance(self.source_sequence, bool)
+            or self.source_sequence < 0
+        ):
+            raise ValueError("source_sequence must be a non-negative integer when provided")
         object.__setattr__(self, "payload", normalized_payload)
 
     @classmethod
@@ -213,6 +220,7 @@ class CorporateEvent:
         effective_date: date,
         source_revision: str,
         payload: Mapping[str, object],
+        source_sequence: int | None = None,
     ) -> "CorporateEvent":
         normalized_kind = _text(kind, name="kind").upper()
         allowed = {
@@ -248,6 +256,7 @@ class CorporateEvent:
             effective_date=effective_date,
             source_revision=_text(source_revision, name="source_revision"),
             payload=normalized_payload,
+            source_sequence=source_sequence,
         )
 
 
@@ -302,6 +311,7 @@ class CorporateActionBook:
         self.registry = registry
         self._events: dict[str, tuple[CorporateEvent, Transition]] = {}
         self._last_effective_date: date | None = None
+        self._last_source_sequence: int | None = None
 
     @classmethod
     def replay(
@@ -317,7 +327,34 @@ class CorporateActionBook:
             instrument_version=instrument_version,
             registry=registry,
         )
-        for event in events:
+        materialized = tuple(events)
+        if not all(isinstance(event, CorporateEvent) for event in materialized):
+            raise TypeError("events must contain CorporateEvent values")
+
+        by_date: dict[date, list[CorporateEvent]] = {}
+        for event in materialized:
+            by_date.setdefault(event.effective_date, []).append(event)
+        for effective_date, same_day in by_date.items():
+            if len(same_day) < 2:
+                continue
+            if any(event.source_sequence is None for event in same_day):
+                raise ValueError(
+                    "same-date corporate events require authoritative source_sequence"
+                )
+            sequences = [event.source_sequence for event in same_day]
+            if len(set(sequences)) != len(sequences):
+                raise ValueError(
+                    "same-date corporate events require unique source_sequence"
+                )
+
+        ordered = sorted(
+            materialized,
+            key=lambda event: (
+                event.effective_date,
+                -1 if event.source_sequence is None else event.source_sequence,
+            ),
+        )
+        for event in ordered:
             book.apply(event)
         return book
 
@@ -377,6 +414,18 @@ class CorporateActionBook:
             raise ValueError(
                 "corporate events must be applied in non-decreasing effective-date order"
             )
+        if (
+            self._last_effective_date is not None
+            and event.effective_date == self._last_effective_date
+        ):
+            if self._last_source_sequence is None or event.source_sequence is None:
+                raise ValueError(
+                    "same-date corporate events require authoritative source_sequence"
+                )
+            if event.source_sequence <= self._last_source_sequence:
+                raise ValueError(
+                    "same-date corporate events must follow increasing source_sequence"
+                )
 
         successor = None
         if event.kind == "SPLIT":
@@ -396,6 +445,7 @@ class CorporateActionBook:
             self.instrument_version = successor
         self._events[event.event_id] = (event, transition)
         self._last_effective_date = event.effective_date
+        self._last_source_sequence = event.source_sequence
         return transition
 
     def _split(self, event: CorporateEvent) -> Transition:

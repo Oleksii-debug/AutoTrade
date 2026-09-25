@@ -296,6 +296,85 @@ class CorporateSettlementTests(unittest.TestCase):
         self.assertEqual(book.state, original)
         self.assertEqual(book.applied_event_ids, ())
 
+    def test_same_date_actions_replay_by_authoritative_source_sequence(self):
+        split = corporate_event(
+            event_id="same-day-split",
+            kind="SPLIT",
+            effective_date=date(2026, 1, 2),
+            source_revision="official-feed-r7",
+            source_sequence=10,
+            payload={"numerator": 2, "denominator": 1},
+        )
+        dividend = corporate_event(
+            event_id="same-day-dividend",
+            kind="CASH_DIVIDEND",
+            effective_date=date(2026, 1, 2),
+            source_revision="official-feed-r7",
+            source_sequence=11,
+            payload={"per_share": "1", "currency": "USD"},
+        )
+
+        forward = CorporateActionBook.replay(
+            state(),
+            instrument_version=instrument(),
+            registry=InstrumentRegistry(versions=(instrument(),)),
+            events=(split, dividend),
+        )
+        shuffled = CorporateActionBook.replay(
+            state(),
+            instrument_version=instrument(),
+            registry=InstrumentRegistry(versions=(instrument(),)),
+            events=(dividend, split),
+        )
+        self.assertEqual(forward.state, shuffled.state)
+        self.assertEqual(forward.state.quantity, Decimal("20"))
+        self.assertEqual(forward.state.unsettled_cash, Decimal("20"))
+        self.assertEqual(
+            forward.applied_event_ids,
+            ("same-day-split", "same-day-dividend"),
+        )
+        self.assertEqual(forward.applied_event_ids, shuffled.applied_event_ids)
+
+    def test_same_date_actions_without_authoritative_order_fail_closed(self):
+        split = corporate_event(
+            event_id="ambiguous-split",
+            kind="SPLIT",
+            effective_date=date(2026, 1, 2),
+            source_revision="date-only-source",
+            payload={"numerator": 2, "denominator": 1},
+        )
+        dividend = corporate_event(
+            event_id="ambiguous-dividend",
+            kind="CASH_DIVIDEND",
+            effective_date=date(2026, 1, 2),
+            source_revision="date-only-source",
+            payload={"per_share": "1", "currency": "USD"},
+        )
+        with self.assertRaisesRegex(ValueError, "authoritative source_sequence"):
+            CorporateActionBook.replay(
+                state(),
+                instrument_version=instrument(),
+                registry=InstrumentRegistry(versions=(instrument(),)),
+                events=(split, dividend),
+            )
+
+        incremental = bound_book(state())
+        incremental.apply(split)
+        with self.assertRaisesRegex(ValueError, "authoritative source_sequence"):
+            incremental.apply(dividend)
+        self.assertEqual(incremental.state.quantity, Decimal("20"))
+        self.assertEqual(incremental.state.unsettled_cash, Decimal("0"))
+
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            corporate_event(
+                event_id="bad-sequence",
+                kind="SPLIT",
+                effective_date=date(2026, 1, 2),
+                source_revision="r1",
+                source_sequence=-1,
+                payload={"numerator": 2, "denominator": 1},
+            )
+
     def test_accepted_event_history_is_immutable_and_complete(self):
         book = bound_book(state())
         split = corporate_event(

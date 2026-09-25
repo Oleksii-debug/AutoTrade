@@ -524,7 +524,13 @@ class _HostRequestHandler(BaseHTTPRequestHandler):
                 str(key): str(value)
                 for key, value in raw_headers
             }
-            length_text = header_map.get("Content-Length", "0")
+            normalized_header_map = {
+                str(key).strip().lower(): str(value)
+                for key, value in raw_headers
+            }
+            if "transfer-encoding" in normalized_header_map:
+                raise ValueError("Transfer-Encoding is not supported")
+            length_text = normalized_header_map.get("content-length", "0")
             length = int(length_text)
             if length < 0 or length > _MAX_BODY_BYTES:
                 response = _error(413, "REQUEST_TOO_LARGE")

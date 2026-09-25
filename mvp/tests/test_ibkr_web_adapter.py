@@ -17,6 +17,7 @@ from mvp.autotrade_mvp.ibkr_web import (
     parse_web_api_trades,
     prepare_normalized_order,
     prepare_reply_confirmation,
+    record_order_submission_result,
 )
 
 
@@ -439,6 +440,146 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertEqual(outcome.status, "REJECTED")
         self.assertEqual(outcome.rejection_reason, "order rejected")
         self.assertFalse(outcome.retry_same_economic_action)
+
+    def test_recorded_ack_is_bound_to_attempt_and_never_fill(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        normalized = prepare_normalized_order(
+            intent,
+            client_order_id="at-ibkr-submit-1",
+            capability=capability(),
+            session=ready_session(),
+            at=NOW,
+            maximum_session_age_seconds=30,
+        )
+        recorded = record_order_submission_result(
+            normalized,
+            attempt_id="attempt-ibkr-1",
+            account_id="U1234567",
+            environment="PAPER",
+            observed_at=NOW,
+            response_body=(
+                '[{"order_id":"1234567890","order_status":"Submitted",'
+                '"encrypt_message":"1"}]'
+            ),
+        )
+        self.assertEqual(recorded.outcome, "ACKNOWLEDGED")
+        self.assertEqual(recorded.next_action, "OBSERVE_OR_RECONCILE")
+        self.assertEqual(recorded.client_order_id, "at-ibkr-submit-1")
+        self.assertEqual(recorded.provider_order_id, "1234567890")
+        self.assertTrue(recorded.response_sha256.startswith("sha256:"))
+        self.assertFalse(recorded.proves_fill)
+        self.assertFalse(recorded.retry_same_economic_action)
+
+    def test_ambiguous_ibkr_transport_is_unknown_and_reconcile_first(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        normalized = prepare_normalized_order(
+            intent,
+            client_order_id="at-ibkr-unknown",
+            capability=capability(),
+            session=ready_session(),
+            at=NOW,
+            maximum_session_age_seconds=30,
+        )
+        recorded = record_order_submission_result(
+            normalized,
+            attempt_id="attempt-ibkr-unknown",
+            account_id="U1234567",
+            environment="PAPER",
+            observed_at=NOW,
+            response_body=None,
+            transport_ambiguous=True,
+        )
+        self.assertEqual(recorded.outcome, "UNKNOWN")
+        self.assertEqual(recorded.next_action, "RECONCILE_FIRST")
+        self.assertIsNone(recorded.response_sha256)
+        self.assertIsNone(recorded.provider_order_id)
+        self.assertFalse(recorded.retry_same_economic_action)
+
+    def test_recorded_reply_requires_explicit_second_guarded_action(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="LIMIT",
+            time_in_force="DAY",
+            quantity="1",
+            limit_price="220.10",
+        )
+        normalized = prepare_normalized_order(
+            intent,
+            client_order_id="at-ibkr-reply",
+            capability=capability(),
+            session=ready_session(),
+            at=NOW,
+            maximum_session_age_seconds=30,
+        )
+        recorded = record_order_submission_result(
+            normalized,
+            attempt_id="attempt-ibkr-reply",
+            account_id="U1234567",
+            environment="PAPER",
+            observed_at=NOW,
+            response_body=(
+                '[{"id":"07a13a5a-4a48-44a5-bb25-5ab37b79186c",'
+                '"message":["Confirm this order"],"isSuppressed":false,'
+                '"messageIds":["o163"]}]'
+            ),
+        )
+        self.assertEqual(recorded.outcome, "REPLY_REQUIRED")
+        self.assertEqual(recorded.next_action, "EXPLICIT_REPLY_REQUIRED")
+        self.assertEqual(
+            recorded.reply_id,
+            "07a13a5a-4a48-44a5-bb25-5ab37b79186c",
+        )
+        self.assertFalse(recorded.retry_same_economic_action)
+
+    def test_recorded_submission_rejects_cross_account_binding(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        normalized = prepare_normalized_order(
+            intent,
+            client_order_id="at-ibkr-account",
+            capability=capability(),
+            session=ready_session(),
+            at=NOW,
+            maximum_session_age_seconds=30,
+        )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "account"):
+            record_order_submission_result(
+                normalized,
+                attempt_id="attempt-cross-account",
+                account_id="OTHER",
+                environment="PAPER",
+                observed_at=NOW,
+                response_body=(
+                    '[{"order_id":"123","order_status":"Submitted",'
+                    '"encrypt_message":"1"}]'
+                ),
+            )
 
     def test_unique_execution_maps_to_canonical_reconciliation_fill(self):
         execution = IbkrExecutionEvidence.create(

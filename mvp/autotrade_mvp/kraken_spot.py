@@ -396,11 +396,15 @@ def coverage_evidence(
     ):
         if type(value) is not bool:
             raise TypeError(f"{name} must be boolean")
+    if qualified_exclusion_semantics:
+        raise KrakenSpotAdapterError(
+            "Kraken Spot foundation cannot self-assert provider exclusion semantics"
+        )
     return CoverageSurfaceEvidence(
         surface=normalized,
         coverage_start=coverage_start,
         coverage_end=coverage_end,
         pagination_complete=pagination_complete,
         consistency_horizon_satisfied=consistency_horizon_satisfied,
-        provider_semantics_exclude_execution=qualified_exclusion_semantics,
+        provider_semantics_exclude_execution=False,
     )

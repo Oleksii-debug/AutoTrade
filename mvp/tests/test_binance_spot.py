@@ -195,7 +195,9 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             intent,
             client_order_id="at-market-1",
             capability=capability(),
+            symbol_rules=symbol_rules(),
             at=NOW,
+            market_reference_price="40000",
         )
         self.assertEqual(request.body["quantity"], "0.5")
         self.assertNotIn("quoteOrderQty", request.body)

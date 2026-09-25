@@ -530,6 +530,24 @@ def evaluate_gates(profile: GateProfile, evidence: EvaluationEvidence) -> GateDe
         check("net_advantage", evidence.net_advantage > profile.minimum_net_advantage,
               "net advantage did not exceed the registered practical effect", "")
 
+    if (
+        evidence.dependence_aware_lower_bound is None
+        or evidence.net_advantage is None
+    ):
+        check(
+            "uncertainty_consistency",
+            None,
+            "",
+            "lower-bound/point-estimate consistency cannot be verified",
+        )
+    else:
+        check(
+            "uncertainty_consistency",
+            evidence.dependence_aware_lower_bound <= evidence.net_advantage,
+            "dependence-aware lower bound exceeds the reported net-advantage point estimate",
+            "",
+        )
+
     if evidence.drawdown is None:
         check("drawdown", None, "", "drawdown evidence is missing")
     else:

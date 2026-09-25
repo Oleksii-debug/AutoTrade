@@ -153,6 +153,22 @@ def _scope_id(scope: SettlementAccountScope) -> str:
     return str(uuid5(NAMESPACE_URL, "settlement-book:" + material))
 
 
+def _legacy_scope_id(
+    *, provider_id: str, account_id: str, environment: str
+) -> str:
+    """Return the pre-provider-environment durable settlement aggregate identity."""
+
+    material = canonical_json(
+        [
+            str(provider_id).strip().upper(),
+            str(account_id).strip(),
+            str(environment).strip().upper(),
+            "settlement-book",
+        ]
+    )
+    return str(uuid5(NAMESPACE_URL, "settlement-book:" + material))
+
+
 def _event_id(scope: SettlementAccountScope, kind: str, identity: object) -> str:
     material = canonical_json([*_scope_identity_parts(scope), kind, identity])
     return str(uuid5(NAMESPACE_URL, "settlement-event:" + material))
@@ -482,6 +498,20 @@ class DurableSettlementBook:
             provider_environment=provider_environment,
         )
         self.scope_id = _scope_id(self.scope)
+        legacy_scope_id = _legacy_scope_id(
+            provider_id=self.scope.provider_id,
+            account_id=self.scope.account_id,
+            environment=self.scope.environment,
+        )
+        if (
+            self.scope.provider_id == "BYBIT"
+            and legacy_scope_id != self.scope_id
+            and self.store.load_events(_AGGREGATE_TYPE, legacy_scope_id)
+        ):
+            raise SettlementConflict(
+                "legacy ambiguous BYBIT settlement state requires explicit "
+                "migration/reconciliation before provider-environment scoped use"
+            )
         self._book = SettlementBook()
         self._reload()
 

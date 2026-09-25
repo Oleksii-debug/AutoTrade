@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.accounting import (
 )
 from mvp.autotrade_mvp.durable_settlement import (
     DurableSettlementBook,
+    _legacy_scope_id,
     SETTLEMENT_EVIDENCE_MEDIA_TYPE,
     settlement_completion_evidence_metadata,
     settlement_completion_evidence_receipt,
@@ -306,6 +307,78 @@ class DurableSettlementBookTests(unittest.TestCase):
                 evidence_artifact_store=artifact_store_for(store),
             )
             self.assertNotEqual(testnet_book.scope_id, demo_book.scope_id)
+
+    def test_bybit_legacy_settlement_state_fails_closed_before_rekey(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            legacy_scope_id = _legacy_scope_id(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+            )
+            legacy_payload = {
+                "scope": {
+                    "provider_id": "BYBIT",
+                    "account_id": "bybit-account",
+                    "environment": "PAPER",
+                },
+                "legacy_state": "pending-obligation",
+            }
+            store.append_event(
+                {
+                    "event_id": "legacy-bybit-settlement-register",
+                    "event_type": "SettlementObligationsRegistered",
+                    "aggregate_type": "settlement_book",
+                    "aggregate_id": legacy_scope_id,
+                    "aggregate_version": "1",
+                    "committed_at": "2026-09-25T08:59:59Z",
+                    "payload": legacy_payload,
+                }
+            )
+
+            for provider_environment in ("TESTNET", "DEMO"):
+                with self.subTest(provider_environment=provider_environment):
+                    with self.assertRaisesRegex(
+                        SettlementConflict,
+                        "legacy ambiguous BYBIT settlement state",
+                    ):
+                        DurableSettlementBook(
+                            JournalStore(path),
+                            provider_id="BYBIT",
+                            account_id="bybit-account",
+                            environment="PAPER",
+                            provider_environment=provider_environment,
+                            evidence_artifact_store=artifact_store_for(store),
+                        )
+
+            settled_payload = {
+                "scope": legacy_payload["scope"],
+                "legacy_state": "settled-obligation",
+            }
+            store.append_event(
+                {
+                    "event_id": "legacy-bybit-settlement-settle",
+                    "event_type": "SettlementCompleted",
+                    "aggregate_type": "settlement_book",
+                    "aggregate_id": legacy_scope_id,
+                    "aggregate_version": "2",
+                    "committed_at": "2026-09-25T09:01:00Z",
+                    "payload": settled_payload,
+                }
+            )
+            with self.assertRaisesRegex(
+                SettlementConflict,
+                "legacy ambiguous BYBIT settlement state",
+            ):
+                DurableSettlementBook(
+                    JournalStore(path),
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    evidence_artifact_store=artifact_store_for(store),
+                )
 
     def test_registration_restarts_and_exact_retry_is_noop(self):
         with TemporaryDirectory() as directory:

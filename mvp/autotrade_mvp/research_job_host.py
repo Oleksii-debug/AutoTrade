@@ -99,13 +99,17 @@ class ResearchJobHostService:
             actor=actor,
             roles=_SUBMIT_ROLES,
         )
+        if job_id is not None:
+            raise ValueError(
+                "host research job_id is server-assigned; use dedupe_key for idempotency"
+            )
         return self._jobs.enqueue(
             kind=kind,
             dedupe_key=_subject_dedupe_key(normalized_actor, dedupe_key),
             input_hashes=input_hashes,
             resource_budget=resource_budget,
             lease_requeueable=lease_requeueable,
-            job_id=job_id,
+            job_id=None,
         )
 
     def get(

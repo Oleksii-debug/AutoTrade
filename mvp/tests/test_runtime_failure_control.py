@@ -78,8 +78,10 @@ class RuntimeRecoveryTests(unittest.TestCase):
         attempt.acknowledge("provider-7", "provider:ack")
         controller.resolve_attempt(attempt)
         self.assertEqual(controller.unresolved_attempts, {"unrelated-provider-gap"})
-        controller.record_reconciliation(consistent=False)
-        self.assertEqual(controller.state, HostState.DEGRADED)
+
+        controller.record_reconciliation(consistent=True)
+        self.assertEqual(controller.unresolved_attempts, set())
+        self.assertEqual(controller.state, HostState.READY)
 
     def test_absence_requires_independent_evidence_before_retry(self):
         attempt = OutboundAttempt("a1", "intent-1", 1)

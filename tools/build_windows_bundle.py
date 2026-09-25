@@ -34,6 +34,11 @@ FORBIDDEN_SUFFIXES = {
 FORBIDDEN_PREFIXES = (
     ".env.",
 )
+WINDOWS_RESERVED_STEMS = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{index}" for index in range(1, 10)}
+    | {f"lpt{index}" for index in range(1, 10)}
+)
 
 
 class BundleError(ValueError):
@@ -52,6 +57,26 @@ def _safe_relative(path: Path, root: Path) -> str:
     if posix.startswith("../") or posix == "..":
         raise BundleError("bundle input escaped staging root")
     return posix
+
+
+def _windows_path_key(relative: str) -> str:
+    normalized: list[str] = []
+    for part in PurePosixPath(relative).parts:
+        if part.endswith((" ", ".")):
+            raise BundleError(
+                f"bundle contains Windows-unsafe trailing space/dot segment: {relative}"
+            )
+        if ":" in part:
+            raise BundleError(
+                f"bundle contains Windows alternate-data-stream path: {relative}"
+            )
+        stem = part.split(".", 1)[0].casefold()
+        if stem in WINDOWS_RESERVED_STEMS:
+            raise BundleError(
+                f"bundle contains Windows reserved device name: {relative}"
+            )
+        normalized.append(part.casefold())
+    return "/".join(normalized)
 
 
 def _is_sensitive(path: Path) -> bool:
@@ -79,7 +104,7 @@ def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
         if not path.is_file():
             raise BundleError(f"unsupported filesystem entry: {path}")
         relative = _safe_relative(path, staging)
-        windows_key = relative.replace("\\", "/").casefold()
+        windows_key = _windows_path_key(relative)
         previous = windows_names.get(windows_key)
         if previous is not None and previous != relative:
             raise BundleError(

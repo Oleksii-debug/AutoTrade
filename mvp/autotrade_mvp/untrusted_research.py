@@ -229,9 +229,27 @@ class ResearchToolBoundary:
         normalized: dict[str, frozenset[ResearchCapability]] = {}
         for tool_name, capabilities in tool_capabilities.items():
             name = _text(tool_name, name="tool_name")
-            values = frozenset(capabilities)
-            if not values:
+            if name in normalized:
+                raise ResearchBoundaryError(
+                    "tool names must be unique after normalization"
+                )
+            if isinstance(capabilities, (str, bytes)):
+                raise ResearchBoundaryError(
+                    "tool capabilities must be ResearchCapability values"
+                )
+            materialized = tuple(capabilities)
+            if not materialized:
                 raise ResearchBoundaryError("tool capability set cannot be empty")
+            if any(
+                not isinstance(capability, ResearchCapability)
+                for capability in materialized
+            ):
+                raise ResearchBoundaryError(
+                    "tool capabilities must be ResearchCapability values"
+                )
+            values = frozenset(materialized)
+            if len(values) != len(materialized):
+                raise ResearchBoundaryError("tool capabilities must be unique")
             if not values <= SAFE_RESEARCH_CAPABILITIES:
                 raise ResearchBoundaryError("tool contains a non-research capability")
             normalized[name] = values

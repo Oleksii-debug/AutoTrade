@@ -57,14 +57,17 @@ def schema_required_members(
 
         def visit(value: object, path: str) -> None:
             if isinstance(value, dict):
-                required = value.get("required")
-                if required is not None:
-                    if (
-                        not isinstance(required, list)
-                        or any(not isinstance(item, str) or not item for item in required)
-                    ):
-                        raise ValueError(f"{name} has invalid required array at {path}")
-                    paths[path] = set(required)
+                required = value.get("required", [])
+                if (
+                    not isinstance(required, list)
+                    or any(not isinstance(item, str) or not item for item in required)
+                ):
+                    raise ValueError(f"{name} has invalid required array at {path}")
+                # Record the object path even when required is absent. This
+                # compares an existing empty required-set with the same object
+                # after a member becomes required. Truly new paths remain
+                # excluded by the base/current path intersection below.
+                paths[path] = set(required)
                 for key, child in value.items():
                     visit(child, f"{path}/{key}")
             elif isinstance(value, list):

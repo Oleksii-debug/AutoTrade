@@ -69,6 +69,56 @@ class ContractVersionGuardTests(unittest.TestCase):
             self.assertTrue(any("new required members" in item for item in errors))
             self.assertTrue(any("account_id" in item for item in errors))
 
+    def test_first_required_member_on_existing_object_requires_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            base_defs = {
+                "A": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "account_id": {"type": "string"},
+                    },
+                }
+            }
+            current_defs = {
+                "A": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["account_id"],
+                    "properties": {
+                        "account_id": {"type": "string"},
+                    },
+                }
+            }
+            write_tree(Path(left), defs=base_defs)
+            write_tree(Path(right), version="1.1.0", defs=current_defs)
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(any("new required members" in item for item in errors))
+            self.assertTrue(any("account_id" in item for item in errors))
+
+    def test_first_required_member_on_existing_object_allows_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            base_defs = {
+                "A": {
+                    "type": "object",
+                    "properties": {
+                        "environment": {"type": "string"},
+                    },
+                }
+            }
+            current_defs = {
+                "A": {
+                    "type": "object",
+                    "required": ["environment"],
+                    "properties": {
+                        "environment": {"type": "string"},
+                    },
+                }
+            }
+            write_tree(Path(left), defs=base_defs)
+            write_tree(Path(right), version="2.0.0", defs=current_defs)
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
     def test_added_required_member_allows_major_increment(self):
         with TemporaryDirectory() as left, TemporaryDirectory() as right:
             base_defs = {

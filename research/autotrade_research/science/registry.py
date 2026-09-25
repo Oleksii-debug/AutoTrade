@@ -72,6 +72,85 @@ def _text(value: Any, name: str) -> str:
     return value.strip()
 
 
+def _protocol_instant(value: Any, name: str) -> datetime:
+    text = _text(value, name)
+    if not text.endswith("Z"):
+        raise ProtocolViolation(f"{name} must be a canonical UTC instant ending in Z")
+    try:
+        parsed = datetime.fromisoformat(text[:-1] + "+00:00")
+    except ValueError as error:
+        raise ProtocolViolation(f"{name} must be an ISO-8601 UTC instant") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ProtocolViolation(f"{name} must be timezone-aware")
+    return parsed.astimezone(timezone.utc)
+
+
+def _protocol_period(value: Any, name: str) -> tuple[datetime, datetime]:
+    if type(value) is not dict or set(value) != {"start", "end"}:
+        raise ProtocolViolation(
+            f"{name} must be an object with exactly start and end"
+        )
+    start = _protocol_instant(value["start"], f"{name}.start")
+    end = _protocol_instant(value["end"], f"{name}.end")
+    if start >= end:
+        raise ProtocolViolation(f"{name} must have start strictly before end")
+    return start, end
+
+
+def _nonnegative_seconds(value: Any, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ProtocolViolation(f"{name} must be a non-negative integer")
+    return value
+
+
+def _validate_causal_protocol_windows(payload: dict[str, Any]) -> None:
+    periods = [
+        ("train_period", _protocol_period(payload["train_period"], "train_period")),
+        (
+            "validation_period",
+            _protocol_period(payload["validation_period"], "validation_period"),
+        ),
+        ("test_period", _protocol_period(payload["test_period"], "test_period")),
+        (
+            "forward_period",
+            _protocol_period(payload["forward_period"], "forward_period"),
+        ),
+    ]
+    exclusion = payload["purge_embargo"]
+    if type(exclusion) is not dict or set(exclusion) != {
+        "purge_seconds",
+        "embargo_seconds",
+    }:
+        raise ProtocolViolation(
+            "purge_embargo must contain exactly purge_seconds and embargo_seconds"
+        )
+    purge = _nonnegative_seconds(
+        exclusion["purge_seconds"], "purge_embargo.purge_seconds"
+    )
+    embargo = _nonnegative_seconds(
+        exclusion["embargo_seconds"], "purge_embargo.embargo_seconds"
+    )
+    # Periods are closed evidence windows.  Each adjacent split therefore needs
+    # a strict temporal separation.  Purge and embargo are two constraints on
+    # that same excluded boundary interval; the boundary must satisfy both,
+    # hence the minimum gap is their maximum rather than caller-chosen prose.
+    minimum_gap_seconds = max(purge, embargo)
+    for (left_name, (_left_start, left_end)), (
+        right_name,
+        (right_start, _right_end),
+    ) in zip(periods, periods[1:]):
+        if left_end >= right_start:
+            raise ProtocolViolation(
+                f"{left_name} must end strictly before {right_name} starts"
+            )
+        gap_seconds = (right_start - left_end).total_seconds()
+        if gap_seconds < minimum_gap_seconds:
+            raise ProtocolViolation(
+                f"{left_name}->{right_name} gap is shorter than registered "
+                "purge/embargo requirement"
+            )
+
+
 def _immutable_artifact_ref(value: Any, name: str) -> str:
     reference = _text(value, name)
     prefix = "artifact:"
@@ -191,6 +270,7 @@ class ScientificRegistry:
             raise ProtocolViolation("required protocol fields cannot be empty: " + ", ".join(empty))
         if not isinstance(payload.get("trial_budget"), int) or isinstance(payload.get("trial_budget"), bool) or payload["trial_budget"] < 1:
             raise ProtocolViolation("trial_budget must be a positive integer")
+        _validate_causal_protocol_windows(payload)
         identifier = _id(protocol_id)
         canonical = _canonical(payload)
         digest = _hash(payload)

@@ -268,13 +268,35 @@ class WhiteBitPreparedRequest:
     documentation_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
-        object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
-        object.__setattr__(
-            self,
-            "environment",
-            _text(self.environment, name="environment").upper(),
+        endpoint = _text(self.endpoint, name="endpoint")
+        if not endpoint.startswith("/api/v4/") or "?" in endpoint or "#" in endpoint:
+            raise WhiteBitAdapterError("prepared endpoint must be a canonical WhiteBIT v4 path")
+        if not isinstance(self.body, Mapping):
+            raise TypeError("body must be a mapping")
+        body = dict(self.body)
+        validate_client_order_id(str(body.get("clientOrderId", "")))
+        _text(str(body.get("market", "")), name="market")
+        account = _text(self.account_id, name="account_id")
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+            raise WhiteBitAdapterError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
+        capability_snapshot_id = _text(
+            self.capability_snapshot_id,
+            name="capability_snapshot_id",
         )
+        refs = tuple(
+            _text(value, name="documentation_ref")
+            for value in self.documentation_refs
+        )
+        if not refs:
+            raise WhiteBitAdapterError("documentation_refs must not be empty")
+
+        object.__setattr__(self, "endpoint", endpoint)
+        object.__setattr__(self, "body", MappingProxyType(body))
+        object.__setattr__(self, "account_id", account)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "capability_snapshot_id", capability_snapshot_id)
+        object.__setattr__(self, "documentation_refs", refs)
 
 
 @dataclass(frozen=True)

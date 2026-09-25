@@ -16,18 +16,26 @@ def load_verify_module():
 
 
 class VerifySurfaceTests(unittest.TestCase):
-    def test_core_verify_includes_dotnet_contracts_and_desktop(self):
+    def test_core_verify_runs_cross_platform_dotnet_and_windows_desktop(self):
         module = load_verify_module()
-        commands = module.verification_commands()
-        rendered = {" ".join(command) for command in commands}
+        linux = {" ".join(command) for command in module.verification_commands(platform="linux")}
+        windows = {" ".join(command) for command in module.verification_commands(platform="win32")}
 
         self.assertTrue(
-            any("tests/Contracts.DotNet/Contracts.DotNet.csproj" in command for command in rendered),
-            "core verification omitted the .NET canonical-contract executable",
+            any("tests/Contracts.DotNet/Contracts.DotNet.csproj" in command for command in linux),
+            "Linux core verification omitted the .NET canonical-contract executable",
         )
         self.assertTrue(
-            any("tests/Desktop.Client/Desktop.Client.csproj" in command for command in rendered),
-            "core verification omitted the desktop authenticated-host contract executable",
+            any("tests/Contracts.DotNet/Contracts.DotNet.csproj" in command for command in windows),
+            "Windows core verification omitted the .NET canonical-contract executable",
+        )
+        self.assertFalse(
+            any("tests/Desktop.Client/Desktop.Client.csproj" in command for command in linux),
+            "Linux core verification must not run the Windows/WPF desktop executable",
+        )
+        self.assertTrue(
+            any("tests/Desktop.Client/Desktop.Client.csproj" in command for command in windows),
+            "Windows core verification omitted the desktop authenticated-host contract executable",
         )
 
     def test_verify_workflow_does_not_claim_separate_qualifications(self):

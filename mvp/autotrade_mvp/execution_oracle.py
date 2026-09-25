@@ -89,7 +89,7 @@ def assert_conservative_execution(
                 observation.interval_start,
                 name="interval_start",
             )
-            if arrival >= interval_start:
+            if interval_start < arrival:
                 raise ExecutionOracleError(
                     "BAR fill uses interval volume from before venue arrival"
                 )

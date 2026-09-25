@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -210,6 +211,50 @@ class ArtifactStoreTests(unittest.TestCase):
                 )
             self.assertEqual(store.audit().objects, 0)
 
+
+    @unittest.skipIf(os.name == "nt", "symlink creation is not reliably available on Windows CI")
+    def test_canonical_object_symlink_is_never_accepted_as_artifact_content(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            data = b"external-evidence"
+            digest = hashlib.sha256(data).hexdigest()
+            canonical = store._object_path(digest)
+            canonical.parent.mkdir(parents=True, exist_ok=True)
+            external = Path(directory) / "outside-object.bin"
+            external.write_bytes(data)
+            canonical.symlink_to(external)
+
+            with self.assertRaisesRegex(ArtifactIntegrityError, "symlink"):
+                store.publish_bytes(
+                    artifact_id=str(uuid4()),
+                    data=data,
+                    media_type="application/octet-stream",
+                    rights={"storage": True, "export": True},
+                )
+
+    @unittest.skipIf(os.name == "nt", "symlink creation is not reliably available on Windows CI")
+    def test_committed_manifest_fails_closed_if_object_is_replaced_by_symlink(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            data = b"durable-content"
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=data,
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": True},
+            )
+            digest = manifest["sha256"].removeprefix("sha256:")
+            canonical = store._object_path(digest)
+            external = Path(directory) / "outside-object.bin"
+            external.write_bytes(data)
+            canonical.unlink()
+            canonical.symlink_to(external)
+
+            with self.assertRaisesRegex(ArtifactIntegrityError, "symlink"):
+                store.read_bytes(artifact_id)
+            with self.assertRaisesRegex(ArtifactIntegrityError, "symlink"):
+                store.export(artifact_id, Path(directory) / "export.bin")
 
     def test_publish_and_export_sync_parent_directory_after_replace(self):
         with TemporaryDirectory() as directory:

@@ -681,7 +681,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                     "event_type": "UnexpectedEconomicEvent",
                     "aggregate_type": "economic_book",
                     "aggregate_id": paper_book_id(provider_id="ALPACA", account_id="acct"),
-                    "aggregate_version": 1,
+                    "aggregate_version": "1",
                     "committed_at": "2026-09-24T18:12:00Z",
                     "payload": payload,
                     "payload_hash": payload_digest(payload),

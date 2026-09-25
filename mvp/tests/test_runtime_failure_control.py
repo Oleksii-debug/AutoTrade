@@ -419,13 +419,16 @@ class RuntimeRecoveryTests(unittest.TestCase):
             owner = controller.start("host-a")
             controller.record_reconciliation(consistent=True)
 
-            with sqlite3.connect(path) as connection:
+            connection = sqlite3.connect(path)
+            try:
                 connection.execute(
                     "UPDATE events SET payload_json = ? "
                     "WHERE aggregate_type = 'recovery_owner'",
                     ('{"owner_epoch":"1","owner_id":"attacker"}',),
                 )
                 connection.commit()
+            finally:
+                connection.close()
 
             with self.assertRaisesRegex(ValueError, "payload hash"):
                 controller.validate_sender(owner.owner_id, owner.epoch)

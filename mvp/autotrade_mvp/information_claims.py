@@ -291,6 +291,7 @@ class InformationSnapshot:
             raise ValueError("claims must be a tuple")
 
         seen: set[str] = set()
+        seen_syndication: set[str] = set()
         for claim in self.claims:
             if not isinstance(claim, InformationClaim):
                 raise ValueError("snapshot claims must be InformationClaim values")
@@ -298,7 +299,10 @@ class InformationSnapshot:
                 raise ValueError("snapshot cannot contain future claims")
             if claim.claim_id in seen:
                 raise ValueError("snapshot cannot contain duplicate claim identities")
+            if claim.syndication_key in seen_syndication:
+                raise ValueError("snapshot cannot contain syndicated duplicates")
             seen.add(claim.claim_id)
+            seen_syndication.add(claim.syndication_key)
 
         canonical = tuple(
             sorted(

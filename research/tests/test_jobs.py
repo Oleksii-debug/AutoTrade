@@ -251,7 +251,7 @@ class ResearchJobStoreTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "jobs.sqlite3"
             job_id = str(uuid4())
-            with closing(sqlite3.connect(path)) as connection:
+            with closing(sqlite3.connect(path)) as connection, connection:
                 connection.executescript(
                     """
                     CREATE TABLE schema_migrations(

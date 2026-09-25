@@ -231,7 +231,7 @@ class ProducerFixture:
         }
         self.protocol_registration = self.science.register_protocol(
             payload,
-            protocol_id=protocol_id,
+            protocol_id=PROTOCOL_ID,
         )
         return self.protocol_registration
 
@@ -339,7 +339,7 @@ class ProducerFixture:
             calibration_task="calibration",
             test_evidence_refs=(test_ref,),
             instrument_family="equity",
-            protocol_id=PROTOCOL_ID,
+            protocol_id=protocol_id,
         )
 
     @staticmethod

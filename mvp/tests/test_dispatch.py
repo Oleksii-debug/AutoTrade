@@ -475,6 +475,99 @@ class DispatchTests(unittest.TestCase):
 
 
 
+    def test_final_barrier_clock_exception_is_persistently_blocked(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            outbound = 0
+
+            def authority(intent_hash, current_time):
+                return True, "allowed"
+
+            def transport(client_id, request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            def broken_clock():
+                raise RuntimeError("clock unavailable")
+
+            result = dispatcher.dispatch(
+                attempt_id="clock-error-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+                final_barrier_clock=broken_clock,
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "final_barrier_clock_failed:RuntimeError")
+            self.assertEqual(outbound, 0)
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("clock-error-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "final_barrier_clock_failed:RuntimeError",
+            )
+
+    def test_invalid_final_barrier_timestamp_is_persistently_blocked(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            outbound = 0
+
+            def authority(intent_hash, current_time):
+                return True, "allowed"
+
+            def transport(client_id, request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            result = dispatcher.dispatch(
+                attempt_id="clock-invalid-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+                final_barrier_clock=lambda: "not-a-timestamp",
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "final_barrier_clock_failed:ValueError")
+            self.assertEqual(outbound, 0)
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("clock-invalid-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+
     def test_backward_final_clock_is_persistently_blocked(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)

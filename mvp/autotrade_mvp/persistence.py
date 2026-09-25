@@ -19,6 +19,12 @@ def payload_digest(value: Any) -> str:
     return "sha256:" + sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _outbox_envelope_digest(topic: str, payload_json: str) -> str:
+    """Bind delivery routing and exact serialized envelope bytes together."""
+
+    return payload_digest({"topic": topic, "payload_json": payload_json})
+
+
 _SEQUENCE_RE = re.compile(r"^(0|[1-9][0-9]*)$")
 
 
@@ -310,13 +316,11 @@ class JournalStore:
                         connection.execute(statement)
                     if version == 4:
                         for row in connection.execute(
-                            "SELECT outbox_id, payload_json FROM outbox"
+                            "SELECT outbox_id, topic, payload_json FROM outbox"
                         ):
-                            envelope_hash = (
-                                "sha256:"
-                                + sha256(
-                                    str(row["payload_json"]).encode("utf-8")
-                                ).hexdigest()
+                            envelope_hash = _outbox_envelope_digest(
+                                str(row["topic"]),
+                                str(row["payload_json"]),
                             )
                             connection.execute(
                                 "UPDATE outbox SET envelope_hash = ? "
@@ -533,9 +537,9 @@ class JournalStore:
             if outbox_topic is not None:
                 outbox_payload = canonical_json(envelope)
                 outbox_id = "outbox-" + sha256(event_id.encode("utf-8")).hexdigest()[:32]
-                outbox_hash = (
-                    "sha256:"
-                    + sha256(outbox_payload.encode("utf-8")).hexdigest()
+                outbox_hash = _outbox_envelope_digest(
+                    outbox_topic,
+                    outbox_payload,
                 )
                 connection.execute(
                     """
@@ -745,11 +749,9 @@ class JournalStore:
             ).fetchall()
         pending: list[dict[str, Any]] = []
         for row in rows:
-            actual_outbox_hash = (
-                "sha256:"
-                + sha256(
-                    str(row["outbox_payload_json"]).encode("utf-8")
-                ).hexdigest()
+            actual_outbox_hash = _outbox_envelope_digest(
+                str(row["topic"]),
+                str(row["outbox_payload_json"]),
             )
             if row["envelope_hash"] != actual_outbox_hash:
                 raise ValueError(
@@ -1089,10 +1091,10 @@ class JournalStore:
                                 item["outbox_topic"],
                                 item["outbox_payload"],
                                 self._now(),
-                                "sha256:"
-                                + sha256(
-                                    item["outbox_payload"].encode("utf-8")
-                                ).hexdigest(),
+                                _outbox_envelope_digest(
+                                    item["outbox_topic"],
+                                    item["outbox_payload"],
+                                ),
                             ),
                         )
                     appended.append(

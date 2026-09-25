@@ -72,6 +72,19 @@ def reconciliation_payload(
             }
             for item in result.submission_resolutions
         ],
+        "matched_provider_activity_ids": list(
+            result.matched_provider_activity_ids
+        ),
+        "unexpected_provider_activity_ids": list(
+            result.unexpected_provider_activity_ids
+        ),
+        "missing_local_provider_activity_ids": list(
+            result.missing_local_provider_activity_ids
+        ),
+        "manual_or_external_activity_ids": list(
+            result.manual_or_external_activity_ids
+        ),
+        "activity_coverage_complete": result.activity_coverage_complete,
         "blocking_resources": list(result.blocking_resources),
         "reasons": list(result.reasons),
     }
@@ -158,23 +171,49 @@ def unresolved_attempt_ids_from_checkpoint(
     for item in resolutions:
         if not isinstance(item, Mapping):
             raise ValueError("submission resolution must be an object")
-        attempt_id = _text(str(item.get("attempt_id", "")), name="attempt_id")
-        outcome = _text(str(item.get("outcome", "")), name="outcome").upper()
+        attempt_id = _text(item.get("attempt_id"), name="attempt_id")
+        outcome = _text(item.get("outcome"), name="outcome").upper()
         if outcome == "UNKNOWN":
             unresolved.append(attempt_id)
     return tuple(sorted(set(unresolved)))
+
+
+def unresolved_provider_activity_ids_from_checkpoint(
+    checkpoint: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    if checkpoint is None:
+        return ()
+    payload = checkpoint.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ValueError("checkpoint payload is required")
+    unexpected = payload.get("unexpected_provider_activity_ids", [])
+    missing = payload.get("missing_local_provider_activity_ids", [])
+    for values, name in (
+        (unexpected, "unexpected_provider_activity_ids"),
+        (missing, "missing_local_provider_activity_ids"),
+    ):
+        if not isinstance(values, list):
+            raise ValueError(f"checkpoint {name} must be a list")
+    normalized = [
+        _text(value, name="provider_activity_id")
+        for value in [*unexpected, *missing]
+    ]
+    return tuple(sorted(set(normalized)))
 
 
 def unknown_submissions_from_dispatch(
     store: JournalStore,
     *,
     attempt_ids: Iterable[str],
+    aggregate_ids: Mapping[str, str] | None = None,
 ) -> tuple[UnknownSubmission, ...]:
     """Rebuild ambiguous outbound attempts from durable Submission* events.
 
     SubmissionSending is ambiguous after a crash because the external request may
-    already have crossed the final send barrier.  SubmissionUnknown is explicitly
-    ambiguous.  Neither state is converted to a retryable state here.
+    already have crossed the final send barrier. SubmissionUnknown is explicitly
+    ambiguous. Neither state is converted to retry authority here. `aggregate_ids`
+    lets callers bind a logical attempt id to the exact durable aggregate identity
+    used by a scoped dispatcher, without duplicating dispatch identity logic.
     """
 
     if not isinstance(store, JournalStore):
@@ -183,9 +222,24 @@ def unknown_submissions_from_dispatch(
     if len(normalized) != len(set(normalized)):
         raise ValueError("attempt_ids must be unique")
 
+    durable_ids: dict[str, str] = {}
+    if aggregate_ids is not None:
+        if not isinstance(aggregate_ids, Mapping):
+            raise TypeError("aggregate_ids must be a mapping")
+        for raw_attempt_id, raw_aggregate_id in aggregate_ids.items():
+            attempt_key = _text(raw_attempt_id, name="aggregate_ids attempt_id")
+            aggregate_id = _text(raw_aggregate_id, name="aggregate_id")
+            if attempt_key in durable_ids and durable_ids[attempt_key] != aggregate_id:
+                raise ValueError("aggregate_ids contains conflicting attempt identity")
+            durable_ids[attempt_key] = aggregate_id
+        extra = set(durable_ids) - set(normalized)
+        if extra:
+            raise ValueError("aggregate_ids contains identities outside attempt_ids")
+
     recovered: list[UnknownSubmission] = []
     for attempt_id in normalized:
-        events = store.load_events("submission_attempt", attempt_id)
+        aggregate_id = durable_ids.get(attempt_id, attempt_id)
+        events = store.load_events("submission_attempt", aggregate_id)
         if not events:
             raise KeyError(f"Unknown submission attempt: {attempt_id}")
         first = events[0]
@@ -195,11 +249,11 @@ def unknown_submissions_from_dispatch(
             )
         payload = first["payload"]
         client_order_id = _text(
-            str(payload.get("client_order_id", "")),
+            payload.get("client_order_id"),
             name="client_order_id",
         )
         started_at = _instant(
-            str(payload.get("prepared_at", "")),
+            payload.get("prepared_at"),
             name="prepared_at",
         )
         last_type = events[-1]["event_type"]

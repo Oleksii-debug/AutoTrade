@@ -12,6 +12,7 @@ from typing import Mapping, Sequence
 _REQUIRED_ABSENCE_SURFACES = frozenset(
     {"OPEN_ORDERS", "ORDER_HISTORY", "EXECUTIONS", "ACTIVITIES"}
 )
+_ACTIVITY_ORIGINS = frozenset({"AUTOTRADE", "MANUAL", "EXTERNAL", "UNKNOWN"})
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -80,6 +81,15 @@ class CoverageSurfaceEvidence:
             and start <= instant <= end
         )
 
+    def proves_complete_window(self, start: datetime, end: datetime) -> bool:
+        coverage_start = _instant(self.coverage_start, name="coverage_start")
+        coverage_end = _instant(self.coverage_end, name="coverage_end")
+        return (
+            self.pagination_complete
+            and self.consistency_horizon_satisfied
+            and coverage_start <= start <= end <= coverage_end
+        )
+
 
 @dataclass(frozen=True)
 class SnapshotConsistencyEvidence:
@@ -122,12 +132,20 @@ class SnapshotConsistencyEvidence:
 
 @dataclass(frozen=True)
 class ProviderWorkingOrderEvidence:
+    provider_id: str
+    account_id: str
     provider_order_id: str
     client_order_id: str | None
     instrument: str
     remaining_quantity: Decimal
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "provider_id", _text(self.provider_id, name="provider_id").upper()
+        )
+        object.__setattr__(
+            self, "account_id", _text(self.account_id, name="account_id")
+        )
         remaining = _decimal(self.remaining_quantity, name="remaining_quantity")
         if remaining <= 0:
             raise ValueError("remaining_quantity must be positive")
@@ -156,6 +174,8 @@ class ProviderWorkingOrderEvidence:
     def create(
         cls,
         *,
+        provider_id: str,
+        account_id: str,
         provider_order_id: str,
         client_order_id: str | None,
         instrument: str,
@@ -165,6 +185,8 @@ class ProviderWorkingOrderEvidence:
         if remaining <= 0:
             raise ValueError("remaining_quantity must be positive")
         return cls(
+            provider_id=_text(provider_id, name="provider_id").upper(),
+            account_id=_text(account_id, name="account_id"),
             provider_order_id=_text(provider_order_id, name="provider_order_id"),
             client_order_id=(
                 _text(client_order_id, name="client_order_id")
@@ -178,6 +200,8 @@ class ProviderWorkingOrderEvidence:
 
 @dataclass(frozen=True)
 class ProviderFillEvidence:
+    provider_id: str
+    account_id: str
     provider_execution_id: str
     client_order_id: str | None
     instrument: str
@@ -188,6 +212,12 @@ class ProviderFillEvidence:
     trade_time: str
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "provider_id", _text(self.provider_id, name="provider_id").upper()
+        )
+        object.__setattr__(
+            self, "account_id", _text(self.account_id, name="account_id")
+        )
         quantity = _decimal(self.quantity, name="quantity")
         price = _decimal(self.price, name="price")
         fee_amount = _decimal(self.fee_amount, name="fee_amount")
@@ -226,6 +256,8 @@ class ProviderFillEvidence:
     def create(
         cls,
         *,
+        provider_id: str,
+        account_id: str,
         provider_execution_id: str,
         client_order_id: str | None,
         instrument: str,
@@ -242,6 +274,8 @@ class ProviderFillEvidence:
             raise ValueError("quantity and price must be positive")
         _instant(trade_time, name="trade_time")
         return cls(
+            provider_id=_text(provider_id, name="provider_id").upper(),
+            account_id=_text(account_id, name="account_id"),
             provider_execution_id=_text(
                 provider_execution_id, name="provider_execution_id"
             ),
@@ -256,6 +290,98 @@ class ProviderFillEvidence:
             fee_amount=fee,
             fee_currency=_text(fee_currency, name="fee_currency").upper(),
             trade_time=trade_time,
+        )
+
+
+@dataclass(frozen=True)
+class ProviderActivityEvidence:
+    provider_id: str
+    account_id: str
+    activity_id: str
+    activity_type: str
+    origin: str
+    occurred_at: str
+    instrument: str | None = None
+    currency: str | None = None
+    client_order_id: str | None = None
+    provider_order_id: str | None = None
+    provider_execution_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "provider_id",
+            _text(self.provider_id, name="provider_id").upper(),
+        )
+        object.__setattr__(
+            self,
+            "account_id",
+            _text(self.account_id, name="account_id"),
+        )
+        object.__setattr__(
+            self,
+            "activity_id",
+            _text(self.activity_id, name="activity_id"),
+        )
+        object.__setattr__(
+            self,
+            "activity_type",
+            _text(self.activity_type, name="activity_type").upper(),
+        )
+        origin = _text(self.origin, name="origin").upper()
+        if origin not in _ACTIVITY_ORIGINS:
+            raise ValueError(f"unsupported provider activity origin: {origin}")
+        object.__setattr__(self, "origin", origin)
+        instant = _instant(self.occurred_at, name="occurred_at")
+        object.__setattr__(
+            self,
+            "occurred_at",
+            instant.isoformat().replace("+00:00", "Z"),
+        )
+        for field in (
+            "instrument",
+            "client_order_id",
+            "provider_order_id",
+            "provider_execution_id",
+        ):
+            value = getattr(self, field)
+            if value is not None:
+                object.__setattr__(self, field, _text(value, name=field))
+        if self.currency is not None:
+            object.__setattr__(
+                self,
+                "currency",
+                _text(self.currency, name="currency").upper(),
+            )
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        provider_id: str,
+        account_id: str,
+        activity_id: str,
+        activity_type: str,
+        origin: str,
+        occurred_at: str,
+        instrument: str | None = None,
+        currency: str | None = None,
+        client_order_id: str | None = None,
+        provider_order_id: str | None = None,
+        provider_execution_id: str | None = None,
+    ) -> "ProviderActivityEvidence":
+        return cls(
+            provider_id=provider_id,
+            account_id=account_id,
+            activity_id=activity_id,
+            activity_type=activity_type,
+            origin=origin,
+            occurred_at=occurred_at,
+            instrument=instrument,
+            currency=currency,
+            client_order_id=client_order_id,
+            provider_order_id=provider_order_id,
+            provider_execution_id=provider_execution_id,
         )
 
 
@@ -314,6 +440,11 @@ class ReconciliationResult:
     submission_resolutions: tuple[SubmissionResolution, ...]
     blocking_resources: tuple[str, ...]
     reasons: tuple[str, ...]
+    matched_provider_activity_ids: tuple[str, ...] = ()
+    unexpected_provider_activity_ids: tuple[str, ...] = ()
+    missing_local_provider_activity_ids: tuple[str, ...] = ()
+    manual_or_external_activity_ids: tuple[str, ...] = ()
+    activity_coverage_complete: bool = True
 
     @property
     def blocks_new_risk(self) -> bool:
@@ -358,16 +489,23 @@ def _absence_coverage_index(
 def _absence_is_proven(
     evidence: Mapping[str, CoverageSurfaceEvidence],
     submission_time: datetime,
+    reconciliation_end: datetime,
 ) -> bool:
     return all(
         surface in evidence
-        and evidence[surface].proves_absence_for(submission_time)
+        and evidence[surface].provider_semantics_exclude_execution
+        and evidence[surface].proves_complete_window(
+            submission_time,
+            reconciliation_end,
+        )
         for surface in _REQUIRED_ABSENCE_SURFACES
     )
 
 
 def reconcile_account(
     *,
+    provider_id: str,
+    account_id: str,
     local_cash: Mapping[str, object],
     provider_cash: Mapping[str, object],
     local_positions: Mapping[str, object],
@@ -383,6 +521,12 @@ def reconcile_account(
     coverage_end: str,
     pagination_complete: bool,
     absence_coverage: Sequence[CoverageSurfaceEvidence] = (),
+    local_provider_activity_ids: Sequence[str] = (),
+    provider_activities: Sequence[ProviderActivityEvidence] = (),
+    provider_activity_provider_id: str | None = None,
+    provider_activity_account_id: str | None = None,
+    activity_coverage: CoverageSurfaceEvidence | None = None,
+    require_activity_reconciliation: bool = False,
     cash_tolerance: Mapping[str, object] | None = None,
     position_tolerance: Mapping[str, object] | None = None,
 ) -> ReconciliationResult:
@@ -396,8 +540,12 @@ def reconcile_account(
     blocks affected new risk.
     """
 
+    provider_scope = _text(provider_id, name="provider_id").upper()
+    account_scope = _text(account_id, name="account_id")
     if not isinstance(pagination_complete, bool):
         raise TypeError("pagination_complete must be boolean")
+    if not isinstance(require_activity_reconciliation, bool):
+        raise TypeError("require_activity_reconciliation must be boolean")
     start = _instant(coverage_start, name="coverage_start")
     end = _instant(coverage_end, name="coverage_end")
     if end < start:
@@ -427,6 +575,10 @@ def reconcile_account(
     for fill in provider_fills:
         if not isinstance(fill, ProviderFillEvidence):
             raise TypeError("provider_fills must contain ProviderFillEvidence")
+        if fill.provider_id != provider_scope:
+            raise ValueError("provider fill evidence provider_id mismatch")
+        if fill.account_id != account_scope:
+            raise ValueError("provider fill evidence account_id mismatch")
         if fill.provider_execution_id in provider_by_id:
             if provider_by_id[fill.provider_execution_id] != fill:
                 raise ValueError("provider execution id has conflicting observations")
@@ -455,6 +607,10 @@ def reconcile_account(
             raise TypeError(
                 "provider_working_orders must contain ProviderWorkingOrderEvidence"
             )
+        if order.provider_id != provider_scope:
+            raise ValueError("provider working-order evidence provider_id mismatch")
+        if order.account_id != account_scope:
+            raise ValueError("provider working-order evidence account_id mismatch")
         existing_provider = provider_working_by_id.get(order.provider_order_id)
         if existing_provider is not None:
             if existing_provider != order:
@@ -531,6 +687,80 @@ def reconcile_account(
         if abs(difference) > tolerance:
             position_differences[instrument] = difference
 
+    local_activity_ids = tuple(
+        _text(value, name="local_provider_activity_id")
+        for value in local_provider_activity_ids
+    )
+    if len(local_activity_ids) != len(set(local_activity_ids)):
+        raise ValueError("local_provider_activity_ids must be unique")
+
+    provider_activity_by_id: dict[str, ProviderActivityEvidence] = {}
+    activity_provider = (
+        None
+        if provider_activity_provider_id is None
+        else _text(provider_activity_provider_id, name="provider_activity_provider_id").upper()
+    )
+    activity_account = (
+        None
+        if provider_activity_account_id is None
+        else _text(provider_activity_account_id, name="provider_activity_account_id")
+    )
+    if provider_activities and (activity_provider is None or activity_account is None):
+        raise ValueError(
+            "provider activity reconciliation requires exact provider/account scope"
+        )
+    if activity_provider is not None and activity_provider != provider_scope:
+        raise ValueError("provider activity scope differs from reconciliation provider_id")
+    if activity_account is not None and activity_account != account_scope:
+        raise ValueError("provider activity scope differs from reconciliation account_id")
+    for activity in provider_activities:
+        if not isinstance(activity, ProviderActivityEvidence):
+            raise TypeError(
+                "provider_activities must contain ProviderActivityEvidence"
+            )
+        if activity.provider_id != activity_provider:
+            raise ValueError("provider activity evidence provider_id mismatch")
+        if activity.account_id != activity_account:
+            raise ValueError("provider activity evidence account_id mismatch")
+        existing = provider_activity_by_id.get(activity.activity_id)
+        if existing is not None:
+            if existing != activity:
+                raise ValueError("provider activity id has conflicting observations")
+            continue
+        provider_activity_by_id[activity.activity_id] = activity
+
+    provider_activity_ids = set(provider_activity_by_id)
+    local_activity_id_set = set(local_activity_ids)
+    matched_activities = tuple(
+        sorted(local_activity_id_set & provider_activity_ids)
+    )
+    unexpected_activities = tuple(
+        sorted(provider_activity_ids - local_activity_id_set)
+    )
+    missing_local_activities = tuple(
+        sorted(local_activity_id_set - provider_activity_ids)
+    )
+    manual_or_external_activities = tuple(
+        sorted(
+            activity_id
+            for activity_id in unexpected_activities
+            if provider_activity_by_id[activity_id].origin
+            in {"MANUAL", "EXTERNAL", "UNKNOWN"}
+        )
+    )
+
+    if activity_coverage is not None and not isinstance(
+        activity_coverage, CoverageSurfaceEvidence
+    ):
+        raise TypeError("activity_coverage must be CoverageSurfaceEvidence")
+    activity_coverage_complete = True
+    if require_activity_reconciliation:
+        activity_coverage_complete = bool(
+            activity_coverage is not None
+            and activity_coverage.surface == "ACTIVITIES"
+            and activity_coverage.proves_complete_window(start, end)
+        )
+
     searched = {
         _text(value, name="searched_client_order_id")
         for value in searched_client_order_ids
@@ -559,7 +789,11 @@ def reconcile_account(
             and pagination_complete
             and submission.client_order_id in searched
             and start <= submission_time <= end
-            and _absence_is_proven(absence_evidence, submission_time)
+            and _absence_is_proven(
+                absence_evidence,
+                submission_time,
+                end,
+            )
         ):
             outcome = "PROVEN_ABSENT"
             reason = (
@@ -627,6 +861,35 @@ def reconcile_account(
         reasons.append(
             "local working orders are absent from provider working-order snapshot"
         )
+    if require_activity_reconciliation and not activity_coverage_complete:
+        blocking.add("ACCOUNT")
+        reasons.append(
+            "provider activity coverage is incomplete for the reconciliation window"
+        )
+    if unexpected_activities:
+        for activity_id in unexpected_activities:
+            activity = provider_activity_by_id[activity_id]
+            scoped = False
+            if activity.instrument is not None:
+                blocking.add(f"INSTRUMENT:{activity.instrument}")
+                scoped = True
+            if activity.currency is not None:
+                blocking.add(f"CASH:{activity.currency}")
+                scoped = True
+            if not scoped:
+                blocking.add("ACCOUNT")
+        reasons.append(
+            "provider contains account activity absent from local truth"
+        )
+    if manual_or_external_activities:
+        reasons.append(
+            "manual, external or unknown-origin provider activity requires import or explicit reconciliation"
+        )
+    if missing_local_activities:
+        blocking.add("ACCOUNT")
+        reasons.append(
+            "local provider activity identities are absent from provider activity evidence"
+        )
     for currency in cash_differences:
         blocking.add(f"CASH:{currency}")
     if cash_differences:
@@ -650,6 +913,9 @@ def reconcile_account(
         and not missing
         and not unexpected_working
         and not missing_local_working
+        and activity_coverage_complete
+        and not unexpected_activities
+        and not missing_local_activities
         and not cash_differences
         and not position_differences
         and all(item.outcome != "UNKNOWN" for item in resolutions)
@@ -668,4 +934,9 @@ def reconcile_account(
         submission_resolutions=tuple(resolutions),
         blocking_resources=tuple(sorted(blocking)),
         reasons=tuple(reasons),
+        matched_provider_activity_ids=matched_activities,
+        unexpected_provider_activity_ids=unexpected_activities,
+        missing_local_provider_activity_ids=missing_local_activities,
+        manual_or_external_activity_ids=manual_or_external_activities,
+        activity_coverage_complete=activity_coverage_complete,
     )

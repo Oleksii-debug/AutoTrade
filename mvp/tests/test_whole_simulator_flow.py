@@ -11,7 +11,11 @@ from mvp.autotrade_mvp.accounting import (
 from mvp.autotrade_mvp.authority import AuthorityPolicy, AuthorityService
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence, reconcile_account
+from mvp.autotrade_mvp.reconciliation import (
+    ProviderFillEvidence,
+    SnapshotConsistencyEvidence,
+    reconcile_account,
+)
 from mvp.autotrade_mvp.reservations import ReservationBook
 from mvp.autotrade_mvp.risk import RiskContext, RiskIntent, RiskPolicy, evaluate_risk
 from mvp.autotrade_mvp.simulated_provider import SimulatedProvider
@@ -192,6 +196,8 @@ class WholeSimulatorFlowTests(unittest.TestCase):
 
             snapshot = provider.account_snapshot(now=LATER)
             provider_fill = ProviderFillEvidence.create(
+                provider_id="SIMULATED",
+                account_id="sim-account",
                 provider_execution_id=fill["provider_execution_id"],
                 client_order_id=dispatched.client_order_id,
                 instrument=fill["instrument_version"],
@@ -201,7 +207,14 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 fee_currency=fee["currency"],
                 trade_time=fill["trade_time"],
             )
+            snapshot_consistency = SnapshotConsistencyEvidence(
+                mode=snapshot["consistency"],
+                query_started_at=snapshot["query_started_at"],
+                query_completed_at=snapshot["query_completed_at"],
+            )
             reconciled = reconcile_account(
+                provider_id="SIMULATED",
+                account_id="sim-account",
                 local_cash={"USD": economic.cash("USD")},
                 provider_cash={"USD": snapshot["balances"][0]["total"]},
                 local_positions={INSTRUMENT: economic.position(INSTRUMENT)},
@@ -211,6 +224,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 },
                 local_execution_ids=[fill["provider_execution_id"]],
                 provider_fills=[provider_fill],
+                snapshot_consistency=snapshot_consistency,
                 coverage_start="2026-09-24T17:00:00Z",
                 coverage_end="2026-09-24T19:00:00Z",
                 pagination_complete=True,

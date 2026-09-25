@@ -3,6 +3,7 @@ import unittest
 
 from mvp.autotrade_mvp.reconciliation import (
     CoverageSurfaceEvidence,
+    ProviderActivityEvidence,
     ProviderFillEvidence,
     ProviderWorkingOrderEvidence,
     SnapshotConsistencyEvidence,
@@ -18,6 +19,8 @@ def fill(
     fee_amount="0",
 ):
     return ProviderFillEvidence.create(
+        provider_id="TEST_PROVIDER",
+        account_id="test-account",
         provider_execution_id=execution_id,
         client_order_id=client_order_id,
         instrument=instrument,
@@ -49,6 +52,8 @@ def absence_coverage(**overrides):
 class ReconciliationTests(unittest.TestCase):
     def base(self, **overrides):
         values = dict(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
             local_cash={"USD": "900"},
             provider_cash={"USD": "900"},
             local_positions={"ABC": "1"},
@@ -63,6 +68,8 @@ class ReconciliationTests(unittest.TestCase):
             coverage_start="2026-09-24T17:00:00Z",
             coverage_end="2026-09-24T19:00:00Z",
             pagination_complete=True,
+            provider_activity_provider_id="TEST_PROVIDER",
+            provider_activity_account_id="test-account",
         )
         values.update(overrides)
         return reconcile_account(**values)
@@ -194,6 +201,27 @@ class ReconciliationTests(unittest.TestCase):
         )
         self.assertEqual(result.submission_resolutions[0].outcome, "UNKNOWN")
 
+    def test_absence_surfaces_must_cover_full_post_send_window(self):
+        unknown = UnknownSubmission.create(
+            attempt_id="a-truncated-window",
+            client_order_id="missing-order",
+            started_at="2026-09-24T18:00:00Z",
+        )
+        result = self.base(
+            unknown_submissions=[unknown],
+            searched_client_order_ids=["missing-order"],
+            absence_coverage=absence_coverage(
+                surface="EXECUTIONS",
+                coverage_end="2026-09-24T18:00:00Z",
+            ),
+        )
+        self.assertEqual(result.submission_resolutions[0].outcome, "UNKNOWN")
+        self.assertEqual(
+            result.submission_resolutions[0].evidence_reason,
+            "absence_surface_evidence_incomplete",
+        )
+        self.assertIn("ACCOUNT", result.blocking_resources)
+
     def test_duplicate_absence_surface_evidence_is_rejected(self):
         evidence = absence_coverage()
         with self.assertRaisesRegex(ValueError, "duplicate absence coverage"):
@@ -251,6 +279,8 @@ class ReconciliationTests(unittest.TestCase):
     def test_direct_working_order_cannot_bypass_positive_remaining_quantity(self):
         with self.assertRaisesRegex(ValueError, "remaining_quantity must be positive"):
             ProviderWorkingOrderEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
                 provider_order_id="provider-order",
                 client_order_id="client-order",
                 instrument="ABC",
@@ -260,6 +290,8 @@ class ReconciliationTests(unittest.TestCase):
     def test_direct_fill_cannot_bypass_provider_evidence_invariants(self):
         with self.assertRaisesRegex(ValueError, "quantity and price must be positive"):
             ProviderFillEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
                 provider_execution_id="execution-1",
                 client_order_id="client-1",
                 instrument="ABC",
@@ -271,6 +303,8 @@ class ReconciliationTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "provider_execution_id is required"):
             ProviderFillEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
                 provider_execution_id=" ",
                 client_order_id="client-1",
                 instrument="ABC",
@@ -302,6 +336,8 @@ class ReconciliationTests(unittest.TestCase):
             started_at="2026-09-24T18:00:00Z",
         )
         order = ProviderWorkingOrderEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
             provider_order_id="provider-working",
             client_order_id="client-working",
             instrument="ABC",
@@ -434,6 +470,8 @@ class ReconciliationTests(unittest.TestCase):
         result = self.base(
             provider_working_orders=[
                 ProviderWorkingOrderEvidence.create(
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
                     provider_order_id="manual-42",
                     client_order_id=None,
                     instrument="XYZ",
@@ -450,6 +488,8 @@ class ReconciliationTests(unittest.TestCase):
 
     def test_local_and_provider_working_orders_must_match(self):
         matching = ProviderWorkingOrderEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
             provider_order_id="provider-1",
             client_order_id="client-1",
             instrument="ABC",
@@ -481,12 +521,16 @@ class ReconciliationTests(unittest.TestCase):
             self.base(
                 provider_working_orders=[
                     ProviderWorkingOrderEvidence.create(
+                        provider_id="TEST_PROVIDER",
+                        account_id="test-account",
                         provider_order_id="p1",
                         client_order_id="c-shared",
                         instrument="ABC",
                         remaining_quantity="1",
                     ),
                     ProviderWorkingOrderEvidence.create(
+                        provider_id="TEST_PROVIDER",
+                        account_id="test-account",
                         provider_order_id="p2",
                         client_order_id="c-shared",
                         instrument="ABC",
@@ -495,12 +539,63 @@ class ReconciliationTests(unittest.TestCase):
                 ]
             )
 
+    def test_fill_evidence_from_other_provider_or_account_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "provider_id mismatch"):
+            self.base(
+                provider_fills=[
+                    ProviderFillEvidence.create(
+                        provider_id="OTHER_PROVIDER",
+                        account_id="test-account",
+                        provider_execution_id="e1",
+                        client_order_id="c1",
+                        instrument="ABC",
+                        quantity="1",
+                        price="100",
+                        fee_currency="USD",
+                        trade_time="2026-09-24T18:00:00Z",
+                    )
+                ]
+            )
+        with self.assertRaisesRegex(ValueError, "account_id mismatch"):
+            self.base(
+                provider_fills=[
+                    ProviderFillEvidence.create(
+                        provider_id="TEST_PROVIDER",
+                        account_id="other-account",
+                        provider_execution_id="e1",
+                        client_order_id="c1",
+                        instrument="ABC",
+                        quantity="1",
+                        price="100",
+                        fee_currency="USD",
+                        trade_time="2026-09-24T18:00:00Z",
+                    )
+                ]
+            )
+
+    def test_working_order_evidence_from_other_account_fails_closed(self):
+        foreign = ProviderWorkingOrderEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="other-account",
+            provider_order_id="provider-foreign",
+            client_order_id="client-1",
+            instrument="ABC",
+            remaining_quantity="1",
+        )
+        with self.assertRaisesRegex(ValueError, "account_id mismatch"):
+            self.base(
+                local_working_client_order_ids=["client-1"],
+                provider_working_orders=[foreign],
+            )
+
     def test_provider_execution_conflict_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "conflicting"):
             self.base(
                 provider_fills=[
                     fill("e1", "c1"),
                     ProviderFillEvidence.create(
+                        provider_id="TEST_PROVIDER",
+                        account_id="test-account",
                         provider_execution_id="e1",
                         client_order_id="c1",
                         instrument="ABC",
@@ -511,6 +606,191 @@ class ReconciliationTests(unittest.TestCase):
                     ),
                 ]
             )
+
+    def activity(self, **overrides):
+        values = dict(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            activity_id="activity-1",
+            activity_type="CASH_ADJUSTMENT",
+            origin="MANUAL",
+            occurred_at="2026-09-24T18:15:00Z",
+            currency="USD",
+        )
+        values.update(overrides)
+        return ProviderActivityEvidence.create(**values)
+
+    def activity_coverage(self, **overrides):
+        values = dict(
+            surface="ACTIVITIES",
+            coverage_start="2026-09-24T17:00:00Z",
+            coverage_end="2026-09-24T19:00:00Z",
+            pagination_complete=True,
+            consistency_horizon_satisfied=True,
+            provider_semantics_exclude_execution=False,
+        )
+        values.update(overrides)
+        return CoverageSurfaceEvidence(**values)
+
+    def test_provider_activity_scope_is_required_and_must_match(self):
+        evidence = self.activity()
+        with self.assertRaisesRegex(ValueError, "requires exact provider/account scope"):
+            self.base(
+                provider_activities=[evidence],
+                provider_activity_provider_id=None,
+                provider_activity_account_id=None,
+            )
+        with self.assertRaisesRegex(ValueError, "reconciliation provider_id"):
+            self.base(
+                provider_activities=[evidence],
+                provider_activity_provider_id="OTHER",
+            )
+        with self.assertRaisesRegex(ValueError, "reconciliation account_id"):
+            self.base(
+                provider_activities=[evidence],
+                provider_activity_account_id="other-account",
+            )
+        foreign = self.activity(provider_id="OTHER")
+        with self.assertRaisesRegex(ValueError, "evidence provider_id mismatch"):
+            self.base(provider_activities=[foreign])
+
+    def test_unexpected_manual_activity_blocks_affected_currency(self):
+        result = self.base(provider_activities=[self.activity()])
+        self.assertFalse(result.complete)
+        self.assertEqual(
+            result.unexpected_provider_activity_ids,
+            ("activity-1",),
+        )
+        self.assertEqual(
+            result.manual_or_external_activity_ids,
+            ("activity-1",),
+        )
+        self.assertIn("CASH:USD", result.blocking_resources)
+
+    def test_unexpected_external_instrument_activity_blocks_instrument(self):
+        result = self.base(
+            provider_activities=[
+                self.activity(
+                    activity_id="activity-position",
+                    activity_type="POSITION_ADJUSTMENT",
+                    origin="EXTERNAL",
+                    currency=None,
+                    instrument="XYZ",
+                )
+            ]
+        )
+        self.assertIn("INSTRUMENT:XYZ", result.blocking_resources)
+        self.assertFalse(result.complete)
+
+    def test_unexpected_autotrade_activity_still_blocks_local_truth_gap(self):
+        result = self.base(
+            provider_activities=[
+                self.activity(
+                    activity_id="activity-auto",
+                    origin="AUTOTRADE",
+                )
+            ]
+        )
+        self.assertEqual(
+            result.unexpected_provider_activity_ids,
+            ("activity-auto",),
+        )
+        self.assertFalse(result.complete)
+
+    def test_matched_activity_and_complete_activity_window_reconcile(self):
+        activity = self.activity()
+        result = self.base(
+            local_provider_activity_ids=["activity-1"],
+            provider_activities=[activity],
+            activity_coverage=self.activity_coverage(),
+            require_activity_reconciliation=True,
+        )
+        self.assertTrue(result.complete)
+        self.assertEqual(
+            result.matched_provider_activity_ids,
+            ("activity-1",),
+        )
+        self.assertTrue(result.activity_coverage_complete)
+        self.assertFalse(result.manual_or_external_activity_ids)
+
+    def test_required_activity_coverage_fails_closed_when_missing_or_incomplete(self):
+        missing = self.base(require_activity_reconciliation=True)
+        incomplete = self.base(
+            activity_coverage=self.activity_coverage(
+                pagination_complete=False,
+            ),
+            require_activity_reconciliation=True,
+        )
+        wrong_surface = self.base(
+            activity_coverage=CoverageSurfaceEvidence(
+                surface="ORDER_HISTORY",
+                coverage_start="2026-09-24T17:00:00Z",
+                coverage_end="2026-09-24T19:00:00Z",
+                pagination_complete=True,
+                consistency_horizon_satisfied=True,
+                provider_semantics_exclude_execution=True,
+            ),
+            require_activity_reconciliation=True,
+        )
+        for result in (missing, incomplete, wrong_surface):
+            self.assertFalse(result.activity_coverage_complete)
+            self.assertFalse(result.complete)
+            self.assertIn("ACCOUNT", result.blocking_resources)
+
+    def test_missing_local_expected_activity_blocks_account(self):
+        result = self.base(
+            local_provider_activity_ids=["activity-missing"],
+            activity_coverage=self.activity_coverage(),
+            require_activity_reconciliation=True,
+        )
+        self.assertEqual(
+            result.missing_local_provider_activity_ids,
+            ("activity-missing",),
+        )
+        self.assertIn("ACCOUNT", result.blocking_resources)
+        self.assertFalse(result.complete)
+
+    def test_conflicting_provider_activity_identity_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "conflicting observations"):
+            self.base(
+                provider_activities=[
+                    self.activity(),
+                    self.activity(activity_type="FEE_ADJUSTMENT"),
+                ]
+            )
+
+    def test_identical_provider_activity_duplicate_is_idempotent(self):
+        activity = self.activity()
+        result = self.base(
+            local_provider_activity_ids=["activity-1"],
+            provider_activities=[activity, activity],
+        )
+        self.assertTrue(result.complete)
+        self.assertEqual(result.matched_provider_activity_ids, ("activity-1",))
+
+    def test_provider_activity_origin_and_timestamp_are_strict(self):
+        with self.assertRaisesRegex(ValueError, "unsupported provider activity origin"):
+            self.activity(origin="MODEL")
+        with self.assertRaisesRegex(ValueError, "must include timezone"):
+            self.activity(occurred_at="2026-09-24T18:15:00")
+
+    def test_generic_activity_does_not_resolve_unknown_submission(self):
+        unknown = UnknownSubmission.create(
+            attempt_id="attempt-activity-only",
+            client_order_id="client-activity-only",
+            started_at="2026-09-24T18:00:00Z",
+        )
+        result = self.base(
+            unknown_submissions=[unknown],
+            provider_activities=[
+                self.activity(
+                    client_order_id="client-activity-only",
+                    origin="AUTOTRADE",
+                )
+            ],
+        )
+        self.assertEqual(result.submission_resolutions[0].outcome, "UNKNOWN")
+        self.assertFalse(result.complete)
 
 
 if __name__ == "__main__":

@@ -78,6 +78,8 @@ class ProjectedFillEvidence:
     side: str
     quantity: Decimal
     price: Decimal
+    position_side: str | None = None
+    position_effect: str | None = None
     provider_revision: str | None = None
     correction_of: str | None = None
 
@@ -98,6 +100,24 @@ class ProjectedFillEvidence:
         if normalized_side not in {"BUY", "SELL"}:
             raise ValueError("side must be BUY or SELL")
         object.__setattr__(self, "side", normalized_side)
+        if self.position_side is not None:
+            normalized_position_side = _text(
+                self.position_side, name="position_side"
+            ).upper()
+            if normalized_position_side not in {"BOTH", "LONG", "SHORT"}:
+                raise ValueError("position_side must be BOTH, LONG or SHORT")
+            object.__setattr__(
+                self, "position_side", normalized_position_side
+            )
+        if self.position_effect is not None:
+            normalized_position_effect = _text(
+                self.position_effect, name="position_effect"
+            ).upper()
+            if normalized_position_effect not in {"OPEN", "REDUCE"}:
+                raise ValueError("position_effect must be OPEN or REDUCE")
+            object.__setattr__(
+                self, "position_effect", normalized_position_effect
+            )
         quantity = _decimal(self.quantity, name="quantity")
         price = _decimal(self.price, name="price")
         if quantity <= 0 or price <= 0:
@@ -134,6 +154,8 @@ class ProjectedFillEvidence:
         side: str,
         quantity,
         price,
+        position_side: str | None = None,
+        position_effect: str | None = None,
         provider_revision: str | None = None,
         correction_of: str | None = None,
     ) -> "ProjectedFillEvidence":
@@ -145,6 +167,8 @@ class ProjectedFillEvidence:
             side=side,
             quantity=_decimal(quantity, name="quantity"),
             price=_decimal(price, name="price"),
+            position_side=position_side,
+            position_effect=position_effect,
             provider_revision=provider_revision,
             correction_of=correction_of,
         )
@@ -196,7 +220,35 @@ def _validated_fill_evidence(
         )
     if provider_fill.side != projected_fill.side:
         raise AccountingConflict("provider fill side does not match projection")
+    if provider_fill.position_side != projected_fill.position_side:
+        if provider_fill.position_side is None:
+            raise AccountingConflict(
+                "provider fill position side is not independently evidenced"
+            )
+        if projected_fill.position_side is None:
+            raise AccountingConflict(
+                "projection is missing provider-required position side"
+            )
+        raise AccountingConflict(
+            "provider fill position side does not match projection"
+        )
+    if provider_fill.position_effect != projected_fill.position_effect:
+        if provider_fill.position_effect is None:
+            raise AccountingConflict(
+                "provider fill position effect is not independently evidenced"
+            )
+        if projected_fill.position_effect is None:
+            raise AccountingConflict(
+                "projection is missing provider-required position effect"
+            )
+        raise AccountingConflict(
+            "provider fill position effect does not match projection"
+        )
     if provider_fill.position_side in {"LONG", "SHORT"}:
+        if provider_fill.position_effect is None:
+            raise AccountingConflict(
+                "hedge-mode provider fill position effect is not independently evidenced"
+            )
         raise AccountingConflict(
             "hedge-mode provider fill requires leg-aware economic accounting"
         )
@@ -234,6 +286,7 @@ def _validated_fill_evidence(
         "intent_id": projected_fill.intent_id,
         "side": provider_fill.side,
         "position_side": provider_fill.position_side,
+        "position_effect": provider_fill.position_effect,
         "instrument": provider_fill.instrument,
         "quantity": format(provider_fill.quantity, "f"),
         "price": format(provider_fill.price, "f"),
@@ -380,6 +433,7 @@ def build_unexpected_provider_fill_transaction(
         "client_order_id": provider_fill.client_order_id,
         "side": provider_fill.side,
         "position_side": provider_fill.position_side,
+        "position_effect": provider_fill.position_effect,
         "instrument": provider_fill.instrument,
         "quantity": format(provider_fill.quantity, "f"),
         "price": format(provider_fill.price, "f"),

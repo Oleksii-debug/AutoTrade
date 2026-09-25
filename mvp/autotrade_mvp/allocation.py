@@ -298,6 +298,7 @@ class AllocationPolicy:
     max_symbol_notional: Decimal
     max_total_cost: Decimal
     max_stress_loss: Decimal
+    stress_loss_penalty_rate: Decimal = Decimal("0")
     minimum_cash_reserve: Decimal = Decimal("0")
     max_iterations: int = 64
     min_scale_tolerance: Decimal = Decimal("0.000001")
@@ -312,6 +313,7 @@ class AllocationPolicy:
             "max_symbol_notional",
             "max_total_cost",
             "max_stress_loss",
+            "stress_loss_penalty_rate",
             "minimum_cash_reserve",
         ):
             object.__setattr__(
@@ -352,6 +354,7 @@ class AllocationPolicy:
         max_symbol_notional,
         max_total_cost,
         max_stress_loss,
+        stress_loss_penalty_rate=0,
         minimum_cash_reserve=0,
         max_iterations: int = 64,
         min_scale_tolerance="0.000001",
@@ -371,6 +374,11 @@ class AllocationPolicy:
             max_symbol_notional=_positive(max_symbol_notional, name="max_symbol_notional", allow_zero=True),
             max_total_cost=_positive(max_total_cost, name="max_total_cost", allow_zero=True),
             max_stress_loss=_positive(max_stress_loss, name="max_stress_loss", allow_zero=True),
+            stress_loss_penalty_rate=_positive(
+                stress_loss_penalty_rate,
+                name="stress_loss_penalty_rate",
+                allow_zero=True,
+            ),
             minimum_cash_reserve=_positive(
                 minimum_cash_reserve,
                 name="minimum_cash_reserve",
@@ -736,6 +744,7 @@ def allocate_targets(
 def _expected_net_utility(
     result: AllocationResult,
     objective_by_symbol: Mapping[str, ObjectiveCandidate],
+    policy: AllocationPolicy,
 ) -> Decimal:
     gross_objective = sum(
         (
@@ -745,7 +754,10 @@ def _expected_net_utility(
         ),
         Decimal("0"),
     )
-    return gross_objective - result.estimated_cost
+    stress_penalty = (
+        result.worst_stress_loss * policy.stress_loss_penalty_rate
+    )
+    return gross_objective - result.estimated_cost - stress_penalty
 
 
 def allocate_objective_targets(
@@ -762,7 +774,9 @@ def allocate_objective_targets(
     Candidates are ranked only to make enumeration and tie-breaking stable.
     Every non-empty subset of positive objective-rate candidates is evaluated
     through the same hard allocation constraints. Estimated execution cost is
-    subtracted exactly once from the objective. The search is exhaustive only
+    subtracted exactly once from the objective, and an explicit portfolio-level
+    stress-loss penalty may rank feasible subsets without replacing the hard
+    risk gate. The search is exhaustive only
     inside max_candidate_sets; if the complete subset space does not fit that
     budget, the allocator fails closed to a no-increase cash fallback rather
     than silently truncating instrument selection.
@@ -785,7 +799,7 @@ def allocate_objective_targets(
             allocation=fallback,
             selected_symbols=(),
             expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v2",
+            objective_version="deterministic-net-utility-v3",
             reason="no objective candidates",
         )
 
@@ -806,7 +820,7 @@ def allocate_objective_targets(
                 allocation=fallback,
                 selected_symbols=(),
                 expected_net_utility=Decimal("0"),
-                objective_version="deterministic-net-utility-v2",
+                objective_version="deterministic-net-utility-v3",
                 reason=evidence_problem,
             )
         normalized_evidence = tuple(stress_evidence)
@@ -829,7 +843,7 @@ def allocate_objective_targets(
             allocation=fallback,
             selected_symbols=(),
             expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v2",
+            objective_version="deterministic-net-utility-v3",
             reason="no candidate has positive expected return after risk penalty",
         )
 
@@ -846,7 +860,7 @@ def allocate_objective_targets(
             allocation=fallback,
             selected_symbols=(),
             expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v2",
+            objective_version="deterministic-net-utility-v3",
             reason=(
                 "objective search budget exceeded before complete subset "
                 "evaluation"
@@ -894,7 +908,7 @@ def allocate_objective_targets(
         )
         if result.status != "ALLOCATED":
             continue
-        utility = _expected_net_utility(result, objective_by_symbol)
+        utility = _expected_net_utility(result, objective_by_symbol, policy)
         if utility <= 0:
             continue
         active_symbols = tuple(
@@ -940,7 +954,7 @@ def allocate_objective_targets(
             allocation=fallback,
             selected_symbols=(),
             expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v2",
+            objective_version="deterministic-net-utility-v3",
             reason=(
                 "no positive-utility feasible allocation survived hard "
                 "constraints and estimated costs"
@@ -951,7 +965,7 @@ def allocate_objective_targets(
         allocation=best_result,
         selected_symbols=best_symbols,
         expected_net_utility=best_utility,
-        objective_version="deterministic-net-utility-v2",
+        objective_version="deterministic-net-utility-v3",
         reason=(
             "selected the highest positive expected-net-utility deterministic "
             "candidate subset that passed all hard allocation constraints"

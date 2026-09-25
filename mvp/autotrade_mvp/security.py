@@ -72,6 +72,7 @@ class SecurityBoundary:
 
     _ROLES = {"OWNER", "OPERATOR", "RESEARCHER", "OBSERVER"}
     _EXECUTION_ROLES = {"OWNER", "OPERATOR"}
+    _HOST_COMMAND_ROLES = {"OWNER", "OPERATOR"}
     _CREDENTIAL_PURPOSES = {"TRADE", "READ"}
 
     def __init__(
@@ -158,13 +159,17 @@ class SecurityBoundary:
         return session
 
     def validate_host_session(self, token: str, actor: str) -> bool:
-        """Validate bearer-session identity for the host command layer.
+        """Validate identity and role for the state-mutating host command layer.
 
-        Action authorization remains a separate server-side policy concern.
+        Read-only RESEARCHER/OBSERVER sessions must use read surfaces; they cannot
+        become mutation authority merely by presenting a valid bearer token.
         """
         try:
             normalized_actor = _required_text(actor, name="actor")
-            session = self.validate_session(token)
+            session = self.validate_session(
+                token,
+                required_roles=self._HOST_COMMAND_ROLES,
+            )
         except (ValueError, PermissionError, RuntimeError):
             return False
         return secrets.compare_digest(session.subject, normalized_actor)

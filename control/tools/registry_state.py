@@ -9,6 +9,12 @@ import uuid
 MUTATING_MODES = frozenset({"SOURCE_MUTATION", "INTEGRATION"})
 NON_MUTATING_MODES = frozenset({"READ_ONLY_AUDIT", "RESEARCH", "CI_TRIAGE"})
 ALLOWED_MODES = MUTATING_MODES | NON_MUTATING_MODES
+REGISTRY_MODE_ENABLED = "ATOMIC_CLAIMS_ENABLED"
+REGISTRY_MODES_DISABLED = frozenset({
+    "BOOTSTRAP_NOT_ENABLED",
+    "PROTOCOL_IMPLEMENTED_NOT_ENABLED",
+})
+REGISTRY_MODES = REGISTRY_MODES_DISABLED | {REGISTRY_MODE_ENABLED}
 
 
 class RegistryProtocolError(ValueError):
@@ -148,6 +154,9 @@ def _validate_registry(registry: Mapping[str, Any]) -> None:
         raise RegistryProtocolError("registry must be an object")
     if registry.get("schema_version") != "1.0.0":
         raise RegistryProtocolError("unsupported registry schema_version")
+    mode = registry.get("mode")
+    if mode not in REGISTRY_MODES:
+        raise RegistryProtocolError("registry mode is unsupported")
     generation = registry.get("generation")
     if type(generation) is not int or generation < 0:
         raise RegistryProtocolError("registry generation must be a nonnegative integer")
@@ -211,6 +220,13 @@ def claim(
     _validate_registry(registry)
     resolved_now = parse_instant(now)
     canonical = _canonical_request(request)
+    if (
+        canonical["claim_mode"] in MUTATING_MODES
+        and registry.get("mode") != REGISTRY_MODE_ENABLED
+    ):
+        raise RegistryProtocolError(
+            "registry mutation claims are disabled until atomic ownership is enabled"
+        )
 
     for existing in registry["claims"]:
         if existing.get("request_id") == canonical["request_id"]:

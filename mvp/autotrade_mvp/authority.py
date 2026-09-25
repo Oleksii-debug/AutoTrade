@@ -1184,6 +1184,7 @@ class AuthorityService:
                     "required_increment": _canonical_decimal_text(required_increment),
                 }
             reservation_expected_available = adjusted_available
+            expected_availability_evidence["availability"] = adjusted_available
             expected_availability_evidence[
                 "borrow_capacity_adjustments"
             ] = canonical_adjustments
@@ -2031,6 +2032,10 @@ class AuthorityService:
                 )
                 availability_evidence = {
                     **availability_evidence,
+                    "availability": {
+                        resource: _canonical_decimal_text(amount)
+                        for resource, amount in authoritative_available.items()
+                    },
                     "borrow_capacity_adjustments": {
                         required_borrow_resource: {
                             "total_capacity": _canonical_decimal_text(total_capacity),

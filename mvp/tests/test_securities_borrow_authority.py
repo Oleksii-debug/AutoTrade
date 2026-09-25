@@ -326,9 +326,13 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 "risk_decision",
                 first.risk_decision_id,
             )[0]
-            adjustment = risk_event["payload"][
+            availability_evidence = risk_event["payload"][
                 "reservation_availability_evidence"
-            ]["borrow_capacity_adjustments"][key]
+            ]
+            self.assertEqual(availability_evidence["availability"][key], "60")
+            adjustment = availability_evidence[
+                "borrow_capacity_adjustments"
+            ][key]
             self.assertEqual(adjustment["total_capacity"], "100")
             self.assertEqual(
                 adjustment["current_borrowed_quantity"],

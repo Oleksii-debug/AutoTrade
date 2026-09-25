@@ -944,6 +944,18 @@ def parse_web_api_trades(
         fee_currency = _text(
             fee_currency_by_execution_id[execution_id], name="fee_currency"
         )
+        raw_side = _text(raw.get("side"), name="trade.side").upper()
+        side_by_provider_value = {
+            "B": "BUY",
+            "BUY": "BUY",
+            "S": "SELL",
+            "SELL": "SELL",
+        }
+        if raw_side not in side_by_provider_value:
+            raise IbkrWebAdapterError(
+                "trade side must be provider-evidenced B/S or BUY/SELL"
+            )
+        side = side_by_provider_value[raw_side]
         trade_time = _text(raw.get("trade_time"), name="trade_time")
         fill = ProviderFillEvidence.create(
             provider_id="IBKR",
@@ -952,6 +964,7 @@ def parse_web_api_trades(
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=instrument,
+            side=side,
             quantity=_decimal(raw.get("size"), name="trade.size", positive=True),
             price=_decimal(raw.get("price"), name="trade.price", positive=True),
             fee_amount=_decimal(raw.get("commission"), name="trade.commission"),

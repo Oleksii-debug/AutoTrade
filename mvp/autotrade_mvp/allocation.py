@@ -131,6 +131,9 @@ class AllocationCandidate:
     min_notional: Decimal = Decimal("0")
     fee_floor: Decimal = Decimal("0")
     max_executable_notional: Decimal | None = None
+    current_quantity: Decimal = Decimal("0")
+    turnover_cost_rate: Decimal | None = None
+    holding_cost_rate: Decimal | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", _text(self.symbol, name="symbol"))
@@ -176,6 +179,45 @@ class AllocationCandidate:
                     allow_zero=True,
                 ),
             )
+        object.__setattr__(
+            self,
+            "current_quantity",
+            _decimal(self.current_quantity, name="current_quantity"),
+        )
+        split_missing = (self.turnover_cost_rate is None) != (
+            self.holding_cost_rate is None
+        )
+        if split_missing:
+            raise ValueError(
+                "turnover_cost_rate and holding_cost_rate must be supplied together"
+            )
+        if self.turnover_cost_rate is not None:
+            object.__setattr__(
+                self,
+                "turnover_cost_rate",
+                _positive(
+                    self.turnover_cost_rate,
+                    name="turnover_cost_rate",
+                    allow_zero=True,
+                ),
+            )
+            object.__setattr__(
+                self,
+                "holding_cost_rate",
+                _positive(
+                    self.holding_cost_rate,
+                    name="holding_cost_rate",
+                    allow_zero=True,
+                ),
+            )
+            if self.turnover_cost_rate + self.holding_cost_rate != self.cost_rate:
+                raise ValueError(
+                    "turnover and holding cost rates must sum to cost_rate"
+                )
+        elif self.current_quantity != 0:
+            raise ValueError(
+                "non-zero current_quantity requires explicit turnover/holding cost split"
+            )
 
     @classmethod
     def create(
@@ -190,6 +232,9 @@ class AllocationCandidate:
         min_notional=0,
         fee_floor=0,
         max_executable_notional=None,
+        current_quantity=0,
+        turnover_cost_rate=None,
+        holding_cost_rate=None,
     ) -> "AllocationCandidate":
         return cls(
             symbol=_text(symbol, name="symbol"),
@@ -209,6 +254,25 @@ class AllocationCandidate:
                 else _positive(
                     max_executable_notional,
                     name="max_executable_notional",
+                    allow_zero=True,
+                )
+            ),
+            current_quantity=_decimal(current_quantity, name="current_quantity"),
+            turnover_cost_rate=(
+                None
+                if turnover_cost_rate is None
+                else _positive(
+                    turnover_cost_rate,
+                    name="turnover_cost_rate",
+                    allow_zero=True,
+                )
+            ),
+            holding_cost_rate=(
+                None
+                if holding_cost_rate is None
+                else _positive(
+                    holding_cost_rate,
+                    name="holding_cost_rate",
                     allow_zero=True,
                 )
             ),
@@ -261,6 +325,9 @@ class ObjectiveCandidate:
         min_notional=0,
         fee_floor=0,
         max_executable_notional=None,
+        current_quantity=0,
+        turnover_cost_rate=None,
+        holding_cost_rate=None,
     ) -> "ObjectiveCandidate":
         return cls(
             candidate=AllocationCandidate.create(
@@ -273,6 +340,9 @@ class ObjectiveCandidate:
                 min_notional=min_notional,
                 fee_floor=fee_floor,
                 max_executable_notional=max_executable_notional,
+                current_quantity=current_quantity,
+                turnover_cost_rate=turnover_cost_rate,
+                holding_cost_rate=holding_cost_rate,
             ),
             expected_return_rate=_decimal(
                 expected_return_rate,
@@ -298,6 +368,7 @@ class AllocationPolicy:
     max_symbol_notional: Decimal
     max_total_cost: Decimal
     max_stress_loss: Decimal
+    max_turnover_notional: Decimal | None = None
     minimum_cash_reserve: Decimal = Decimal("0")
     max_iterations: int = 64
     min_scale_tolerance: Decimal = Decimal("0.000001")
@@ -320,6 +391,16 @@ class AllocationPolicy:
                 _positive(
                     getattr(self, field_name),
                     name=field_name,
+                    allow_zero=True,
+                ),
+            )
+        if self.max_turnover_notional is not None:
+            object.__setattr__(
+                self,
+                "max_turnover_notional",
+                _positive(
+                    self.max_turnover_notional,
+                    name="max_turnover_notional",
                     allow_zero=True,
                 ),
             )
@@ -352,6 +433,7 @@ class AllocationPolicy:
         max_symbol_notional,
         max_total_cost,
         max_stress_loss,
+        max_turnover_notional=None,
         minimum_cash_reserve=0,
         max_iterations: int = 64,
         min_scale_tolerance="0.000001",
@@ -371,6 +453,15 @@ class AllocationPolicy:
             max_symbol_notional=_positive(max_symbol_notional, name="max_symbol_notional", allow_zero=True),
             max_total_cost=_positive(max_total_cost, name="max_total_cost", allow_zero=True),
             max_stress_loss=_positive(max_stress_loss, name="max_stress_loss", allow_zero=True),
+            max_turnover_notional=(
+                None
+                if max_turnover_notional is None
+                else _positive(
+                    max_turnover_notional,
+                    name="max_turnover_notional",
+                    allow_zero=True,
+                )
+            ),
             minimum_cash_reserve=_positive(
                 minimum_cash_reserve,
                 name="minimum_cash_reserve",
@@ -389,6 +480,7 @@ class AllocationTarget:
     quantity: Decimal
     notional: Decimal
     estimated_cost: Decimal
+    turnover_notional: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -402,6 +494,7 @@ class AllocationResult:
     worst_stress_loss: Decimal
     cash_required: Decimal
     reason: str
+    turnover_notional: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -504,34 +597,56 @@ def _evaluate(
     targets: list[AllocationTarget] = []
     notionals: dict[str, Decimal] = {}
     total_cost = Decimal("0")
+    total_turnover = Decimal("0")
     capital_required = Decimal("0")
 
     for candidate in candidates:
-        scaled = candidate.desired_notional * scale
+        current_notional = candidate.current_quantity * candidate.price
+        scaled = current_notional + (
+            candidate.desired_notional - current_notional
+        ) * scale
         quantity = _round_quantity(scaled, candidate.price, candidate.lot_size)
         notional = quantity * candidate.price
+        delta_notional = notional - current_notional
         if (
             candidate.max_executable_notional is not None
-            and abs(notional) > candidate.max_executable_notional
+            and abs(delta_notional) > candidate.max_executable_notional
         ):
-            capped = (
-                candidate.max_executable_notional
-                if notional > 0
-                else -candidate.max_executable_notional
+            direction = Decimal("1") if delta_notional > 0 else Decimal("-1")
+            capped_target = (
+                current_notional
+                + direction * candidate.max_executable_notional
             )
-            quantity = _round_quantity(capped, candidate.price, candidate.lot_size)
+            quantity = _round_quantity(
+                capped_target,
+                candidate.price,
+                candidate.lot_size,
+            )
             notional = quantity * candidate.price
         if quantity != 0 and abs(notional) < candidate.min_notional:
             quantity = Decimal("0")
             notional = Decimal("0")
-        proportional_cost = abs(notional) * candidate.cost_rate
-        cost = (
-            max(proportional_cost, candidate.fee_floor)
-            if notional != 0
-            else Decimal("0")
-        )
+        turnover = abs(notional - current_notional)
+        if candidate.turnover_cost_rate is None:
+            proportional_cost = abs(notional) * candidate.cost_rate
+            cost = (
+                max(proportional_cost, candidate.fee_floor)
+                if notional != 0
+                else Decimal("0")
+            )
+        else:
+            proportional_cost = (
+                turnover * candidate.turnover_cost_rate
+                + abs(notional) * candidate.holding_cost_rate
+            )
+            cost = (
+                max(proportional_cost, candidate.fee_floor)
+                if turnover != 0
+                else proportional_cost
+            )
         notionals[candidate.symbol] = notional
         total_cost += cost
+        total_turnover += turnover
         capital_required += abs(notional) * candidate.capital_requirement_rate
         targets.append(
             AllocationTarget(
@@ -539,6 +654,7 @@ def _evaluate(
                 quantity=quantity,
                 notional=notional,
                 estimated_cost=cost,
+                turnover_notional=turnover,
             )
         )
 
@@ -561,8 +677,13 @@ def _evaluate(
         abs(value) <= policy.max_symbol_notional
         for value in notionals.values()
     )
+    turnover_ok = (
+        policy.max_turnover_notional is None
+        or total_turnover <= policy.max_turnover_notional
+    )
     feasible = (
         symbol_ok
+        and turnover_ok
         and gross <= policy.max_gross_notional
         and net <= policy.max_net_notional
         and total_cost <= policy.max_total_cost
@@ -579,6 +700,7 @@ def _evaluate(
         estimated_cost=total_cost,
         worst_stress_loss=worst_stress_loss,
         cash_required=cash_required,
+        turnover_notional=total_turnover,
         reason=(
             "all hard constraints satisfied"
             if feasible
@@ -592,23 +714,30 @@ def _cash_fallback(
     *,
     reason: str,
 ) -> AllocationResult:
+    current_targets = tuple(
+        AllocationTarget(
+            symbol=candidate.symbol,
+            quantity=candidate.current_quantity,
+            notional=candidate.current_quantity * candidate.price,
+            estimated_cost=Decimal("0"),
+            turnover_notional=Decimal("0"),
+        )
+        for candidate in candidates
+    )
+    current_notionals = tuple(target.notional for target in current_targets)
     return AllocationResult(
         status="NO_INCREASE_FALLBACK",
         scale=Decimal("0"),
-        targets=tuple(
-            AllocationTarget(
-                symbol=candidate.symbol,
-                quantity=Decimal("0"),
-                notional=Decimal("0"),
-                estimated_cost=Decimal("0"),
-            )
-            for candidate in candidates
+        targets=current_targets,
+        gross_notional=sum(
+            (abs(value) for value in current_notionals),
+            Decimal("0"),
         ),
-        gross_notional=Decimal("0"),
-        net_notional=Decimal("0"),
+        net_notional=abs(sum(current_notionals, Decimal("0"))),
         estimated_cost=Decimal("0"),
         worst_stress_loss=Decimal("0"),
         cash_required=Decimal("0"),
+        turnover_notional=Decimal("0"),
         reason=reason,
     )
 
@@ -708,6 +837,14 @@ def allocate_targets(
         else:
             high = mid
 
+    if best.turnover_notional == 0 and requested.turnover_notional > 0:
+        return _cash_fallback(
+            candidates,
+            reason=(
+                "bounded search found no positive-turnover feasible allocation; "
+                "preserve the current portfolio without increasing risk"
+            ),
+        )
     if best.gross_notional == 0:
         return _cash_fallback(
             candidates,
@@ -726,6 +863,7 @@ def allocate_targets(
         estimated_cost=best.estimated_cost,
         worst_stress_loss=best.worst_stress_loss,
         cash_required=best.cash_required,
+        turnover_notional=best.turnover_notional,
         reason=(
             "requested allocation was infeasible; uniformly reduced to the "
             "largest verified feasible target found"
@@ -1379,12 +1517,14 @@ def _allocation_decision_digest(
             "estimated_cost": str(result.allocation.estimated_cost),
             "worst_stress_loss": str(result.allocation.worst_stress_loss),
             "cash_required": str(result.allocation.cash_required),
+            "turnover_notional": str(result.allocation.turnover_notional),
             "targets": [
                 {
                     "symbol": target.symbol,
                     "quantity": str(target.quantity),
                     "notional": str(target.notional),
                     "estimated_cost": str(target.estimated_cost),
+                    "turnover_notional": str(target.turnover_notional),
                 }
                 for target in result.allocation.targets
             ],
@@ -1424,6 +1564,10 @@ def allocate_evidence_bound_objective_targets(
     if normalized_environment not in _ALLOWED_EVIDENCE_ENVIRONMENTS:
         raise ValueError(f"unsupported allocation environment: {normalized_environment}")
     normalized_policy_version = _text(policy_version, name="allocation policy_version")
+    if policy.max_turnover_notional is None:
+        raise ValueError(
+            "evidence-bound allocation requires explicit max_turnover_notional"
+        )
     normalized_decision_time = _instant(
         decision_time,
         name="allocation decision_time",
@@ -1528,6 +1672,24 @@ def allocate_evidence_bound_objective_targets(
         "reservation_state_version",
     )
     base_currency = _payload_text(resolved_capital, "base_currency").upper()
+    if resolved_capital.payload.get("positions_complete") is not True:
+        raise ValueError(
+            "capital evidence must declare a complete position snapshot"
+        )
+    position_quantities_raw = resolved_capital.payload.get("position_quantities")
+    if not isinstance(position_quantities_raw, Mapping):
+        raise ValueError("capital evidence position_quantities must be a mapping")
+    if set(position_quantities_raw) != set(symbols):
+        raise ValueError(
+            "capital evidence position_quantities must exactly cover candidate symbols"
+        )
+    current_quantities = {
+        symbol: _decimal(
+            position_quantities_raw[symbol],
+            name=f"capital evidence current quantity {symbol}",
+        )
+        for symbol in symbols
+    }
 
     resolved_valuation = {}
     normalized_candidates = []
@@ -1646,6 +1808,16 @@ def allocate_evidence_bound_objective_targets(
                     min_notional=min_notional_base,
                     fee_floor=fee_floor_base,
                     max_executable_notional=max_executable_notional_base,
+                    current_quantity=current_quantities[symbol],
+                    turnover_cost_rate=(
+                        normalized.cost_rate_components["execution"]
+                        + normalized.cost_rate_components["fx"]
+                    ),
+                    holding_cost_rate=(
+                        normalized.cost_rate_components["financing"]
+                        + normalized.cost_rate_components["funding"]
+                        + normalized.cost_rate_components["borrow"]
+                    ),
                 ),
                 expected_return_rate=item.expected_return_rate,
                 risk_penalty_rate=item.risk_penalty_rate,

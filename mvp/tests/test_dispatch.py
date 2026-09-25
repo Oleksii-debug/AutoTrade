@@ -1,5 +1,6 @@
 from tempfile import TemporaryDirectory
 import unittest
+from uuid import UUID
 
 from mvp.autotrade_mvp.dispatch import (
     DispatchBlocked,
@@ -42,6 +43,52 @@ class DispatchTests(unittest.TestCase):
         )
         self.assertNotEqual(paper, live)
         self.assertNotEqual(paper, other_account)
+
+    def test_uuid_client_order_id_is_deterministic_scope_bound_and_not_truncated(self):
+        first = stable_client_order_id(
+            "KRAKEN",
+            "intent-uuid",
+            environment="LIVE",
+            account_id="spot-account",
+            max_length=36,
+            client_id_format="UUID",
+        )
+        repeated = stable_client_order_id(
+            "KRAKEN",
+            "intent-uuid",
+            environment="LIVE",
+            account_id="spot-account",
+            max_length=36,
+            client_id_format="uuid",
+        )
+        other_scope = stable_client_order_id(
+            "KRAKEN",
+            "intent-uuid",
+            environment="LIVE",
+            account_id="other-account",
+            max_length=36,
+            client_id_format="UUID",
+        )
+        self.assertEqual(str(UUID(first)), first)
+        self.assertEqual(first, repeated)
+        self.assertNotEqual(first, other_scope)
+        with self.assertRaisesRegex(ValueError, "at least 36"):
+            stable_client_order_id(
+                "KRAKEN",
+                "intent-uuid",
+                environment="LIVE",
+                account_id="spot-account",
+                max_length=32,
+                client_id_format="UUID",
+            )
+        with self.assertRaisesRegex(ValueError, "TOKEN or UUID"):
+            stable_client_order_id(
+                "KRAKEN",
+                "intent-uuid",
+                environment="LIVE",
+                account_id="spot-account",
+                client_id_format="provider-magic",
+            )
 
     def test_delimiters_inside_external_ids_cannot_alias_client_identity(self):
         first = stable_client_order_id(

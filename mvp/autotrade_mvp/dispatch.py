@@ -303,6 +303,7 @@ def stable_client_order_id(
     environment: str,
     account_id: str,
     max_length: int = 32,
+    client_id_format: str = "TOKEN",
 ) -> str:
     if not isinstance(provider, str) or not provider.strip():
         raise ValueError("provider is required")
@@ -313,17 +314,32 @@ def stable_client_order_id(
         raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
     if not isinstance(account_id, str) or not account_id.strip():
         raise ValueError("account_id is required")
-    if not isinstance(max_length, int) or isinstance(max_length, bool) or max_length < 20:
-        raise ValueError(
-            "max_length must be an integer of at least 20 "
-            "to preserve client-order identity entropy"
-        )
+    if not isinstance(client_id_format, str):
+        raise TypeError("client_id_format must be text")
+    normalized_format = client_id_format.strip().upper()
+    if normalized_format not in {"TOKEN", "UUID"}:
+        raise ValueError("client_id_format must be TOKEN or UUID")
     digest = _identity_digest(
         provider.strip().lower(),
         normalized_environment,
         account_id.strip(),
         intent_id.strip(),
     )
+    if normalized_format == "UUID":
+        if (
+            not isinstance(max_length, int)
+            or isinstance(max_length, bool)
+            or max_length < 36
+        ):
+            raise ValueError(
+                "UUID client-order identity requires max_length of at least 36"
+            )
+        return str(uuid5(NAMESPACE_URL, "client-order:" + digest))
+    if not isinstance(max_length, int) or isinstance(max_length, bool) or max_length < 20:
+        raise ValueError(
+            "max_length must be an integer of at least 20 "
+            "to preserve client-order identity entropy"
+        )
     return ("at-" + digest)[:max_length]
 
 
@@ -535,6 +551,7 @@ class GuardedDispatcher:
         authority_check: AuthorityCheck,
         transport_send: TransportSend,
         client_id_max_length: int = 32,
+        client_id_format: str = "TOKEN",
         final_barrier_clock: Callable[[], str] | None = None,
         sender_check: SenderCheck | None = None,
         submission_scope: Mapping[str, Any] | None = None,
@@ -571,6 +588,7 @@ class GuardedDispatcher:
             environment=self.environment,
             account_id=self.account_id,
             max_length=client_id_max_length,
+            client_id_format=client_id_format,
         )
 
         existing = self._events(attempt_id)

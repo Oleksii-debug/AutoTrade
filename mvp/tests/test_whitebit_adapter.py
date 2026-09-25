@@ -791,7 +791,7 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertEqual(deal.provider_order_id, "456")
         self.assertEqual(deal.role, "TAKER")
         self.assertEqual(deal.trade_time, "2020-06-27T04:58:59.123456Z")
-        fill = deal.to_reconciliation_fill()
+        fill = deal.to_reconciliation_fill(account_id="acct-whitebit", environment="PAPER")
         self.assertEqual(fill.provider_execution_id, "123")
         self.assertEqual(fill.quantity, Decimal("0.001"))
         self.assertEqual(fill.price, Decimal("40000"))
@@ -815,7 +815,7 @@ class WhiteBitAdapterTests(unittest.TestCase):
             market="BTC_USDT",
         )
         self.assertIsNone(deal.client_order_id)
-        self.assertIsNone(deal.to_reconciliation_fill().client_order_id)
+        self.assertIsNone(deal.to_reconciliation_fill(account_id="acct-whitebit", environment="PAPER").client_order_id)
 
     def test_execution_deal_requires_exact_economic_identity(self):
         with self.assertRaisesRegex(WhiteBitAdapterError, "multiplied by price"):

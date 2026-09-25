@@ -194,12 +194,18 @@ def reconciliation_payload(
                     result.resource_availability.available_resources
                 ),
                 "evidence_refs": list(result.resource_availability.evidence_refs),
-                "resource_details": {
-                    resource: dict(detail)
-                    for resource, detail in sorted(
-                        result.resource_availability.resource_details.items()
-                    )
-                },
+                **(
+                    {
+                        "resource_details": {
+                            resource: dict(detail)
+                            for resource, detail in sorted(
+                                result.resource_availability.resource_details.items()
+                            )
+                        }
+                    }
+                    if result.resource_availability.resource_details
+                    else {}
+                ),
             }
         ),
         "blocking_resources": list(result.blocking_resources),

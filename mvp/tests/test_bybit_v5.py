@@ -123,7 +123,7 @@ def write_capability(
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
     )
 
-def write_capability(
+def submission_write_capability(
     *,
     account_id="bybit-account",
     environment="LIVE",
@@ -507,7 +507,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             environment=runtime_environment,
             account_id=account_id,
         )
-        capability = write_capability(
+        capability = submission_write_capability(
             account_id=account_id,
             environment=runtime_environment,
         )
@@ -674,7 +674,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             account_id="bybit-account",
         )
         prepared = prepare_order_submission(
-            capability=write_capability(),
+            capability=submission_write_capability(),
             at=READ_AT,
             provider_environment="MAINNET",
             product_family="SPOT",
@@ -704,7 +704,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             account_id="bybit-account",
         )
         prepared = prepare_order_submission(
-            capability=write_capability(),
+            capability=submission_write_capability(),
             at=READ_AT,
             provider_environment="MAINNET",
             product_family="SPOT",
@@ -749,7 +749,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             account_id="bybit-account",
         )
         prepared = prepare_order_submission(
-            capability=write_capability(),
+            capability=submission_write_capability(),
             at=READ_AT,
             provider_environment="MAINNET",
             product_family="SPOT",

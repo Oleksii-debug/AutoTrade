@@ -1050,8 +1050,8 @@ class ChampionRegistryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "minimum cannot exceed maximum"):
                 ParameterBound(
                     name="threshold",
-                    minimum=Decimal("0.9"),
-                    maximum=Decimal("0.1"),
+                    minimum="0.9",
+                    maximum="0.1",
                 )
             self.assertEqual(registry.state().generation, state.generation)
 

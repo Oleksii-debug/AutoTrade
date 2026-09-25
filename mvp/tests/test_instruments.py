@@ -280,6 +280,36 @@ class InstrumentRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(InstrumentRegistryError, "observed_at"):
             spot(metadata_evidence=({**evidence, "observed_at": "2026-01-01T00:00:00+00:00"},))
 
+    def test_future_cannot_use_option_payoff(self):
+        with self.assertRaisesRegex(
+            InstrumentRegistryError,
+            "future/perpetual payoff must be LINEAR or INVERSE",
+        ):
+            InstrumentVersion(
+                instrument_id=A,
+                version=1,
+                provider_id="simulated",
+                venue_id="futures",
+                provider_symbol="ABC-FUT",
+                asset_class="FUTURE",
+                base_currency="ABC",
+                quote_currency="USD",
+                settlement_currency="USD",
+                quantity_unit="contract",
+                contract_multiplier="1",
+                price_tick="0.01",
+                quantity_step="1",
+                minimum_quantity="1",
+                calendar_id="CONTINUOUS_24_7",
+                timezone_id="UTC",
+                effective_from=when(1),
+                payoff="OPTION",
+                underlying_id=f"{B}@1",
+                expiry=when(12),
+                settlement_method="CASH",
+                margin_model_id="future-margin-v1",
+            )
+
     def test_perpetual_requires_funding_and_cannot_invent_expiry(self):
         with self.assertRaisesRegex(InstrumentRegistryError, "funding_schedule"):
             InstrumentVersion(

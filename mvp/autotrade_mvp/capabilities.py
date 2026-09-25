@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timezone
 import hashlib
 import re
@@ -19,6 +19,7 @@ class CapabilityError(ValueError):
 SOURCES = frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"})
 ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 STATUSES = frozenset({"VERIFIED", "UNKNOWN", "CONFLICTED", "EXPIRED"})
+_DERIVED_SNAPSHOT_TOKEN = object()
 
 
 def _text(value: str, field: str) -> str:
@@ -43,29 +44,48 @@ def _freeze_evidence(value: Mapping[str, object]) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise CapabilityError("evidence_ref must be an object")
     required = {"artifact_id", "sha256", "observed_at"}
-    allowed = required | {"source_uri", "rights_id"}
+    allowed = required | {"source_uri", "rights_id", "issuer_ref", "issuer_sha256"}
     keys = set(value)
     if required - keys:
         raise CapabilityError("evidence_ref is missing required fields")
     if keys - allowed:
         raise CapabilityError("evidence_ref contains unknown fields")
-    artifact_id = _text(value["artifact_id"], "artifact_id")
+    artifact_id = value["artifact_id"]
+    if not isinstance(artifact_id, str) or artifact_id != artifact_id.strip():
+        raise CapabilityError("evidence artifact_id must be a canonical UUID")
     try:
-        UUID(artifact_id)
+        canonical_artifact_id = str(UUID(artifact_id))
     except (ValueError, TypeError, AttributeError) as error:
-        raise CapabilityError("evidence artifact_id must be a UUID") from error
-    digest = _text(value["sha256"], "sha256")
-    if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+        raise CapabilityError("evidence artifact_id must be a canonical UUID") from error
+    if canonical_artifact_id != artifact_id:
+        raise CapabilityError("evidence artifact_id must be a canonical UUID")
+
+    digest = value["sha256"]
+    if (
+        not isinstance(digest, str)
+        or digest != digest.strip()
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+    ):
         raise CapabilityError("evidence sha256 must be a canonical SHA-256 digest")
-    observed_at = _text(value["observed_at"], "observed_at")
-    if not observed_at.endswith("Z"):
-        raise CapabilityError("evidence observed_at must be UTC and end in Z")
+
+    observed_at = value["observed_at"]
+    if (
+        not isinstance(observed_at, str)
+        or observed_at != observed_at.strip()
+        or not observed_at.endswith("Z")
+    ):
+        raise CapabilityError("evidence observed_at must be canonical UTC text")
     try:
         parsed = datetime.fromisoformat(observed_at[:-1] + "+00:00")
     except ValueError as error:
         raise CapabilityError("evidence observed_at must be an ISO date-time") from error
     if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
         raise CapabilityError("evidence observed_at must be UTC")
+    canonical_observed_at = (
+        parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
+    if observed_at != canonical_observed_at:
+        raise CapabilityError("evidence observed_at must be canonical UTC text")
     normalized: dict[str, object] = {
         "artifact_id": artifact_id,
         "sha256": digest,
@@ -78,6 +98,31 @@ def _freeze_evidence(value: Mapping[str, object]) -> Mapping[str, object]:
         normalized["source_uri"] = source_uri
     if "rights_id" in value:
         normalized["rights_id"] = _text(value["rights_id"], "rights_id")
+    issuer_ref = value.get("issuer_ref")
+    issuer_sha256 = value.get("issuer_sha256")
+    if (issuer_ref is None) != (issuer_sha256 is None):
+        raise CapabilityError(
+            "evidence issuer_ref and issuer_sha256 must be provided together"
+        )
+    if issuer_ref is not None:
+        normalized_issuer_ref = _text(issuer_ref, "issuer_ref")
+        if re.fullmatch(
+            r"[a-z][a-z0-9-]*:sha256:[0-9a-f]{64}",
+            normalized_issuer_ref,
+        ) is None:
+            raise CapabilityError(
+                "evidence issuer_ref must be a canonical namespaced SHA-256 identity"
+            )
+        if (
+            not isinstance(issuer_sha256, str)
+            or issuer_sha256 != issuer_sha256.strip()
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", issuer_sha256) is None
+        ):
+            raise CapabilityError(
+                "evidence issuer_sha256 must be a canonical SHA-256 digest"
+            )
+        normalized["issuer_ref"] = normalized_issuer_ref
+        normalized["issuer_sha256"] = issuer_sha256
     return MappingProxyType(normalized)
 
 
@@ -171,13 +216,35 @@ _CAPABILITY_PRODUCER_TYPES = {
 
 def artifact_store_evidence_verifier(
     store: object,
+    *,
+    issuer_verifiers: Mapping[
+        str,
+        Callable[[CapabilityClaim, str, str], EvidenceVerification],
+    ]
+    | None = None,
 ) -> Callable[[CapabilityClaim], EvidenceVerification]:
-    """Bind capability claims to the canonical immutable artifact store.
+    """Verify artifact integrity and independent source-specific issuer authority.
 
-    The adapter relies only on the existing store public load_manifest and
-    read_bytes methods so capability authority does not create a second
-    evidence repository.
+    ArtifactStore is an immutable byte/integrity store, not an issuer trust
+    root. A capability source can verify only when the claim carries an
+    immutable issuer identity/digest and a separately supplied verifier for
+    that exact source validates the upstream authority record.
     """
+
+    normalized_issuers: dict[
+        str,
+        Callable[[CapabilityClaim, str, str], EvidenceVerification],
+    ] = {}
+    if issuer_verifiers is not None:
+        if not isinstance(issuer_verifiers, Mapping):
+            raise TypeError("issuer_verifiers must be a mapping")
+        for source, verifier in issuer_verifiers.items():
+            normalized_source = _text(source, "issuer source").upper()
+            if normalized_source not in SOURCES:
+                raise CapabilityError("issuer_verifiers contains unsupported source")
+            if not callable(verifier):
+                raise TypeError("issuer verifier must be callable")
+            normalized_issuers[normalized_source] = verifier
 
     def verify(claim: CapabilityClaim) -> EvidenceVerification:
         artifact_id = str(claim.evidence_ref["artifact_id"])
@@ -280,7 +347,45 @@ def artifact_store_evidence_verifier(
                     reason="evidence artifact rights identity does not match the claim",
                 )
 
-        return EvidenceVerification(valid=True)
+        issuer_ref = claim.evidence_ref.get("issuer_ref")
+        issuer_sha256 = claim.evidence_ref.get("issuer_sha256")
+        if issuer_ref is None or issuer_sha256 is None:
+            return EvidenceVerification(
+                valid=False,
+                reason="trusted issuer provenance is missing",
+            )
+        if (
+            metadata.get("issuer_ref") != issuer_ref
+            or metadata.get("issuer_sha256") != issuer_sha256
+        ):
+            return EvidenceVerification(
+                valid=False,
+                conflicted=True,
+                reason="artifact issuer provenance does not match the claim",
+            )
+
+        issuer_verifier = normalized_issuers.get(claim.source)
+        if issuer_verifier is None:
+            return EvidenceVerification(
+                valid=False,
+                reason="trusted source-specific issuer verifier is unavailable",
+            )
+        try:
+            issuer_result = issuer_verifier(
+                claim,
+                str(issuer_ref),
+                str(issuer_sha256),
+            )
+        except Exception:
+            return EvidenceVerification(
+                valid=False,
+                reason="trusted issuer provenance verification failed",
+            )
+        if not isinstance(issuer_result, EvidenceVerification):
+            raise TypeError(
+                "issuer verifier must return EvidenceVerification"
+            )
+        return issuer_result
 
     return verify
 
@@ -305,8 +410,9 @@ class CapabilitySnapshot:
     evidence: tuple[Mapping[str, object], ...]
     status: str
     sources: frozenset[str]
+    _verification_token: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _verification_token: object | None) -> None:
         try:
             UUID(self.snapshot_id)
         except (ValueError, TypeError, AttributeError) as error:
@@ -345,7 +451,29 @@ class CapabilitySnapshot:
         if not sources.issubset(SOURCES):
             raise CapabilityError("snapshot sources contain unsupported source")
         object.__setattr__(self, "sources", sources)
-        object.__setattr__(self, "evidence", tuple(_freeze_evidence(item) for item in self.evidence))
+        evidence = tuple(_freeze_evidence(item) for item in self.evidence)
+        object.__setattr__(self, "evidence", evidence)
+        if status == "VERIFIED":
+            if _verification_token is not _DERIVED_SNAPSHOT_TOKEN:
+                raise CapabilityError(
+                    "VERIFIED capability snapshots must come from canonical evidence derivation"
+                )
+            if sources != SOURCES:
+                raise CapabilityError(
+                    "VERIFIED capability snapshots require all canonical sources"
+                )
+            if len(evidence) < len(SOURCES):
+                raise CapabilityError(
+                    "VERIFIED capability snapshots require evidence for every canonical source"
+                )
+            if (
+                not self.supported_order_types
+                or not self.time_in_force
+                or not self.permission_scopes
+            ):
+                raise CapabilityError(
+                    "VERIFIED capability snapshots require executable capability intersections"
+                )
 
     @property
     def identity(self) -> tuple[str, str, str, str, str]:
@@ -487,6 +615,7 @@ def derive_capability_snapshot(
     verified_sources = frozenset(claim.source for claim in verified_live)
     evidence_missing_sources = required - verified_sources
     evidence_conflict = any(result.conflicted for result in evidence_results)
+    evidence_incomplete = any(not result.valid for result in evidence_results)
 
     order_types = _intersection(verified_live, "supported_order_types")
     tif = _intersection(verified_live, "time_in_force")
@@ -507,6 +636,8 @@ def derive_capability_snapshot(
         status = "EXPIRED"
     elif evidence_conflict:
         status = "CONFLICTED"
+    elif evidence_incomplete:
+        status = "UNKNOWN"
     elif evidence_missing_sources:
         status = "UNKNOWN"
     elif set_conflict or scalar_conflict:
@@ -534,6 +665,7 @@ def derive_capability_snapshot(
         evidence=tuple(claim.evidence_ref for claim in verified_live),
         status=status,
         sources=verified_sources,
+        _verification_token=_DERIVED_SNAPSHOT_TOKEN,
     )
 
 

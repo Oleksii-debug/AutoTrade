@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import unittest
 
 from mvp.autotrade_mvp.capabilities import (
+    CapabilitySnapshot,
     CapabilityClaim,
     CapabilityError,
     CapabilityRegistry,
@@ -71,6 +72,61 @@ def complete_claims(**overrides):
 
 
 class CapabilityFoundationTests(unittest.TestCase):
+    def test_direct_verified_snapshot_cannot_bypass_evidence_derivation(self):
+        with self.assertRaisesRegex(
+            CapabilityError,
+            "canonical evidence derivation",
+        ):
+            CapabilitySnapshot(
+                snapshot_id=SNAPSHOT_1,
+                provider_id="provider",
+                account_id="account",
+                entity_id="entity",
+                environment="PAPER",
+                instrument_version="instrument-v1",
+                observed_at=NOW,
+                expires_at=NOW + timedelta(minutes=5),
+                supported_order_types=frozenset({"LIMIT"}),
+                time_in_force=frozenset({"DAY"}),
+                permission_scopes=frozenset({"ORDER.WRITE"}),
+                position_mode="NET",
+                native_protection=frozenset(),
+                rate_limit_policy_id="rate-v1",
+                data_entitlements=frozenset(),
+                evidence=(),
+                status="VERIFIED",
+                sources=frozenset(),
+            )
+
+    def test_capability_evidence_identity_aliases_fail_closed(self):
+        base = claim("API")
+        canonical_time = base.observed_at.isoformat().replace("+00:00", "Z")
+        canonical = {
+            "artifact_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "sha256": "sha256:" + ("a" * 64),
+            "observed_at": canonical_time,
+        }
+        accepted = replace(base, evidence_ref=canonical)
+        self.assertEqual(
+            accepted.evidence_ref["artifact_id"],
+            canonical["artifact_id"],
+        )
+
+        invalid_refs = (
+            {**canonical, "artifact_id": "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"},
+            {**canonical, "artifact_id": canonical["artifact_id"].replace("-", "")},
+            {**canonical, "artifact_id": " " + canonical["artifact_id"]},
+            {**canonical, "sha256": canonical["sha256"] + " "},
+            {**canonical, "observed_at": "2026-09-24T15:59:00.000000Z"},
+            {**canonical, "observed_at": canonical_time + " "},
+        )
+        for evidence_ref in invalid_refs:
+            with self.subTest(evidence_ref=evidence_ref), self.assertRaisesRegex(
+                CapabilityError,
+                "canonical",
+            ):
+                replace(base, evidence_ref=evidence_ref)
+
     def test_self_asserted_evidence_without_verifier_is_unknown(self):
         snapshot = _derive_capability_snapshot(
             snapshot_id=SNAPSHOT_1,
@@ -79,6 +135,52 @@ class CapabilityFoundationTests(unittest.TestCase):
         )
         self.assertEqual(snapshot.status, "UNKNOWN")
         self.assertEqual(snapshot.sources, frozenset())
+
+    def test_unverified_live_refresh_cannot_preserve_older_source_authority(self):
+        older_account = claim(
+            "ACCOUNT",
+            scopes=("ORDER.READ", "ORDER.WRITE"),
+            observed_at=NOW - timedelta(minutes=5),
+            expires_at=NOW + timedelta(minutes=10),
+        )
+        newer_account = claim(
+            "ACCOUNT",
+            scopes=("ORDER.READ",),
+            observed_at=NOW - timedelta(seconds=30),
+            expires_at=NOW + timedelta(minutes=10),
+        )
+        claims = (
+            claim("DOCUMENTED"),
+            claim("API"),
+            older_account,
+            newer_account,
+            claim("INSTRUMENT"),
+        )
+
+        def verifier(item):
+            if item is newer_account:
+                return EvidenceVerification(
+                    valid=False,
+                    reason="newer capability evidence is unavailable",
+                )
+            return EvidenceVerification(valid=True)
+
+        snapshot = _derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=claims,
+            observed_at=NOW,
+            evidence_verifier=verifier,
+        )
+
+        self.assertEqual(snapshot.status, "UNKNOWN")
+        self.assertFalse(
+            snapshot.admits(
+                at=NOW,
+                order_type="LIMIT",
+                time_in_force="DAY",
+                permission_scope="ORDER.WRITE",
+            )
+        )
 
     def test_verified_snapshot_is_exact_intersection(self):
         claims = (
@@ -393,8 +495,9 @@ class CapabilityFoundationTests(unittest.TestCase):
             claims=complete_claims(),
             observed_at=NOW,
         )
+        unverified = replace(snapshot, status="UNKNOWN")
         rebuilt = replace(
-            snapshot,
+            unverified,
             supported_order_types=[" LIMIT ", "MARKET"],
             sources={" documented ", "api", "ACCOUNT", "instrument"},
         )
@@ -404,9 +507,9 @@ class CapabilityFoundationTests(unittest.TestCase):
             frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}),
         )
         with self.assertRaisesRegex(CapabilityError, "unsupported source"):
-            replace(snapshot, sources={"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT", "MODEL"})
+            replace(unverified, sources={"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT", "MODEL"})
         with self.assertRaisesRegex(CapabilityError, "must be a collection"):
-            replace(snapshot, permission_scopes="ORDER.WRITE")
+            replace(unverified, permission_scopes="ORDER.WRITE")
 
     def test_old_evidence_cannot_be_relabelled_as_fresh_claim(self):
         original = claim(

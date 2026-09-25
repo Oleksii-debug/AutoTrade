@@ -1,16 +1,25 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
+from pathlib import Path
 import unittest
+
+from jsonschema import Draft202012Validator, FormatChecker
+from referencing import Registry, Resource
 
 from research.autotrade_research.strategies.deterministic import (
     CausalObservation,
+    DeterministicProposal,
+    NoTradeBaseline,
     ReturnThresholdBaseline,
+    StrategyDescriptor,
     run_baseline,
+    to_decision_proposal,
 )
 
 
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def obs(i, price, *, available=None):
@@ -225,6 +234,640 @@ class DeterministicStrategyTests(unittest.TestCase):
         strategy.ingest(later, simulation_time=later.available_at)
         with self.assertRaises(ValueError):
             strategy.ingest(earlier, simulation_time=later.available_at)
+
+
+    def descriptor(self, **overrides):
+        values = dict(
+            strategy_id="return-threshold-baseline",
+            version=1,
+            family="DETERMINISTIC_RETURN_THRESHOLD",
+            feature_schema="price-only-v1",
+            market_requirements=("CAUSAL_PRICE",),
+            minimum_history=2,
+            horizon_seconds=3600,
+            decision_schedule="ON_REGISTERED_CUTOFF",
+            proposal_semantics="BUY_SELL_HOLD_RESEARCH_PROPOSAL",
+            parameter_bounds=(
+                ("threshold", "0", "0.10"),
+                ("proposal_quantity", "0.0001", "100"),
+            ),
+            resource_profile="CPU_LIGHT_ZERO_MODEL",
+            supported_regimes=("UNSPECIFIED",),
+            source_license="FIRST_PARTY",
+            evaluation_protocol_sha256="sha256:" + "a" * 64,
+            artifact_sha256="sha256:" + "b" * 64,
+        )
+        values.update(overrides)
+        return StrategyDescriptor(**values)
+
+    def test_descriptor_is_deterministic_versioned_identity(self):
+        descriptor = self.descriptor()
+        same = self.descriptor()
+        changed = self.descriptor(version=2)
+        self.assertEqual(descriptor.fingerprint, same.fingerprint)
+        self.assertNotEqual(descriptor.fingerprint, changed.fingerprint)
+        self.assertTrue(descriptor.fingerprint.startswith("sha256:"))
+        self.assertEqual(
+            descriptor.canonical_document()["minimum_history"],
+            2,
+        )
+
+    def test_descriptor_rejects_noncanonical_evidence_and_invalid_bounds(self):
+        with self.assertRaisesRegex(ValueError, "canonical sha256"):
+            self.descriptor(evaluation_protocol_sha256="A" * 64)
+        with self.assertRaisesRegex(ValueError, "minimum cannot exceed"):
+            self.descriptor(
+                parameter_bounds=(
+                    ("threshold", "0.2", "0.1"),
+                    ("proposal_quantity", "1", "2"),
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            self.descriptor(
+                parameter_bounds=(
+                    ("threshold", "0", "1"),
+                    ("threshold", "0", "2"),
+                )
+            )
+
+    def test_strategy_configuration_must_fit_registered_descriptor(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        self.assertEqual(strategy.descriptor, descriptor)
+        with self.assertRaisesRegex(ValueError, "minimum_history"):
+            ReturnThresholdBaseline(
+                lookback=3,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
+            )
+        with self.assertRaisesRegex(ValueError, "outside descriptor bounds"):
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.20",
+                proposal_quantity="2",
+                descriptor=descriptor,
+            )
+
+    def test_registered_proposal_binds_cutoff_horizon_expiry_and_strategy(self):
+        descriptor = self.descriptor(horizon_seconds=7200)
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        decision_time = BASE + timedelta(minutes=1)
+        proposal = run_baseline(
+            strategy,
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=decision_time,
+            symbol="AAA",
+        )
+        self.assertEqual(proposal.information_cutoff, decision_time)
+        self.assertEqual(proposal.horizon_seconds, 7200)
+        self.assertEqual(
+            proposal.expiry,
+            decision_time + timedelta(seconds=7200),
+        )
+        self.assertEqual(
+            proposal.strategy_version,
+            "return-threshold-baseline@1",
+        )
+        self.assertEqual(
+            proposal.strategy_fingerprint,
+            descriptor.fingerprint,
+        )
+        self.assertEqual(proposal.model_calls, 0)
+        self.assertEqual(proposal.economic_edge_claim, "UNPROVEN")
+
+    def test_no_trade_proposal_preserves_registered_identity(self):
+        descriptor = self.descriptor(minimum_history=3)
+        descriptor = StrategyDescriptor(
+            **{
+                **descriptor.__dict__,
+                "minimum_history": 3,
+            }
+        )
+        strategy = ReturnThresholdBaseline(
+            lookback=3,
+            threshold="0.01",
+            proposal_quantity="1",
+            descriptor=descriptor,
+        )
+        proposal = run_baseline(
+            strategy,
+            [obs(0, "100"), obs(1, "101")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+        )
+        self.assertEqual(proposal.action, "HOLD")
+        self.assertEqual(proposal.economic_edge_claim, "UNPROVEN")
+        self.assertEqual(proposal.strategy_fingerprint, descriptor.fingerprint)
+        self.assertIsNotNone(proposal.expiry)
+
+    def test_descriptor_survives_snapshot_restart_exactly(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        for item in (obs(0, "100"), obs(1, "102")):
+            strategy.ingest(item, simulation_time=item.available_at)
+        snapshot = strategy.snapshot()
+        restored = ReturnThresholdBaseline.restore(snapshot)
+        self.assertIsNotNone(restored.descriptor)
+        self.assertEqual(
+            restored.descriptor.fingerprint,
+            descriptor.fingerprint,
+        )
+        before = strategy.propose(
+            symbol="AAA",
+            decision_time=BASE + timedelta(minutes=1),
+        )
+        after = restored.propose(
+            symbol="AAA",
+            decision_time=BASE + timedelta(minutes=1),
+        )
+        self.assertEqual(before, after)
+
+    def test_snapshot_descriptor_tamper_fails_closed(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        payload = json.loads(strategy.snapshot())
+        payload["descriptor"]["minimum_history"] = 3
+        with self.assertRaisesRegex(ValueError, "fingerprint does not match"):
+            ReturnThresholdBaseline.restore(
+                json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            )
+
+
+    def test_registered_result_projects_to_canonical_decision_shape(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        proposal = run_baseline(
+            strategy,
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+        )
+        body = to_decision_proposal(
+            proposal,
+            proposal_id="12345678-1234-5678-9234-567812345678",
+            instrument_version="instrument:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa@7",
+            input_manifest_refs=("sha256:" + "c" * 64,),
+            expected_return_distribution_ref="artifact:return-distribution:1",
+            exit_policy_ref="exit-policy:registered-v1",
+            compute_cost_currency="USD",
+            counterarguments=("economic edge remains unproven",),
+        )
+        self.assertEqual(
+            set(body),
+            {
+                "proposal_id",
+                "strategy_version",
+                "decision_at",
+                "information_cutoff",
+                "input_manifest_refs",
+                "thesis",
+                "candidate_instruments",
+                "horizon",
+                "expected_return_distribution_ref",
+                "confidence_basis",
+                "counterarguments",
+                "exit_policy_ref",
+                "expiry",
+                "estimated_compute_cost",
+            },
+        )
+        self.assertEqual(body["strategy_version"], "return-threshold-baseline@1")
+        self.assertEqual(body["horizon"], "PT3600S")
+        self.assertEqual(body["estimated_compute_cost"], {"amount": "0", "currency": "USD"})
+        self.assertEqual(body["confidence_basis"]["economic_edge_claim"], "UNPROVEN")
+        self.assertEqual(body["confidence_basis"]["model_calls"], 0)
+        self.assertNotIn("NO_TRADE_reason", body)
+
+        schemas = {
+            path.name: json.loads(path.read_text(encoding="utf-8"))
+            for path in (ROOT / "contracts" / "jsonschema").glob("*.json")
+        }
+        registry = Registry().with_resources(
+            [
+                (schema["$id"], Resource.from_contents(schema))
+                for schema in schemas.values()
+            ]
+        )
+        decision_schema = schemas["decision.schema.json"]
+        Draft202012Validator(
+            {
+                "$ref": (
+                    decision_schema["$id"]
+                    + "#/$defs/DecisionProposal"
+                )
+            },
+            registry=registry,
+            format_checker=FormatChecker(),
+        ).validate(body)
+
+    def test_hold_projects_to_no_trade_without_executable_candidate(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.10",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        proposal = run_baseline(
+            strategy,
+            [obs(0, "100"), obs(1, "101")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+        )
+        body = to_decision_proposal(
+            proposal,
+            proposal_id="12345678-1234-5678-9234-567812345678",
+            instrument_version="instrument:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa@7",
+            input_manifest_refs=("sha256:" + "c" * 64,),
+            expected_return_distribution_ref="artifact:return-distribution:1",
+            exit_policy_ref="exit-policy:registered-v1",
+            compute_cost_currency="USD",
+        )
+        self.assertEqual(body["candidate_instruments"], [])
+        self.assertEqual(body["NO_TRADE_reason"], proposal.reason)
+        self.assertEqual(body["estimated_compute_cost"]["amount"], "0")
+
+    def test_projection_refuses_unregistered_or_unproven_inputs(self):
+        unregistered = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="1",
+        ).propose(symbol="AAA", decision_time=BASE)
+        with self.assertRaisesRegex(ValueError, "registered strategy"):
+            to_decision_proposal(
+                unregistered,
+                proposal_id="12345678-1234-5678-9234-567812345678",
+                instrument_version="instrument:v1",
+                input_manifest_refs=("sha256:" + "c" * 64,),
+                expected_return_distribution_ref="artifact:return-distribution:1",
+                exit_policy_ref="exit-policy:v1",
+                compute_cost_currency="USD",
+            )
+
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="1",
+            descriptor=descriptor,
+        )
+        proposal = run_baseline(
+            strategy,
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+        )
+        with self.assertRaisesRegex(ValueError, "canonical UUID"):
+            to_decision_proposal(
+                proposal,
+                proposal_id="abcdefab-1234-5678-9234-567812345678".upper(),
+                instrument_version="instrument:v1",
+                input_manifest_refs=("sha256:" + "c" * 64,),
+                expected_return_distribution_ref="artifact:return-distribution:1",
+                exit_policy_ref="exit-policy:v1",
+                compute_cost_currency="USD",
+            )
+        with self.assertRaisesRegex(ValueError, "immutable evidence"):
+            to_decision_proposal(
+                proposal,
+                proposal_id="12345678-1234-5678-9234-567812345678",
+                instrument_version="instrument:v1",
+                input_manifest_refs=(),
+                expected_return_distribution_ref="artifact:return-distribution:1",
+                exit_policy_ref="exit-policy:v1",
+                compute_cost_currency="USD",
+            )
+        with self.assertRaisesRegex(ValueError, "canonical sha256"):
+            to_decision_proposal(
+                proposal,
+                proposal_id="12345678-1234-5678-9234-567812345678",
+                instrument_version="instrument:v1",
+                input_manifest_refs=("not-a-digest",),
+                expected_return_distribution_ref="artifact:return-distribution:1",
+                exit_policy_ref="exit-policy:v1",
+                compute_cost_currency="USD",
+            )
+
+
+    def test_no_trade_control_is_registered_zero_model_comparator(self):
+        descriptor = self.descriptor(
+            strategy_id="no-trade-control",
+            family="NO_TRADE_CONTROL",
+            minimum_history=1,
+            horizon_seconds=86400,
+            parameter_bounds=(("dummy", "0", "0"),),
+        )
+        baseline = NoTradeBaseline(descriptor=descriptor)
+        proposal = baseline.propose(
+            symbol="AAA",
+            decision_time=BASE,
+            evidence_event_ids=("market-cutoff-1",),
+        )
+        self.assertEqual(proposal.action, "HOLD")
+        self.assertEqual(proposal.quantity, Decimal("0"))
+        self.assertEqual(proposal.model_calls, 0)
+        self.assertEqual(proposal.economic_edge_claim, "UNPROVEN")
+        self.assertEqual(proposal.evidence_event_ids, ("market-cutoff-1",))
+        self.assertEqual(proposal.horizon_seconds, 86400)
+        self.assertEqual(proposal.expiry, BASE + timedelta(days=1))
+        self.assertEqual(
+            proposal.strategy_version,
+            "no-trade-control@1",
+        )
+
+        body = to_decision_proposal(
+            proposal,
+            proposal_id="12345678-1234-5678-9234-567812345678",
+            instrument_version="instrument:not-executable-for-hold",
+            input_manifest_refs=("sha256:" + "c" * 64,),
+            expected_return_distribution_ref="artifact:null-return-distribution",
+            exit_policy_ref="exit-policy:no-position",
+            compute_cost_currency="USD",
+        )
+        self.assertEqual(body["candidate_instruments"], [])
+        self.assertEqual(
+            body["NO_TRADE_reason"],
+            "registered no-trade control baseline",
+        )
+
+    def test_no_trade_control_rejects_mislabeled_descriptor_and_duplicate_evidence(self):
+        with self.assertRaisesRegex(ValueError, "NO_TRADE_CONTROL"):
+            NoTradeBaseline(descriptor=self.descriptor())
+        descriptor = self.descriptor(
+            strategy_id="no-trade-control",
+            family="NO_TRADE_CONTROL",
+            minimum_history=1,
+            parameter_bounds=(("dummy", "0", "0"),),
+        )
+        baseline = NoTradeBaseline(descriptor=descriptor)
+        with self.assertRaisesRegex(ValueError, "duplicates"):
+            baseline.propose(
+                symbol="AAA",
+                decision_time=BASE,
+                evidence_event_ids=("event-1", "event-1"),
+            )
+
+
+    def test_snapshot_fingerprint_detects_semantically_valid_descriptor_tamper(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        payload = json.loads(strategy.snapshot())
+        payload["descriptor"]["horizon_seconds"] = 7200
+        with self.assertRaisesRegex(ValueError, "fingerprint does not match"):
+            ReturnThresholdBaseline.restore(
+                json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            )
+
+    def test_legacy_v3_descriptor_snapshot_remains_readable(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        payload = json.loads(strategy.snapshot())
+        payload["schema_version"] = 3
+        del payload["descriptor_fingerprint"]
+        del payload["configuration_fingerprint"]
+        restored = ReturnThresholdBaseline.restore(
+            json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        )
+        self.assertEqual(restored.descriptor.fingerprint, descriptor.fingerprint)
+
+
+    def test_direct_proposal_cannot_bypass_zero_model_or_edge_invariants(self):
+        base = dict(
+            symbol="AAA",
+            action="HOLD",
+            quantity=Decimal("0"),
+            decision_time=BASE,
+            evidence_event_ids=(),
+            model_calls=0,
+            economic_edge_claim="UNPROVEN",
+            reason="control",
+        )
+        with self.assertRaisesRegex(ValueError, "model calls"):
+            DeterministicProposal(**{**base, "model_calls": 1})
+        with self.assertRaisesRegex(ValueError, "economic edge"):
+            DeterministicProposal(
+                **{**base, "economic_edge_claim": "PROVEN"}
+            )
+        with self.assertRaisesRegex(ValueError, "HOLD.*zero"):
+            DeterministicProposal(
+                **{**base, "quantity": Decimal("1")}
+            )
+        with self.assertRaisesRegex(ValueError, "BUY/SELL.*positive"):
+            DeterministicProposal(
+                **{
+                    **base,
+                    "action": "BUY",
+                    "quantity": Decimal("0"),
+                }
+            )
+        with self.assertRaises(TypeError):
+            DeterministicProposal(
+                **{
+                    **base,
+                    "action": "BUY",
+                    "quantity": 1.5,
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            DeterministicProposal(**{**base, "action": "EXECUTE_NOW"})
+
+    def test_direct_proposal_rejects_inconsistent_horizon_timing(self):
+        base = dict(
+            symbol="AAA",
+            action="HOLD",
+            quantity=Decimal("0"),
+            decision_time=BASE,
+            evidence_event_ids=(),
+            model_calls=0,
+            economic_edge_claim="UNPROVEN",
+            reason="control",
+            information_cutoff=BASE,
+            horizon_seconds=3600,
+            expiry=BASE + timedelta(hours=1),
+        )
+        with self.assertRaisesRegex(ValueError, "plus horizon_seconds"):
+            DeterministicProposal(
+                **{**base, "expiry": BASE + timedelta(minutes=30)}
+            )
+        with self.assertRaisesRegex(ValueError, "cannot be after decision_time"):
+            DeterministicProposal(
+                **{
+                    **base,
+                    "information_cutoff": BASE + timedelta(seconds=1),
+                    "expiry": BASE + timedelta(seconds=3601),
+                }
+            )
+
+    def test_direct_proposal_rejects_duplicate_evidence_and_naive_time(self):
+        base = dict(
+            symbol="AAA",
+            action="HOLD",
+            quantity=Decimal("0"),
+            decision_time=BASE,
+            evidence_event_ids=(),
+            model_calls=0,
+            economic_edge_claim="UNPROVEN",
+            reason="control",
+        )
+        with self.assertRaisesRegex(ValueError, "duplicates"):
+            DeterministicProposal(
+                **{
+                    **base,
+                    "evidence_event_ids": ("event-1", "event-1"),
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "timezone-aware"):
+            DeterministicProposal(
+                **{
+                    **base,
+                    "decision_time": datetime(2026, 1, 1),
+                }
+            )
+
+
+    def test_configuration_fingerprint_distinguishes_runtime_parameters(self):
+        descriptor = self.descriptor()
+        lower = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        higher = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.02",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        self.assertEqual(
+            lower.descriptor.fingerprint,
+            higher.descriptor.fingerprint,
+        )
+        self.assertNotEqual(
+            lower.configuration_fingerprint,
+            higher.configuration_fingerprint,
+        )
+        proposal = lower.propose(symbol="AAA", decision_time=BASE)
+        self.assertEqual(
+            proposal.strategy_configuration_fingerprint,
+            lower.configuration_fingerprint,
+        )
+
+    def test_snapshot_detects_parameter_tamper_inside_registered_bounds(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        payload = json.loads(strategy.snapshot())
+        payload["threshold"] = "0.02"
+        with self.assertRaisesRegex(
+            ValueError,
+            "configuration fingerprint does not match",
+        ):
+            ReturnThresholdBaseline.restore(
+                json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            )
+
+    def test_legacy_v4_snapshot_remains_readable_without_configuration_fingerprint(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        payload = json.loads(strategy.snapshot())
+        payload["schema_version"] = 4
+        del payload["configuration_fingerprint"]
+        restored = ReturnThresholdBaseline.restore(
+            json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        )
+        self.assertEqual(
+            restored.configuration_fingerprint,
+            strategy.configuration_fingerprint,
+        )
+
+    def test_direct_proposal_rejects_partial_registered_strategy_identity(self):
+        descriptor = self.descriptor()
+        with self.assertRaisesRegex(
+            ValueError,
+            "registered strategy identity must include",
+        ):
+            DeterministicProposal(
+                symbol="AAA",
+                action="HOLD",
+                quantity=Decimal("0"),
+                decision_time=BASE,
+                evidence_event_ids=(),
+                model_calls=0,
+                economic_edge_claim="UNPROVEN",
+                reason="manual but incomplete",
+                information_cutoff=BASE,
+                horizon_seconds=3600,
+                expiry=BASE + timedelta(hours=1),
+                strategy_version="return-threshold-baseline@1",
+                strategy_fingerprint=descriptor.fingerprint,
+                strategy_configuration_fingerprint=None,
+            )
+
+    def test_direct_registered_identity_requires_horizon_bundle(self):
+        descriptor = self.descriptor()
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires cutoff, horizon and expiry",
+        ):
+            DeterministicProposal(
+                symbol="AAA",
+                action="HOLD",
+                quantity=Decimal("0"),
+                decision_time=BASE,
+                evidence_event_ids=(),
+                model_calls=0,
+                economic_edge_claim="UNPROVEN",
+                reason="manual but incomplete",
+                strategy_version="return-threshold-baseline@1",
+                strategy_fingerprint=descriptor.fingerprint,
+                strategy_configuration_fingerprint=descriptor.fingerprint,
+            )
 
 
 if __name__ == "__main__":

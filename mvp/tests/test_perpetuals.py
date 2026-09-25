@@ -363,6 +363,7 @@ class PerpetualLifecycleTests(unittest.TestCase):
         ledger = FundingLedger()
         ledger.apply(
             event_id="funding-1",
+            funding_period_id="2026-09-24T12:00Z",
             instrument_id="BTC-PERP",
             currency=" usdt ",
             amount="-1.25",

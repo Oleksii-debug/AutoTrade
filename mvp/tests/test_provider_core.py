@@ -1,15 +1,26 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
+import json
+from tempfile import TemporaryDirectory
 import unittest
 
+from mvp.autotrade_mvp.dispatch import (
+    ExactJsonTransportResponse,
+    GuardedDispatcher,
+    load_submission_response_binding,
+)
+from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
     ClockGuard,
     PROVIDERS,
     REQUIRED_QUALIFICATION_CASES,
     ProviderCoreError,
+    ProviderSubmissionObservation,
     QualificationEvidence,
     QuotaBucket,
     classify_write_outcome,
+    observe_submission_json_response,
     provider_definition,
 )
 
@@ -20,6 +31,128 @@ OTHER_SHA = "b" * 40
 
 
 class ProviderCoreTests(unittest.TestCase):
+
+    def _durable_submission_binding(
+        self,
+        directory,
+        *,
+        capability_snapshot_ids=("cap-1",),
+        instrument_versions=("BTCUSD:v1",),
+        raw=b'{ "orderId" : "provider-1" }',
+    ):
+        store = JournalStore(f"{directory}/journal.sqlite3")
+        dispatcher = GuardedDispatcher(
+            store,
+            environment="SIMULATION",
+            account_id="acct",
+            owner_token="owner",
+        )
+        request = {"symbol": "BTCUSD", "qty": "1"}
+        request_text = json.dumps(
+            request,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        request_sha = "sha256:" + sha256(request_text.encode("utf-8")).hexdigest()
+        scope = {
+            "endpoint": "/v5/order/create",
+            "prepared_request_sha256": request_sha,
+            "capability_snapshot_ids": list(capability_snapshot_ids),
+            "instrument_versions": list(instrument_versions),
+        }
+
+        def transport(_client_id, _request, guard):
+            guard()
+            return ExactJsonTransportResponse(raw)
+
+        outcome = dispatcher.dispatch(
+            attempt_id="provider-evidence-a1",
+            intent_id="intent-1",
+            intent_hash="intent-hash",
+            provider="BYBIT",
+            request=request,
+            now="2026-09-24T18:00:00Z",
+            authority_check=lambda _hash, _now: (True, "allowed"),
+            transport_send=transport,
+            submission_scope=scope,
+        )
+        self.assertEqual(outcome.status, "SENT")
+        return (
+            load_submission_response_binding(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="provider-evidence-a1",
+            ),
+            request_sha,
+        )
+
+    def test_submission_observation_requires_durable_exact_send_scope(self):
+        with TemporaryDirectory() as directory:
+            binding, request_sha = self._durable_submission_binding(directory)
+            observation = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSD:v1",),
+            )
+            self.assertIsInstance(observation, ProviderSubmissionObservation)
+            self.assertEqual(observation.payload["orderId"], "provider-1")
+            self.assertEqual(observation.response_sha256, binding.response_sha256)
+            self.assertEqual(observation.request_sha256, request_sha)
+            observation.require_scope(
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSD:v1",),
+                account_id="acct",
+                environment="SIMULATION",
+                client_order_id=binding.client_order_id,
+            )
+
+    def test_submission_observation_rejects_scope_relabelling(self):
+        with TemporaryDirectory() as directory:
+            binding, request_sha = self._durable_submission_binding(directory)
+            for kwargs in (
+                {"provider_id": "ALPACA"},
+                {"endpoint": "/other"},
+                {"prepared_request_sha256": "sha256:" + "0" * 64},
+                {"capability_snapshot_ids": ("cap-2",)},
+                {"instrument_versions": ("ETHUSD:v1",)},
+            ):
+                values = {
+                    "response_binding": binding,
+                    "provider_id": "BYBIT",
+                    "endpoint": "/v5/order/create",
+                    "prepared_request_sha256": request_sha,
+                    "capability_snapshot_ids": ("cap-1",),
+                    "instrument_versions": ("BTCUSD:v1",),
+                }
+                values.update(kwargs)
+                with self.subTest(kwargs=kwargs), self.assertRaises(ProviderCoreError):
+                    observe_submission_json_response(**values)
+
+    def test_submission_observation_cannot_be_constructed_directly(self):
+        with TemporaryDirectory() as directory:
+            binding, _request_sha = self._durable_submission_binding(directory)
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "durable exact response binding",
+            ):
+                ProviderSubmissionObservation(
+                    response_binding=binding,
+                    endpoint="/v5/order/create",
+                    capability_snapshot_ids=("cap-1",),
+                    instrument_versions=("BTCUSD:v1",),
+                    evidence_ref="provider-write:sha256:" + "1" * 64,
+                    payload={"orderId": "forged"},
+                )
+
     def test_all_six_architectural_provider_targets_exist(self):
         self.assertEqual(
             set(PROVIDERS),

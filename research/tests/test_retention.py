@@ -34,6 +34,62 @@ def policy(**overrides):
 
 
 class RetentionTests(unittest.TestCase):
+    def test_direct_regime_metric_construction_cannot_bypass_invariants(self):
+        with self.assertRaisesRegex(TypeError, "Decimal, string or integer input"):
+            RegimeMetric(
+                regime="old",
+                champion_net_score=0.10,
+                candidate_net_score=Decimal("0.11"),
+                observations=100,
+                label_complete=True,
+            )
+        with self.assertRaisesRegex(ValueError, "observations"):
+            RegimeMetric(
+                regime="old",
+                champion_net_score=Decimal("0.10"),
+                candidate_net_score=Decimal("0.11"),
+                observations=True,
+                label_complete=True,
+            )
+        with self.assertRaisesRegex(TypeError, "label_complete"):
+            RegimeMetric(
+                regime="old",
+                champion_net_score=Decimal("0.10"),
+                candidate_net_score=Decimal("0.11"),
+                observations=100,
+                label_complete=1,
+            )
+
+    def test_direct_retention_policy_cannot_bypass_invariants(self):
+        with self.assertRaisesRegex(TypeError, "regime lists"):
+            RetentionPolicy(
+                protected_regimes=("old",),
+                recent_regimes=(7,),
+                max_protected_degradation=Decimal("0.02"),
+                max_recent_degradation=Decimal("0"),
+                min_recent_improvement=Decimal("0.01"),
+                min_observations_per_regime=50,
+                require_complete_labels=True,
+                independent_science_gate_passed=True,
+                risk_gate_passed=True,
+            )
+        with self.assertRaisesRegex(TypeError, "independent_science_gate_passed"):
+            RetentionPolicy(
+                protected_regimes=("old",),
+                recent_regimes=("new",),
+                max_protected_degradation=Decimal("0.02"),
+                max_recent_degradation=Decimal("0"),
+                min_recent_improvement=Decimal("0.01"),
+                min_observations_per_regime=50,
+                require_complete_labels=True,
+                independent_science_gate_passed=1,
+                risk_gate_passed=True,
+            )
+
+    def test_policy_factory_rejects_non_text_regime_identity(self):
+        with self.assertRaisesRegex(TypeError, "regime lists"):
+            policy(recent_regimes=["new", 7])
+
     def test_recent_gain_with_retained_old_regime_can_pass(self):
         result = evaluate_retention(
             {"old": metric("old", "0.10", "0.09"), "new": metric("new", "0.05", "0.08")},

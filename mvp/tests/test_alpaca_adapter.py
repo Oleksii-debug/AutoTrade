@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import json
+from tempfile import TemporaryDirectory
 import unittest
 from uuid import uuid4
 
@@ -7,6 +9,7 @@ from mvp.autotrade_mvp.alpaca import (
     AlpacaAbsenceEvidence,
     AlpacaAdapterError,
     AlpacaOrderIntent,
+    AlpacaPreparedRequest,
     paper_evidence_proves_live_execution_realism,
     coverage_evidence,
     parse_order_observation,
@@ -14,42 +17,128 @@ from mvp.autotrade_mvp.alpaca import (
     parse_trade_activities,
     prepare_order_request,
 )
-from mvp.autotrade_mvp.capabilities import CapabilitySnapshot
+from mvp.autotrade_mvp.capabilities import (
+    CapabilityClaim,
+    EvidenceVerification,
+    derive_capability_snapshot,
+)
+from mvp.autotrade_mvp.dispatch import (
+    ExactJsonTransportResponse,
+    GuardedDispatcher,
+    load_submission_response_binding,
+    stable_client_order_id,
+)
+from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.provider_core import (
+    Surface,
+    observe_authenticated_json_response,
+    observe_submission_json_response,
+    prepare_authenticated_read_query,
+)
 
 
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
-def capability(*, order_types=("MARKET", "LIMIT", "STOP", "STOP_LIMIT"), tif=("DAY", "GTC", "IOC")):
-    evidence = {
-        "artifact_id": str(uuid4()),
-        "sha256": "sha256:" + "d" * 64,
-        "observed_at": "2026-09-24T19:00:00Z",
-        "source_uri": "https://docs.alpaca.markets/us/reference/postorder",
-    }
-    return CapabilitySnapshot(
+def capability(
+    *,
+    order_types=("MARKET", "LIMIT", "STOP", "STOP_LIMIT"),
+    tif=("DAY", "GTC", "IOC"),
+    account_id="paper-account",
+    environment="PAPER",
+    instrument_version="AAPL:v1",
+):
+    observed_at = NOW - timedelta(hours=1)
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            provider_id="ALPACA",
+            account_id=account_id,
+            entity_id="alpaca",
+            environment=environment,
+            instrument_version=instrument_version,
+            observed_at=observed_at,
+            expires_at=NOW + timedelta(hours=1),
+            supported_order_types=frozenset(order_types),
+            time_in_force=frozenset(tif),
+            permission_scopes=frozenset({"ORDER_WRITE", "ORDER.READ"}),
+            position_mode="NET",
+            native_protection=frozenset({"STOP"}),
+            rate_limit_policy_id="alpaca-paper-test",
+            data_entitlements=frozenset({"ORDERS", "ACTIVITIES"}),
+            evidence_ref={
+                "artifact_id": str(uuid4()),
+                "sha256": "sha256:" + "d" * 64,
+                "observed_at": "2026-09-24T19:00:00Z",
+                "source_uri": "https://docs.alpaca.markets/us/reference/postorder",
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    return derive_capability_snapshot(
         snapshot_id=str(uuid4()),
-        provider_id="ALPACA",
-        account_id="paper-account",
-        entity_id="alpaca",
-        environment="PAPER",
-        instrument_version="AAPL:v1",
-        observed_at=NOW - timedelta(hours=1),
-        expires_at=NOW + timedelta(hours=1),
-        supported_order_types=frozenset(order_types),
-        time_in_force=frozenset(tif),
-        permission_scopes=frozenset({"ORDER_WRITE"}),
-        position_mode="NET",
-        native_protection=frozenset({"STOP"}),
-        rate_limit_policy_id="alpaca-paper-test",
-        data_entitlements=frozenset({"ORDERS", "ACTIVITIES"}),
-        evidence=(evidence,),
-        status="VERIFIED",
-        sources=frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}),
+        claims=claims,
+        observed_at=NOW,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    )
+
+
+def bound_activity_response(
+    activities,
+    *,
+    account_id="paper-1",
+    environment="PAPER",
+):
+    query = prepare_authenticated_read_query(
+        capability=capability(
+            account_id=account_id,
+            environment=environment,
+            instrument_version="AAPL:v1",
+        ),
+        surface=Surface.ACTIVITIES,
+        endpoint="/v2/account/activities/FILL",
+        query={"activity_types": "FILL"},
+        at=NOW,
+        permission_scope="ORDER.READ",
+    )
+    raw = json.dumps(
+        activities,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return observe_authenticated_json_response(
+        query_binding=query,
+        response_bytes=raw,
+        observed_at=NOW,
     )
 
 
 class AlpacaAdapterTests(unittest.TestCase):
+    def test_direct_prepared_request_cannot_bypass_scope_or_provenance(self):
+        with self.assertRaisesRegex(
+            AlpacaAdapterError,
+            "canonical preparation factory",
+        ):
+            AlpacaPreparedRequest(
+                endpoint="/v2/orders",
+                body={
+                    "symbol": "AAPL",
+                    "side": "buy",
+                    "type": "market",
+                    "time_in_force": "day",
+                    "client_order_id": "at-direct",
+                    "qty": "1",
+                    "extended_hours": False,
+                },
+                account_id="paper-account",
+                environment="PAPER",
+                capability_snapshot_id=str(uuid4()),
+                documentation_refs=("https://docs.alpaca.markets/orders",),
+                instrument_versions=("AAPL:v1",),
+            )
+
     def test_equity_limit_request_preserves_decimal_strings(self):
         intent = AlpacaOrderIntent.create(
             instrument_version="AAPL:v1",
@@ -64,13 +153,49 @@ class AlpacaAdapterTests(unittest.TestCase):
         request = prepare_order_request(
             intent,
             client_order_id="at-equity-1",
+            account_id="paper-account",
+            environment="PAPER",
             capability=capability(),
             at=NOW,
         )
         self.assertEqual(request.endpoint, "/v2/orders")
+        self.assertEqual(request.account_id, "paper-account")
+        self.assertEqual(request.environment, "PAPER")
+        self.assertEqual(request.instrument_versions, ("AAPL:v1",))
+        self.assertEqual(request.capability_snapshot_ids, (request.capability_snapshot_id,))
+        self.assertRegex(request.body_sha256, r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(request.body["qty"], "1.25")
         self.assertEqual(request.body["limit_price"], "220.10")
         self.assertNotIn("notional", request.body)
+
+    def test_order_preparation_is_bound_to_exact_account_and_environment(self):
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        with self.assertRaisesRegex(AlpacaAdapterError, "account"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-wrong-account",
+                account_id="other-account",
+                environment="PAPER",
+                capability=capability(),
+                at=NOW,
+            )
+        with self.assertRaisesRegex(AlpacaAdapterError, "environment"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-wrong-env",
+                account_id="paper-account",
+                environment="LIVE",
+                capability=capability(environment="PAPER"),
+                at=NOW,
+            )
 
     def test_crypto_notional_uses_native_crypto_tif(self):
         intent = AlpacaOrderIntent.create(
@@ -223,6 +348,8 @@ class AlpacaAdapterTests(unittest.TestCase):
             prepare_order_request(
                 intent,
                 client_order_id="at-order-1",
+                account_id="paper-account",
+                environment="PAPER",
                 capability=capability(order_types=("MARKET",)),
                 at=NOW,
             )
@@ -345,52 +472,255 @@ class AlpacaAdapterTests(unittest.TestCase):
         self.assertEqual(qualified.verdict(), "PROVEN_ABSENT")
 
 
+    def _durable_submission_observation(
+        self,
+        *,
+        payload,
+        intent_id="alpaca-submission-intent",
+        attempt_id=None,
+    ):
+        attempt = attempt_id or str(uuid4())
+        client_id = stable_client_order_id(
+            "ALPACA",
+            intent_id,
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        prepared = prepare_order_request(
+            intent,
+            client_order_id=client_id,
+            account_id="paper-account",
+            environment="PAPER",
+            capability=capability(),
+            at=NOW,
+        )
+        raw = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="paper-account",
+                owner_token="owner",
+            )
+            outcome = dispatcher.dispatch(
+                attempt_id=attempt,
+                intent_id=intent_id,
+                intent_hash="alpaca-intent-hash",
+                provider="ALPACA",
+                request=prepared.body,
+                now="2026-09-24T20:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(raw),
+                )[1],
+                sender_check=lambda _owner, _epoch: None,
+                submission_scope={
+                    "endpoint": prepared.endpoint,
+                    "prepared_request_sha256": prepared.body_sha256,
+                    "capability_snapshot_ids": list(
+                        prepared.capability_snapshot_ids
+                    ),
+                    "instrument_versions": list(prepared.instrument_versions),
+                },
+            )
+            self.assertEqual(outcome.status, "SENT")
+            binding = load_submission_response_binding(
+                store,
+                environment="PAPER",
+                account_id="paper-account",
+                attempt_id=attempt,
+            )
+            observation = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="ALPACA",
+                endpoint=prepared.endpoint,
+                prepared_request_sha256=prepared.body_sha256,
+                capability_snapshot_ids=prepared.capability_snapshot_ids,
+                instrument_versions=prepared.instrument_versions,
+            )
+        return attempt, prepared, observation
+
     def test_success_order_response_is_ack_only_not_fill(self):
         order_id = str(uuid4())
-        result = parse_submission_response(
-            attempt_id=str(uuid4()),
-            client_order_id="at-ack-1",
-            response={
+        attempt, prepared, observation = self._durable_submission_observation(
+            payload={
                 "id": order_id,
-                "client_order_id": "at-ack-1",
+                "client_order_id": stable_client_order_id(
+                    "ALPACA",
+                    "alpaca-submission-intent",
+                    environment="PAPER",
+                    account_id="paper-account",
+                ),
                 "status": "filled",
                 "filled_qty": "1",
-            },
-            observed_at="2026-09-24T20:00:00Z",
-            environment="PAPER",
+            }
+        )
+        result = parse_submission_response(
+            attempt_id=attempt,
+            prepared_request=prepared,
+            observation=observation,
         )
         self.assertEqual(result["outcome"], "ACKNOWLEDGED")
         self.assertEqual(result["retry_disposition"], "NEVER")
         self.assertEqual(result["provider_order_id"], order_id)
+        self.assertEqual(
+            result["evidence"][0]["sha256"],
+            observation.response_sha256,
+        )
+
+    def test_submission_response_rejects_attempt_and_scope_relabelling(self):
+        order_id = str(uuid4())
+        attempt, prepared, observation = self._durable_submission_observation(
+            payload={
+                "id": order_id,
+                "client_order_id": stable_client_order_id(
+                    "ALPACA",
+                    "alpaca-submission-intent",
+                    environment="PAPER",
+                    account_id="paper-account",
+                ),
+            }
+        )
+        with self.assertRaisesRegex(AlpacaAdapterError, "attempt_id mismatch"):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=prepared,
+                observation=observation,
+            )
+        other_intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="LIMIT",
+            time_in_force="DAY",
+            quantity="1",
+            limit_price="200",
+        )
+        wrong_request = prepare_order_request(
+            other_intent,
+            client_order_id=prepared.body["client_order_id"],
+            account_id="paper-account",
+            environment="PAPER",
+            capability=capability(),
+            at=NOW,
+        )
+        with self.assertRaisesRegex(Exception, "provenance|scope|digest"):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=wrong_request,
+                observation=observation,
+            )
 
     def test_transport_ambiguity_is_unknown_and_reconcile_first(self):
+        client_id = stable_client_order_id(
+            "ALPACA",
+            "alpaca-unknown-intent",
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        prepared = prepare_order_request(
+            intent,
+            client_order_id=client_id,
+            account_id="paper-account",
+            environment="PAPER",
+            capability=capability(),
+            at=NOW,
+        )
         result = parse_submission_response(
             attempt_id=str(uuid4()),
-            client_order_id="at-unknown-1",
-            response=None,
-            observed_at="2026-09-24T20:00:00Z",
-            environment="PAPER",
+            prepared_request=prepared,
+            observation=None,
             transport_ambiguous=True,
         )
         self.assertEqual(result["outcome"], "UNKNOWN")
         self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
-        self.assertIsNone(result["provider_received_at"])
-        self.assertEqual(result["observed_at"], "2026-09-24T20:00:00Z")
-        self.assertEqual(result["provider_environment"], "PAPER")
+        self.assertNotIn("provider_received_at", result)
+        self.assertNotIn("observed_at", result)
+        self.assertNotIn("provider_environment", result)
         self.assertEqual(result["evidence"], [])
 
     def test_transport_ambiguity_cannot_claim_provider_response(self):
+        _attempt, prepared, observation = self._durable_submission_observation(
+            payload={
+                "id": str(uuid4()),
+                "client_order_id": stable_client_order_id(
+                    "ALPACA",
+                    "alpaca-submission-intent",
+                    environment="PAPER",
+                    account_id="paper-account",
+                ),
+            }
+        )
         with self.assertRaisesRegex(AlpacaAdapterError, "must not fabricate"):
             parse_submission_response(
                 attempt_id=str(uuid4()),
-                client_order_id="at-unknown-2",
-                response={
-                    "id": str(uuid4()),
-                    "client_order_id": "at-unknown-2",
-                },
-                observed_at="2026-09-24T20:00:00Z",
-                environment="PAPER",
+                prepared_request=prepared,
+                observation=observation,
                 transport_ambiguous=True,
+            )
+
+    def test_decoded_mapping_cannot_mint_submission_authority(self):
+        client_id = stable_client_order_id(
+            "ALPACA",
+            "alpaca-mapping-intent",
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        prepared = prepare_order_request(
+            intent,
+            client_order_id=client_id,
+            account_id="paper-account",
+            environment="PAPER",
+            capability=capability(),
+            at=NOW,
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "durable ProviderSubmissionObservation",
+        ):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=prepared,
+                observation={
+                    "id": str(uuid4()),
+                    "client_order_id": client_id,
+                },
             )
 
     def test_trade_activity_requires_order_and_fee_evidence(self):
@@ -404,21 +734,44 @@ class AlpacaAdapterTests(unittest.TestCase):
             "price": "220.10",
             "transaction_time": "2026-09-24T20:01:00Z",
         }
+        observation = bound_activity_response([row])
         with self.assertRaisesRegex(AlpacaAdapterError, "fee evidence"):
             parse_trade_activities(
-                [row],
+                observation,
                 instrument_versions={"AAPL": "AAPL:v1"},
                 client_ids_by_order_id={order_id: "at-ack-1"},
                 fees_by_activity_id={},
             )
         fills = parse_trade_activities(
-            [row, row],
+            bound_activity_response([row, row]),
             instrument_versions={"AAPL": "AAPL:v1"},
             client_ids_by_order_id={order_id: "at-ack-1"},
             fees_by_activity_id={row["id"]: ("0.01", "USD")},
         )
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].fee_amount, Decimal("0.01"))
+        self.assertEqual((fills[0].account_id, fills[0].environment), ("paper-1", "PAPER"))
+
+    def test_trade_activity_scope_cannot_be_relabelled_after_provider_read(self):
+        order_id = str(uuid4())
+        row = {
+            "activity_type": "FILL",
+            "id": "activity-scope-1",
+            "order_id": order_id,
+            "symbol": "AAPL",
+            "qty": "1",
+            "price": "220.10",
+            "transaction_time": "2026-09-24T20:01:00Z",
+        }
+        observation = bound_activity_response([row], account_id="account-a")
+        fills = parse_trade_activities(
+            observation,
+            instrument_versions={"AAPL": "AAPL:v1"},
+            client_ids_by_order_id={order_id: "at-scope-1"},
+            fees_by_activity_id={row["id"]: ("0.01", "USD")},
+        )
+        self.assertEqual((fills[0].account_id, fills[0].environment), ("account-a", "PAPER"))
+        self.assertEqual(observation.query_binding.account_id, "account-a")
 
     def test_canonical_coverage_defaults_to_unproven_absence(self):
         evidence = coverage_evidence(
@@ -427,7 +780,9 @@ class AlpacaAdapterTests(unittest.TestCase):
             coverage_end="2026-09-24T21:00:00Z",
             pagination_complete=True,
             consistency_horizon_satisfied=True,
-        )
+        
+            account_id="paper-1",
+            environment="PAPER",)
         self.assertFalse(evidence.provider_semantics_exclude_execution)
 
     def test_paper_is_not_live_execution_realism_proof(self):
@@ -442,26 +797,12 @@ from mvp.autotrade_mvp.alpaca import (
 
 
 def mleg_capability(instrument_version, *, account_id="paper-account", environment="PAPER"):
-    base = capability(order_types=("MARKET", "LIMIT"), tif=("DAY",))
-    return CapabilitySnapshot(
-        snapshot_id=str(uuid4()),
-        provider_id="ALPACA",
+    return capability(
+        order_types=("MARKET", "LIMIT"),
+        tif=("DAY",),
         account_id=account_id,
-        entity_id="alpaca",
         environment=environment,
         instrument_version=instrument_version,
-        observed_at=base.observed_at,
-        expires_at=base.expires_at,
-        supported_order_types=base.supported_order_types,
-        time_in_force=base.time_in_force,
-        permission_scopes=base.permission_scopes,
-        position_mode=base.position_mode,
-        native_protection=base.native_protection,
-        rate_limit_policy_id=base.rate_limit_policy_id,
-        data_entitlements=base.data_entitlements,
-        evidence=base.evidence,
-        status=base.status,
-        sources=base.sources,
     )
 
 
@@ -501,6 +842,14 @@ class AlpacaMlegFoundationTests(unittest.TestCase):
             at=NOW,
         )
         self.assertEqual(request.body["order_class"], "mleg")
+        self.assertEqual(request.account_id, "paper-account")
+        self.assertEqual(request.environment, "PAPER")
+        self.assertEqual(
+            request.instrument_versions,
+            (first.instrument_version, second.instrument_version),
+        )
+        self.assertEqual(len(request.capability_snapshot_ids), 2)
+        self.assertRegex(request.body_sha256, r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(request.body["qty"], "2")
         self.assertEqual(request.body["limit_price"], "-0.60")
         self.assertNotIn("symbol", request.body)

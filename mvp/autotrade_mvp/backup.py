@@ -27,6 +27,7 @@ BACKUP_SCHEMA_VERSION = 1
 MANIFEST_NAME = "backup-manifest.json"
 MANIFEST_DIGEST_NAME = "backup-manifest.sha256"
 RESTORE_MARKER_NAME = "RESTORE_RECONCILIATION_REQUIRED.json"
+_SHA256_HEX = frozenset("0123456789abcdef")
 
 
 class BackupError(RuntimeError):
@@ -97,10 +98,58 @@ def _inside(path: Path, root: Path) -> bool:
 def _safe_relative_path(raw: str) -> Path:
     if not isinstance(raw, str) or not raw:
         raise BackupIntegrityError("Backup manifest path is invalid")
+    if "\\" in raw or "\x00" in raw:
+        raise BackupIntegrityError("Backup manifest path must use canonical POSIX separators")
+    if len(raw) >= 2 and raw[0].isalpha() and raw[1] == ":":
+        raise BackupIntegrityError("Backup manifest path must not use Windows drive notation")
     pure = PurePosixPath(raw)
-    if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+    if (
+        pure.is_absolute()
+        or pure.as_posix() != raw
+        or any(part in {"", ".", ".."} for part in pure.parts)
+    ):
         raise BackupIntegrityError("Backup manifest path is unsafe")
     return Path(*pure.parts)
+
+
+def _valid_sha256_digest(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and value == value.lower()
+        and all(character in _SHA256_HEX for character in value)
+    )
+
+
+def _expected_kind(path: str) -> str:
+    parts = PurePosixPath(path).parts
+    if parts == ("state", "journal.sqlite3"):
+        return "sqlite-journal"
+    if parts in {
+        ("state", "checkpoint.json"),
+        ("state", "learning-evidence.jsonl"),
+    }:
+        return "runtime-state"
+    if len(parts) >= 3 and parts[:2] == ("state", "order-intents") and parts[-1].endswith(".json"):
+        return "order-intent"
+    if (
+        len(parts) == 5
+        and parts[:3] == ("artifacts", "objects", "sha256")
+        and len(parts[3]) == 2
+        and _valid_sha256_digest(parts[4])
+        and parts[3] == parts[4][:2]
+    ):
+        return "artifact-object"
+    if (
+        len(parts) == 5
+        and parts[:3] == ("artifacts", "manifests", "sha256")
+        and len(parts[3]) == 2
+        and parts[4].endswith(".json")
+        and _valid_sha256_digest(parts[4][:-5])
+        and parts[3] == parts[4][:-5][:2]
+    ):
+        return "artifact-manifest"
+    raise BackupIntegrityError(f"Backup payload path is outside the canonical inventory: {path}")
 
 
 def _copy_stable_file(source: Path, destination: Path) -> tuple[str, int]:
@@ -116,7 +165,11 @@ def _copy_stable_file(source: Path, destination: Path) -> tuple[str, int]:
     return digest, len(payload)
 
 
-def _sqlite_schema_version(path: Path) -> int:
+def _sqlite_schema_version(
+    path: Path,
+    *,
+    classify_future_source_as_compatibility: bool = False,
+) -> int:
     if not path.is_file():
         raise BackupError("Durable journal is missing")
     uri = path.resolve().as_uri() + "?mode=ro"
@@ -131,11 +184,47 @@ def _sqlite_schema_version(path: Path) -> int:
         ) from error
     if not rows:
         raise BackupCompatibilityError("Durable journal has no schema migration record")
-    return max(int(row[0]) for row in rows)
+    try:
+        versions = [int(row[0]) for row in rows]
+    except (TypeError, ValueError) as error:
+        raise BackupIntegrityError(
+            "Durable journal schema migration history is invalid"
+        ) from error
+    latest = versions[-1]
+    current_prefix = [
+        version for version in versions
+        if version <= JournalStore.SCHEMA_VERSION
+    ]
+    expected_prefix = list(
+        range(1, min(latest, JournalStore.SCHEMA_VERSION) + 1)
+    )
+    if current_prefix != expected_prefix:
+        raise BackupIntegrityError(
+            "Durable journal schema migration history is not contiguous"
+        )
+    if (
+        latest > JournalStore.SCHEMA_VERSION
+        and classify_future_source_as_compatibility
+    ):
+        raise BackupCompatibilityError(
+            f"Unsupported journal schema version: {latest}"
+        )
+    if versions != list(range(1, latest + 1)):
+        raise BackupIntegrityError(
+            "Durable journal schema migration history is not contiguous"
+        )
+    if latest > JournalStore.SCHEMA_VERSION:
+        raise BackupCompatibilityError(
+            f"Unsupported journal schema version: {latest}"
+        )
+    return latest
 
 
 def _backup_sqlite(source: Path, destination: Path) -> tuple[str, int, int]:
-    schema_version = _sqlite_schema_version(source)
+    schema_version = _sqlite_schema_version(
+        source,
+        classify_future_source_as_compatibility=True,
+    )
     if schema_version != JournalStore.SCHEMA_VERSION:
         raise BackupCompatibilityError(
             f"Unsupported journal schema version: {schema_version}"
@@ -200,10 +289,11 @@ def _validate_artifact_source(root: Path) -> None:
         for path in objects_root.rglob("*"):
             if not path.is_file():
                 continue
-            digest = path.name.lower()
+            digest = path.name
             if (
-                len(digest) != 64
-                or any(character not in "0123456789abcdef" for character in digest)
+                not _valid_sha256_digest(digest)
+                or path.parent.name != digest[:2]
+                or path.parent.parent != objects_root
                 or _sha256_file(path) != digest
             ):
                 raise BackupIntegrityError("Artifact object is not content-addressed correctly")
@@ -214,11 +304,65 @@ def _validate_artifact_source(root: Path) -> None:
                 digest = payload["digest"]
             except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
                 raise BackupIntegrityError("Artifact manifest is unreadable") from error
-            if not isinstance(digest, str) or path.stem != digest:
+            declared_size = payload.get("size_bytes")
+            if (
+                payload.get("algorithm") != "sha256"
+                or not _valid_sha256_digest(digest)
+                or path.stem != digest
+                or path.parent.name != digest[:2]
+                or path.parent.parent != manifests_root
+                or isinstance(declared_size, bool)
+                or not isinstance(declared_size, int)
+                or declared_size < 0
+            ):
                 raise BackupIntegrityError("Artifact manifest digest identity is invalid")
             object_path = objects_root / digest[:2] / digest
-            if not object_path.is_file() or _sha256_file(object_path) != digest:
+            if (
+                not object_path.is_file()
+                or _sha256_file(object_path) != digest
+                or object_path.stat().st_size != declared_size
+            ):
                 raise BackupIntegrityError("Artifact manifest references a missing or corrupt object")
+
+
+def _verify_runtime_trace_consistency(state_root: Path) -> None:
+    checkpoint = state_root / "checkpoint.json"
+    learning_evidence = state_root / "learning-evidence.jsonl"
+    journal = state_root / "journal.sqlite3"
+    present = (checkpoint.is_file(), learning_evidence.is_file())
+    if present == (False, False):
+        return
+    if present != (True, True):
+        raise BackupIntegrityError(
+            "Runtime consistency evidence is partial; checkpoint and learning evidence "
+            "must be captured together or both be absent"
+        )
+    if not journal.is_file():
+        raise BackupIntegrityError(
+            "Runtime consistency verification requires journal"
+        )
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".autotrade-backup-verify-",
+        ) as verification_directory:
+            verification_state = Path(verification_directory) / "state"
+            verification_state.mkdir()
+            for name in (
+                "journal.sqlite3",
+                "checkpoint.json",
+                "learning-evidence.jsonl",
+            ):
+                # Trace verification is byte-oriented.  Keep this copy path
+                # distinct from restore publication so restore fault injection
+                # cannot be consumed by preflight verification.
+                shutil.copyfile(state_root / name, verification_state / name)
+            build_diagnostic_snapshot(verification_state)
+    except BackupIntegrityError:
+        raise
+    except Exception as error:
+        raise BackupIntegrityError(
+            "Runtime state, journal and evidence are not one consistent snapshot"
+        ) from error
 
 
 def create_backup(
@@ -292,37 +436,23 @@ def create_backup(
             if not source.is_file() or _sha256_file(source) != expected_digest:
                 raise BackupError("Source changed before backup commit")
 
-        if (stage / "state" / "checkpoint.json").is_file() and (
+        checkpoint_present = (stage / "state" / "checkpoint.json").is_file()
+        learning_evidence_present = (
             stage / "state" / "learning-evidence.jsonl"
-        ).is_file():
-            try:
-                # Diagnostic reconstruction opens the journal in WAL mode. Run it
-                # against an isolated byte-for-byte verification copy so SQLite
-                # sidecars can never become undeclared backup payloads.
-                with tempfile.TemporaryDirectory(
-                    prefix=".autotrade-backup-check-",
-                    dir=target.parent,
-                ) as verification_directory:
-                    verification_state = Path(verification_directory) / "state"
-                    verification_state.mkdir()
-                    for name in (
-                        "journal.sqlite3",
-                        "checkpoint.json",
-                        "learning-evidence.jsonl",
-                    ):
-                        shutil.copy2(stage / "state" / name, verification_state / name)
-                    build_diagnostic_snapshot(verification_state)
-            except ValueError as error:
-                raise BackupIntegrityError(
-                    "Runtime state, journal and evidence are not one consistent snapshot"
-                ) from error
+        ).is_file()
+        _verify_runtime_trace_consistency(stage / "state")
+        runtime_consistency_check = (
+            "DURABLE_TRACE_RECONSTRUCTION"
+            if checkpoint_present and learning_evidence_present
+            else "JOURNAL_ONLY"
+        )
 
         manifest = {
             "schema_version": BACKUP_SCHEMA_VERSION,
             "created_at": _utc_now(),
             "journal_schema_version": journal_schema,
             "reconciliation_required_after_restore": True,
-            "runtime_consistency_check": "DURABLE_TRACE_RECONSTRUCTION",
+            "runtime_consistency_check": runtime_consistency_check,
             "files": sorted(entries, key=lambda item: item["path"]),
         }
         manifest_bytes = _canonical_json(manifest)
@@ -363,8 +493,6 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
         raise BackupCompatibilityError("Unsupported backed-up journal schema version")
     if manifest.get("reconciliation_required_after_restore") is not True:
         raise BackupIntegrityError("Restore reconciliation gate is missing")
-    if manifest.get("runtime_consistency_check") != "DURABLE_TRACE_RECONSTRUCTION":
-        raise BackupIntegrityError("Runtime consistency evidence is missing")
     entries = manifest.get("files")
     if not isinstance(entries, list) or not entries:
         raise BackupIntegrityError("Backup file inventory is empty")
@@ -382,6 +510,11 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
         normalized = relative.as_posix()
         if normalized in expected_paths:
             raise BackupIntegrityError("Backup file inventory contains duplicates")
+        expected_kind = _expected_kind(normalized)
+        if item["kind"] != expected_kind:
+            raise BackupIntegrityError(
+                f"Backup payload kind does not match canonical path: {normalized}"
+            )
         expected_paths.add(normalized)
         path = root / relative
         if path.is_symlink() or not path.is_file():
@@ -393,17 +526,41 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
             or digest != f"sha256:{_sha256_file(path)}"
         ):
             raise BackupIntegrityError(f"Backup payload digest mismatch: {normalized}")
-        if item["size_bytes"] != path.stat().st_size:
+        size_bytes = item["size_bytes"]
+        if (
+            isinstance(size_bytes, bool)
+            or not isinstance(size_bytes, int)
+            or size_bytes < 0
+            or size_bytes != path.stat().st_size
+        ):
             raise BackupIntegrityError(f"Backup payload size mismatch: {normalized}")
         if normalized.startswith("artifacts/objects/sha256/"):
             object_digest = path.name.lower()
             if item["sha256"] != f"sha256:{object_digest}":
                 raise BackupIntegrityError("Content-addressed artifact object identity mismatch")
 
+    checkpoint_present = "state/checkpoint.json" in expected_paths
+    learning_evidence_present = "state/learning-evidence.jsonl" in expected_paths
+    if checkpoint_present != learning_evidence_present:
+        raise BackupIntegrityError(
+            "Backup runtime consistency evidence is partial"
+        )
+    expected_consistency_check = (
+        "DURABLE_TRACE_RECONSTRUCTION"
+        if checkpoint_present
+        else "JOURNAL_ONLY"
+    )
+    if manifest.get("runtime_consistency_check") != expected_consistency_check:
+        raise BackupIntegrityError(
+            "Runtime consistency claim does not match the backup inventory"
+        )
+
     observed_paths = {
-        path.relative_to(root).as_posix()
+        relative
         for path in root.rglob("*")
-        if path.is_file() and path.name not in {MANIFEST_NAME, MANIFEST_DIGEST_NAME}
+        if path.is_file()
+        for relative in (path.relative_to(root).as_posix(),)
+        if relative not in {MANIFEST_NAME, MANIFEST_DIGEST_NAME}
     }
     if observed_paths != expected_paths:
         raise BackupIntegrityError(
@@ -417,6 +574,8 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
         raise BackupIntegrityError("Backed-up journal is missing")
     if _sqlite_schema_version(root / journal_relative) != JournalStore.SCHEMA_VERSION:
         raise BackupCompatibilityError("Backed-up journal schema is incompatible")
+    if expected_consistency_check == "DURABLE_TRACE_RECONSTRUCTION":
+        _verify_runtime_trace_consistency(root / "state")
 
     artifact_manifests = [
         root / _safe_relative_path(item["path"])
@@ -429,9 +588,28 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
             digest = artifact_manifest["digest"]
         except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
             raise BackupIntegrityError("Backed-up artifact manifest is invalid") from error
+        declared_size = artifact_manifest.get("size_bytes")
+        expected_manifest_relative = (
+            f"artifacts/manifests/sha256/{digest[:2]}/{digest}.json"
+            if _valid_sha256_digest(digest)
+            else ""
+        )
+        actual_manifest_relative = path.relative_to(root).as_posix()
+        if (
+            artifact_manifest.get("algorithm") != "sha256"
+            or not _valid_sha256_digest(digest)
+            or actual_manifest_relative != expected_manifest_relative
+            or isinstance(declared_size, bool)
+            or not isinstance(declared_size, int)
+            or declared_size < 0
+        ):
+            raise BackupIntegrityError("Backed-up artifact manifest identity is invalid")
         object_relative = f"artifacts/objects/sha256/{digest[:2]}/{digest}"
         if object_relative not in expected_paths:
             raise BackupIntegrityError("Backed-up artifact manifest has no matching object")
+        object_path = root / _safe_relative_path(object_relative)
+        if _sha256_file(object_path) != digest or object_path.stat().st_size != declared_size:
+            raise BackupIntegrityError("Backed-up artifact manifest does not match its object")
 
     return manifest
 

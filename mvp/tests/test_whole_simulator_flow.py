@@ -1,4 +1,5 @@
 from decimal import Decimal
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from uuid import uuid4
@@ -10,16 +11,29 @@ from mvp.autotrade_mvp.accounting import (
 )
 from mvp.autotrade_mvp.authority import AuthorityPolicy, AuthorityService
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
-from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence, reconcile_account
-from mvp.autotrade_mvp.reservations import ReservationBook
-from mvp.autotrade_mvp.risk import RiskContext, RiskIntent, RiskPolicy, evaluate_risk
+from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+from mvp.autotrade_mvp.reconciliation import (
+    ProviderFillEvidence,
+    ResourceAvailabilityEvidence,
+    SnapshotConsistencyEvidence,
+    UnknownSubmission,
+    reconcile_account,
+)
+from mvp.autotrade_mvp.reconciliation_journal import (
+    record_reconciliation_checkpoint,
+)
+from mvp.autotrade_mvp.reservations import ReservationBook, ReservationConflict
+from mvp.autotrade_mvp.risk import RiskContext, RiskIntent, RiskPolicy
 from mvp.autotrade_mvp.simulated_provider import SimulatedProvider
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 
 NOW = "2026-09-24T18:00:00Z"
 LATER = "2026-09-24T18:01:00Z"
 INSTRUMENT = "ABC@1"
+AUTHORITY_INSTRUMENT_ID = "33333333-3333-4333-8333-333333333333"
+CAPABILITY_SNAPSHOT_ID = "sim-capability-snapshot-1"
 
 
 def risk_policy() -> RiskPolicy:
@@ -55,19 +69,20 @@ def risk_context() -> RiskContext:
     )
 
 
-def authority_service() -> AuthorityService:
-    service = AuthorityService()
+def authority_service(store: JournalStore) -> AuthorityService:
+    service = AuthorityService(store)
     service.register_policy(
         AuthorityPolicy.create(
             policy_id="sim-policy",
             account_id="sim-account",
             environments={"SIMULATION"},
-            instruments={INSTRUMENT},
+            instruments={(AUTHORITY_INSTRUMENT_ID, 1)},
             actions={"ORDER.SUBMIT"},
             max_notional="1000",
             expires_at="2026-09-25T00:00:00Z",
             autonomous=True,
             protection_only=False,
+            version=1,
         )
     )
     return service
@@ -91,6 +106,73 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 )
             )
 
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(journal)
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            reservations = DurableReservationBook(
+                journal,
+                environment="SIMULATION",
+                account_id="sim-account",
+                resolution_artifact_store=artifacts,
+            )
+            initial_snapshot = provider.account_snapshot(now=NOW)
+            availability_result = reconcile_account(
+                provider_id="SIMULATED",
+                account_id="sim-account",
+                environment="SIMULATION",
+                local_cash={"USD": "1000"},
+                provider_cash={
+                    "USD": initial_snapshot["balances"][0]["total"]
+                },
+                local_positions={},
+                provider_positions={},
+                local_execution_ids=(),
+                provider_fills=(),
+                snapshot_consistency=SnapshotConsistencyEvidence(
+                    provider_id="SIMULATED",
+                    account_id="sim-account",
+                    environment="SIMULATION",
+                    mode="ATOMIC",
+                    query_started_at=NOW,
+                    query_completed_at=NOW,
+                ),
+                coverage_start=NOW,
+                coverage_end=NOW,
+                pagination_complete=True,
+                provider_activity_provider_id="SIMULATED",
+                provider_activity_account_id="sim-account",
+                resource_availability=ResourceAvailabilityEvidence(
+                    provider_id="SIMULATED",
+                    account_id="sim-account",
+                    environment="SIMULATION",
+                    snapshot_id=initial_snapshot["snapshot_id"],
+                    query_started_at=NOW,
+                    query_completed_at=NOW,
+                    valid_until=LATER,
+                    available_resources={
+                        "CASH:USD": initial_snapshot["balances"][0]["available"]
+                    },
+                    provider_as_of=initial_snapshot["provider_as_of"],
+                    evidence_refs=(
+                        f"provider:snapshot:{initial_snapshot['snapshot_id']}",
+                    ),
+                ),
+            )
+            availability_checkpoint = record_reconciliation_checkpoint(
+                journal,
+                reconciliation_id="sim-account:admission-availability",
+                result=availability_result,
+                observed_at=NOW,
+                host_id="sim-host",
+                owner_epoch="1",
+            )
+            for pending in journal.pending_outbox():
+                if pending["event_id"] == availability_checkpoint["event_id"]:
+                    journal.mark_outbox_delivered(
+                        pending["outbox_id"],
+                        expected_envelope_hash=pending["envelope_hash"],
+                    )
+
             intent = RiskIntent.create(
                 symbol=INSTRUMENT,
                 side="BUY",
@@ -98,33 +180,39 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 price="100",
                 expected_state_version=1,
             )
-            risk = evaluate_risk(intent, risk_context(), risk_policy())
-            self.assertTrue(risk.admitted)
-
-            authority = authority_service()
             intent_hash = "sha256:" + "a" * 64
             admission = authority.admit(
+                command_id="financial-command-1",
+                idempotency_key="financial-command-1",
                 admission_id="admission-1",
                 policy_id="sim-policy",
+                intent_id="intent-1",
                 intent_hash=intent_hash,
                 account_id="sim-account",
                 environment="SIMULATION",
-                instrument=INSTRUMENT,
+                instrument_id=AUTHORITY_INSTRUMENT_ID,
+                instrument_version=1,
                 action="ORDER.SUBMIT",
                 notional="200",
-                state_version=1,
-                risk_admitted=risk.admitted,
+                capability_snapshot_id=CAPABILITY_SNAPSHOT_ID,
+                risk_intent=intent,
+                risk_context=risk_context(),
+                risk_policy=risk_policy(),
+                risk_valid_until="2026-09-24T18:05:00Z",
+                reservation_book=reservations,
+                reservation_id="reservation-1",
+                reservation_requirements={"CASH:USD": "200.2"},
+                reservation_available={"CASH:USD": "1000"},
+                reservation_checkpoint_event_id=availability_checkpoint["event_id"],
+                reservation_provider_id="SIMULATED",
+                reservation_max_age_seconds="60",
                 now=NOW,
             )
             self.assertEqual(admission.outcome, "ADMITTED")
-
-            reservations = ReservationBook()
-            reservations.reserve(
-                reservation_id="reservation-1",
-                intent_id="intent-1",
-                requirements={"CASH:USD": "200.2"},
-                available={"CASH:USD": "1000"},
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"), Decimal("200.2")
             )
+            self.assertEqual(len(journal.pending_outbox()), 1)
 
             def final_authority_check(candidate_hash, current_time):
                 return authority.dispatch_allowed(
@@ -132,14 +220,18 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                     intent_hash=candidate_hash,
                     account_id="sim-account",
                     environment="SIMULATION",
-                    instrument=INSTRUMENT,
+                    instrument_id=AUTHORITY_INSTRUMENT_ID,
+                    instrument_version=1,
                     action="ORDER.SUBMIT",
                     now=current_time,
+                    capability_snapshot_id=CAPABILITY_SNAPSHOT_ID,
                 )
 
             attempt_id = str(uuid4())
             dispatcher = GuardedDispatcher(
-                JournalStore(f"{directory}/journal.sqlite3"),
+                journal,
+                environment="SIMULATION",
+                account_id="sim-account",
                 owner_token="sim-owner",
             )
             dispatched = dispatcher.dispatch(
@@ -165,15 +257,12 @@ class WholeSimulatorFlowTests(unittest.TestCase):
 
             fill = provider.activity_fills()[0]
             fee = fill["fees"][0]
-            reservations.consume("reservation-1", {"CASH:USD": "200.2"})
-            terminal = reservations.mark_terminal(
-                "reservation-1",
-                outcome="FILLED",
-                resolution_evidence=fill["provider_execution_id"],
+            reservations.consume(
+                command_id="reservation-consume-1",
+                idempotency_key="reservation-consume-1",
+                reservation_id="reservation-1",
+                usage={"CASH:USD": "200.2"},
             )
-            self.assertEqual(terminal.state, "FILLED")
-            self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("0"))
-
             economic.append(
                 book_equity_fill(
                     transaction_id="economic-fill-1",
@@ -192,6 +281,9 @@ class WholeSimulatorFlowTests(unittest.TestCase):
 
             snapshot = provider.account_snapshot(now=LATER)
             provider_fill = ProviderFillEvidence.create(
+                provider_id="SIMULATED",
+                account_id="sim-account",
+                environment="SIMULATION",
                 provider_execution_id=fill["provider_execution_id"],
                 client_order_id=dispatched.client_order_id,
                 instrument=fill["instrument_version"],
@@ -201,7 +293,19 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 fee_currency=fee["currency"],
                 trade_time=fill["trade_time"],
             )
+            unresolved_submission = UnknownSubmission.create(
+                attempt_id=attempt_id,
+                intent_id="intent-1",
+                provider_id="SIMULATED",
+                account_id="sim-account",
+                environment="SIMULATION",
+                client_order_id=dispatched.client_order_id,
+                started_at=NOW,
+            )
             reconciled = reconcile_account(
+                provider_id="SIMULATED",
+                account_id="sim-account",
+                environment="SIMULATION",
                 local_cash={"USD": economic.cash("USD")},
                 provider_cash={"USD": snapshot["balances"][0]["total"]},
                 local_positions={INSTRUMENT: economic.position(INSTRUMENT)},
@@ -211,13 +315,80 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 },
                 local_execution_ids=[fill["provider_execution_id"]],
                 provider_fills=[provider_fill],
+                snapshot_consistency=SnapshotConsistencyEvidence(
+                    provider_id="SIMULATED",
+                    account_id="sim-account",
+                    environment="SIMULATION",
+                    mode="ATOMIC",
+                    query_started_at=LATER,
+                    query_completed_at=LATER,
+                ),
+                unknown_submissions=(unresolved_submission,),
+                searched_client_order_ids=(dispatched.client_order_id,),
                 coverage_start="2026-09-24T17:00:00Z",
                 coverage_end="2026-09-24T19:00:00Z",
                 pagination_complete=True,
+                provider_activity_provider_id="SIMULATED",
+                provider_activity_account_id="sim-account",
             )
             self.assertTrue(reconciled.complete)
             self.assertFalse(reconciled.blocks_new_risk)
-            self.assertEqual(reconciled.matched_execution_ids, (fill["provider_execution_id"],))
+            self.assertEqual(
+                reconciled.matched_execution_ids,
+                (fill["provider_execution_id"],),
+            )
+            self.assertEqual(reconciled.submission_resolutions[0].outcome, "OBSERVED_EXECUTION")
+
+            checkpoint = record_reconciliation_checkpoint(
+                journal,
+                reconciliation_id="sim-account:whole-flow",
+                result=reconciled,
+                observed_at=LATER,
+                host_id="sim-host",
+                owner_epoch="1",
+            )
+            resolution_artifact_id = "44444444-4444-4444-8444-444444444444"
+            resolution_receipt = {
+                "schema_version": 2,
+                "evidence_type": "AUTOTRADE_RESERVATION_RESOLUTION",
+                "environment": "SIMULATION",
+                "account_id": "sim-account",
+                "reservation_id": "reservation-1",
+                "intent_id": "intent-1",
+                "provider": "SIMULATED",
+                "attempt_id": attempt_id,
+                "outcome": "FILLED",
+                "reconciliation_complete": True,
+                "reconciliation_event_id": checkpoint["event_id"],
+                "reconciliation_payload_hash": checkpoint["payload_hash"],
+            }
+            resolution_manifest = artifacts.publish_bytes(
+                artifact_id=resolution_artifact_id,
+                data=canonical_json(resolution_receipt).encode("utf-8"),
+                media_type="application/vnd.autotrade.reservation-resolution+json",
+                rights={"storage": True, "export": False},
+            )
+            with self.assertRaisesRegex(
+                ReservationConflict,
+                "lacks canonical reconciliation semantics",
+            ):
+                reservations.mark_terminal(
+                    command_id="reservation-terminal-1",
+                    idempotency_key="reservation-terminal-1",
+                    reservation_id="reservation-1",
+                    outcome="FILLED",
+                    provider="SIMULATED",
+                    attempt_id=attempt_id,
+                    resolution_evidence=(
+                        f"artifact:{resolution_artifact_id}@{resolution_manifest['sha256']}"
+                    ),
+                )
+            # One observed execution proves economic activity, not terminal fill.
+            # Until durable order projection proves FILLED, reservation authority
+            # must not publish a terminal state.
+            reservation = reservations.get("reservation-1")
+            self.assertEqual(reservation.state, "WORKING")
+            self.assertIsNone(reservation.resolution_evidence)
             self.assertEqual(snapshot["open_orders"], [])
 
     def test_acknowledgement_without_fill_keeps_reservation_and_working_order_truth(self):
@@ -237,6 +408,8 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             attempt_id = str(uuid4())
             dispatcher = GuardedDispatcher(
                 JournalStore(f"{directory}/journal.sqlite3"),
+                environment="SIMULATION",
+                account_id="sim-account",
                 owner_token="sim-owner",
             )
             dispatched = dispatcher.dispatch(
@@ -354,6 +527,8 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             attempt_id = str(uuid4())
             dispatcher = GuardedDispatcher(
                 JournalStore(f"{directory}/journal.sqlite3"),
+                environment="SIMULATION",
+                account_id="sim-account",
                 owner_token="sim-owner",
             )
 
@@ -441,6 +616,8 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             }
             first_process = GuardedDispatcher(
                 JournalStore(journal_path),
+                environment="SIMULATION",
+                account_id="sim-account",
                 owner_token="process-one",
             )
 
@@ -476,6 +653,8 @@ class WholeSimulatorFlowTests(unittest.TestCase):
 
             restarted = GuardedDispatcher(
                 JournalStore(journal_path),
+                environment="SIMULATION",
+                account_id="sim-account",
                 owner_token="process-two",
             )
 
@@ -501,7 +680,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
 
             events = JournalStore(journal_path).load_events(
                 "submission_attempt",
-                attempt_id,
+                restarted._aggregate_id(attempt_id),
             )
             self.assertEqual(
                 [event["event_type"] for event in events],

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Mapping
+from uuid import UUID
 import base64
 import hashlib
 import hmac
@@ -32,6 +33,7 @@ WHITEBIT_OFFICIAL_DOCS = MappingProxyType(
         "api": "https://docs.whitebit.com/api-reference/overview",
         "order_types": "https://docs.whitebit.com/concepts/order-types",
         "client_order_id": "https://docs.whitebit.com/guides/client-order-id",
+        "websocket": "https://docs.whitebit.com/websocket/overview",
     }
 )
 
@@ -262,11 +264,54 @@ class WhiteBitOrderIntent:
 class WhiteBitPreparedRequest:
     endpoint: str
     body: Mapping[str, object]
+    account_id: str
+    environment: str
     capability_snapshot_id: str
     documentation_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
+        endpoint = _text(self.endpoint, name="endpoint")
+        allowed_endpoints = {
+            "/api/v4/order/market",
+            "/api/v4/order/new",
+            "/api/v4/order/stop_market",
+            "/api/v4/order/stop_limit",
+            "/api/v4/order/stock_market",
+            "/api/v4/order/collateral/market",
+            "/api/v4/order/collateral/limit",
+            "/api/v4/order/collateral/trigger-market",
+            "/api/v4/order/collateral/stop-limit",
+        }
+        if endpoint not in allowed_endpoints:
+            raise WhiteBitAdapterError(
+                "prepared endpoint must be a canonical WhiteBIT order path"
+            )
+        if not isinstance(self.body, Mapping):
+            raise TypeError("body must be a mapping")
+        body = dict(self.body)
+        validate_client_order_id(body.get("clientOrderId"))
+        _text(body.get("market"), name="market")
+        account = _text(self.account_id, name="account_id")
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+            raise WhiteBitAdapterError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
+        capability_snapshot_id = _text(
+            self.capability_snapshot_id,
+            name="capability_snapshot_id",
+        )
+        refs = tuple(
+            _text(value, name="documentation_ref")
+            for value in self.documentation_refs
+        )
+        if not refs:
+            raise WhiteBitAdapterError("documentation_refs must not be empty")
+
+        object.__setattr__(self, "endpoint", endpoint)
+        object.__setattr__(self, "body", MappingProxyType(body))
+        object.__setattr__(self, "account_id", account)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "capability_snapshot_id", capability_snapshot_id)
+        object.__setattr__(self, "documentation_refs", refs)
 
 
 @dataclass(frozen=True)
@@ -407,6 +452,8 @@ def prepare_order_request(
     intent: WhiteBitOrderIntent,
     *,
     client_order_id: str,
+    account_id: str,
+    environment: str,
     capability: CapabilitySnapshot,
     market_rules: WhiteBitMarketRules,
     at: datetime,
@@ -424,8 +471,14 @@ def prepare_order_request(
         raise TypeError("capability must be CapabilitySnapshot")
     point = _instant(at, name="at")
     client_id = validate_client_order_id(client_order_id)
+    account = _text(account_id, name="account_id")
+    env = _text(environment, name="environment").upper()
     if capability.provider_id.upper() != "WHITEBIT":
         raise WhiteBitAdapterError("capability belongs to another provider")
+    if capability.account_id != account:
+        raise WhiteBitAdapterError("capability account does not match target account")
+    if capability.environment.upper() != env:
+        raise WhiteBitAdapterError("capability environment does not match target environment")
     if capability.instrument_version != intent.instrument_version:
         raise WhiteBitAdapterError("capability instrument version does not match intent")
     if not capability.admits(
@@ -476,6 +529,8 @@ def prepare_order_request(
     return WhiteBitPreparedRequest(
         endpoint=endpoint,
         body=body,
+        account_id=account,
+        environment=env,
         capability_snapshot_id=capability.snapshot_id,
         documentation_refs=tuple(WHITEBIT_OFFICIAL_DOCS.values()),
     )
@@ -500,8 +555,14 @@ class WhiteBitSubmissionResult:
     rejection_message: str | None = None
 
     def __post_init__(self) -> None:
-        for name in ("attempt_id", "account_id", "environment"):
+        for name in ("attempt_id", "account_id"):
             object.__setattr__(self, name, _text(getattr(self, name), name=name))
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+            raise WhiteBitAdapterError(
+                "environment must be one of REPLAY, SIMULATION, PAPER, LIVE"
+            )
+        object.__setattr__(self, "environment", environment)
         object.__setattr__(
             self,
             "client_order_id",
@@ -541,6 +602,141 @@ class WhiteBitSubmissionResult:
             raise WhiteBitAdapterError("unknown submission cannot assert provider_order_id")
 
 
+def _canonical_evidence_ref(
+    value: Mapping[str, object],
+    *,
+    expected_sha256: str,
+    expected_observed_at: datetime,
+) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise WhiteBitAdapterError("response evidence must be a mapping")
+    allowed = {"artifact_id", "sha256", "observed_at", "source_uri", "rights_id"}
+    extra = sorted(set(value) - allowed)
+    if extra:
+        raise WhiteBitAdapterError(
+            "response evidence contains unsupported fields: " + ", ".join(extra)
+        )
+    try:
+        artifact_id = str(
+            UUID(_text(str(value.get("artifact_id", "")), name="artifact_id"))
+        )
+    except (ValueError, TypeError, AttributeError) as error:
+        raise WhiteBitAdapterError(
+            "response evidence artifact_id must be a UUID"
+        ) from error
+    digest = _text(str(value.get("sha256", "")), name="sha256")
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+        raise WhiteBitAdapterError(
+            "response evidence sha256 must be canonical SHA-256"
+        )
+    if digest != expected_sha256:
+        raise WhiteBitAdapterError(
+            "response evidence digest does not match authoritative provider response"
+        )
+    observed_raw = _text(str(value.get("observed_at", "")), name="observed_at")
+    try:
+        observed = datetime.fromisoformat(observed_raw.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise WhiteBitAdapterError(
+            "response evidence observed_at must be ISO timestamp"
+        ) from error
+    if observed.tzinfo is None or observed.utcoffset() is None:
+        raise WhiteBitAdapterError(
+            "response evidence observed_at must be timezone-aware"
+        )
+    canonical_observed = observed.astimezone(timezone.utc)
+    if canonical_observed != _instant(expected_observed_at, name="observed_at"):
+        raise WhiteBitAdapterError(
+            "response evidence observed_at does not match local response observation"
+        )
+    normalized = {
+        "artifact_id": artifact_id,
+        "sha256": digest,
+        "observed_at": canonical_observed.isoformat().replace("+00:00", "Z"),
+    }
+    source_uri = value.get("source_uri")
+    if source_uri is not None:
+        normalized["source_uri"] = _text(str(source_uri), name="source_uri")
+    rights_id = value.get("rights_id")
+    if rights_id is not None:
+        normalized["rights_id"] = _text(str(rights_id), name="rights_id")
+    return normalized
+
+
+def to_canonical_submission_result(
+    result: WhiteBitSubmissionResult,
+    *,
+    response_evidence: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Map the rich WhiteBIT attempt record to the closed provider contract.
+
+    Account/environment/local observation stay on the durable attempt record.
+    WhiteBIT create-order responses do not currently prove a provider receive
+    timestamp, so local observed_at is never emitted as provider_received_at.
+    """
+
+    if not isinstance(result, WhiteBitSubmissionResult):
+        raise TypeError("result must be WhiteBitSubmissionResult")
+    try:
+        attempt_id = str(UUID(result.attempt_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise WhiteBitAdapterError(
+            "attempt_id must be a UUID for canonical submission"
+        ) from error
+
+    canonical: dict[str, object] = {
+        "attempt_id": attempt_id,
+        "outcome": result.outcome,
+        "client_order_id": result.client_order_id,
+    }
+    if result.outcome == "UNKNOWN":
+        if (
+            result.response_sha256 is not None
+            or result.http_status is not None
+            or response_evidence is not None
+        ):
+            raise WhiteBitAdapterError(
+                "UNKNOWN canonical submission cannot claim provider response evidence"
+            )
+        canonical["evidence"] = []
+        canonical["reason_code"] = "TRANSPORT_AMBIGUOUS"
+        canonical["retry_disposition"] = "RECONCILE_FIRST"
+        return canonical
+
+    if result.response_sha256 is None or result.http_status is None:
+        raise WhiteBitAdapterError(
+            "authoritative ACK/REJECT requires provider response evidence"
+        )
+    if response_evidence is None:
+        raise WhiteBitAdapterError(
+            "authoritative ACK/REJECT requires immutable response EvidenceRef"
+        )
+    evidence = _canonical_evidence_ref(
+        response_evidence,
+        expected_sha256=result.response_sha256,
+        expected_observed_at=result.observed_at,
+    )
+    canonical["evidence"] = [evidence]
+    canonical["retry_disposition"] = "NEVER"
+
+    if result.outcome == "ACKNOWLEDGED":
+        if result.provider_order_id is None:
+            raise WhiteBitAdapterError(
+                "ACKNOWLEDGED canonical submission requires provider_order_id"
+            )
+        canonical["provider_order_id"] = result.provider_order_id
+        return canonical
+
+    if result.outcome == "REJECTED":
+        if result.rejection_code is None:
+            raise WhiteBitAdapterError(
+                "REJECTED canonical submission requires rejection_code"
+            )
+        canonical["reason_code"] = result.rejection_code
+        return canonical
+
+    raise WhiteBitAdapterError("unsupported canonical submission outcome")
+
 def _response_bytes(raw: str | bytes) -> bytes:
     if isinstance(raw, bytes):
         try:
@@ -574,12 +770,28 @@ def parse_submission_result(
 
     if not isinstance(prepared, WhiteBitPreparedRequest):
         raise TypeError("prepared must be WhiteBitPreparedRequest")
+    if type(transport_ambiguous) is not bool:
+        raise WhiteBitAdapterError("transport_ambiguous must be a boolean")
     client_id = validate_client_order_id(str(prepared.body.get("clientOrderId", "")))
     attempt = _text(attempt_id, name="attempt_id")
     account = _text(account_id, name="account_id")
     env = _text(environment, name="environment").upper()
+    if env not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+        raise WhiteBitAdapterError(
+            "environment must be one of REPLAY, SIMULATION, PAPER, LIVE"
+        )
     point = _instant(observed_at, name="observed_at")
+    if account != prepared.account_id:
+        raise WhiteBitAdapterError(
+            "submission account does not match prepared guarded request"
+        )
+    if env != prepared.environment:
+        raise WhiteBitAdapterError(
+            "submission environment does not match prepared guarded request"
+        )
 
+    if type(transport_ambiguous) is not bool:
+        raise WhiteBitAdapterError("transport_ambiguous must be boolean")
     if transport_ambiguous:
         if response_body is not None or http_status is not None:
             raise WhiteBitAdapterError(
@@ -799,6 +1011,7 @@ class WhiteBitAbsenceEvidence:
     executions_complete: bool
     activities_complete: bool
     consistency_horizon_satisfied: bool
+    qualified_exclusion_semantics: bool = False
 
     def __post_init__(self) -> None:
         for field in (
@@ -808,21 +1021,18 @@ class WhiteBitAbsenceEvidence:
             "executions_complete",
             "activities_complete",
             "consistency_horizon_satisfied",
+            "qualified_exclusion_semantics",
         ):
             if type(getattr(self, field)) is not bool:
                 raise TypeError(f"{field} must be boolean")
+        if self.qualified_exclusion_semantics:
+            raise WhiteBitAdapterError(
+                "WhiteBIT foundation cannot self-assert provider exclusion semantics"
+            )
 
     def verdict(self) -> str:
         if self.order_found:
             return "FOUND"
-        if (
-            self.open_orders_complete
-            and self.order_history_complete
-            and self.executions_complete
-            and self.activities_complete
-            and self.consistency_horizon_satisfied
-        ):
-            return "PROVEN_ABSENT"
         return "INCONCLUSIVE"
 
 
@@ -857,8 +1067,16 @@ class WhiteBitExecutionDeal:
     fee_currency: str
     trade_time: str
 
-    def to_reconciliation_fill(self) -> ProviderFillEvidence:
+    def to_reconciliation_fill(
+        self,
+        *,
+        account_id: str,
+        environment: str,
+    ) -> ProviderFillEvidence:
         return ProviderFillEvidence.create(
+            provider_id="WHITEBIT",
+            account_id=account_id,
+            environment=environment,
             provider_execution_id=self.provider_execution_id,
             client_order_id=self.client_order_id,
             instrument=self.market,
@@ -1342,6 +1560,7 @@ def absence_evidence_from_coverages(
     executions: WhiteBitPaginationCoverage,
     activities_complete: bool,
     consistency_horizon_satisfied: bool,
+    qualified_exclusion_semantics: bool = False,
 ) -> WhiteBitAbsenceEvidence:
     """Bind absence semantics to concrete, surface-typed pagination proof."""
     for coverage, expected in (
@@ -1361,6 +1580,8 @@ def absence_evidence_from_coverages(
         raise TypeError("activities_complete must be boolean")
     if type(consistency_horizon_satisfied) is not bool:
         raise TypeError("consistency_horizon_satisfied must be boolean")
+    if type(qualified_exclusion_semantics) is not bool:
+        raise TypeError("qualified_exclusion_semantics must be boolean")
     return WhiteBitAbsenceEvidence(
         order_found=order_found,
         open_orders_complete=open_orders.complete,
@@ -1368,6 +1589,7 @@ def absence_evidence_from_coverages(
         executions_complete=executions.complete,
         activities_complete=activities_complete,
         consistency_horizon_satisfied=consistency_horizon_satisfied,
+        qualified_exclusion_semantics=qualified_exclusion_semantics,
     )
 
 
@@ -1879,6 +2101,7 @@ def websocket_recovery_policy(channel: str) -> WhiteBitStreamRecoveryPolicy:
 
 
 def validate_websocket_endpoint(endpoint: str) -> str:
+    """Admit only the current host from WhiteBIT's official migration contract."""
     value = _text(endpoint, name="endpoint")
     if value == WHITEBIT_DEPRECATED_WEBSOCKET_ENDPOINT:
         raise WhiteBitAdapterError(

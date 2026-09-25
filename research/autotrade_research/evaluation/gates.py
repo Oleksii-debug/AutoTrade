@@ -3,8 +3,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+import json
 from types import MappingProxyType
 from typing import Iterable, Mapping
+from uuid import UUID
+
+from ..artifacts.store import ArtifactIntegrityError, ArtifactStore
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -17,6 +21,57 @@ def _decimal(value, *, name: str) -> Decimal:
     if not result.is_finite():
         raise ValueError(f"{name} must be a finite decimal")
     return result
+
+
+
+
+_REPORT_EVIDENCE_KINDS = frozenset({
+    "profile",
+    "trial_log",
+    "causal_audit",
+    "financial_invariants",
+    "retention",
+    "metrics",
+    "independent_review",
+})
+
+
+_REQUIRED_EVIDENCE_KINDS = frozenset({
+    "profile",
+    "code",
+    "data",
+    "model",
+    "config",
+    "cost",
+    "rights",
+    "environment",
+    "trial_log",
+    "causal_audit",
+    "financial_invariants",
+    "retention",
+    "metrics",
+    "independent_review",
+})
+
+
+@dataclass(frozen=True)
+class GateEvidenceRef:
+    artifact_id: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        try:
+            artifact_id = str(UUID(self.artifact_id))
+        except (ValueError, AttributeError, TypeError) as error:
+            raise ValueError("evidence artifact_id must be a UUID") from error
+        if (
+            not isinstance(self.sha256, str)
+            or len(self.sha256) != 71
+            or not self.sha256.startswith("sha256:")
+            or any(ch not in "0123456789abcdef" for ch in self.sha256[7:])
+        ):
+            raise ValueError("evidence sha256 must be a canonical SHA-256 digest")
+        object.__setattr__(self, "artifact_id", artifact_id)
 
 
 @dataclass(frozen=True)
@@ -75,8 +130,15 @@ class GateProfile:
 
         if not isinstance(self.selection_correction, str) or not self.selection_correction.strip():
             raise ValueError("selection_correction is required")
+        correction = self.selection_correction.strip()
         if type(self.max_trials) is not int or self.max_trials <= 0:
             raise ValueError("max_trials must be a positive integer")
+        if self.max_trials > 1 and correction.lower() in {
+            "none", "no", "unadjusted", "disabled", "n/a", "na"
+        }:
+            raise ValueError(
+                "multi-trial protocols require an explicit multiplicity treatment"
+            )
         if isinstance(self.required_regimes, (str, bytes)):
             raise TypeError("required_regimes must be a collection")
         regimes_raw = tuple(self.required_regimes)
@@ -103,7 +165,7 @@ class GateProfile:
         object.__setattr__(self, "min_power", power)
         object.__setattr__(self, "primary_baseline_id", primary_baseline)
         object.__setattr__(self, "baseline_ids", baselines)
-        object.__setattr__(self, "selection_correction", self.selection_correction.strip())
+        object.__setattr__(self, "selection_correction", correction)
         object.__setattr__(self, "required_regimes", regimes)
 
     @classmethod
@@ -169,6 +231,12 @@ class GateProfile:
         correction = selection_correction.strip()
         if type(max_trials) is not int or max_trials <= 0:
             raise ValueError("max_trials must be a positive integer")
+        if max_trials > 1 and correction.lower() in {
+            "none", "no", "unadjusted", "disabled", "n/a", "na"
+        }:
+            raise ValueError(
+                "multi-trial protocols require an explicit multiplicity treatment"
+            )
         if isinstance(required_regimes, (str, bytes)):
             raise TypeError("required_regimes must be a collection")
         materialized_regimes = tuple(required_regimes)
@@ -215,6 +283,7 @@ class EvaluationEvidence:
     selection_correction_applied: str | None
     trials_attempted: int | None
     regime_coverage: frozenset[str] | None
+    evidence_refs: Mapping[str, GateEvidenceRef] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -276,6 +345,26 @@ class EvaluationEvidence:
                 self,
                 "baseline_advantages",
                 MappingProxyType(normalized_baselines),
+            )
+
+
+        if self.evidence_refs is not None:
+            if not isinstance(self.evidence_refs, Mapping):
+                raise TypeError("evidence_refs must be a mapping or None")
+            normalized_refs: dict[str, GateEvidenceRef] = {}
+            for raw_kind, raw_ref in self.evidence_refs.items():
+                if not isinstance(raw_kind, str) or not raw_kind.strip():
+                    raise ValueError("evidence ref kind is required")
+                kind = raw_kind.strip()
+                if kind in normalized_refs:
+                    raise ValueError("duplicate normalized evidence ref kind")
+                if not isinstance(raw_ref, GateEvidenceRef):
+                    raise TypeError("evidence_refs values must be GateEvidenceRef")
+                normalized_refs[kind] = raw_ref
+            object.__setattr__(
+                self,
+                "evidence_refs",
+                MappingProxyType(normalized_refs),
             )
 
         if self.selection_correction_applied is not None:
@@ -413,7 +502,162 @@ class GateDecision:
         object.__setattr__(self, "checks", MappingProxyType(frozen_checks))
 
 
-def evaluate_gates(profile: GateProfile, evidence: EvaluationEvidence) -> GateDecision:
+
+def _decimal_text(value: Decimal | None) -> str | None:
+    if value is None:
+        return None
+    if value == 0:
+        return "0"
+    return format(value.normalize(), "f")
+
+
+def gate_report_payload(
+    kind: str,
+    profile: GateProfile,
+    evidence: EvaluationEvidence,
+) -> bytes:
+    """Canonical semantic payload for PASS-critical scientific report artifacts."""
+
+    if kind not in _REPORT_EVIDENCE_KINDS:
+        raise ValueError("kind is not a scientific report evidence kind")
+    if not isinstance(profile, GateProfile):
+        raise TypeError("profile must be GateProfile")
+    if not isinstance(evidence, EvaluationEvidence):
+        raise TypeError("evidence must be EvaluationEvidence")
+
+    profile_id = profile.profile_id
+    if kind == "profile":
+        value = {
+            "profile_id": profile_id,
+            "minimum_net_advantage": _decimal_text(profile.minimum_net_advantage),
+            "max_drawdown": _decimal_text(profile.max_drawdown),
+            "max_adverse_cost_loss": _decimal_text(profile.max_adverse_cost_loss),
+            "min_power": _decimal_text(profile.min_power),
+            "primary_baseline_id": profile.primary_baseline_id,
+            "baseline_ids": list(profile.baseline_ids),
+            "selection_correction": profile.selection_correction,
+            "max_trials": profile.max_trials,
+            "required_regimes": list(profile.required_regimes),
+            "require_complete_trials": profile.require_complete_trials,
+            "require_causal_audit": profile.require_causal_audit,
+            "require_financial_invariants": profile.require_financial_invariants,
+        }
+    elif kind == "trial_log":
+        value = {
+            "profile_id": profile_id,
+            "complete": evidence.trial_log_complete,
+            "trials_attempted": evidence.trials_attempted,
+            "selection_correction_applied": evidence.selection_correction_applied,
+        }
+    elif kind == "causal_audit":
+        value = {
+            "profile_id": profile_id,
+            "passed": evidence.causal_audit_passed,
+        }
+    elif kind == "financial_invariants":
+        value = {
+            "profile_id": profile_id,
+            "passed": evidence.financial_invariants_passed,
+        }
+    elif kind == "retention":
+        value = {
+            "profile_id": profile_id,
+            "passed": evidence.retention_passed,
+        }
+    elif kind == "metrics":
+        value = {
+            "profile_id": profile_id,
+            "reproducible": evidence.reproducible,
+            "dependence_aware_lower_bound": _decimal_text(
+                evidence.dependence_aware_lower_bound
+            ),
+            "estimated_power": _decimal_text(evidence.estimated_power),
+            "net_advantage": _decimal_text(evidence.net_advantage),
+            "drawdown": _decimal_text(evidence.drawdown),
+            "adverse_cost_loss": _decimal_text(evidence.adverse_cost_loss),
+            "baseline_advantages": (
+                None
+                if evidence.baseline_advantages is None
+                else {
+                    key: _decimal_text(amount)
+                    for key, amount in sorted(evidence.baseline_advantages.items())
+                }
+            ),
+            "regime_coverage": (
+                None
+                if evidence.regime_coverage is None
+                else sorted(evidence.regime_coverage)
+            ),
+        }
+    else:
+        value = {
+            "profile_id": profile_id,
+            "profile_unchanged_after_results": (
+                evidence.profile_unchanged_after_results
+            ),
+            "status": "PASS",
+        }
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _verify_evidence_bundle(
+    profile: GateProfile,
+    evidence: EvaluationEvidence,
+    artifact_store: ArtifactStore | None,
+) -> bool | None:
+    """Verify the immutable G0/G1/G2/G3/G4 evidence references.
+
+    Missing verifier context is INCONCLUSIVE. Once a bundle is supplied,
+    missing/corrupt/mismatched provenance is a hard failure rather than a
+    caller-asserted PASS.
+    """
+
+    if artifact_store is None or evidence.evidence_refs is None:
+        return None
+    refs = evidence.evidence_refs
+    if set(refs) != _REQUIRED_EVIDENCE_KINDS:
+        return False
+    for kind in sorted(_REQUIRED_EVIDENCE_KINDS):
+        ref = refs[kind]
+        try:
+            manifest = artifact_store.load_manifest(ref.artifact_id)
+            payload = artifact_store.read_bytes(ref.artifact_id)
+        except (FileNotFoundError, ArtifactIntegrityError, ValueError, OSError):
+            return False
+        if manifest.get("manifest_hash") is None:
+            return False
+        if manifest.get("sha256") != ref.sha256:
+            return False
+        metadata = manifest.get("metadata")
+        if not isinstance(metadata, dict):
+            return False
+        if metadata.get("evidence_kind") != kind:
+            return False
+        if metadata.get("profile_id") != profile.profile_id:
+            return False
+        rights = manifest.get("rights")
+        if not isinstance(rights, dict) or rights.get("storage") is not True:
+            return False
+        if kind in _REPORT_EVIDENCE_KINDS:
+            if manifest.get("media_type") != "application/json":
+                return False
+            if payload != gate_report_payload(kind, profile, evidence):
+                return False
+    return True
+
+
+def evaluate_gates(
+    profile: GateProfile,
+    evidence: EvaluationEvidence,
+    *,
+    artifact_store: ArtifactStore | None = None,
+) -> GateDecision:
     checks: dict[str, str] = {}
     failures: list[str] = []
     unknowns: list[str] = []
@@ -433,6 +677,12 @@ def evaluate_gates(profile: GateProfile, evidence: EvaluationEvidence) -> GateDe
         evidence.registered_profile_id == profile.profile_id,
         "evaluation used a different gate profile",
         "gate profile identity is unavailable",
+    )
+    check(
+        "evidence_bundle",
+        _verify_evidence_bundle(profile, evidence, artifact_store),
+        "immutable scientific evidence bundle is missing, corrupt, or mismatched",
+        "immutable scientific evidence bundle has not been verified",
     )
     check(
         "profile_lock",
@@ -529,6 +779,24 @@ def evaluate_gates(profile: GateProfile, evidence: EvaluationEvidence) -> GateDe
     else:
         check("net_advantage", evidence.net_advantage > profile.minimum_net_advantage,
               "net advantage did not exceed the registered practical effect", "")
+
+    if (
+        evidence.dependence_aware_lower_bound is None
+        or evidence.net_advantage is None
+    ):
+        check(
+            "uncertainty_consistency",
+            None,
+            "",
+            "lower-bound/point-estimate consistency cannot be verified",
+        )
+    else:
+        check(
+            "uncertainty_consistency",
+            evidence.dependence_aware_lower_bound <= evidence.net_advantage,
+            "dependence-aware lower bound exceeds the reported net-advantage point estimate",
+            "",
+        )
 
     if evidence.drawdown is None:
         check("drawdown", None, "", "drawdown evidence is missing")

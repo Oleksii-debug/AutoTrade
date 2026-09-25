@@ -4,9 +4,8 @@ import subprocess
 import tempfile
 import unittest
 
-from control.tools.registry_state import claim
 from control.tools.registry_store import GitRegistryStore, RegistryWriteUnconfirmed
-from test_registry_state import empty_registry, request, NOW
+from test_registry_state import NOW, claim, empty_registry, request
 
 
 def git(path, *args):

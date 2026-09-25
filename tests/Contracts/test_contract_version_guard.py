@@ -2,8 +2,9 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
-from tools.contract_version_guard import evaluate
+from tools.contract_version_guard import evaluate, evaluate_refs
 
 
 def write_tree(root: Path, version="1.0.0", schemas=None, defs=None):
@@ -38,6 +39,126 @@ class ContractVersionGuardTests(unittest.TestCase):
             errors = evaluate(Path(left), Path(right))
             self.assertTrue(any("without increasing" in item for item in errors))
 
+    def test_added_required_member_requires_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            base_defs = {
+                "A": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["command_id"],
+                    "properties": {
+                        "command_id": {"type": "string"},
+                        "account_id": {"type": "string"},
+                    },
+                }
+            }
+            current_defs = {
+                "A": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["command_id", "account_id"],
+                    "properties": {
+                        "command_id": {"type": "string"},
+                        "account_id": {"type": "string"},
+                    },
+                }
+            }
+            write_tree(Path(left), defs=base_defs)
+            write_tree(Path(right), version="1.1.0", defs=current_defs)
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(any("new required members" in item for item in errors))
+            self.assertTrue(any("account_id" in item for item in errors))
+
+    def test_first_required_member_on_existing_object_requires_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            base_defs = {
+                "A": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "account_id": {"type": "string"},
+                    },
+                }
+            }
+            current_defs = {
+                "A": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["account_id"],
+                    "properties": {
+                        "account_id": {"type": "string"},
+                    },
+                }
+            }
+            write_tree(Path(left), defs=base_defs)
+            write_tree(Path(right), version="1.1.0", defs=current_defs)
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(any("new required members" in item for item in errors))
+            self.assertTrue(any("account_id" in item for item in errors))
+
+    def test_first_required_member_on_existing_object_allows_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            base_defs = {
+                "A": {
+                    "type": "object",
+                    "properties": {
+                        "environment": {"type": "string"},
+                    },
+                }
+            }
+            current_defs = {
+                "A": {
+                    "type": "object",
+                    "required": ["environment"],
+                    "properties": {
+                        "environment": {"type": "string"},
+                    },
+                }
+            }
+            write_tree(Path(left), defs=base_defs)
+            write_tree(Path(right), version="2.0.0", defs=current_defs)
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_added_required_member_allows_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            base_defs = {
+                "A": {
+                    "type": "object",
+                    "required": ["command_id"],
+                    "properties": {"command_id": {"type": "string"}},
+                }
+            }
+            current_defs = {
+                "A": {
+                    "type": "object",
+                    "required": ["command_id", "environment"],
+                    "properties": {
+                        "command_id": {"type": "string"},
+                        "environment": {"type": "string"},
+                    },
+                }
+            }
+            write_tree(Path(left), defs=base_defs)
+            write_tree(Path(right), version="2.0.0", defs=current_defs)
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_required_members_in_new_definition_do_not_force_major(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left), defs={"A": {"type": "string"}})
+            write_tree(
+                Path(right),
+                version="1.1.0",
+                defs={
+                    "A": {"type": "string"},
+                    "B": {
+                        "type": "object",
+                        "required": ["value"],
+                        "properties": {"value": {"type": "string"}},
+                    },
+                },
+            )
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
     def test_removed_definition_requires_major_increment(self):
         with TemporaryDirectory() as left, TemporaryDirectory() as right:
             write_tree(Path(left), defs={"A": {}, "B": {}})
@@ -50,6 +171,23 @@ class ContractVersionGuardTests(unittest.TestCase):
             write_tree(Path(left), defs={"A": {}, "B": {}})
             write_tree(Path(right), version="2.0.0", defs={"A": {}})
             self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_ref_evaluation_uses_clean_archives_for_both_sides(self):
+        with TemporaryDirectory() as base_dir, TemporaryDirectory() as current_dir:
+            base = Path(base_dir)
+            current = Path(current_dir)
+            write_tree(base)
+            write_tree(current)
+
+            with patch(
+                "tools.contract_version_guard.export_ref",
+                side_effect=[base, current],
+            ) as export:
+                self.assertEqual(evaluate_refs("origin/main"), [])
+                self.assertEqual(
+                    [call.args[0] for call in export.call_args_list],
+                    ["origin/main", "HEAD"],
+                )
 
     def test_version_cannot_decrease(self):
         with TemporaryDirectory() as left, TemporaryDirectory() as right:

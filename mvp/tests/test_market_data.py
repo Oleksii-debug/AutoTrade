@@ -434,6 +434,46 @@ class MarketNormalizationTests(unittest.TestCase):
         )
         self.assertIn("UNVERIFIED_BOOK_STATE", next_delta.quality_flags)
 
+    def test_raw_evidence_ref_is_strict_contract_evidence(self):
+        base = raw("TRADE", {"price": "100", "quantity": "1"})
+        common = dict(
+            provider_id=base.provider_id,
+            venue_id=base.venue_id,
+            provider_symbol=base.provider_symbol,
+            kind=base.kind,
+            source_event_at=base.source_event_at,
+            available_at=base.available_at,
+            ingested_at=base.ingested_at,
+            availability_basis=base.availability_basis,
+            revision=base.revision,
+            payload=base.payload,
+        )
+        with self.assertRaisesRegex(MarketDataError, "missing required"):
+            RawMarketUpdate(
+                **common,
+                raw_evidence_ref={"artifact_id": EVIDENCE["artifact_id"]},
+            )
+        with self.assertRaisesRegex(MarketDataError, "sha256"):
+            RawMarketUpdate(
+                **common,
+                raw_evidence_ref={**EVIDENCE, "sha256": "bad"},
+            )
+        with self.assertRaisesRegex(MarketDataError, "unknown fields"):
+            RawMarketUpdate(
+                **common,
+                raw_evidence_ref={**EVIDENCE, "secret": "must-not-pass"},
+            )
+        with self.assertRaisesRegex(MarketDataError, "artifact_id"):
+            RawMarketUpdate(
+                **common,
+                raw_evidence_ref={**EVIDENCE, "artifact_id": "not-a-uuid"},
+            )
+        with self.assertRaisesRegex(MarketDataError, "absolute URI"):
+            RawMarketUpdate(
+                **common,
+                raw_evidence_ref={**EVIDENCE, "source_uri": "/relative"},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

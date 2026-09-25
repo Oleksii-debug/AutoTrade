@@ -2,6 +2,7 @@ import unittest
 
 from mvp.autotrade_mvp.untrusted_research import (
     Redistribution,
+    AdmittedResearchToolRequest,
     ResearchBoundaryError,
     ResearchCapability,
     ResearchEvidence,
@@ -98,6 +99,108 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
                     requested_capabilities=("COMPUTE_STATISTICS",),
                     arguments={},
                 )
+            )
+
+    def test_admitted_request_cannot_be_forged_or_left_mutable(self):
+        nested = {"window": {"size": 20}}
+        admitted = AdmittedResearchToolRequest(
+            request_id="direct-admitted",
+            tool_name="statistics",
+            capabilities=(ResearchCapability.COMPUTE_STATISTICS,),
+            arguments=nested,
+            evidence_refs=("artifact:1",),
+        )
+        nested["window"]["size"] = 999
+        self.assertEqual(admitted.arguments["window"]["size"], 20)
+        with self.assertRaisesRegex(TypeError, "immutable"):
+            admitted.arguments["window"]["size"] = 30
+
+        with self.assertRaisesRegex(ResearchBoundaryError, "ResearchCapability"):
+            AdmittedResearchToolRequest(
+                request_id="forged-capability",
+                tool_name="statistics",
+                capabilities=("COMPUTE_STATISTICS",),
+                arguments={},
+                evidence_refs=(),
+            )
+        with self.assertRaisesRegex(ResearchBoundaryError, "cannot grant authority"):
+            AdmittedResearchToolRequest(
+                request_id="forged-authority",
+                tool_name="statistics",
+                capabilities=(ResearchCapability.COMPUTE_STATISTICS,),
+                arguments={},
+                evidence_refs=(),
+                permission_effect="EXECUTION",
+            )
+
+    def test_tool_arguments_are_deeply_immutable_across_admission(self):
+        nested = {"window": {"size": 20}, "fields": ["price"]}
+        request = ResearchToolRequest(
+            request_id="immutable-args",
+            tool_name="statistics",
+            requested_capabilities=("COMPUTE_STATISTICS",),
+            arguments=nested,
+        )
+        admitted = self.boundary().admit(request)
+
+        nested["window"]["size"] = 999
+        nested["fields"].append("secret")
+
+        self.assertEqual(admitted.arguments["window"]["size"], 20)
+        self.assertEqual(admitted.arguments["fields"], ("price",))
+        with self.assertRaisesRegex(TypeError, "immutable"):
+            admitted.arguments["window"]["size"] = 30
+
+    def test_tool_arguments_reject_opaque_or_nonfinite_nested_values(self):
+        for value in (object(), {1, 2}, float("nan"), float("inf")):
+            with self.subTest(value=repr(value)), self.assertRaisesRegex(
+                ResearchBoundaryError,
+                "research tool arguments.*JSON-compatible|finite JSON",
+            ):
+                ResearchToolRequest(
+                    request_id="invalid-args",
+                    tool_name="statistics",
+                    requested_capabilities=("COMPUTE_STATISTICS",),
+                    arguments={"nested": {"value": value}},
+                )
+
+    def test_host_tool_allowlist_rejects_normalized_name_collision(self):
+        with self.assertRaisesRegex(
+            ResearchBoundaryError,
+            "unique after normalization",
+        ):
+            ResearchToolBoundary(
+                {
+                    "statistics": (
+                        ResearchCapability.COMPUTE_STATISTICS,
+                    ),
+                    " statistics ": (
+                        ResearchCapability.READ_MARKET_EVIDENCE,
+                    ),
+                }
+            )
+
+    def test_host_tool_allowlist_requires_typed_unique_capabilities(self):
+        with self.assertRaisesRegex(
+            ResearchBoundaryError,
+            "ResearchCapability values",
+        ):
+            ResearchToolBoundary(
+                {
+                    "statistics": ("COMPUTE_STATISTICS",),
+                }
+            )
+        with self.assertRaisesRegex(
+            ResearchBoundaryError,
+            "capabilities must be unique",
+        ):
+            ResearchToolBoundary(
+                {
+                    "statistics": (
+                        ResearchCapability.COMPUTE_STATISTICS,
+                        ResearchCapability.COMPUTE_STATISTICS,
+                    ),
+                }
             )
 
     def test_unknown_tool_is_rejected_even_when_requested_capability_is_safe(self):
@@ -241,6 +344,26 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
             result.proposal["analysis"]["token"] = "late-injection"
         with self.assertRaises(TypeError):
             result.proposal["steps"][0]["authority_grant"] = "TRADE_ALLOWED"
+        with self.assertRaises(TypeError):
+            dict.__setitem__(result.proposal, "token", "base-class-bypass")
+        self.assertNotIn("token", result.proposal)
+
+    def test_admitted_arguments_cannot_be_mutated_via_dict_base_class(self):
+        admitted = self.boundary().admit(
+            ResearchToolRequest(
+                request_id="dict-bypass",
+                tool_name="statistics",
+                requested_capabilities=("COMPUTE_STATISTICS",),
+                arguments={"window": {"size": 20}},
+            )
+        )
+        with self.assertRaises(TypeError):
+            dict.__setitem__(
+                admitted.arguments["window"],
+                "size",
+                999,
+            )
+        self.assertEqual(admitted.arguments["window"]["size"], 20)
 
     def test_evidence_cannot_be_constructed_as_trusted_or_permission_granting(self):
         base = {

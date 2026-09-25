@@ -7,12 +7,17 @@ import json
 import unittest
 from uuid import uuid4
 
-from mvp.autotrade_mvp.capabilities import CapabilitySnapshot
+from mvp.autotrade_mvp.capabilities import (
+    CapabilityClaim,
+    EvidenceVerification,
+    derive_capability_snapshot,
+)
 from mvp.autotrade_mvp.whitebit import (
     WhiteBitAbsenceEvidence,
     WhiteBitAdapterError,
     WhiteBitMarketRules,
     WhiteBitOrderIntent,
+    WhiteBitPreparedRequest,
     WhiteBitPageEvidence,
     WhiteBitRecoveryCheckpoint,
     absence_evidence_from_coverages,
@@ -57,32 +62,45 @@ from mvp.autotrade_mvp.whitebit import (
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
-def capability(*, order_types=("LIMIT", "MARKET", "STOP_MARKET", "STOP_LIMIT"), tif=("GTC", "IOC")):
-    evidence = {
-        "artifact_id": str(uuid4()),
-        "sha256": "sha256:" + "a" * 64,
-        "observed_at": "2026-09-24T19:00:00Z",
-        "source_uri": "https://docs.whitebit.com/concepts/order-types",
-    }
-    return CapabilitySnapshot(
+def capability(
+    *,
+    order_types=("LIMIT", "MARKET", "STOP_MARKET", "STOP_LIMIT"),
+    tif=("GTC", "IOC"),
+    account_id="account-1",
+    environment="PAPER",
+):
+    observed_at = NOW - timedelta(hours=1)
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            provider_id="WHITEBIT",
+            account_id=account_id,
+            entity_id="global",
+            environment=environment,
+            instrument_version="BTC_USDT:v1",
+            observed_at=observed_at,
+            expires_at=NOW + timedelta(hours=1),
+            supported_order_types=frozenset(order_types),
+            time_in_force=frozenset(tif),
+            permission_scopes=frozenset({"ORDER_WRITE"}),
+            position_mode="NET",
+            native_protection=frozenset({"STOP"}),
+            rate_limit_policy_id="whitebit-v4-test",
+            data_entitlements=frozenset({"ORDERS"}),
+            evidence_ref={
+                "artifact_id": str(uuid4()),
+                "sha256": "sha256:" + "a" * 64,
+                "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+                "source_uri": "https://docs.whitebit.com/concepts/order-types",
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    return derive_capability_snapshot(
         snapshot_id=str(uuid4()),
-        provider_id="WHITEBIT",
-        account_id="account-1",
-        entity_id="global",
-        environment="PAPER",
-        instrument_version="BTC_USDT:v1",
-        observed_at=NOW - timedelta(hours=1),
-        expires_at=NOW + timedelta(hours=1),
-        supported_order_types=frozenset(order_types),
-        time_in_force=frozenset(tif),
-        permission_scopes=frozenset({"ORDER_WRITE"}),
-        position_mode="NET",
-        native_protection=frozenset({"STOP"}),
-        rate_limit_policy_id="whitebit-v4-test",
-        data_entitlements=frozenset({"ORDERS"}),
-        evidence=(evidence,),
-        status="VERIFIED",
-        sources=frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}),
+        claims=claims,
+        observed_at=observed_at,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
     )
 
 
@@ -149,6 +167,45 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertEqual(normalized.side, "BUY")
         self.assertEqual(normalized.amount, Decimal("0.0100"))
 
+    def test_direct_prepared_request_cannot_bypass_guarded_scope_or_provenance(self):
+        base = {
+            "endpoint": "/api/v4/order/new",
+            "body": {
+                "market": "BTC_USDT",
+                "clientOrderId": "at-direct-guard",
+            },
+            "account_id": "account-1",
+            "environment": "PAPER",
+            "capability_snapshot_id": "cap-1",
+            "documentation_refs": ("https://docs.whitebit.com/order",),
+        }
+        request = WhiteBitPreparedRequest(**base)
+        self.assertEqual(request.environment, "PAPER")
+        self.assertEqual(request.capability_snapshot_id, "cap-1")
+        with self.assertRaisesRegex(WhiteBitAdapterError, "environment"):
+            WhiteBitPreparedRequest(**{**base, "environment": "STAGING"})
+        with self.assertRaisesRegex(WhiteBitAdapterError, "capability_snapshot_id"):
+            WhiteBitPreparedRequest(**{**base, "capability_snapshot_id": " "})
+        with self.assertRaisesRegex(WhiteBitAdapterError, "documentation_refs"):
+            WhiteBitPreparedRequest(**{**base, "documentation_refs": ()})
+        with self.assertRaisesRegex(WhiteBitAdapterError, "client_order_id|clientOrderId"):
+            WhiteBitPreparedRequest(
+                **{**base, "body": {"market": "BTC_USDT", "clientOrderId": ""}}
+            )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "endpoint"):
+            WhiteBitPreparedRequest(**{**base, "endpoint": "https://evil.test/order"})
+        with self.assertRaisesRegex(WhiteBitAdapterError, "order path"):
+            WhiteBitPreparedRequest(
+                **{**base, "endpoint": "/api/v4/main-account/withdraw"}
+            )
+        for field, value in (("clientOrderId", None), ("clientOrderId", 123), ("market", True)):
+            with self.subTest(field=field, value=value), self.assertRaises(
+                WhiteBitAdapterError
+            ):
+                WhiteBitPreparedRequest(
+                    **{**base, "body": {**base["body"], field: value}}
+                )
+
     def test_spot_limit_request_uses_exact_strings_and_dispatcher_client_id(self):
         intent = WhiteBitOrderIntent.create(
             instrument_version="BTC_USDT:v1",
@@ -162,16 +219,71 @@ class WhiteBitAdapterTests(unittest.TestCase):
         request = prepare_order_request(
             intent,
             client_order_id="at-0123456789abcdef",
+            account_id="account-1",
+            environment="PAPER",
             capability=capability(),
             market_rules=market_rules(),
             at=NOW,
         )
         self.assertEqual(request.endpoint, "/api/v4/order/new")
+        self.assertEqual(request.account_id, "account-1")
+        self.assertEqual(request.environment, "PAPER")
         self.assertEqual(request.body["amount"], "0.0100")
         self.assertEqual(request.body["price"], "40000.25")
         self.assertEqual(request.body["clientOrderId"], "at-0123456789abcdef")
         self.assertNotIn("nonce", request.body)
         self.assertNotIn("request", request.body)
+
+    def test_prepared_and_recorded_submission_share_exact_account_environment_scope(self):
+        intent = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="MARKET",
+            amount="0.01",
+        )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "account"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-cross-account",
+                account_id="other-account",
+                environment="PAPER",
+                capability=capability(),
+                market_rules=market_rules(),
+                at=NOW,
+            )
+        request = prepare_order_request(
+            intent,
+            client_order_id="at-scope-bind",
+            account_id="account-1",
+            environment="PAPER",
+            capability=capability(),
+            market_rules=market_rules(),
+            at=NOW,
+        )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "submission account"):
+            parse_submission_result(
+                request,
+                attempt_id="attempt-cross-account",
+                account_id="other-account",
+                environment="PAPER",
+                observed_at=NOW,
+                response_body=None,
+                http_status=None,
+                transport_ambiguous=True,
+            )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "submission environment"):
+            parse_submission_result(
+                request,
+                attempt_id="attempt-cross-environment",
+                account_id="account-1",
+                environment="LIVE",
+                observed_at=NOW,
+                response_body=None,
+                http_status=None,
+                transport_ambiguous=True,
+            )
 
     def test_spot_market_buy_uses_base_quantity_stock_market_endpoint(self):
         intent = WhiteBitOrderIntent.create(
@@ -185,6 +297,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
         request = prepare_order_request(
             intent,
             client_order_id="at-stock-buy",
+            account_id="account-1",
+            environment="PAPER",
             capability=capability(),
             market_rules=market_rules(),
             at=NOW,
@@ -209,6 +323,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
             prepare_order_request(
                 intent,
                 client_order_id="at-stop-buy",
+                account_id="account-1",
+                environment="PAPER",
                 capability=capability(),
                 market_rules=market_rules(),
                 at=NOW,
@@ -304,6 +420,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
             prepare_order_request(
                 intent,
                 client_order_id="at-order-1",
+                account_id="account-1",
+                environment="PAPER",
                 capability=capability(order_types=("MARKET",)),
                 market_rules=market_rules(),
                 at=NOW,
@@ -323,6 +441,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
         request = prepare_order_request(
             collateral,
             client_order_id="at-reduce-1",
+            account_id="account-1",
+            environment="PAPER",
             capability=capability(),
             market_rules=market_rules(market_type="futures"),
             at=NOW,
@@ -374,6 +494,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
         request = prepare_order_request(
             intent,
             client_order_id="at-submit-1",
+            account_id="account-1",
+            environment="PAPER",
             capability=capability(),
             market_rules=market_rules(),
             at=NOW,
@@ -414,6 +536,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
         request = prepare_order_request(
             intent,
             client_order_id="at-submit-2",
+            account_id="account-1",
+            environment="PAPER",
             capability=capability(),
             market_rules=market_rules(),
             at=NOW,
@@ -458,6 +582,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
         request = prepare_order_request(
             intent,
             client_order_id="at-unknown-1",
+            account_id="account-1",
+            environment="PAPER",
             capability=capability(),
             market_rules=market_rules(),
             at=NOW,
@@ -490,6 +616,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
         request = prepare_order_request(
             intent,
             client_order_id="at-reject-1",
+            account_id="account-1",
+            environment="PAPER",
             capability=capability(),
             market_rules=market_rules(),
             at=NOW,
@@ -527,6 +655,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
         request = prepare_order_request(
             intent,
             client_order_id="at-http-500",
+            account_id="account-1",
+            environment="PAPER",
             capability=capability(),
             market_rules=market_rules(),
             at=NOW,
@@ -672,7 +802,7 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertEqual(deal.provider_order_id, "456")
         self.assertEqual(deal.role, "TAKER")
         self.assertEqual(deal.trade_time, "2020-06-27T04:58:59.123456Z")
-        fill = deal.to_reconciliation_fill()
+        fill = deal.to_reconciliation_fill(account_id="paper-1", environment="PAPER")
         self.assertEqual(fill.provider_execution_id, "123")
         self.assertEqual(fill.quantity, Decimal("0.001"))
         self.assertEqual(fill.price, Decimal("40000"))
@@ -696,7 +826,7 @@ class WhiteBitAdapterTests(unittest.TestCase):
             market="BTC_USDT",
         )
         self.assertIsNone(deal.client_order_id)
-        self.assertIsNone(deal.to_reconciliation_fill().client_order_id)
+        self.assertIsNone(deal.to_reconciliation_fill(account_id="paper-1", environment="PAPER").client_order_id)
 
     def test_execution_deal_requires_exact_economic_identity(self):
         with self.assertRaisesRegex(WhiteBitAdapterError, "multiplied by price"):
@@ -1478,7 +1608,20 @@ class WhiteBitAdapterTests(unittest.TestCase):
             activities_complete=True,
             consistency_horizon_satisfied=True,
         )
-        self.assertEqual(evidence.verdict(), "PROVEN_ABSENT")
+        self.assertEqual(evidence.verdict(), "INCONCLUSIVE")
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "cannot self-assert provider exclusion semantics",
+        ):
+            absence_evidence_from_coverages(
+                order_found=False,
+                open_orders=open_orders,
+                order_history=order_history,
+                executions=executions,
+                activities_complete=True,
+                consistency_horizon_satisfied=True,
+                qualified_exclusion_semantics=True,
+            )
 
     def test_absence_builder_stays_inconclusive_on_full_nonterminal_page(self):
         open_orders = open_order_coverage()
@@ -1531,7 +1674,7 @@ class WhiteBitAdapterTests(unittest.TestCase):
         )
         self.assertEqual(evidence.verdict(), "INCONCLUSIVE")
 
-    def test_absence_requires_all_surfaces_and_consistency_horizon(self):
+    def test_complete_surfaces_do_not_self_qualify_provider_absence(self):
         evidence = WhiteBitAbsenceEvidence(
             order_found=False,
             open_orders_complete=True,
@@ -1540,7 +1683,20 @@ class WhiteBitAdapterTests(unittest.TestCase):
             activities_complete=True,
             consistency_horizon_satisfied=True,
         )
-        self.assertEqual(evidence.verdict(), "PROVEN_ABSENT")
+        self.assertEqual(evidence.verdict(), "INCONCLUSIVE")
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "cannot self-assert provider exclusion semantics",
+        ):
+            WhiteBitAbsenceEvidence(
+                order_found=False,
+                open_orders_complete=True,
+                order_history_complete=True,
+                executions_complete=True,
+                activities_complete=True,
+                consistency_horizon_satisfied=True,
+                qualified_exclusion_semantics=True,
+            )
         found = WhiteBitAbsenceEvidence(
             order_found=True,
             open_orders_complete=False,

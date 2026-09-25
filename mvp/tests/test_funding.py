@@ -165,5 +165,92 @@ class FundingTests(unittest.TestCase):
 
 
 
+    def test_restart_rehydrates_final_before_booking_only_correction_delta(self):
+        first_event = event(revision=1, kind="FINAL", rate="0.0001")
+        first_book = FundingRevisionBook()
+        first = first_book.record(first_event)
+        ledger = EconomicBook(
+            [
+                book_funding_delta(
+                    transaction_id="funding-r1",
+                    cause_event_id="funding-observation-r1",
+                    settlement_currency="USD",
+                    economic_delta=first.economic_delta,
+                )
+            ]
+        )
+
+        restarted = FundingRevisionBook(first_book.events)
+        correction_event = event(revision=2, kind="FINAL", rate="0.00012", available_hour=9)
+        correction = restarted.record(correction_event)
+        self.assertEqual(correction.economic_delta, Decimal("-0.02000"))
+        self.assertEqual(
+            restarted.events,
+            (first_event, correction_event),
+        )
+
+        ledger.append(
+            book_funding_delta(
+                transaction_id="funding-r2",
+                cause_event_id="funding-observation-r2",
+                settlement_currency="USD",
+                economic_delta=correction.economic_delta,
+            )
+        )
+        self.assertEqual(ledger.cash("USD"), Decimal("-0.12000"))
+
+    def test_rehydration_fails_closed_on_non_monotonic_history(self):
+        with self.assertRaisesRegex(FundingConflict, "cannot move backwards"):
+            FundingRevisionBook(
+                (
+                    event(revision=2, kind="FINAL", rate="0.00012", available_hour=9),
+                    event(revision=1, kind="FINAL", rate="0.0001", available_hour=9),
+                )
+            )
+
+    def test_currency_aliases_are_canonical_across_revision_and_posting(self):
+        first = FundingEvent(
+            funding_id="funding:BTC-PERP:currency",
+            revision=1,
+            kind="FINAL",
+            effective_at=moment(8),
+            available_at=moment(8),
+            settlement_currency=" usd ",
+            signed_notional=Decimal("1000"),
+            rate=Decimal("0.0001"),
+            sign_convention="POSITIVE_LONG_PAYS",
+            evidence_ref="artifact:currency-r1",
+        )
+        correction = FundingEvent(
+            funding_id=first.funding_id,
+            revision=2,
+            kind="FINAL",
+            effective_at=moment(8),
+            available_at=moment(9),
+            settlement_currency="USD",
+            signed_notional=Decimal("1000"),
+            rate=Decimal("0.00012"),
+            sign_convention="POSITIVE_LONG_PAYS",
+            evidence_ref="artifact:currency-r2",
+        )
+        book = FundingRevisionBook((first,))
+        update = book.record(correction)
+        self.assertEqual(first.settlement_currency, "USD")
+        self.assertEqual(update.economic_delta, Decimal("-0.02000"))
+
+        transaction = book_funding_delta(
+            transaction_id="funding-currency",
+            cause_event_id="funding-currency-r2",
+            settlement_currency=" usd ",
+            economic_delta=update.economic_delta,
+        )
+        self.assertEqual(transaction.postings[0].ledger_account, "CASH:USD")
+        self.assertEqual(transaction.postings[0].asset_or_currency, "USD")
+
+    def test_record_rejects_non_event_boundary(self):
+        with self.assertRaisesRegex(TypeError, "FundingEvent"):
+            FundingRevisionBook().record({"funding_id": "forged"})
+
+
 if __name__ == "__main__":
     unittest.main()

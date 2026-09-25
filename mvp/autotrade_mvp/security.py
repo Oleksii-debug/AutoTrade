@@ -2,7 +2,9 @@
 
 Credential persistence and decryption are delegated to the canonical protected
 credential vault. This module owns roles, paired origins and short-lived sessions;
-it deliberately does not keep a second plaintext credential store.
+session minting additionally requires an injected authenticated-identity/role
+verifier, so a paired browser origin is never treated as authentication by itself.
+It deliberately does not keep a second plaintext credential store.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 
+from .host_actions import required_roles_for_host_action
 from .windows_secrets import PersistentCredentialHandle, ProtectedCredentialVault
 
 
@@ -79,6 +82,7 @@ class SecurityBoundary:
         *,
         allowed_origins: set[str],
         credential_vault: ProtectedCredentialVault,
+        session_authorizer: Callable[[str, str, str], bool] | None = None,
         now: Callable[[], float] | None = None,
     ) -> None:
         if not allowed_origins:
@@ -87,6 +91,9 @@ class SecurityBoundary:
             raise TypeError("credential_vault must be a ProtectedCredentialVault")
         self._paired_origins = {_authenticated_origin(value) for value in allowed_origins}
         self._credential_vault = credential_vault
+        if session_authorizer is not None and not callable(session_authorizer):
+            raise TypeError("session_authorizer must be callable or None")
+        self._session_authorizer = session_authorizer
         self._now = now or time.time
         self._sessions: dict[str, Session] = {}
 
@@ -118,6 +125,22 @@ class SecurityBoundary:
             raise ValueError("Session lifetime must be an integer number of seconds")
         if ttl_seconds <= 0 or ttl_seconds > 3600:
             raise ValueError("Session lifetime is outside the permitted bound")
+        if self._session_authorizer is None:
+            raise PermissionError(
+                "Session authentication verifier is unavailable"
+            )
+        try:
+            authenticated = self._session_authorizer(
+                normalized_subject,
+                normalized_role,
+                normalized_origin,
+            )
+        except Exception as error:
+            raise PermissionError("Session authentication failed") from error
+        if authenticated is not True:
+            raise PermissionError(
+                "Session identity and role are not authenticated"
+            )
         session = Session(
             token=secrets.token_urlsafe(32),
             subject=normalized_subject,
@@ -157,14 +180,29 @@ class SecurityBoundary:
                 raise PermissionError("Role is not authorized")
         return session
 
-    def validate_host_session(self, token: str, actor: str) -> bool:
-        """Validate bearer-session identity for the host command layer.
+    def validate_host_session(
+        self,
+        token: str,
+        actor: str,
+        origin: str,
+        action: str,
+    ) -> bool:
+        """Validate identity, current origin and action-aware host mutation role.
 
-        Action authorization remains a separate server-side policy concern.
+        Read-only RESEARCHER/OBSERVER sessions must use read surfaces. Authority
+        grant/revoke commands are Owner-only; other mutations may also be admitted
+        for Operator and still require their normal server-side policy/capability
+        checks outside this authentication boundary.
         """
         try:
             normalized_actor = _required_text(actor, name="actor")
-            session = self.validate_session(token)
+            normalized_origin = _authenticated_origin(origin)
+            required_roles = set(required_roles_for_host_action(action))
+            session = self.validate_session(
+                token,
+                required_roles=required_roles,
+                origin=normalized_origin,
+            )
         except (ValueError, PermissionError, RuntimeError):
             return False
         return secrets.compare_digest(session.subject, normalized_actor)
@@ -212,6 +250,7 @@ class SecurityBoundary:
         owner_identity: str,
         account_id: str,
         provider: str,
+        environment: str,
         purpose: str,
         secret_value: str,
     ) -> CredentialHandle:
@@ -223,6 +262,7 @@ class SecurityBoundary:
             owner_identity=_required_text(owner_identity, name="owner_identity"),
             account_id=_required_text(account_id, name="account_id"),
             provider=_required_text(provider, name="provider"),
+            environment=_required_text(environment, name="environment").upper(),
             purpose=normalized_purpose,
             secret_value=secret_value,
         )
@@ -235,6 +275,7 @@ class SecurityBoundary:
             handle_id=str(metadata["handle_id"]),
             account_id=str(metadata["account_id"]),
             provider=str(metadata["provider"]),
+            environment=str(metadata["environment"]),
             purpose=str(metadata["purpose"]),
             generation=int(metadata["generation"]),
         )
@@ -280,6 +321,7 @@ class SecurityBoundary:
         execution_identity: str,
         account_id: str,
         provider: str,
+        environment: str,
         purpose: str,
     ) -> str:
         self.validate_session(token, required_roles=self._EXECUTION_ROLES, origin=origin)
@@ -292,6 +334,7 @@ class SecurityBoundary:
             ),
             account_id=_required_text(account_id, name="account_id"),
             provider=_required_text(provider, name="provider"),
+            environment=_required_text(environment, name="environment").upper(),
             purpose=_required_text(purpose, name="purpose").upper(),
         )
 

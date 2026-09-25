@@ -25,6 +25,7 @@ class SecretVaultError(ValueError):
 
 
 _ALLOWED_PURPOSES = frozenset({"READ", "TRADE"})
+_ALLOWED_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 
 
 class SecretProtector(Protocol):
@@ -44,6 +45,7 @@ def _scope_entropy(
     owner_identity: str,
     account_id: str,
     provider: str,
+    environment: str,
     purpose: str,
     generation: int,
 ) -> bytes:
@@ -52,6 +54,7 @@ def _scope_entropy(
         "owner_identity": owner_identity,
         "account_id": account_id,
         "provider": provider,
+        "environment": environment,
         "purpose": purpose,
         "generation": generation,
     }
@@ -197,6 +200,7 @@ class PersistentCredentialHandle:
     handle_id: str
     account_id: str
     provider: str
+    environment: str
     purpose: str
     generation: int
 
@@ -204,6 +208,10 @@ class PersistentCredentialHandle:
         object.__setattr__(self, "handle_id", _text(self.handle_id, name="handle_id"))
         object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
         object.__setattr__(self, "provider", _text(self.provider, name="provider").upper())
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in _ALLOWED_ENVIRONMENTS:
+            raise SecretVaultError("credential environment is not canonical")
+        object.__setattr__(self, "environment", environment)
         purpose = _text(self.purpose, name="purpose").upper()
         if purpose not in _ALLOWED_PURPOSES:
             raise SecretVaultError("credential purpose is not allowed")
@@ -219,8 +227,9 @@ class PersistentCredentialHandle:
 class ProtectedCredentialVault:
     """Atomic metadata+ciphertext vault using an injected OS protector."""
 
-    FORMAT_VERSION = 1
+    FORMAT_VERSION = 2
     ALLOWED_PURPOSES = _ALLOWED_PURPOSES
+    ALLOWED_ENVIRONMENTS = _ALLOWED_ENVIRONMENTS
 
     def __init__(self, path: str | Path, *, protector: SecretProtector) -> None:
         self.path = Path(path)
@@ -240,7 +249,15 @@ class ProtectedCredentialVault:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
             raise SecretVaultError("credential vault is corrupt or unreadable") from error
-        if not isinstance(raw, dict) or raw.get("version") != self.FORMAT_VERSION:
+        if not isinstance(raw, dict):
+            raise SecretVaultError("credential vault version is unsupported")
+        version = raw.get("version")
+        if version == 1:
+            raise SecretVaultError(
+                "legacy credential vault v1 has no environment binding; "
+                "explicit credential reattachment is required"
+            )
+        if version != self.FORMAT_VERSION:
             raise SecretVaultError("credential vault version is unsupported")
         records = raw.get("records")
         if not isinstance(records, dict):
@@ -256,6 +273,7 @@ class ProtectedCredentialVault:
                 "handle_id",
                 "account_id",
                 "provider",
+                "environment",
                 "purpose",
                 "generation",
             }:
@@ -267,6 +285,7 @@ class ProtectedCredentialVault:
                     handle_id=handle.get("handle_id"),
                     account_id=handle.get("account_id"),
                     provider=handle.get("provider"),
+                    environment=handle.get("environment"),
                     purpose=handle.get("purpose"),
                     generation=handle.get("generation"),
                 )
@@ -315,17 +334,21 @@ class ProtectedCredentialVault:
         owner_identity: object,
         account_id: object,
         provider: object,
+        environment: object,
         purpose: object,
-    ) -> tuple[str, str, str, str]:
+    ) -> tuple[str, str, str, str, str]:
         owner = _text(owner_identity, name="owner_identity")
         account = _text(account_id, name="account_id")
         normalized_provider = _text(provider, name="provider").upper()
+        normalized_environment = _text(environment, name="environment").upper()
+        if normalized_environment not in ProtectedCredentialVault.ALLOWED_ENVIRONMENTS:
+            raise PermissionError("Credential environment is not canonical")
         normalized_purpose = _text(purpose, name="purpose").upper()
         if normalized_purpose not in ProtectedCredentialVault.ALLOWED_PURPOSES:
             raise PermissionError(
                 "Credential purpose is not an allowed read/trade scope"
             )
-        return owner, account, normalized_provider, normalized_purpose
+        return owner, account, normalized_provider, normalized_environment, normalized_purpose
 
     @staticmethod
     def _handle(record: dict[str, object]) -> PersistentCredentialHandle:
@@ -334,6 +357,7 @@ class ProtectedCredentialVault:
             handle_id=str(metadata["handle_id"]),
             account_id=str(metadata["account_id"]),
             provider=str(metadata["provider"]),
+            environment=str(metadata["environment"]),
             purpose=str(metadata["purpose"]),
             generation=int(metadata["generation"]),
         )
@@ -344,14 +368,16 @@ class ProtectedCredentialVault:
         owner_identity: str,
         account_id: str,
         provider: str,
+        environment: str,
         purpose: str,
         secret_value: str,
         handle_id: str | None = None,
     ) -> PersistentCredentialHandle:
-        owner, account, normalized_provider, normalized_purpose = self._normalize_scope(
+        owner, account, normalized_provider, normalized_environment, normalized_purpose = self._normalize_scope(
             owner_identity=owner_identity,
             account_id=account_id,
             provider=provider,
+            environment=environment,
             purpose=purpose,
         )
         if not isinstance(secret_value, str) or not secret_value:
@@ -372,6 +398,7 @@ class ProtectedCredentialVault:
                 owner_identity=owner,
                 account_id=account,
                 provider=normalized_provider,
+                environment=normalized_environment,
                 purpose=normalized_purpose,
                 generation=generation,
             )
@@ -383,6 +410,7 @@ class ProtectedCredentialVault:
                 handle_id=hid,
                 account_id=account,
                 provider=normalized_provider,
+                environment=normalized_environment,
                 purpose=normalized_purpose,
                 generation=generation,
             )
@@ -406,6 +434,7 @@ class ProtectedCredentialVault:
             "handle_id": handle.handle_id,
             "account_id": handle.account_id,
             "provider": handle.provider,
+            "environment": handle.environment,
             "purpose": handle.purpose,
             "generation": handle.generation,
         }
@@ -422,6 +451,7 @@ class ProtectedCredentialVault:
             owner_identity=owner_identity,
             account_id=handle.account_id,
             provider=handle.provider,
+            environment=handle.environment,
             purpose=handle.purpose,
             generation=handle.generation,
         )
@@ -445,14 +475,16 @@ class ProtectedCredentialVault:
         execution_identity: str,
         account_id: str,
         provider: str,
+        environment: str,
         purpose: str,
     ) -> str:
         if not isinstance(handle, PersistentCredentialHandle):
             raise TypeError("handle must be a PersistentCredentialHandle")
-        owner, account, normalized_provider, normalized_purpose = self._normalize_scope(
+        owner, account, normalized_provider, normalized_environment, normalized_purpose = self._normalize_scope(
             owner_identity=execution_identity,
             account_id=account_id,
             provider=provider,
+            environment=environment,
             purpose=purpose,
         )
         state = self._load()
@@ -464,7 +496,11 @@ class ProtectedCredentialVault:
             raise PermissionError("Credential handle generation is stale")
         if record["owner_identity"] != owner:
             raise PermissionError("Execution identity cannot decrypt this credential")
-        if current.account_id != account or current.provider != normalized_provider:
+        if (
+            current.account_id != account
+            or current.provider != normalized_provider
+            or current.environment != normalized_environment
+        ):
             raise PermissionError("Credential scope mismatch")
         if current.purpose != normalized_purpose:
             raise PermissionError("Credential purpose mismatch")
@@ -473,6 +509,7 @@ class ProtectedCredentialVault:
             owner_identity=owner,
             account_id=current.account_id,
             provider=current.provider,
+            environment=current.environment,
             purpose=current.purpose,
             generation=current.generation,
         )
@@ -524,6 +561,7 @@ class ProtectedCredentialVault:
                 handle_id=current.handle_id,
                 account_id=current.account_id,
                 provider=current.provider,
+                environment=current.environment,
                 purpose=current.purpose,
                 generation=current.generation + 1,
             )
@@ -532,6 +570,7 @@ class ProtectedCredentialVault:
                 owner_identity=owner,
                 account_id=next_handle.account_id,
                 provider=next_handle.provider,
+                environment=next_handle.environment,
                 purpose=next_handle.purpose,
                 generation=next_handle.generation,
             )

@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import json
 import unittest
 from uuid import uuid4
 
@@ -11,11 +12,53 @@ from mvp.autotrade_mvp.binance_usdm import (
     parse_order_ack,
     prepare_order_request,
 )
-from mvp.autotrade_mvp.capabilities import CapabilitySnapshot
+from mvp.autotrade_mvp.provider_core import (
+    Surface,
+    observe_authenticated_json_response,
+    prepare_authenticated_read_query,
+)
+from mvp.autotrade_mvp.capabilities import (
+    CapabilityClaim,
+    CapabilitySnapshot,
+    EvidenceVerification,
+    derive_capability_snapshot,
+)
 
 
 NOW = datetime(2026, 9, 25, 0, tzinfo=timezone.utc)
 
+
+def execution_observation(
+    rows,
+    *,
+    account_id="paper-1",
+    environment="PAPER",
+    surface=Surface.AUTHENTICATED_READ,
+):
+    query = prepare_authenticated_read_query(
+        capability=capability(
+            account_id=account_id,
+            environment=environment,
+            instrument_version="BTCUSDT-PERP:v1",
+        ),
+        surface=surface,
+        endpoint="/fapi/v1/userTrades",
+        query={"symbol": "BTCUSDT"},
+        at=NOW,
+        permission_scope="ORDER.READ",
+    )
+    raw = json.dumps(
+        rows,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return observe_authenticated_json_response(
+        query_binding=query,
+        response_bytes=raw,
+        observed_at=NOW,
+    )
 
 def capability(
     *,
@@ -23,37 +66,57 @@ def capability(
     order_types=("LIMIT", "MARKET"),
     tif=("GTC", "IOC", "FOK", "NONE"),
     provider_id="BINANCE",
+    account_id="account-1",
+    environment="PAPER",
     instrument_version="BTCUSDT-PERP:v1",
     status="VERIFIED",
 ):
-    evidence = {
-        "artifact_id": str(uuid4()),
-        "sha256": "sha256:" + "c" * 64,
-        "observed_at": "2026-09-24T23:00:00Z",
-        "source_uri": (
-            "https://developers.binance.com/en/docs/catalog/"
-            "core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/trade"
-        ),
-    }
-    return CapabilitySnapshot(
-        snapshot_id=str(uuid4()),
+    observed_at = NOW - timedelta(hours=1)
+    common = dict(
         provider_id=provider_id,
-        account_id="account-1",
+        account_id=account_id,
         entity_id="global",
-        environment="PAPER",
+        environment=environment,
         instrument_version=instrument_version,
-        observed_at=NOW - timedelta(hours=1),
+        observed_at=observed_at,
         expires_at=NOW + timedelta(hours=1),
         supported_order_types=frozenset(order_types),
         time_in_force=frozenset(tif),
-        permission_scopes=frozenset({"ORDER_WRITE"}),
+        permission_scopes=frozenset({"ORDER_WRITE", "ORDER.READ"}),
         position_mode=position_mode,
         native_protection=frozenset(),
         rate_limit_policy_id="binance-usdm-foundation",
         data_entitlements=frozenset({"ORDERS", "TRADES"}),
-        evidence=(evidence,),
-        status=status,
-        sources=frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}),
+    )
+    if status != "VERIFIED":
+        return CapabilitySnapshot(
+            snapshot_id=str(uuid4()),
+            **common,
+            evidence=(),
+            status=status,
+            sources=frozenset(),
+        )
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            **common,
+            evidence_ref={
+                "artifact_id": str(uuid4()),
+                "sha256": "sha256:" + "c" * 64,
+                "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+                "source_uri": (
+                    "https://developers.binance.com/en/docs/catalog/"
+                    "core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/trade"
+                ),
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    return derive_capability_snapshot(
+        snapshot_id=str(uuid4()),
+        claims=claims,
+        observed_at=observed_at,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
     )
 
 
@@ -285,14 +348,18 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             "symbol": "BTCUSDT",
             "time": 1569514978020,
         }
+        observation = execution_observation([row, dict(row)])
         fills = parse_account_trades(
-            [row, dict(row)],
+            observation,
             instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
             client_ids_by_order_id={25851813: "at-usdm-fill"},
         )
         self.assertEqual(len(fills), 1)
         fill = fills[0]
         self.assertEqual(fill.provider_execution_id, "BINANCE-USDM:BTCUSDT:698759")
+        self.assertEqual(fill.account_id, "paper-1")
+        self.assertEqual(fill.environment, "PAPER")
+        self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
         self.assertEqual(fill.client_order_id, "at-usdm-fill")
         self.assertEqual(fill.quantity, Decimal("0.002"))
         self.assertEqual(fill.price, Decimal("7819.01"))
@@ -314,12 +381,14 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
         changed = dict(first, qty="0.3")
         with self.assertRaisesRegex(BinanceUsdmAdapterError, "conflicting"):
             parse_account_trades(
-                [first, changed],
+                execution_observation([first, changed]),
                 instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
             )
 
     def test_empty_order_history_never_proves_absence_by_default(self):
         evidence = coverage_evidence(
+            account_id="paper-1",
+            environment="PAPER",
             surface="ORDER_HISTORY",
             coverage_start="2026-09-24T20:00:00Z",
             coverage_end="2026-09-25T00:00:00Z",
@@ -329,6 +398,8 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
         self.assertFalse(evidence.provider_semantics_exclude_execution)
 
         qualified = coverage_evidence(
+            account_id="paper-1",
+            environment="PAPER",
             surface="ORDER_HISTORY",
             coverage_start="2026-09-24T20:00:00Z",
             coverage_end="2026-09-25T00:00:00Z",
@@ -356,7 +427,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(BinanceUsdmAdapterError, "positionSide"):
             parse_account_trades(
-                [
+                execution_observation([
                     {
                         "commission": "0.01",
                         "commissionAsset": "USDT",
@@ -368,7 +439,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                         "symbol": "BTCUSDT",
                         "time": 1790272800123,
                     }
-                ],
+                ]),
                 instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
             )
 

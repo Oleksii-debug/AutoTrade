@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from hashlib import sha256
 import json
+import re
 from typing import Mapping, Sequence
+from uuid import UUID
 
 
 RISK_ACTIONS = frozenset({"TRADE", "REDUCE", "HEDGE", "FLATTEN", "EXERCISE"})
@@ -52,6 +55,52 @@ def _normalize_mapping(values, *, name: str, parser) -> dict[str, Decimal]:
     return normalized
 
 
+def normalize_reservation_requirements(
+    values: Mapping[str, object],
+) -> tuple[tuple[str, Decimal], ...]:
+    """Canonical exact worst-case reservation delta bound to one risk decision."""
+
+    normalized = _normalize_mapping(
+        values,
+        name="reservation_requirements",
+        parser=lambda value, resource: _positive(
+            value,
+            name=f"reservation_requirements[{resource}]",
+        ),
+    )
+    if not normalized:
+        raise ValueError("reservation_requirements must not be empty")
+    return tuple(sorted(normalized.items()))
+
+
+def reservation_requirements_payload(
+    values: tuple[tuple[str, Decimal], ...] | Mapping[str, object],
+) -> dict[str, str]:
+    if isinstance(values, Mapping):
+        normalized = normalize_reservation_requirements(values)
+    else:
+        if (
+            not isinstance(values, tuple)
+            or not values
+            or any(
+                not isinstance(item, tuple) or len(item) != 2
+                for item in values
+            )
+        ):
+            raise TypeError(
+                "reservation requirements must be a canonical tuple or mapping"
+            )
+        normalized = normalize_reservation_requirements(dict(values))
+        if normalized != values:
+            raise ValueError(
+                "reservation requirements tuple is not canonical"
+            )
+    return {
+        resource: _canonical_decimal_text(amount)
+        for resource, amount in normalized
+    }
+
+
 def _normalize_text_mapping(values, *, name: str) -> dict[str, str]:
     if not isinstance(values, Mapping):
         raise TypeError(f"{name} must be a mapping")
@@ -82,6 +131,20 @@ def _normalize_actions(values, *, name: str) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def _normalize_labels(values, *, name: str) -> tuple[str, ...]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        raise TypeError(f"{name} must be a sequence of labels")
+    normalized: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} values must be non-empty strings")
+        label = value.strip()
+        if label in normalized:
+            raise ValueError(f"{name} values must be unique")
+        normalized.append(label)
+    return tuple(normalized)
+
+
 def _normalize_nested_mapping(values, *, name: str) -> dict[str, dict[str, Decimal]]:
     if not isinstance(values, Mapping):
         raise TypeError(f"{name} must be a mapping")
@@ -99,6 +162,263 @@ def _normalize_nested_mapping(values, *, name: str) -> dict[str, dict[str, Decim
             ),
         )
     return normalized
+
+
+def _canonical_decimal_text(value: Decimal) -> str:
+    if value == 0:
+        return "0"
+    return format(value.normalize(), "f")
+
+
+def stress_scenario_digest(scenario: Mapping[str, object]) -> str:
+    """Content identity for one normalized deterministic stress scenario."""
+
+    normalized = _normalize_mapping(
+        scenario,
+        name="stress_scenario",
+        parser=lambda value, key: _decimal(
+            value,
+            name=f"stress shock {key}",
+        ),
+    )
+    encoded = json.dumps(
+        {
+            key: _canonical_decimal_text(value)
+            for key, value in sorted(normalized.items())
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return "sha256:" + sha256(encoded).hexdigest()
+
+
+def tail_scenario_set_digest(
+    scenarios: Sequence[Mapping[str, object]],
+) -> str:
+    """Order-independent multiset identity for an equal-weight tail distribution."""
+
+    if not isinstance(scenarios, Sequence) or isinstance(scenarios, (str, bytes)):
+        raise TypeError("tail scenarios must be a sequence of mappings")
+    scenario_digests = sorted(stress_scenario_digest(item) for item in scenarios)
+    encoded = json.dumps(
+        scenario_digests,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + sha256(encoded).hexdigest()
+
+
+def _normalize_scenario_digests(
+    values: Mapping[str, str],
+    *,
+    name: str,
+) -> tuple[tuple[str, str], ...]:
+    if not isinstance(values, Mapping):
+        raise TypeError(f"{name} must be a mapping")
+    normalized: dict[str, str] = {}
+    for raw_label, raw_digest in values.items():
+        label = _identity_key(raw_label, name=name)
+        if label in normalized:
+            raise ValueError(f"{name} keys must be unique after normalization")
+        if not isinstance(raw_digest, str):
+            raise TypeError(f"{name}[{label}] must be a SHA-256 string")
+        digest = raw_digest.strip()
+        if (
+            not digest.startswith("sha256:")
+            or len(digest) != 71
+            or any(ch not in "0123456789abcdef" for ch in digest[7:])
+        ):
+            raise ValueError(
+                f"{name}[{label}] must be canonical lowercase sha256:<64-hex>"
+            )
+        normalized[label] = digest
+    if not normalized:
+        raise ValueError(f"{name} must contain at least one digest")
+    return tuple(sorted(normalized.items()))
+
+
+
+RISK_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _utc(value: datetime, *, name: str) -> datetime:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
+        raise ValueError(f"{name} must be timezone-aware")
+    return value.astimezone(timezone.utc)
+
+
+def _utc_text(value: datetime) -> str:
+    return _utc(value, name="timestamp").isoformat().replace("+00:00", "Z")
+
+
+@dataclass(frozen=True)
+class LiquidationScope:
+    provider_id: str
+    account_id: str
+    environment: str
+    margin_mode: str
+    risk_tier_version: str
+
+    def __post_init__(self) -> None:
+        provider = _identity_key(self.provider_id, name="provider_id").upper()
+        account = _identity_key(self.account_id, name="account_id")
+        environment = _identity_key(self.environment, name="environment").upper()
+        if environment not in RISK_ENVIRONMENTS:
+            raise ValueError("environment is unsupported")
+        margin_mode = _identity_key(self.margin_mode, name="margin_mode").upper()
+        tier = _identity_key(self.risk_tier_version, name="risk_tier_version")
+        object.__setattr__(self, "provider_id", provider)
+        object.__setattr__(self, "account_id", account)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "margin_mode", margin_mode)
+        object.__setattr__(self, "risk_tier_version", tier)
+
+
+@dataclass(frozen=True)
+class LiquidationHeadroomEvidence:
+    headroom: Decimal
+    state_version: int
+    provider_id: str
+    account_id: str
+    environment: str
+    margin_mode: str
+    risk_tier_version: str
+    observed_at: datetime
+    expires_at: datetime
+    artifact_id: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.state_version, int)
+            or isinstance(self.state_version, bool)
+            or self.state_version < 0
+        ):
+            raise ValueError("liquidation evidence state_version must be non-negative")
+        scope = LiquidationScope(
+            provider_id=self.provider_id,
+            account_id=self.account_id,
+            environment=self.environment,
+            margin_mode=self.margin_mode,
+            risk_tier_version=self.risk_tier_version,
+        )
+        observed = _utc(self.observed_at, name="liquidation evidence observed_at")
+        expires = _utc(self.expires_at, name="liquidation evidence expires_at")
+        if expires <= observed:
+            raise ValueError("liquidation evidence expires_at must follow observed_at")
+        try:
+            artifact_id = str(UUID(self.artifact_id))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise ValueError("liquidation evidence artifact_id must be a UUID") from error
+        digest = _identity_key(self.sha256, name="liquidation evidence sha256")
+        if _SHA256_RE.fullmatch(digest) is None:
+            raise ValueError(
+                "liquidation evidence sha256 must be canonical lowercase sha256:<64-hex>"
+            )
+        object.__setattr__(
+            self,
+            "headroom",
+            _decimal(self.headroom, name="liquidation evidence headroom"),
+        )
+        object.__setattr__(self, "provider_id", scope.provider_id)
+        object.__setattr__(self, "account_id", scope.account_id)
+        object.__setattr__(self, "environment", scope.environment)
+        object.__setattr__(self, "margin_mode", scope.margin_mode)
+        object.__setattr__(self, "risk_tier_version", scope.risk_tier_version)
+        object.__setattr__(self, "observed_at", observed)
+        object.__setattr__(self, "expires_at", expires)
+        object.__setattr__(self, "artifact_id", artifact_id)
+        object.__setattr__(self, "sha256", digest)
+
+    @classmethod
+    def create(cls, **values) -> "LiquidationHeadroomEvidence":
+        return cls(**values)
+
+    @property
+    def scope(self) -> LiquidationScope:
+        return LiquidationScope(
+            provider_id=self.provider_id,
+            account_id=self.account_id,
+            environment=self.environment,
+            margin_mode=self.margin_mode,
+            risk_tier_version=self.risk_tier_version,
+        )
+
+
+def liquidation_evidence_payload(
+    evidence: LiquidationHeadroomEvidence,
+) -> dict[str, object]:
+    if not isinstance(evidence, LiquidationHeadroomEvidence):
+        raise TypeError("evidence must be LiquidationHeadroomEvidence")
+    return {
+        "artifact_kind": "LIQUIDATION_HEADROOM_EVIDENCE",
+        "schema_version": 1,
+        "provider_id": evidence.provider_id,
+        "account_id": evidence.account_id,
+        "environment": evidence.environment,
+        "margin_mode": evidence.margin_mode,
+        "risk_tier_version": evidence.risk_tier_version,
+        "state_version": evidence.state_version,
+        "observed_at": _utc_text(evidence.observed_at),
+        "expires_at": _utc_text(evidence.expires_at),
+        "headroom": _canonical_decimal_text(evidence.headroom),
+    }
+
+
+def _verify_liquidation_headroom_evidence(
+    *,
+    evidence: LiquidationHeadroomEvidence | None,
+    expected_scope: LiquidationScope | None,
+    expected_state_version: int,
+    decision_time: datetime | None,
+    evidence_store: object | None,
+) -> bool:
+    if (
+        evidence is None
+        or expected_scope is None
+        or decision_time is None
+        or evidence_store is None
+    ):
+        return False
+    if evidence.scope != expected_scope or evidence.state_version != expected_state_version:
+        return False
+    point = _utc(decision_time, name="decision_time")
+    if not (evidence.observed_at <= point < evidence.expires_at):
+        return False
+    try:
+        manifest = evidence_store.load_manifest(evidence.artifact_id)
+        raw = evidence_store.read_bytes(evidence.artifact_id)
+    except Exception:
+        return False
+    if type(manifest) is not dict or not isinstance(raw, bytes):
+        return False
+    actual = "sha256:" + sha256(raw).hexdigest()
+    if (
+        manifest.get("artifact_id") != evidence.artifact_id
+        or manifest.get("sha256") != evidence.sha256
+        or actual != evidence.sha256
+        or not manifest.get("manifest_hash")
+    ):
+        return False
+    payload = liquidation_evidence_payload(evidence)
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if raw != canonical:
+        return False
+    metadata = manifest.get("metadata")
+    if type(metadata) is not dict:
+        return False
+    return all(metadata.get(key) == value for key, value in payload.items())
 
 
 @dataclass(frozen=True)
@@ -174,6 +494,12 @@ class RiskPolicy:
     max_fx_age_seconds: Decimal
     min_margin_headroom: Decimal
     max_stress_loss: Decimal
+    max_expected_shortfall: Decimal | None = None
+    expected_shortfall_tail_fraction: Decimal | None = None
+    min_liquidation_headroom: Decimal | None = None
+    required_stress_scenario_labels: tuple[str, ...] | None = None
+    required_stress_scenario_digests: tuple[tuple[str, str], ...] | None = None
+    required_tail_scenario_set_digest: str | None = None
     max_asset_concentration_fraction: Decimal | None = None
     max_venue_concentration_fraction: Decimal | None = None
     max_order_participation_fraction: Decimal | None = None
@@ -200,6 +526,12 @@ class RiskPolicy:
         max_fx_age_seconds,
         min_margin_headroom,
         max_stress_loss,
+        max_expected_shortfall=None,
+        expected_shortfall_tail_fraction=None,
+        min_liquidation_headroom=None,
+        required_stress_scenario_labels: Sequence[str] | None = None,
+        required_stress_scenario_digests: Mapping[str, str] | None = None,
+        required_tail_scenario_set_digest: str | None = None,
         max_asset_concentration_fraction=None,
         max_venue_concentration_fraction=None,
         max_order_participation_fraction=None,
@@ -226,6 +558,102 @@ class RiskPolicy:
         }
         if values["max_drawdown_fraction"] > 1:
             raise ValueError("max_drawdown_fraction cannot exceed 1")
+
+        expected_shortfall_limit = (
+            None
+            if max_expected_shortfall is None
+            else _positive(
+                max_expected_shortfall,
+                name="max_expected_shortfall",
+                allow_zero=True,
+            )
+        )
+        expected_shortfall_tail = (
+            None
+            if expected_shortfall_tail_fraction is None
+            else _positive(
+                expected_shortfall_tail_fraction,
+                name="expected_shortfall_tail_fraction",
+            )
+        )
+        if (expected_shortfall_limit is None) != (expected_shortfall_tail is None):
+            raise ValueError(
+                "max_expected_shortfall and expected_shortfall_tail_fraction "
+                "must be configured together"
+            )
+        if expected_shortfall_tail is not None and expected_shortfall_tail > 1:
+            raise ValueError("expected_shortfall_tail_fraction cannot exceed 1")
+        liquidation_headroom_limit = (
+            None
+            if min_liquidation_headroom is None
+            else _positive(
+                min_liquidation_headroom,
+                name="min_liquidation_headroom",
+                allow_zero=True,
+            )
+        )
+        normalized_required_stress_labels = (
+            None
+            if required_stress_scenario_labels is None
+            else _normalize_labels(
+                required_stress_scenario_labels,
+                name="required_stress_scenario_labels",
+            )
+        )
+        if normalized_required_stress_labels == ():
+            raise ValueError(
+                "required_stress_scenario_labels must contain at least one label"
+            )
+        normalized_required_stress_digests = (
+            None
+            if required_stress_scenario_digests is None
+            else _normalize_scenario_digests(
+                required_stress_scenario_digests,
+                name="required_stress_scenario_digests",
+            )
+        )
+        if (normalized_required_stress_labels is None) != (
+            normalized_required_stress_digests is None
+        ):
+            raise ValueError(
+                "required stress scenario labels and digests must be configured together"
+            )
+        if normalized_required_stress_labels is not None:
+            digest_labels = {
+                label for label, _digest in normalized_required_stress_digests or ()
+            }
+            if digest_labels != set(normalized_required_stress_labels):
+                raise ValueError(
+                    "required_stress_scenario_digests keys must exactly match required labels"
+                )
+
+        normalized_tail_set_digest = None
+        if required_tail_scenario_set_digest is not None:
+            if not isinstance(required_tail_scenario_set_digest, str):
+                raise TypeError(
+                    "required_tail_scenario_set_digest must be a SHA-256 string"
+                )
+            normalized_tail_set_digest = required_tail_scenario_set_digest.strip()
+            if (
+                not normalized_tail_set_digest.startswith("sha256:")
+                or len(normalized_tail_set_digest) != 71
+                or any(
+                    ch not in "0123456789abcdef"
+                    for ch in normalized_tail_set_digest[7:]
+                )
+            ):
+                raise ValueError(
+                    "required_tail_scenario_set_digest must be canonical "
+                    "lowercase sha256:<64-hex>"
+                )
+        if expected_shortfall_limit is not None and normalized_tail_set_digest is None:
+            raise ValueError(
+                "expected-shortfall policy requires a frozen tail distribution digest"
+            )
+        if expected_shortfall_limit is None and normalized_tail_set_digest is not None:
+            raise ValueError(
+                "tail distribution digest requires expected-shortfall policy"
+            )
 
         optional_limits: dict[str, Decimal | None] = {}
         for name, raw_value in (
@@ -281,6 +709,12 @@ class RiskPolicy:
         )
         return cls(
             **values,
+            max_expected_shortfall=expected_shortfall_limit,
+            expected_shortfall_tail_fraction=expected_shortfall_tail,
+            min_liquidation_headroom=liquidation_headroom_limit,
+            required_stress_scenario_labels=normalized_required_stress_labels,
+            required_stress_scenario_digests=normalized_required_stress_digests,
+            required_tail_scenario_set_digest=normalized_tail_set_digest,
             **optional_limits,
             max_abs_factor_exposure=factor_limit,
             max_clock_age_seconds=clock_limit,
@@ -307,6 +741,12 @@ class RiskContext:
     capability_allowed: bool
     borrow_available: bool | None
     stress_scenarios: Sequence[Mapping[str, Decimal]]
+    stress_scenario_labels: tuple[str, ...] = ()
+    tail_scenarios: Sequence[Mapping[str, Decimal]] = ()
+    liquidation_headroom: Decimal | None = None
+    liquidation_scope: LiquidationScope | None = None
+    liquidation_headroom_evidence: LiquidationHeadroomEvidence | None = None
+    decision_time: datetime | None = None
     asset_buckets: Mapping[str, str] | None = None
     venues: Mapping[str, str] | None = None
     liquidity_capacity: Mapping[str, Decimal] | None = None
@@ -338,6 +778,12 @@ class RiskContext:
         capability_allowed: bool,
         borrow_available: bool | None,
         stress_scenarios: Sequence[Mapping[str, object]] = (),
+        stress_scenario_labels: Sequence[str] = (),
+        tail_scenarios: Sequence[Mapping[str, object]] = (),
+        liquidation_headroom=None,
+        liquidation_scope: LiquidationScope | None = None,
+        liquidation_headroom_evidence: LiquidationHeadroomEvidence | None = None,
+        decision_time: datetime | None = None,
         asset_buckets: Mapping[str, str] | None = None,
         venues: Mapping[str, str] | None = None,
         liquidity_capacity: Mapping[str, object] | None = None,
@@ -470,6 +916,105 @@ class RiskContext:
             )
             for index, scenario in enumerate(stress_scenarios)
         )
+        normalized_stress_labels = _normalize_labels(
+            stress_scenario_labels,
+            name="stress_scenario_labels",
+        )
+        if normalized_stress_labels and len(normalized_stress_labels) != len(scenarios):
+            raise ValueError(
+                "stress_scenario_labels must align one-to-one with stress_scenarios"
+            )
+        if not isinstance(tail_scenarios, Sequence) or isinstance(
+            tail_scenarios,
+            (str, bytes),
+        ):
+            raise TypeError("tail_scenarios must be a sequence of mappings")
+        normalized_tail_scenarios = tuple(
+            _normalize_mapping(
+                scenario,
+                name=f"tail_scenarios[{index}]",
+                parser=lambda value, key: _decimal(
+                    value,
+                    name=f"tail return {key}",
+                ),
+            )
+            for index, scenario in enumerate(tail_scenarios)
+        )
+        normalized_liquidation_headroom = (
+            None
+            if liquidation_headroom is None
+            else _decimal(
+                liquidation_headroom,
+                name="liquidation_headroom",
+            )
+        )
+
+        if liquidation_scope is not None and not isinstance(
+            liquidation_scope, LiquidationScope
+        ):
+            raise TypeError("liquidation_scope must be LiquidationScope or None")
+        normalized_scope = (
+            None
+            if liquidation_scope is None
+            else LiquidationScope(
+                provider_id=liquidation_scope.provider_id,
+                account_id=liquidation_scope.account_id,
+                environment=liquidation_scope.environment,
+                margin_mode=liquidation_scope.margin_mode,
+                risk_tier_version=liquidation_scope.risk_tier_version,
+            )
+        )
+        if liquidation_headroom_evidence is not None and not isinstance(
+            liquidation_headroom_evidence, LiquidationHeadroomEvidence
+        ):
+            raise TypeError(
+                "liquidation_headroom_evidence must be "
+                "LiquidationHeadroomEvidence or None"
+            )
+        normalized_liquidation_evidence = (
+            None
+            if liquidation_headroom_evidence is None
+            else LiquidationHeadroomEvidence.create(
+                headroom=liquidation_headroom_evidence.headroom,
+                state_version=liquidation_headroom_evidence.state_version,
+                provider_id=liquidation_headroom_evidence.provider_id,
+                account_id=liquidation_headroom_evidence.account_id,
+                environment=liquidation_headroom_evidence.environment,
+                margin_mode=liquidation_headroom_evidence.margin_mode,
+                risk_tier_version=liquidation_headroom_evidence.risk_tier_version,
+                observed_at=liquidation_headroom_evidence.observed_at,
+                expires_at=liquidation_headroom_evidence.expires_at,
+                artifact_id=liquidation_headroom_evidence.artifact_id,
+                sha256=liquidation_headroom_evidence.sha256,
+            )
+        )
+        normalized_decision_time = (
+            None
+            if decision_time is None
+            else _utc(decision_time, name="decision_time")
+        )
+        if normalized_liquidation_evidence is not None:
+            if normalized_scope is None or normalized_decision_time is None:
+                raise ValueError(
+                    "liquidation evidence requires exact scope and decision_time"
+                )
+            if normalized_liquidation_evidence.scope != normalized_scope:
+                raise ValueError(
+                    "liquidation evidence scope differs from risk context scope"
+                )
+            if normalized_liquidation_evidence.state_version != state_version:
+                raise ValueError(
+                    "liquidation evidence state_version differs from risk context"
+                )
+            if (
+                normalized_liquidation_headroom is not None
+                and normalized_liquidation_headroom
+                != normalized_liquidation_evidence.headroom
+            ):
+                raise ValueError(
+                    "liquidation_headroom differs from immutable evidence"
+                )
+            normalized_liquidation_headroom = normalized_liquidation_evidence.headroom
         normalized_drawdown = _positive(
             drawdown_fraction,
             name="drawdown_fraction",
@@ -505,6 +1050,12 @@ class RiskContext:
             capability_allowed=capability_allowed,
             borrow_available=borrow_available,
             stress_scenarios=scenarios,
+            stress_scenario_labels=normalized_stress_labels,
+            tail_scenarios=normalized_tail_scenarios,
+            liquidation_headroom=normalized_liquidation_headroom,
+            liquidation_scope=normalized_scope,
+            liquidation_headroom_evidence=normalized_liquidation_evidence,
+            decision_time=normalized_decision_time,
             asset_buckets=normalized_asset_buckets,
             venues=normalized_venues,
             liquidity_capacity=normalized_liquidity,
@@ -536,7 +1087,57 @@ class RiskDecision:
     gross_leverage: Decimal
     net_leverage: Decimal
     worst_stress_loss: Decimal
+    input_fingerprint: str
     rules: tuple[RiskRuleResult, ...]
+    decision_id: str | None = None
+    intent_hash: str | None = None
+    state_version: int | None = None
+    policy_version: int | None = None
+    reservation_version: int | None = None
+    reservation_requirements: tuple[tuple[str, Decimal], ...] | None = None
+    capability_snapshot_id: str | None = None
+    evaluated_at: str | None = None
+    valid_until: str | None = None
+
+
+def _fingerprint_value(value):
+    if isinstance(value, Decimal):
+        return _canonical_decimal_text(value)
+    if isinstance(value, datetime):
+        return _utc_text(value)
+    if hasattr(value, "__dataclass_fields__"):
+        return _fingerprint_value(vars(value))
+    if isinstance(value, Mapping):
+        return {
+            str(key): _fingerprint_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (tuple, list)):
+        return [_fingerprint_value(item) for item in value]
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    raise TypeError(
+        f"Unsupported normalized risk fingerprint value: {type(value).__name__}"
+    )
+
+
+def _risk_input_fingerprint(
+    intent: RiskIntent,
+    context: RiskContext,
+    policy: RiskPolicy,
+) -> str:
+    payload = {
+        "intent": _fingerprint_value(vars(intent)),
+        "context": _fingerprint_value(vars(context)),
+        "policy": _fingerprint_value(vars(policy)),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
 
 
 def risk_decision_fingerprint(decision: RiskDecision) -> str:
@@ -544,10 +1145,11 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
         raise TypeError("decision must be a RiskDecision")
     payload = {
         "admitted": decision.admitted,
-        "resulting_position": str(decision.resulting_position),
-        "gross_leverage": str(decision.gross_leverage),
-        "net_leverage": str(decision.net_leverage),
-        "worst_stress_loss": str(decision.worst_stress_loss),
+        "resulting_position": _canonical_decimal_text(decision.resulting_position),
+        "gross_leverage": _canonical_decimal_text(decision.gross_leverage),
+        "net_leverage": _canonical_decimal_text(decision.net_leverage),
+        "worst_stress_loss": _canonical_decimal_text(decision.worst_stress_loss),
+        "input_fingerprint": decision.input_fingerprint,
         "rules": [
             {
                 "rule": item.rule,
@@ -559,6 +1161,31 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
             for item in decision.rules
         ],
     }
+    binding_values = (
+        decision.intent_hash,
+        decision.state_version,
+        decision.policy_version,
+        decision.reservation_version,
+        decision.reservation_requirements,
+        decision.capability_snapshot_id,
+        decision.evaluated_at,
+        decision.valid_until,
+    )
+    if any(value is not None for value in binding_values):
+        if any(value is None for value in binding_values):
+            raise ValueError("risk decision binding must be complete")
+        payload["binding"] = {
+            "intent_hash": decision.intent_hash,
+            "state_version": decision.state_version,
+            "policy_version": decision.policy_version,
+            "reservation_version": decision.reservation_version,
+            "reservation_requirements": reservation_requirements_payload(
+                decision.reservation_requirements
+            ),
+            "capability_snapshot_id": decision.capability_snapshot_id,
+            "evaluated_at": decision.evaluated_at,
+            "valid_until": decision.valid_until,
+        }
     encoded = json.dumps(
         payload,
         ensure_ascii=True,
@@ -568,7 +1195,145 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
     return sha256(encoded).hexdigest()
 
 
-def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) -> RiskDecision:
+def _risk_binding_instant(value: str, *, name: str) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} is required")
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{name} must be an ISO timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{name} must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _risk_binding_text(value: str, *, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} is required")
+    return value.strip()
+
+
+def bind_risk_decision(
+    decision: RiskDecision,
+    *,
+    intent_hash: str,
+    state_version: int,
+    policy_version: int,
+    reservation_version: int,
+    reservation_requirements: Mapping[str, object],
+    capability_snapshot_id: str,
+    evaluated_at: str,
+    valid_until: str,
+) -> RiskDecision:
+    """Bind a deterministic risk result to immutable admission evidence."""
+
+    if not isinstance(decision, RiskDecision):
+        raise TypeError("decision must be a RiskDecision")
+    ihash = _risk_binding_text(intent_hash, name="intent_hash")
+    capability = _risk_binding_text(
+        capability_snapshot_id, name="capability_snapshot_id"
+    )
+    if (
+        not isinstance(state_version, int)
+        or isinstance(state_version, bool)
+        or state_version < 0
+    ):
+        raise ValueError("state_version must be a non-negative integer")
+    if (
+        not isinstance(policy_version, int)
+        or isinstance(policy_version, bool)
+        or policy_version < 1
+    ):
+        raise ValueError("policy_version must be a positive integer")
+    if (
+        not isinstance(reservation_version, int)
+        or isinstance(reservation_version, bool)
+        or reservation_version < 0
+    ):
+        raise ValueError("reservation_version must be a non-negative integer")
+    requirements = normalize_reservation_requirements(
+        reservation_requirements
+    )
+    evaluated = _risk_binding_text(evaluated_at, name="evaluated_at")
+    valid = _risk_binding_text(valid_until, name="valid_until")
+    if _risk_binding_instant(evaluated, name="evaluated_at") >= _risk_binding_instant(
+        valid, name="valid_until"
+    ):
+        raise ValueError("evaluated_at must precede valid_until")
+
+    bound = replace(
+        decision,
+        decision_id=None,
+        intent_hash=ihash,
+        state_version=state_version,
+        policy_version=policy_version,
+        reservation_version=reservation_version,
+        reservation_requirements=requirements,
+        capability_snapshot_id=capability,
+        evaluated_at=evaluated,
+        valid_until=valid,
+    )
+    digest = risk_decision_fingerprint(bound)
+    return replace(bound, decision_id="risk:sha256:" + digest)
+
+
+def validate_bound_risk_decision(decision: RiskDecision, *, now: str) -> None:
+    if not isinstance(decision, RiskDecision):
+        raise TypeError("risk_decision must be a RiskDecision")
+    if decision.decision_id is None:
+        raise ValueError("risk_decision must be bound before admission")
+    expected = "risk:sha256:" + risk_decision_fingerprint(decision)
+    if decision.decision_id != expected:
+        raise ValueError("risk_decision_id does not match bound evidence")
+    current = _risk_binding_instant(now, name="now")
+    evaluated = _risk_binding_instant(decision.evaluated_at, name="evaluated_at")
+    valid = _risk_binding_instant(decision.valid_until, name="valid_until")
+    if current < evaluated:
+        raise ValueError("risk_decision is not yet valid")
+    if current >= valid:
+        raise ValueError("risk_decision is expired")
+
+
+def evaluate_bound_risk(
+    intent: RiskIntent,
+    context: RiskContext,
+    policy: RiskPolicy,
+    *,
+    intent_hash: str,
+    policy_version: int,
+    reservation_version: int,
+    reservation_requirements: Mapping[str, object],
+    capability_snapshot_id: str,
+    evaluated_at: str,
+    valid_until: str,
+    evidence_store: object | None = None,
+) -> RiskDecision:
+    decision = evaluate_risk(
+        intent,
+        context,
+        policy,
+        evidence_store=evidence_store,
+    )
+    return bind_risk_decision(
+        decision,
+        intent_hash=intent_hash,
+        state_version=context.state_version,
+        policy_version=policy_version,
+        reservation_version=reservation_version,
+        reservation_requirements=reservation_requirements,
+        capability_snapshot_id=capability_snapshot_id,
+        evaluated_at=evaluated_at,
+        valid_until=valid_until,
+    )
+
+
+def evaluate_risk(
+    intent: RiskIntent,
+    context: RiskContext,
+    policy: RiskPolicy,
+    *,
+    evidence_store: object | None = None,
+) -> RiskDecision:
     if not isinstance(intent, RiskIntent):
         raise TypeError("intent must be RiskIntent")
     if not isinstance(context, RiskContext):
@@ -601,6 +1366,12 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         capability_allowed=context.capability_allowed,
         borrow_available=context.borrow_available,
         stress_scenarios=context.stress_scenarios,
+        stress_scenario_labels=context.stress_scenario_labels,
+        tail_scenarios=context.tail_scenarios,
+        liquidation_headroom=context.liquidation_headroom,
+        liquidation_scope=context.liquidation_scope,
+        liquidation_headroom_evidence=context.liquidation_headroom_evidence,
+        decision_time=context.decision_time,
         asset_buckets=context.asset_buckets,
         venues=context.venues,
         liquidity_capacity=context.liquidity_capacity,
@@ -625,6 +1396,16 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         max_fx_age_seconds=policy.max_fx_age_seconds,
         min_margin_headroom=policy.min_margin_headroom,
         max_stress_loss=policy.max_stress_loss,
+        max_expected_shortfall=policy.max_expected_shortfall,
+        expected_shortfall_tail_fraction=policy.expected_shortfall_tail_fraction,
+        min_liquidation_headroom=policy.min_liquidation_headroom,
+        required_stress_scenario_labels=policy.required_stress_scenario_labels,
+        required_stress_scenario_digests=(
+            None
+            if policy.required_stress_scenario_digests is None
+            else dict(policy.required_stress_scenario_digests)
+        ),
+        required_tail_scenario_set_digest=policy.required_tail_scenario_set_digest,
         max_asset_concentration_fraction=policy.max_asset_concentration_fraction,
         max_venue_concentration_fraction=policy.max_venue_concentration_fraction,
         max_order_participation_fraction=policy.max_order_participation_fraction,
@@ -760,24 +1541,66 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         )
 
     stress_symbols = set(notionals)
+    base_stress_symbols = set(base_notionals)
     stress_coverage_complete = bool(context.stress_scenarios) or not stress_symbols
     missing_stress_symbols: set[str] = set()
+    missing_base_stress_symbols: set[str] = set()
+    missing_stress_labels: set[str] = set()
+    mismatched_stress_labels: set[str] = set()
+    stress_regime_coverage_complete = True
+    if policy.required_stress_scenario_labels is not None and stress_symbols:
+        observed_labels = set(context.stress_scenario_labels)
+        missing_stress_labels = (
+            set(policy.required_stress_scenario_labels) - observed_labels
+        )
+        required_digests = dict(policy.required_stress_scenario_digests or ())
+        observed_scenarios = {
+            label: scenario
+            for label, scenario in zip(
+                context.stress_scenario_labels,
+                context.stress_scenarios,
+            )
+        }
+        mismatched_stress_labels = {
+            label
+            for label in policy.required_stress_scenario_labels
+            if label in observed_scenarios
+            and stress_scenario_digest(observed_scenarios[label])
+            != required_digests[label]
+        }
+        stress_regime_coverage_complete = (
+            not missing_stress_labels
+            and not mismatched_stress_labels
+            and len(context.stress_scenario_labels) == len(context.stress_scenarios)
+        )
     for scenario in context.stress_scenarios:
-        missing_stress_symbols.update(stress_symbols - set(scenario))
+        scenario_symbols = set(scenario)
+        missing_stress_symbols.update(stress_symbols - scenario_symbols)
+        missing_base_stress_symbols.update(base_stress_symbols - scenario_symbols)
     if missing_stress_symbols:
         stress_coverage_complete = False
+    base_stress_comparison_complete = (
+        not stress_symbols
+        or not base_stress_symbols
+        or (
+            bool(context.stress_scenarios)
+            and not missing_base_stress_symbols
+        )
+    )
 
     base_worst_stress_loss = Decimal("0")
     worst_stress_loss = Decimal("0")
     if stress_coverage_complete:
         for scenario in context.stress_scenarios:
-            base_pnl = sum(
-                (
-                    notional * scenario.get(symbol, Decimal("0"))
-                    for symbol, notional in base_notionals.items()
-                ),
-                Decimal("0"),
-            )
+            if base_stress_comparison_complete:
+                base_pnl = sum(
+                    (
+                        notional * scenario[symbol]
+                        for symbol, notional in base_notionals.items()
+                    ),
+                    Decimal("0"),
+                )
+                base_worst_stress_loss = max(base_worst_stress_loss, -base_pnl)
             pnl = sum(
                 (
                     notional * scenario[symbol]
@@ -785,25 +1608,140 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
                 ),
                 Decimal("0"),
             )
-            base_worst_stress_loss = max(base_worst_stress_loss, -base_pnl)
             worst_stress_loss = max(worst_stress_loss, -pnl)
+
+    tail_coverage_complete = True
+    tail_distribution_matches = True
+    base_tail_comparison_complete = True
+    missing_tail_symbols: set[str] = set()
+    missing_base_tail_symbols: set[str] = set()
+    expected_shortfall: Decimal | None = None
+    base_expected_shortfall: Decimal | None = None
+    if policy.max_expected_shortfall is not None:
+        if stress_symbols:
+            tail_distribution_matches = (
+                bool(context.tail_scenarios)
+                and tail_scenario_set_digest(context.tail_scenarios)
+                == policy.required_tail_scenario_set_digest
+            )
+        tail_coverage_complete = (
+            (bool(context.tail_scenarios) or not stress_symbols)
+            and tail_distribution_matches
+        )
+        for scenario in context.tail_scenarios:
+            scenario_symbols = set(scenario)
+            missing_tail_symbols.update(stress_symbols - scenario_symbols)
+            missing_base_tail_symbols.update(base_stress_symbols - scenario_symbols)
+        if missing_tail_symbols:
+            tail_coverage_complete = False
+        base_tail_comparison_complete = (
+            not stress_symbols
+            or not base_stress_symbols
+            or (
+                bool(context.tail_scenarios)
+                and not missing_base_tail_symbols
+            )
+        )
+        tail_fraction = policy.expected_shortfall_tail_fraction
+        assert tail_fraction is not None
+        tail_count = (
+            max(
+                1,
+                int(
+                    (Decimal(len(context.tail_scenarios)) * tail_fraction)
+                    .to_integral_value(rounding=ROUND_CEILING)
+                ),
+            )
+            if context.tail_scenarios
+            else 0
+        )
+        if tail_coverage_complete and stress_symbols:
+            projected_losses = []
+            for scenario in context.tail_scenarios:
+                projected_pnl = sum(
+                    (notional * scenario[symbol] for symbol, notional in notionals.items()),
+                    Decimal("0"),
+                )
+                projected_losses.append(max(-projected_pnl, Decimal("0")))
+            projected_tail = sorted(projected_losses, reverse=True)[:tail_count]
+            expected_shortfall = sum(projected_tail, Decimal("0")) / Decimal(
+                len(projected_tail)
+            )
+        elif tail_coverage_complete:
+            expected_shortfall = Decimal("0")
+
+        if not base_stress_symbols:
+            base_expected_shortfall = Decimal("0")
+        elif base_tail_comparison_complete and context.tail_scenarios:
+            base_losses: list[Decimal] = []
+            for scenario in context.tail_scenarios:
+                base_pnl = sum(
+                    (
+                        notional * scenario[symbol]
+                        for symbol, notional in base_notionals.items()
+                    ),
+                    Decimal("0"),
+                )
+                base_losses.append(max(-base_pnl, Decimal("0")))
+            base_tail = sorted(base_losses, reverse=True)[:tail_count]
+            base_expected_shortfall = sum(base_tail, Decimal("0")) / Decimal(
+                len(base_tail)
+            )
 
     reduces_absolute_exposure = (
         abs(resulting) < abs(base_position)
         and base_position * resulting >= 0
     )
+    current_after_intent = current + signed
+    reduces_current_exposure = (
+        abs(current_after_intent) < abs(current)
+        and current * current_after_intent >= 0
+    )
+    stress_nonworsening = (
+        not stress_symbols
+        or (
+            stress_coverage_complete
+            and base_stress_comparison_complete
+            and worst_stress_loss <= base_worst_stress_loss
+        )
+    )
+    tail_nonworsening = (
+        policy.max_expected_shortfall is None
+        or not stress_symbols
+        or (
+            tail_coverage_complete
+            and base_tail_comparison_complete
+            and expected_shortfall is not None
+            and base_expected_shortfall is not None
+            and expected_shortfall <= base_expected_shortfall
+        )
+    )
     protective_reduction = (
         intent.reduce_only
         and reduces_absolute_exposure
+        and reduces_current_exposure
         and gross < base_gross
         and net <= base_net
-        and worst_stress_loss <= base_worst_stress_loss
+        and stress_nonworsening
+        and tail_nonworsening
     )
 
     rules: list[RiskRuleResult] = []
 
     def add(rule: str, passed: bool, observed, limit, reason: str) -> None:
-        rules.append(RiskRuleResult(rule, passed, str(observed), str(limit), reason))
+        observed_text = (
+            _canonical_decimal_text(observed)
+            if isinstance(observed, Decimal)
+            else str(observed)
+        )
+        limit_text = (
+            _canonical_decimal_text(limit)
+            if isinstance(limit, Decimal)
+            else str(limit)
+        )
+        rules.append(
+            RiskRuleResult(rule, passed, observed_text, limit_text, reason)
+        )
 
     add(
         "state_version",
@@ -900,12 +1838,16 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         policy.max_fx_age_seconds,
         "required FX inputs must be present and fresh enough for valuation",
     )
+    projected_abs_position = max(
+        (abs(quantity) for quantity in projected_positions.values()),
+        default=Decimal("0"),
+    )
     add(
         "position_limit",
-        abs(resulting) <= policy.max_abs_position or protective_reduction,
-        abs(resulting),
+        projected_abs_position <= policy.max_abs_position or protective_reduction,
+        projected_abs_position,
         policy.max_abs_position,
-        "resulting absolute position must stay within policy",
+        "every projected absolute position must stay within policy",
     )
     add(
         "single_notional",
@@ -1029,6 +1971,26 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         "complete non-empty stress evidence for every non-zero projected position",
         "stress admission must fail closed when scenarios are missing or incomplete",
     )
+    if policy.required_stress_scenario_labels is not None:
+        add(
+            "stress_regime_coverage",
+            stress_regime_coverage_complete,
+            (
+                "NO_PROJECTED_RISK"
+                if not stress_symbols
+                else (
+                    "MISSING:" + ",".join(sorted(missing_stress_labels))
+                    if missing_stress_labels
+                    else (
+                        "MISMATCH:" + ",".join(sorted(mismatched_stress_labels))
+                        if mismatched_stress_labels
+                        else ",".join(context.stress_scenario_labels)
+                    )
+                )
+            ),
+            ",".join(policy.required_stress_scenario_labels),
+            "configured frozen stress regimes must all be evidenced by labeled scenarios",
+        )
     add(
         "stress_loss",
         stress_coverage_complete
@@ -1037,6 +1999,66 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         policy.max_stress_loss,
         "worst configured stress loss must stay within policy",
     )
+    if policy.max_expected_shortfall is not None:
+        add(
+            "tail_coverage",
+            tail_coverage_complete,
+            (
+                ",".join(sorted(missing_tail_symbols))
+                if missing_tail_symbols
+                else (
+                    "DISTRIBUTION_MISMATCH"
+                    if not tail_distribution_matches
+                    else len(context.tail_scenarios)
+                )
+            ),
+            "complete non-empty tail scenarios for every non-zero projected position",
+            "expected-shortfall admission requires complete frozen tail evidence",
+        )
+        add(
+            "expected_shortfall",
+            tail_coverage_complete
+            and expected_shortfall is not None
+            and (
+                expected_shortfall <= policy.max_expected_shortfall
+                or protective_reduction
+            ),
+            expected_shortfall if expected_shortfall is not None else "UNKNOWN",
+            policy.max_expected_shortfall,
+            "equal-weight expected shortfall over the configured worst tail must stay within policy",
+        )
+    if policy.min_liquidation_headroom is not None:
+        liquidation_evidence_verified = _verify_liquidation_headroom_evidence(
+            evidence=context.liquidation_headroom_evidence,
+            expected_scope=context.liquidation_scope,
+            expected_state_version=context.state_version,
+            decision_time=context.decision_time,
+            evidence_store=evidence_store,
+        )
+        add(
+            "liquidation_headroom",
+            liquidation_evidence_verified
+            and context.liquidation_headroom is not None
+            and (
+                context.liquidation_headroom >= policy.min_liquidation_headroom
+                or protective_reduction
+            ),
+            (
+                context.liquidation_headroom
+                if liquidation_evidence_verified
+                and context.liquidation_headroom is not None
+                else (
+                    "UNVERIFIED"
+                    if context.liquidation_headroom is not None
+                    else "UNKNOWN"
+                )
+            ),
+            policy.min_liquidation_headroom,
+            (
+                "scope-bound immutable liquidation evidence must verify before "
+                "the headroom floor or protective-reduction exception can admit risk"
+            ),
+        )
 
     opens_short = resulting < 0 and resulting < base_position
     borrow_ok = not opens_short or context.borrow_available is True
@@ -1075,13 +2097,23 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
             "new futures risk requires sufficient evidenced delivery headroom",
         )
 
-    reduce_only_ok = not intent.reduce_only or reduces_absolute_exposure
+    reduce_only_ok = not intent.reduce_only or (
+        reduces_absolute_exposure and reduces_current_exposure
+    )
     add(
         "reduce_only",
         reduce_only_ok,
-        abs(resulting),
-        abs(base_position),
-        "reduce-only intent must not increase actual portfolio exposure",
+        (
+            f"current={abs(current_after_intent)};projected={abs(resulting)}"
+            if intent.reduce_only
+            else abs(resulting)
+        ),
+        (
+            f"current<{abs(current)};projected<{abs(base_position)}"
+            if intent.reduce_only
+            else abs(base_position)
+        ),
+        "reduce-only intent must reduce both current and reserved-inclusive exposure without crossing flat",
     )
 
     return RiskDecision(
@@ -1090,5 +2122,6 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         gross_leverage=gross_leverage,
         net_leverage=net_leverage,
         worst_stress_loss=worst_stress_loss,
+        input_fingerprint=_risk_input_fingerprint(intent, context, policy),
         rules=tuple(rules),
     )

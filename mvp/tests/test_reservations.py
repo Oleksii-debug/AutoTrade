@@ -218,7 +218,7 @@ class ReservationFoundationTests(unittest.TestCase):
             )
 
 
-    def test_filled_terminal_cannot_release_unconsumed_remainder(self):
+    def test_filled_terminal_releases_only_unused_worst_case_remainder(self):
         book = ReservationBook()
         book.reserve(
             reservation_id="r1",
@@ -227,13 +227,15 @@ class ReservationFoundationTests(unittest.TestCase):
             available={"CASH:USD": "100"},
         )
         book.consume("r1", {"CASH:USD": "40"})
-        with self.assertRaisesRegex(ReservationConflict, "FILLED"):
-            book.mark_terminal(
-                "r1",
-                outcome="FILLED",
-                resolution_evidence="provider-filled",
-            )
-        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("60"))
+        filled = book.mark_terminal(
+            "r1",
+            outcome="FILLED",
+            resolution_evidence="provider-filled",
+        )
+        self.assertEqual(filled.state, "FILLED")
+        self.assertEqual(filled.consumed["CASH:USD"], Decimal("40"))
+        self.assertEqual(filled.remaining["CASH:USD"], Decimal("0"))
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("0"))
 
     def test_rejected_or_absent_cannot_erase_consumed_exposure(self):
         for outcome in ("REJECTED", "PROVEN_ABSENT"):

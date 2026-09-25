@@ -1,14 +1,26 @@
+from functools import partial
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import json
 import unittest
 from uuid import uuid4
 
-from mvp.autotrade_mvp.capabilities import CapabilitySnapshot
+from mvp.autotrade_mvp.capabilities import (
+    CapabilityClaim,
+    EvidenceVerification,
+    derive_capability_snapshot,
+)
+from mvp.autotrade_mvp.provider_core import (
+    Surface,
+    observe_authenticated_json_response,
+    prepare_authenticated_read_query,
+)
 from mvp.autotrade_mvp.ibkr_web import (
     IbkrAbsenceEvidence,
     IbkrBrokerageSessionStatus,
     IbkrContractIdentity,
     IbkrExecutionEvidence,
+    IbkrReplyRequest,
     IbkrWebAdapterError,
     IbkrWebOrderIntent,
     execution_to_reconciliation_fill,
@@ -25,31 +37,38 @@ NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
 def capability(*, account_id="U1234567", order_types=("MARKET", "LIMIT", "STOP", "STOP_LIMIT")):
-    evidence = {
-        "artifact_id": str(uuid4()),
-        "sha256": "sha256:" + "e" * 64,
-        "observed_at": "2026-09-24T19:00:00Z",
-        "source_uri": "https://www.interactivebrokers.com/docs/web-api/v1/endpoints/orders/place-order",
-    }
-    return CapabilitySnapshot(
+    observed_at = NOW - timedelta(hours=1)
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            provider_id="IBKR",
+            account_id=account_id,
+            entity_id="web-api",
+            environment="PAPER",
+            instrument_version="AAPL-CONID-265598:v1",
+            observed_at=observed_at,
+            expires_at=NOW + timedelta(hours=1),
+            supported_order_types=frozenset(order_types),
+            time_in_force=frozenset({"DAY", "GTC", "IOC"}),
+            permission_scopes=frozenset({"ORDER_WRITE", "ORDER.READ"}),
+            position_mode="NET",
+            native_protection=frozenset(),
+            rate_limit_policy_id="ibkr-web-paper",
+            data_entitlements=frozenset({"ORDERS", "EXECUTIONS"}),
+            evidence_ref={
+                "artifact_id": str(uuid4()),
+                "sha256": "sha256:" + "e" * 64,
+                "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+                "source_uri": "https://www.interactivebrokers.com/docs/web-api/v1/endpoints/orders/place-order",
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    return derive_capability_snapshot(
         snapshot_id=str(uuid4()),
-        provider_id="IBKR",
-        account_id=account_id,
-        entity_id="web-api",
-        environment="PAPER",
-        instrument_version="AAPL-CONID-265598:v1",
-        observed_at=NOW - timedelta(hours=1),
-        expires_at=NOW + timedelta(hours=1),
-        supported_order_types=frozenset(order_types),
-        time_in_force=frozenset({"DAY", "GTC", "IOC"}),
-        permission_scopes=frozenset({"ORDER_WRITE"}),
-        position_mode="NET",
-        native_protection=frozenset(),
-        rate_limit_policy_id="ibkr-web-paper",
-        data_entitlements=frozenset({"ORDERS", "EXECUTIONS"}),
-        evidence=(evidence,),
-        status="VERIFIED",
-        sources=frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}),
+        claims=claims,
+        observed_at=observed_at,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
     )
 
 
@@ -63,6 +82,33 @@ def ready_session(**overrides):
     )
     values.update(overrides)
     return IbkrBrokerageSessionStatus(**values)
+
+
+def ibkr_trade_observation(payload, *, account_id="U1234567"):
+    binding = prepare_authenticated_read_query(
+        capability=capability(account_id=account_id),
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint="/iserver/account/trades",
+        query={},
+        at=NOW,
+    )
+    return observe_authenticated_json_response(
+        query_binding=binding,
+        response_bytes=json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8"),
+        observed_at=NOW,
+    )
+
+
+# Bind only the non-provider-read fixture helper.
+execution_to_reconciliation_fill = partial(
+    execution_to_reconciliation_fill,
+    environment="PAPER",
+)
 
 
 class IbkrWebAdapterTests(unittest.TestCase):
@@ -400,7 +446,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertFalse(outcome.proves_fill)
         self.assertFalse(outcome.retry_same_economic_action)
 
-    def test_reply_message_requires_separate_explicit_guarded_authorization(self):
+    def test_unrecorded_reply_message_cannot_prepare_second_request(self):
         outcome = parse_order_submission_response(
             [
                 {
@@ -413,14 +459,56 @@ class IbkrWebAdapterTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "REPLY_REQUIRED")
         self.assertFalse(outcome.proves_fill)
-        with self.assertRaisesRegex(IbkrWebAdapterError, "explicit authorization"):
-            prepare_reply_confirmation(outcome, explicit_authorization=False)
-        request = prepare_reply_confirmation(outcome, explicit_authorization=True)
-        self.assertEqual(
-            request.endpoint,
-            "/iserver/reply/07a13a5a-4a48-44a5-bb25-5ab37b79186c",
-        )
+        with self.assertRaisesRegex(TypeError, "recorded"):
+            prepare_reply_confirmation(
+                outcome,
+                expected_attempt_id="attempt-1",
+                expected_account_id="U1234567",
+                expected_client_order_id="coid-1",
+                explicit_authorization=True,
+            )
+
+    def test_reply_identity_cannot_escape_reply_endpoint_or_mutate_confirmation_body(self):
+        with self.assertRaisesRegex(IbkrWebAdapterError, "path segment"):
+            parse_order_submission_response(
+                [{"id": "../orders", "message": ["Confirm"], "messageIds": ["o1"]}]
+            )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "path segment"):
+            parse_order_submission_response(
+                [{"id": "reply?confirmed=false", "message": ["Confirm"], "messageIds": ["o1"]}]
+            )
+        for unsafe_id in (".", ".."):
+            with self.subTest(unsafe_id=unsafe_id), self.assertRaisesRegex(
+                IbkrWebAdapterError, "path segment"
+            ):
+                parse_order_submission_response(
+                    [{"id": unsafe_id, "message": ["Confirm"], "messageIds": ["o1"]}]
+                )
+        for invalid_reply_id in (None, True, 123):
+            with self.subTest(reply_id=invalid_reply_id), self.assertRaisesRegex(
+                IbkrWebAdapterError,
+                "reply id must be a string",
+            ):
+                parse_order_submission_response(
+                    [{"id": invalid_reply_id, "message": ["Confirm"], "messageIds": ["o1"]}]
+                )
+
+        base = {
+            "endpoint": "/iserver/reply/safe-reply-id",
+            "body": {"confirmed": True},
+            "attempt_id": "attempt-1",
+            "account_id": "U1234567",
+            "client_order_id": "at-reply-direct",
+            "response_sha256": "sha256:" + "a" * 64,
+        }
+        request = IbkrReplyRequest(**base)
         self.assertEqual(dict(request.body), {"confirmed": True})
+        with self.assertRaisesRegex(IbkrWebAdapterError, "reply endpoint|path segment"):
+            IbkrReplyRequest(**{**base, "endpoint": "/iserver/reply/../orders"})
+        with self.assertRaisesRegex(IbkrWebAdapterError, "path segment"):
+            IbkrReplyRequest(**{**base, "endpoint": "/iserver/reply/.."})
+        with self.assertRaisesRegex(IbkrWebAdapterError, "confirmed=true"):
+            IbkrReplyRequest(**{**base, "body": {"confirmed": False}})
 
     def test_ambiguous_ack_and_reply_shape_fails_closed(self):
         with self.assertRaisesRegex(IbkrWebAdapterError, "ambiguous"):
@@ -550,6 +638,47 @@ class IbkrWebAdapterTests(unittest.TestCase):
         )
         self.assertFalse(recorded.retry_same_economic_action)
 
+        with self.assertRaisesRegex(IbkrWebAdapterError, "explicit authorization"):
+            prepare_reply_confirmation(
+                recorded,
+                expected_attempt_id="attempt-ibkr-reply",
+                expected_account_id="U1234567",
+                expected_client_order_id="at-ibkr-reply",
+                explicit_authorization=False,
+            )
+
+        request = prepare_reply_confirmation(
+            recorded,
+            expected_attempt_id="attempt-ibkr-reply",
+            expected_account_id="U1234567",
+            expected_client_order_id="at-ibkr-reply",
+            explicit_authorization=True,
+        )
+        self.assertEqual(
+            request.endpoint,
+            "/iserver/reply/07a13a5a-4a48-44a5-bb25-5ab37b79186c",
+        )
+        self.assertEqual(dict(request.body), {"confirmed": True})
+        self.assertEqual(request.attempt_id, "attempt-ibkr-reply")
+        self.assertEqual(request.account_id, "U1234567")
+        self.assertEqual(request.client_order_id, "at-ibkr-reply")
+        self.assertEqual(request.response_sha256, recorded.response_sha256)
+
+        for field, value in (
+            ("expected_attempt_id", "other-attempt"),
+            ("expected_account_id", "OTHER"),
+            ("expected_client_order_id", "other-coid"),
+        ):
+            kwargs = {
+                "expected_attempt_id": "attempt-ibkr-reply",
+                "expected_account_id": "U1234567",
+                "expected_client_order_id": "at-ibkr-reply",
+                "explicit_authorization": True,
+            }
+            kwargs[field] = value
+            with self.subTest(field=field), self.assertRaises(IbkrWebAdapterError):
+                prepare_reply_confirmation(recorded, **kwargs)
+
     def test_recorded_submission_rejects_cross_account_binding(self):
         intent = IbkrWebOrderIntent.create(
             instrument_version="AAPL-CONID-265598:v1",
@@ -598,6 +727,9 @@ class IbkrWebAdapterTests(unittest.TestCase):
             fee_currency="USD",
             trade_time="2026-09-24T20:00:01Z",
         )
+        self.assertEqual(fill.provider_id, "IBKR")
+        self.assertEqual(fill.account_id, "U1234567")
+        self.assertEqual(fill.environment, "PAPER")
         self.assertEqual(fill.provider_execution_id, "0001.123.01")
         self.assertEqual(fill.client_order_id, "at-ibkr-1")
         self.assertEqual(fill.quantity, Decimal("0.5"))
@@ -621,12 +753,14 @@ class IbkrWebAdapterTests(unittest.TestCase):
             }
         ]
         fills = parse_web_api_trades(
-            [rows[0], dict(rows[0])],
-            expected_account_id="U1234567",
+            ibkr_trade_observation([rows[0], dict(rows[0])]),
             instrument_versions_by_conid={265598: "AAPL-CONID-265598:v1"},
             fee_currency_by_execution_id={"0001.123.01": "USD"},
         )
         self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0].provider_id, "IBKR")
+        self.assertEqual(fills[0].account_id, "U1234567")
+        self.assertEqual(fills[0].environment, "PAPER")
         self.assertEqual(fills[0].provider_execution_id, "0001.123.01")
         self.assertEqual(fills[0].client_order_id, "at-ibkr-1")
         self.assertEqual(fills[0].quantity, Decimal("0.5"))
@@ -645,22 +779,19 @@ class IbkrWebAdapterTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(IbkrWebAdapterError, "account"):
             parse_web_api_trades(
-                [row],
-                expected_account_id="OTHER",
+                ibkr_trade_observation([row], account_id="OTHER"),
                 instrument_versions_by_conid={265598: "AAPL:v1"},
                 fee_currency_by_execution_id={"exec-1": "USD"},
             )
         with self.assertRaisesRegex(IbkrWebAdapterError, "unmapped IBKR conid"):
             parse_web_api_trades(
-                [row],
-                expected_account_id="U1234567",
+                ibkr_trade_observation([row]),
                 instrument_versions_by_conid={},
                 fee_currency_by_execution_id={"exec-1": "USD"},
             )
         with self.assertRaisesRegex(IbkrWebAdapterError, "fee currency"):
             parse_web_api_trades(
-                [row],
-                expected_account_id="U1234567",
+                ibkr_trade_observation([row]),
                 instrument_versions_by_conid={265598: "AAPL:v1"},
                 fee_currency_by_execution_id={},
             )
@@ -678,17 +809,35 @@ class IbkrWebAdapterTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(IbkrWebAdapterError, "exact decimal"):
             parse_web_api_trades(
-                [dict(base, size=1.0)],
-                expected_account_id="U1234567",
+                ibkr_trade_observation([dict(base, size=1.0)]),
                 instrument_versions_by_conid={265598: "AAPL:v1"},
                 fee_currency_by_execution_id={"exec-1": "USD"},
             )
         with self.assertRaisesRegex(IbkrWebAdapterError, "conflicting"):
             parse_web_api_trades(
-                [base, dict(base, size="2")],
-                expected_account_id="U1234567",
+                ibkr_trade_observation([base, dict(base, size="2")]),
                 instrument_versions_by_conid={265598: "AAPL:v1"},
                 fee_currency_by_execution_id={"exec-1": "USD"},
+            )
+
+    def test_reconciliation_fill_rejects_noncanonical_environment(self):
+        execution = IbkrExecutionEvidence.create(
+            execution_id="0001.998.01",
+            permanent_order_id=778898,
+            account_id="U1234567",
+            quantity="1",
+            price="100",
+        )
+        with self.assertRaisesRegex(ValueError, "environment"):
+            execution_to_reconciliation_fill(
+                execution,
+                environment="UNKNOWN_ENV",
+                client_order_id="at-ibkr-env",
+                expected_account_id="U1234567",
+                instrument="AAPL-CONID-265598:v1",
+                fee_amount="0",
+                fee_currency="USD",
+                trade_time="2026-09-24T20:00:01Z",
             )
 
     def test_execution_cannot_cross_account_boundary_during_reconciliation(self):

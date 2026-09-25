@@ -18,6 +18,16 @@ def _text(value: str, *, name: str) -> str:
     return value.strip()
 
 
+_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
+
+
+def _environment(value: str) -> str:
+    normalized = _text(value, name="environment").upper()
+    if normalized not in _ENVIRONMENTS:
+        raise ValueError("unsupported environment")
+    return normalized
+
+
 def _decimal(value, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")
@@ -43,6 +53,9 @@ class FillRecord:
 
 @dataclass(frozen=True)
 class OrderSnapshot:
+    provider_id: str
+    account_id: str
+    environment: str
     client_order_id: str
     instrument: str
     side: str
@@ -53,12 +66,18 @@ class OrderSnapshot:
     overfill_quantity: Decimal
     average_fill_price: Decimal | None
     provider_order_id: str | None
+    submission_attempt_id: str | None
+    parent_intent_id: str | None
     oco_group_id: str | None
     oco_violation: bool
     fill_count: int
     observation_count: int
     cancel_requested: bool
     cancel_confirmed: bool
+    cancel_command_id: str | None
+    replace_requested: bool
+    replace_command_id: str | None
+    expired: bool
 
 
 class OrderProjectionConflict(ValueError):
@@ -69,6 +88,9 @@ class OrderProjection:
     def __init__(
         self,
         *,
+        provider_id: str,
+        account_id: str,
+        environment: str,
         client_order_id: str,
         instrument: str,
         side: str,
@@ -76,6 +98,9 @@ class OrderProjection:
         oco_group_id: str | None = None,
         parent_intent_id: str | None = None,
     ):
+        self.provider_id = _text(provider_id, name="provider_id").upper()
+        self.account_id = _text(account_id, name="account_id")
+        self.environment = _environment(environment)
         self.client_order_id = _text(client_order_id, name="client_order_id")
         self.instrument = _text(instrument, name="instrument")
         normalized_side = _text(side, name="side").upper()
@@ -99,9 +124,14 @@ class OrderProjection:
         if self.parent_intent_id == self.client_order_id:
             raise ValueError("order cannot amend itself")
         self.provider_order_id: str | None = None
+        self.submission_attempt_id: str | None = None
         self.submission_state = "PENDING"
         self.cancel_requested = False
         self.cancelled = False
+        self.cancel_command_id: str | None = None
+        self.replace_requested = False
+        self.replace_command_id: str | None = None
+        self.expired = False
         self.rejected = False
         self._fills: dict[str, FillRecord] = {}
         self._provider_execution_ids: dict[str, str] = {}
@@ -109,19 +139,53 @@ class OrderProjection:
         self._history: list[FillRecord] = []
         self._oco_violation = False
 
+    def _bind_submission_attempt(self, attempt_id: str) -> None:
+        attempt = _text(attempt_id, name="attempt_id")
+        if (
+            self.submission_attempt_id is not None
+            and self.submission_attempt_id != attempt
+        ):
+            raise OrderProjectionConflict(
+                "order already belongs to a different submission attempt"
+            )
+        self.submission_attempt_id = attempt
+
+    def mark_send_started(self, *, attempt_id: str) -> None:
+        """Record the durable outbound-attempt identity without inventing ACK."""
+        self._bind_submission_attempt(attempt_id)
+
     def acknowledge(
         self,
         *,
-        provider_order_id: str,
+        provider_order_id: str | None = None,
         status: str = "ACCEPTED",
+        attempt_id: str | None = None,
     ) -> None:
-        order_id = _text(provider_order_id, name="provider_order_id")
+        if attempt_id is not None:
+            self._bind_submission_attempt(attempt_id)
+        order_id = (
+            _text(provider_order_id, name="provider_order_id")
+            if provider_order_id is not None
+            else None
+        )
         normalized = _text(status, name="status").upper()
+        if normalized == "ACKNOWLEDGED":
+            normalized = "ACCEPTED"
         if normalized not in {"ACCEPTED", "REJECTED", "UNKNOWN"}:
             raise ValueError("unsupported submission status")
-        if self.provider_order_id is not None and self.provider_order_id != order_id:
+        if (
+            order_id is not None
+            and self.provider_order_id is not None
+            and self.provider_order_id != order_id
+        ):
             raise OrderProjectionConflict("provider_order_id changed")
-        self.provider_order_id = order_id
+        prior = self.submission_state
+        if prior in {"ACCEPTED", "REJECTED"} and normalized != prior:
+            raise OrderProjectionConflict(
+                "terminal submission outcome cannot change"
+            )
+        if order_id is not None:
+            self.provider_order_id = order_id
         if normalized == "REJECTED":
             self.rejected = True
         self.submission_state = normalized
@@ -284,13 +348,73 @@ class OrderProjection:
             correction_fill_id=correction_fill_id,
         )
 
-    def request_cancel(self) -> None:
-        """Record a pending cancel request without inventing provider confirmation."""
+    def request_cancel(self, *, command_id: str) -> None:
+        """Record one pending cancel command without inventing confirmation."""
+        command = _text(command_id, name="command_id")
+        if self.cancel_command_id is not None:
+            if self.cancel_command_id == command:
+                return
+            raise OrderProjectionConflict(
+                "cancel request already has a different command_id"
+            )
+        if self.replace_requested:
+            raise OrderProjectionConflict(
+                "cancel and replace requests cannot be pending together"
+            )
+        if self.rejected or self.expired:
+            raise OrderProjectionConflict(
+                "terminal order cannot accept a new cancel request"
+            )
+        self.cancel_command_id = command
         if not self.cancelled:
             self.cancel_requested = True
 
+    def request_replace(self, *, command_id: str) -> None:
+        """Record one pending replace command without inventing completion."""
+        command = _text(command_id, name="command_id")
+        if self.replace_command_id is not None:
+            if self.replace_command_id == command:
+                return
+            raise OrderProjectionConflict(
+                "replace request already has a different command_id"
+            )
+        if self.cancel_requested:
+            raise OrderProjectionConflict(
+                "cancel and replace requests cannot be pending together"
+            )
+        if self.rejected or self.cancelled or self.expired:
+            raise OrderProjectionConflict(
+                "terminal order cannot accept a new replace request"
+            )
+        if self.filled_quantity >= self.requested_quantity:
+            raise OrderProjectionConflict(
+                "fully filled order cannot accept a new replace request"
+            )
+        self.replace_command_id = command
+        self.replace_requested = True
+
+    def confirm_expired(self) -> None:
+        """Record provider-evidenced expiry of the remaining quantity."""
+        if self.rejected or self.cancelled:
+            raise OrderProjectionConflict(
+                "terminal order outcome cannot be relabelled expired"
+            )
+        if self.cancel_requested or self.replace_requested:
+            raise OrderProjectionConflict(
+                "pending cancel/replace must resolve before expiry is recorded"
+            )
+        self.expired = True
+
     def confirm_cancel(self) -> None:
         """Record provider-confirmed cancellation of the still-unfilled remainder."""
+        if self.rejected or self.expired:
+            raise OrderProjectionConflict(
+                "terminal order cannot also be confirmed cancelled"
+            )
+        if self.replace_requested:
+            raise OrderProjectionConflict(
+                "replace request must resolve before cancellation is confirmed"
+            )
         self.cancel_requested = True
         self.cancelled = True
 
@@ -303,6 +427,15 @@ class OrderProjection:
             raise ValueError("order is not in an OCO group")
         if self.filled_quantity > 0:
             self._oco_violation = True
+
+    @property
+    def historical_execution_observed(self) -> bool:
+        """Whether immutable history ever contained positive execution evidence."""
+
+        return any(
+            observation.active and observation.quantity > 0
+            for observation in self._history
+        )
 
     @property
     def filled_quantity(self) -> Decimal:
@@ -340,23 +473,28 @@ class OrderProjection:
         remaining = self.requested_quantity - self.filled_quantity
         return remaining if remaining > 0 else Decimal("0")
 
-    @property
-    def state(self) -> str:
+    def _state_without_oco(self) -> str:
         filled = self.filled_quantity
-        if self._oco_violation:
-            return "OCO_VIOLATION"
         if filled > self.requested_quantity:
             if self.cancelled:
                 return "OVERFILLED_AFTER_CANCEL"
+            if self.expired:
+                return "OVERFILLED_AFTER_EXPIRY"
             if self.rejected:
                 return "OVERFILLED_AFTER_REJECT"
             if self.cancel_requested:
                 return "OVERFILLED_DURING_CANCEL"
+            if self.replace_requested:
+                return "OVERFILLED_DURING_REPLACE"
             return "OVERFILLED"
         if self.cancelled:
             if filled == self.requested_quantity:
                 return "FILLED_AFTER_CANCEL"
             return "PARTIALLY_FILLED_CANCELLED" if filled > 0 else "CANCELLED"
+        if self.expired:
+            if filled == self.requested_quantity:
+                return "FILLED_AFTER_EXPIRY"
+            return "PARTIALLY_FILLED_EXPIRED" if filled > 0 else "EXPIRED"
         if self.rejected:
             return "FILLED_AFTER_REJECT" if filled > 0 else "REJECTED"
         if filled == self.requested_quantity:
@@ -367,21 +505,47 @@ class OrderProjection:
                 if filled > 0
                 else "CANCEL_REQUESTED"
             )
+        if self.replace_requested:
+            return (
+                "PARTIALLY_FILLED_REPLACE_REQUESTED"
+                if filled > 0
+                else "REPLACE_REQUESTED"
+            )
         if filled > 0:
             return "PARTIALLY_FILLED"
         if self.submission_state == "ACCEPTED":
             return "WORKING"
         if self.submission_state == "UNKNOWN":
             return "UNKNOWN"
+        if self.submission_attempt_id is not None:
+            return "SEND_STARTED"
         return "PENDING"
 
-    def snapshot(self) -> OrderSnapshot:
+    @property
+    def state(self) -> str:
+        if self._oco_violation:
+            return "OCO_VIOLATION"
+        return self._state_without_oco()
+
+    def snapshot(self, *, oco_violation: bool | None = None) -> OrderSnapshot:
+        violation = (
+            self._oco_violation
+            if oco_violation is None
+            else bool(oco_violation)
+        )
         return OrderSnapshot(
+            provider_id=self.provider_id,
+            account_id=self.account_id,
+            environment=self.environment,
             client_order_id=self.client_order_id,
             instrument=self.instrument,
             side=self.side,
             requested_quantity=self.requested_quantity,
-            state=self.state,
+            state=(
+                "OCO_VIOLATION"
+                if violation
+                else self._state_without_oco()
+            ),
             filled_quantity=self.filled_quantity,
             open_quantity=self.open_quantity,
             overfill_quantity=max(
@@ -390,25 +554,48 @@ class OrderProjection:
             ),
             average_fill_price=self.average_fill_price,
             provider_order_id=self.provider_order_id,
+            submission_attempt_id=self.submission_attempt_id,
+            parent_intent_id=self.parent_intent_id,
             oco_group_id=self.oco_group_id,
-            oco_violation=self._oco_violation,
+            oco_violation=violation,
             fill_count=len(self.active_fills),
             observation_count=len(self._history),
             cancel_requested=self.cancel_requested,
             cancel_confirmed=self.cancelled,
+            cancel_command_id=self.cancel_command_id,
+            replace_requested=self.replace_requested,
+            replace_command_id=self.replace_command_id,
+            expired=self.expired,
         )
 
 
 class OrderBookProjection:
     """Aggregate multiple canonical orders without creating a second order authority."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        provider_id: str,
+        account_id: str,
+        environment: str,
+    ) -> None:
+        self.provider_id = _text(provider_id, name="provider_id").upper()
+        self.account_id = _text(account_id, name="account_id")
+        self.environment = _environment(environment)
         self._orders: dict[str, OrderProjection] = {}
         self._amend_children: dict[str, str] = {}
 
     def register(self, order: OrderProjection) -> bool:
         if not isinstance(order, OrderProjection):
             raise TypeError("order must be OrderProjection")
+        if (
+            order.provider_id != self.provider_id
+            or order.account_id != self.account_id
+            or order.environment != self.environment
+        ):
+            raise OrderProjectionConflict(
+                "order provider/account/environment scope differs from book"
+            )
         existing = self._orders.get(order.client_order_id)
         if existing is not None:
             if existing is order:
@@ -418,6 +605,19 @@ class OrderBookProjection:
         if parent is not None:
             if parent not in self._orders:
                 raise KeyError(parent)
+            parent_order = self._orders[parent]
+            if order.instrument != parent_order.instrument:
+                raise OrderProjectionConflict(
+                    "amendment child instrument differs from parent"
+                )
+            if order.side != parent_order.side:
+                raise OrderProjectionConflict(
+                    "amendment child side differs from parent"
+                )
+            if order.oco_group_id != parent_order.oco_group_id:
+                raise OrderProjectionConflict(
+                    "amendment child OCO group differs from parent"
+                )
             child = self._amend_children.get(parent)
             if child is not None and child != order.client_order_id:
                 raise OrderProjectionConflict(
@@ -438,6 +638,9 @@ class OrderBookProjection:
         parent_intent_id: str | None = None,
     ) -> OrderProjection:
         order = OrderProjection(
+            provider_id=self.provider_id,
+            account_id=self.account_id,
+            environment=self.environment,
             client_order_id=client_order_id,
             instrument=instrument,
             side=side,
@@ -484,44 +687,89 @@ class OrderBookProjection:
             fills.extend(order.active_fills)
         return tuple(fills)
 
+    def _oco_breaches(
+        self,
+        *,
+        historical: bool,
+    ) -> dict[str, tuple[str, ...]]:
+        groups: dict[str, list[OrderProjection]] = {}
+        for order in self._orders.values():
+            if order.oco_group_id is None:
+                continue
+            observed = (
+                order.historical_execution_observed
+                if historical
+                else order.filled_quantity > 0
+            )
+            if not observed:
+                continue
+            groups.setdefault(order.oco_group_id, []).append(order)
+
+        return {
+            group: tuple(
+                sorted(order.client_order_id for order in orders)
+            )
+            for group, orders in groups.items()
+            if len(orders) > 1
+        }
+
     def snapshots(self) -> tuple[OrderSnapshot, ...]:
-        return tuple(order.snapshot() for order in self._orders.values())
+        # OCO breach is historical provider-observation truth. Derive it from
+        # immutable fill/revision history without mutating orders during reads;
+        # a later bust may reverse current economics but cannot erase the fact
+        # that both peers were previously observed as executed.
+        breaches = self._oco_breaches(historical=True)
+        violated = {
+            order_id
+            for order_ids in breaches.values()
+            for order_id in order_ids
+        }
+        return tuple(
+            order.snapshot(
+                oco_violation=order.client_order_id in violated
+            )
+            for order in self._orders.values()
+        )
 
     def oco_breaches(self) -> Mapping[str, tuple[str, ...]]:
-        groups: dict[str, list[str]] = {}
-        for order in self._orders.values():
-            if order.oco_group_id is None or order.filled_quantity <= 0:
-                continue
-            groups.setdefault(order.oco_group_id, []).append(order.client_order_id)
-        return {
-            group: tuple(sorted(order_ids))
-            for group, order_ids in groups.items()
-            if len(order_ids) > 1
-        }
+        """Historical OCO races derived from immutable observations."""
+
+        return self._oco_breaches(historical=True)
+
+    def active_oco_breaches(self) -> Mapping[str, tuple[str, ...]]:
+        """Current double-filled OCO exposure after corrections/busts."""
+
+        return self._oco_breaches(historical=False)
 
 
 class OcoGroupProjection:
     def __init__(self, group_id: str):
         self.group_id = _text(group_id, name="group_id")
         self._orders: dict[str, OrderProjection] = {}
+        self._scope: tuple[str, str, str] | None = None
 
     def add(self, order: OrderProjection) -> None:
         if not isinstance(order, OrderProjection):
             raise TypeError("order must be OrderProjection")
         if order.oco_group_id != self.group_id:
             raise ValueError("order belongs to another OCO group")
+        scope = (order.provider_id, order.account_id, order.environment)
+        if self._scope is None:
+            self._scope = scope
+        elif self._scope != scope:
+            raise OrderProjectionConflict(
+                "OCO peers must share provider/account/environment scope"
+            )
         existing = self._orders.get(order.client_order_id)
         if existing is not None and existing is not order:
             raise OrderProjectionConflict("client_order_id already registered")
         self._orders[order.client_order_id] = order
 
     def refresh(self) -> bool:
-        filled_orders = [
+        # Legacy compatibility query only. OCO truth is derived from immutable
+        # observation history and reads must not mutate order state.
+        observed_orders = [
             order for order in self._orders.values()
-            if order.filled_quantity > 0
+            if order.historical_execution_observed
         ]
-        violation = len(filled_orders) > 1
-        if violation:
-            for order in filled_orders:
-                order.mark_oco_peer_filled()
-        return violation
+        return len(observed_orders) > 1

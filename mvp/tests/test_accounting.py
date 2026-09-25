@@ -10,6 +10,7 @@ from mvp.autotrade_mvp.accounting import (
     book_external_cash_flow,
     book_fx_exchange,
     posting,
+    project_equity_position,
     reverse_transaction,
     transaction_digest,
     validate_transaction,
@@ -444,6 +445,222 @@ class AccountingFoundationTests(unittest.TestCase):
                 quantity=1,
                 price=100.1,
             )
+
+
+    def test_atomic_batch_is_all_or_nothing_and_exact_retry_is_idempotent(self):
+        book = EconomicBook()
+        usd = book_external_cash_flow(
+            transaction_id="batch-usd",
+            cause_event_id="batch-cash-usd",
+            currency="USD",
+            amount="10",
+        )
+        eur = book_external_cash_flow(
+            transaction_id="batch-eur",
+            cause_event_id="batch-cash-eur",
+            currency="EUR",
+            amount="5",
+        )
+
+        self.assertTrue(book.append_batch((usd, eur)))
+        committed_digest = book.audit_digest()
+        self.assertFalse(book.append_batch((usd, eur)))
+        self.assertEqual(book.audit_digest(), committed_digest)
+        self.assertEqual(len(book.transactions), 2)
+
+        gbp = book_external_cash_flow(
+            transaction_id="batch-gbp",
+            cause_event_id="batch-cash-gbp",
+            currency="GBP",
+            amount="7",
+        )
+        conflicting_eur = book_external_cash_flow(
+            transaction_id="batch-eur",
+            cause_event_id="batch-cash-eur-conflict",
+            currency="EUR",
+            amount="6",
+        )
+        before = book.transactions
+        before_digest = book.audit_digest()
+        with self.assertRaises(AccountingConflict):
+            book.append_batch((gbp, conflicting_eur))
+        self.assertEqual(book.transactions, before)
+        self.assertEqual(book.audit_digest(), before_digest)
+        self.assertEqual(book.cash("GBP"), Decimal("0"))
+
+
+    def test_corrected_fill_restates_fifo_at_original_economic_time(self):
+        book = EconomicBook()
+        original = book_equity_fill(
+            transaction_id="buy-original",
+            cause_event_id="fill-buy-original",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="2",
+            price="100",
+            economic_effective_at="2026-01-01T10:00:00Z",
+            economic_order_key="fill-1",
+        )
+        later_sale = book_equity_fill(
+            transaction_id="sell-later",
+            cause_event_id="fill-sell-later",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="SELL",
+            quantity="1",
+            price="110",
+            economic_effective_at="2026-01-01T11:00:00Z",
+            economic_order_key="fill-2",
+        )
+        book.append(original)
+        book.append(later_sale)
+        replacement = book_equity_fill(
+            transaction_id="buy-corrected",
+            cause_event_id="fill-buy-corrected",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="2",
+            price="101",
+            economic_effective_at=original.economic_effective_at,
+            economic_order_key=original.economic_order_key,
+            observed_at="2026-01-02T12:00:00Z",
+            corrects_transaction_id=original.transaction_id,
+        )
+        self.assertTrue(
+            book.append_batch(
+                (
+                    reverse_transaction(
+                        original,
+                        transaction_id="buy-original-reversal",
+                        cause_event_id="fill-buy-correction-reversal",
+                        observed_at="2026-01-02T12:00:00Z",
+                    ),
+                    replacement,
+                )
+            )
+        )
+
+        projected = project_equity_position(
+            book,
+            instrument="ABC",
+            settlement_currency="USD",
+        )
+        self.assertEqual(projected.quantity, Decimal("1"))
+        self.assertEqual(projected.open_cost_basis, Decimal("101"))
+        self.assertEqual(projected.realized_pnl, Decimal("9"))
+        self.assertEqual(projected.lots[0].transaction_id, "buy-corrected")
+
+        restarted = EconomicBook(book.transactions)
+        self.assertEqual(
+            project_equity_position(
+                restarted,
+                instrument="ABC",
+                settlement_currency="USD",
+            ),
+            projected,
+        )
+
+    def test_corrected_fifo_fails_closed_without_explicit_replacement_lineage(self):
+        book = EconomicBook()
+        original = book_equity_fill(
+            transaction_id="buy-lineage",
+            cause_event_id="fill-buy-lineage",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="1",
+            price="100",
+            economic_effective_at="2026-01-01T10:00:00Z",
+            economic_order_key="provider:A:execution:lineage",
+        )
+        book.append(original)
+        reversal = reverse_transaction(
+            original,
+            transaction_id="buy-lineage-reversal",
+            cause_event_id="fill-buy-lineage-reversal",
+            observed_at="2026-01-02T10:00:00Z",
+        )
+        replacement = book_equity_fill(
+            transaction_id="buy-lineage-unbound",
+            cause_event_id="fill-buy-lineage-unbound",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="1",
+            price="101",
+            economic_effective_at=original.economic_effective_at,
+            economic_order_key=original.economic_order_key,
+        )
+        book.append_batch((reversal, replacement))
+        with self.assertRaisesRegex(AccountingConflict, "replacement lineage"):
+            project_equity_position(
+                book,
+                instrument="ABC",
+                settlement_currency="USD",
+            )
+
+    def test_corrected_fifo_fails_closed_when_active_fill_lacks_order_evidence(self):
+        book = EconomicBook()
+        original = book_equity_fill(
+            transaction_id="buy-original",
+            cause_event_id="fill-buy-original",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="2",
+            price="100",
+            economic_effective_at="2026-01-01T10:00:00Z",
+            economic_order_key="fill-1",
+        )
+        book.append(original)
+        book.append(
+            book_equity_fill(
+                transaction_id="sell-without-order-proof",
+                cause_event_id="fill-sell-unordered",
+                instrument="ABC",
+                settlement_currency="USD",
+                side="SELL",
+                quantity="1",
+                price="110",
+            )
+        )
+        replacement = book_equity_fill(
+            transaction_id="buy-corrected",
+            cause_event_id="fill-buy-corrected",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="2",
+            price="101",
+            economic_effective_at=original.economic_effective_at,
+            economic_order_key=original.economic_order_key,
+            observed_at="2026-01-02T12:00:00Z",
+            corrects_transaction_id=original.transaction_id,
+        )
+        book.append_batch(
+            (
+                reverse_transaction(
+                    original,
+                    transaction_id="buy-original-reversal",
+                    cause_event_id="fill-buy-correction-reversal",
+                    observed_at="2026-01-02T12:00:00Z",
+                ),
+                replacement,
+            )
+        )
+        with self.assertRaisesRegex(
+            AccountingConflict,
+            "economic effective-time",
+        ):
+            project_equity_position(
+                book,
+                instrument="ABC",
+                settlement_currency="USD",
+            )
+
+
 
 
 if __name__ == "__main__":

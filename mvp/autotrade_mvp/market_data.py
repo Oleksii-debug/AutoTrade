@@ -7,9 +7,11 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
+import re
 from types import MappingProxyType
 from typing import Any, Mapping
-from uuid import NAMESPACE_URL, uuid5
+from urllib.parse import urlsplit
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .instruments import (
     InstrumentNotFound,
@@ -94,7 +96,47 @@ def _canonical(value: Any) -> str:
 def _evidence(value: Mapping[str, object]) -> Mapping[str, object]:
     if not isinstance(value, Mapping) or not value:
         raise MarketDataError("raw_evidence_ref is required")
-    return MappingProxyType(dict(value))
+    required = {"artifact_id", "sha256", "observed_at"}
+    allowed = required | {"source_uri", "rights_id"}
+    keys = set(value)
+    if required - keys:
+        raise MarketDataError("raw_evidence_ref is missing required fields")
+    if keys - allowed:
+        raise MarketDataError("raw_evidence_ref contains unknown fields")
+
+    artifact_id = _text(value["artifact_id"], "artifact_id")
+    try:
+        UUID(artifact_id)
+    except (ValueError, TypeError, AttributeError) as error:
+        raise MarketDataError("raw evidence artifact_id must be a UUID") from error
+
+    digest = _text(value["sha256"], "sha256")
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+        raise MarketDataError("raw evidence sha256 must be a canonical SHA-256 digest")
+
+    observed_at = _text(value["observed_at"], "observed_at")
+    if not observed_at.endswith("Z"):
+        raise MarketDataError("raw evidence observed_at must be UTC and end in Z")
+    try:
+        parsed = datetime.fromisoformat(observed_at[:-1] + "+00:00")
+    except ValueError as error:
+        raise MarketDataError("raw evidence observed_at must be an ISO date-time") from error
+    if parsed.utcoffset() != timedelta(0):
+        raise MarketDataError("raw evidence observed_at must be UTC")
+
+    normalized: dict[str, object] = {
+        "artifact_id": artifact_id,
+        "sha256": digest,
+        "observed_at": observed_at,
+    }
+    if "source_uri" in value:
+        source_uri = _text(value["source_uri"], "source_uri")
+        if not urlsplit(source_uri).scheme:
+            raise MarketDataError("raw evidence source_uri must be an absolute URI")
+        normalized["source_uri"] = source_uri
+    if "rights_id" in value:
+        normalized["rights_id"] = _text(value["rights_id"], "rights_id")
+    return MappingProxyType(normalized)
 
 
 @dataclass(frozen=True)

@@ -11,7 +11,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from hashlib import sha256
+import json
 from typing import Literal, Sequence
+from uuid import UUID
+
+from research.autotrade_research.artifacts.store import ArtifactStore
+
+from .capabilities import CapabilitySnapshot
 
 
 class PerpetualMarginError(ValueError):
@@ -61,6 +68,86 @@ def _instant(value: str, *, name: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _artifact_id(value: object, *, name: str) -> str:
+    text = _text(value, name=name)
+    try:
+        return str(UUID(text))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise PerpetualMarginError(f"{name} must be an artifact UUID") from error
+
+
+def _decimal_text(value: Decimal) -> str:
+    normalized = value.normalize()
+    if normalized == 0:
+        return "0"
+    return format(normalized, "f")
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _verify_immutable_artifact(
+    store: ArtifactStore,
+    *,
+    artifact_id: str,
+    expected_payload: object,
+    expected_metadata: dict[str, object],
+) -> None:
+    if not isinstance(store, ArtifactStore):
+        raise PerpetualMarginError(
+            "canonical ArtifactStore is required for immutable margin evidence"
+        )
+    try:
+        manifest = store.load_manifest(artifact_id)
+        payload = store.read_bytes(artifact_id)
+    except Exception as error:
+        raise PerpetualMarginError(
+            "immutable margin evidence artifact is missing or corrupt"
+        ) from error
+    if type(manifest) is not dict or not isinstance(payload, bytes):
+        raise PerpetualMarginError(
+            "immutable margin evidence artifact has unsupported representation"
+        )
+    if manifest.get("artifact_id") != artifact_id:
+        raise PerpetualMarginError("margin evidence artifact identity mismatch")
+    actual_digest = "sha256:" + sha256(payload).hexdigest()
+    if manifest.get("sha256") != actual_digest:
+        raise PerpetualMarginError("margin evidence artifact digest mismatch")
+    manifest_hash = manifest.get("manifest_hash")
+    if (
+        not isinstance(manifest_hash, str)
+        or len(manifest_hash) != 71
+        or not manifest_hash.startswith("sha256:")
+        or any(ch not in "0123456789abcdef" for ch in manifest_hash[7:])
+    ):
+        raise PerpetualMarginError(
+            "margin evidence artifact manifest integrity binding is required"
+        )
+    rights = manifest.get("rights")
+    if not isinstance(rights, dict) or rights.get("storage") is not True:
+        raise PerpetualMarginError(
+            "margin evidence artifact must preserve storage provenance"
+        )
+    if manifest.get("media_type") != "application/json":
+        raise PerpetualMarginError("margin evidence artifact media type mismatch")
+    metadata = manifest.get("metadata")
+    if type(metadata) is not dict or any(
+        metadata.get(key) != value for key, value in expected_metadata.items()
+    ):
+        raise PerpetualMarginError("margin evidence artifact scope metadata mismatch")
+    if payload != _canonical_json_bytes(expected_payload):
+        raise PerpetualMarginError(
+            "margin evidence artifact content does not match supplied economics"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class MarginTier:
     notional_upper_bound: Decimal
@@ -106,7 +193,19 @@ class MarginTier:
 
 @dataclass(frozen=True, slots=True)
 class PerpetualMarginEvidence:
+    provider_id: str
+    account_id: str
+    entity_id: str
+    environment: str
     instrument_version: str
+    capability_snapshot_id: str
+    position_mode: str
+    margin_mode: str
+    collateral_currency: str
+    settlement_currency: str
+    risk_tier_revision: str
+    evidence_bundle_ref: str
+    tier_table_evidence_ref: str
     mark_price: Decimal
     index_price: Decimal
     collateral_fx_to_settlement: Decimal
@@ -115,13 +214,59 @@ class PerpetualMarginEvidence:
     collateral_fx_observed_at: str
     margin_tiers_observed_at: str
     margin_tiers: tuple[MarginTier, ...]
-    evidence_ref: str
 
     def __post_init__(self) -> None:
+        for name in (
+            "provider_id",
+            "account_id",
+            "entity_id",
+            "instrument_version",
+            "capability_snapshot_id",
+            "position_mode",
+            "collateral_currency",
+            "settlement_currency",
+            "risk_tier_revision",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _text(getattr(self, name), name=name),
+            )
         object.__setattr__(
             self,
-            "instrument_version",
-            _text(self.instrument_version, name="instrument_version"),
+            "evidence_bundle_ref",
+            _artifact_id(self.evidence_bundle_ref, name="evidence_bundle_ref"),
+        )
+        object.__setattr__(
+            self,
+            "tier_table_evidence_ref",
+            _artifact_id(
+                self.tier_table_evidence_ref,
+                name="tier_table_evidence_ref",
+            ),
+        )
+        # Provider/account capability identity must use the exact canonical
+        # representation owned by CapabilitySnapshot. Do not introduce a second
+        # case-normalization rule inside margin evidence.
+        object.__setattr__(
+            self,
+            "environment",
+            _text(self.environment, name="environment").upper(),
+        )
+        object.__setattr__(
+            self,
+            "margin_mode",
+            _text(self.margin_mode, name="margin_mode").upper(),
+        )
+        object.__setattr__(
+            self,
+            "collateral_currency",
+            self.collateral_currency.upper(),
+        )
+        object.__setattr__(
+            self,
+            "settlement_currency",
+            self.settlement_currency.upper(),
         )
         object.__setattr__(self, "mark_price", _positive(self.mark_price, name="mark_price"))
         object.__setattr__(self, "index_price", _positive(self.index_price, name="index_price"))
@@ -153,7 +298,91 @@ class PerpetualMarginEvidence:
                 )
             prior = tier.notional_upper_bound
         object.__setattr__(self, "margin_tiers", tiers)
-        object.__setattr__(self, "evidence_ref", _text(self.evidence_ref, name="evidence_ref"))
+
+    @property
+    def capability_identity(self) -> tuple[str, str, str, str, str]:
+        return (
+            self.provider_id,
+            self.account_id,
+            self.entity_id,
+            self.environment,
+            self.instrument_version,
+        )
+
+    @property
+    def tier_identity(self) -> tuple[str, str, str]:
+        return (
+            self.capability_snapshot_id,
+            self.risk_tier_revision,
+            self.tier_table_evidence_ref,
+        )
+
+    def tier_table_payload(self) -> dict[str, object]:
+        return {
+            "risk_tier_revision": self.risk_tier_revision,
+            "tiers": [
+                {
+                    "notional_upper_bound": _decimal_text(
+                        tier.notional_upper_bound
+                    ),
+                    "maintenance_rate": _decimal_text(tier.maintenance_rate),
+                    "maintenance_adjustment": _decimal_text(
+                        tier.maintenance_adjustment
+                    ),
+                    "adjustment_convention": tier.adjustment_convention,
+                }
+                for tier in self.margin_tiers
+            ],
+        }
+
+    def evidence_bundle_payload(self) -> dict[str, object]:
+        return {
+            "mark_price": _decimal_text(self.mark_price),
+            "index_price": _decimal_text(self.index_price),
+            "collateral_fx_to_settlement": _decimal_text(
+                self.collateral_fx_to_settlement
+            ),
+            "mark_observed_at": self.mark_observed_at,
+            "index_observed_at": self.index_observed_at,
+            "collateral_fx_observed_at": self.collateral_fx_observed_at,
+            "margin_tiers_observed_at": self.margin_tiers_observed_at,
+        }
+
+    def verify_immutable_artifacts(self, store: ArtifactStore) -> None:
+        common_metadata = {
+            "schema_version": 1,
+            "provider_id": self.provider_id,
+            "account_id": self.account_id,
+            "entity_id": self.entity_id,
+            "environment": self.environment,
+            "instrument_version": self.instrument_version,
+            "capability_snapshot_id": self.capability_snapshot_id,
+            "position_mode": self.position_mode,
+            "margin_mode": self.margin_mode,
+            "collateral_currency": self.collateral_currency,
+            "settlement_currency": self.settlement_currency,
+            "risk_tier_revision": self.risk_tier_revision,
+        }
+        _verify_immutable_artifact(
+            store,
+            artifact_id=self.tier_table_evidence_ref,
+            expected_payload=self.tier_table_payload(),
+            expected_metadata={
+                **common_metadata,
+                "artifact_kind": "PERPETUAL_MARGIN_TIER_TABLE",
+                "observed_at": self.margin_tiers_observed_at,
+            },
+        )
+        _verify_immutable_artifact(
+            store,
+            artifact_id=self.evidence_bundle_ref,
+            expected_payload=self.evidence_bundle_payload(),
+            expected_metadata={
+                **common_metadata,
+                "artifact_kind": "PERPETUAL_MARGIN_EVIDENCE_BUNDLE",
+                "observed_at": self.mark_observed_at,
+            },
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,11 +453,17 @@ def _select_tier(notional: Decimal, tiers: Sequence[MarginTier]) -> MarginTier:
 
 def evaluate_perpetual_margin(
     *,
+    capability: CapabilitySnapshot,
     instrument_version: str,
+    margin_mode: str,
+    collateral_currency: str,
+    settlement_currency: str,
+    risk_tier_revision: str,
     signed_notional_settlement,
     collateral_amount,
     unrealized_pnl_settlement,
     evidence: PerpetualMarginEvidence,
+    artifact_store: ArtifactStore,
     stress: PerpetualStress,
     evaluated_at: str,
     maximum_evidence_age_seconds: int,
@@ -242,13 +477,56 @@ def evaluate_perpetual_margin(
     silently converts an inverse contract as though it were linear.
     """
 
+    if not isinstance(capability, CapabilitySnapshot):
+        raise TypeError("capability must be CapabilitySnapshot")
     if not isinstance(evidence, PerpetualMarginEvidence):
         raise TypeError("evidence must be PerpetualMarginEvidence")
     if not isinstance(stress, PerpetualStress):
         raise TypeError("stress must be PerpetualStress")
+    if not isinstance(artifact_store, ArtifactStore):
+        raise PerpetualMarginError(
+            "canonical ArtifactStore is required for immutable margin evidence"
+        )
+
+    # Scope compatibility is an authority boundary and must be checked before
+    # tier selection or any financial arithmetic.
     instrument = _text(instrument_version, name="instrument_version")
+    requested_margin_mode = _text(margin_mode, name="margin_mode").upper()
+    requested_collateral = _text(
+        collateral_currency, name="collateral_currency"
+    ).upper()
+    requested_settlement = _text(
+        settlement_currency, name="settlement_currency"
+    ).upper()
+    requested_revision = _text(
+        risk_tier_revision, name="risk_tier_revision"
+    )
     if instrument != evidence.instrument_version:
         raise PerpetualMarginError("instrument_version must match margin evidence")
+    if capability.identity != evidence.capability_identity:
+        raise PerpetualMarginError(
+            "provider/account/entity/environment/instrument capability scope mismatch"
+        )
+    if capability.snapshot_id != evidence.capability_snapshot_id:
+        raise PerpetualMarginError("capability snapshot does not match margin evidence")
+    if capability.position_mode != evidence.position_mode:
+        raise PerpetualMarginError("position mode does not match margin evidence")
+    if requested_margin_mode != evidence.margin_mode:
+        raise PerpetualMarginError("margin mode does not match margin evidence")
+    if requested_collateral != evidence.collateral_currency:
+        raise PerpetualMarginError("collateral currency does not match margin evidence")
+    if requested_settlement != evidence.settlement_currency:
+        raise PerpetualMarginError("settlement currency does not match margin evidence")
+    if requested_revision != evidence.risk_tier_revision:
+        raise PerpetualMarginError("risk tier revision does not match margin evidence")
+    if capability.status != "VERIFIED":
+        raise PerpetualMarginError("verified capability snapshot is required")
+
+    evidence.verify_immutable_artifacts(artifact_store)
+
+    now = _instant(evaluated_at, name="evaluated_at")
+    if not (capability.observed_at <= now < capability.expires_at):
+        raise PerpetualMarginError("capability snapshot is stale at evaluation time")
     if (
         isinstance(maximum_evidence_age_seconds, bool)
         or not isinstance(maximum_evidence_age_seconds, int)
@@ -287,7 +565,6 @@ def evaluate_perpetual_margin(
     stressed_tier = _select_tier(stressed_notional, evidence.margin_tiers)
     stressed_maintenance = stressed_tier.maintenance_requirement(stressed_notional)
 
-    now = _instant(evaluated_at, name="evaluated_at")
     max_age = timedelta(seconds=maximum_evidence_age_seconds)
     reasons: list[str] = []
     for field in (

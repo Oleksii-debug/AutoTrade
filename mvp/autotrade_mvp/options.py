@@ -38,6 +38,22 @@ def _text(value: str, name: str) -> str:
     return value.strip()
 
 
+def _text_tuple(
+    values: tuple[str, ...],
+    name: str,
+    *,
+    allow_empty: bool = False,
+) -> tuple[str, ...]:
+    if not isinstance(values, tuple):
+        raise OptionError(f"{name} must be a tuple")
+    normalized = tuple(_text(value, name) for value in values)
+    if not allow_empty and not normalized:
+        raise OptionError(f"{name} must be non-empty")
+    if len(normalized) != len(set(normalized)):
+        raise OptionError(f"{name} values must be unique")
+    return normalized
+
+
 def _utc(value: datetime, name: str) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None:
         raise OptionError(f"{name} must be timezone-aware")
@@ -406,6 +422,8 @@ class OptionRiskEvidence:
     theta: Decimal
     rho: Decimal
     scenarios: tuple[OptionScenarioResult, ...]
+    tests_run: tuple[str, ...]
+    unresolved_limits: tuple[str, ...]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "instrument", _text(self.instrument, "instrument"))
@@ -450,6 +468,20 @@ class OptionRiskEvidence:
         if len(ids) != len(set(ids)):
             raise OptionError("scenario_id values must be unique")
         object.__setattr__(self, "scenarios", scenarios)
+        object.__setattr__(
+            self,
+            "tests_run",
+            _text_tuple(self.tests_run, "tests_run"),
+        )
+        object.__setattr__(
+            self,
+            "unresolved_limits",
+            _text_tuple(
+                self.unresolved_limits,
+                "unresolved_limits",
+                allow_empty=True,
+            ),
+        )
 
     @property
     def worst_scenario_loss(self) -> Decimal:
@@ -478,6 +510,11 @@ def require_current_option_risk(
     expected = _text(instrument, "instrument")
     if evidence.instrument != expected:
         raise OptionError("option risk evidence belongs to another instrument")
+    if evidence.unresolved_limits:
+        raise OptionError(
+            "option risk evidence has unresolved limits: "
+            + "; ".join(evidence.unresolved_limits)
+        )
     point = _utc(at, "at")
     if point < evidence.calculated_at:
         raise OptionError("option risk evidence is from the future")

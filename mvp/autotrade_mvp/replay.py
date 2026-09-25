@@ -72,6 +72,125 @@ class ReplayEvent:
         object.__setattr__(self, "payload", _canonical_payload(self.payload))
 
 
+_SHA256_HEX = frozenset("0123456789abcdef")
+REQUIRED_RUNTIME_COMPONENTS = frozenset(
+    {
+        "pending_event_queue",
+        "rng_state",
+        "strategy_state",
+        "portfolio_accounting_state",
+        "execution_state",
+        "accrual_state",
+        "policy_state",
+        "instrument_state",
+        "provider_state",
+        "experiment_state",
+    }
+)
+
+
+def _sha256_hex(value: str, *, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in _SHA256_HEX for character in value)
+    ):
+        raise ReplayError(f"{field} must be a canonical lowercase SHA-256 hex digest")
+    return value
+
+
+def _build_sha(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) not in {40, 64}
+        or any(character not in _SHA256_HEX for character in value)
+    ):
+        raise ReplayError("build_sha must be a canonical lowercase Git object hash")
+    return value
+
+
+def _component_bindings(
+    values: Mapping[str, str],
+) -> Mapping[str, str]:
+    if not isinstance(values, Mapping):
+        raise TypeError("runtime component bindings must be a mapping")
+    normalized: dict[str, str] = {}
+    for raw_name, raw_digest in values.items():
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise ReplayError("runtime component names must be non-empty")
+        name = raw_name.strip()
+        if name != raw_name:
+            raise ReplayError("runtime component names must be canonical text")
+        if name in normalized:
+            raise ReplayError("runtime component names must be unique")
+        normalized[name] = _sha256_hex(
+            raw_digest,
+            field=f"runtime component {name}",
+        )
+    missing = sorted(REQUIRED_RUNTIME_COMPONENTS - set(normalized))
+    if missing:
+        raise ReplayError(
+            "composite replay checkpoint is missing required runtime components: "
+            + ", ".join(missing)
+        )
+    return MappingProxyType(dict(sorted(normalized.items())))
+
+
+@dataclass(frozen=True)
+class CompositeReplayCheckpoint:
+    """Immutable whole-runtime resume gate over existing component authorities.
+
+    Component digests are references to canonical state owned elsewhere; this
+    envelope does not become a second ledger, scheduler, strategy store or RNG
+    authority. Resume is permitted only when every bound component, build and
+    experiment/protocol identity matches before another replay event is exposed.
+    """
+
+    replay: "ReplayCheckpoint"
+    runtime_components: Mapping[str, str]
+    build_sha: str
+    protocol_ref: str
+    schema_version: str = "1.0.0"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.replay, ReplayCheckpoint):
+            raise TypeError("replay must be ReplayCheckpoint")
+        components = _component_bindings(self.runtime_components)
+        build = _build_sha(self.build_sha)
+        if not isinstance(self.protocol_ref, str) or not self.protocol_ref.strip():
+            raise ReplayError("protocol_ref must be non-empty")
+        protocol = self.protocol_ref.strip()
+        if protocol != self.protocol_ref:
+            raise ReplayError("protocol_ref must be canonical text")
+        if self.schema_version != "1.0.0":
+            raise ReplayError("unsupported composite replay checkpoint schema")
+        object.__setattr__(self, "runtime_components", components)
+        object.__setattr__(self, "build_sha", build)
+        object.__setattr__(self, "protocol_ref", protocol)
+
+    @property
+    def fingerprint(self) -> str:
+        material = {
+            "schema_version": self.schema_version,
+            "replay": {
+                "dataset_digest": self.replay.dataset_digest,
+                "cursor": self.replay.cursor,
+                "clock": self.replay.clock,
+            },
+            "runtime_components": dict(self.runtime_components),
+            "build_sha": self.build_sha,
+            "protocol_ref": self.protocol_ref,
+        }
+        return sha256(
+            json.dumps(
+                material,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()
+
+
 @dataclass(frozen=True)
 class ReplayCheckpoint:
     dataset_digest: str
@@ -210,3 +329,49 @@ class CausalReplay:
 
     def remaining(self) -> int:
         return len(self._events) - self._cursor
+
+    def composite_checkpoint(
+        self,
+        *,
+        runtime_components: Mapping[str, str],
+        build_sha: str,
+        protocol_ref: str,
+    ) -> CompositeReplayCheckpoint:
+        """Bind this source cursor to the exact externally owned runtime cut."""
+
+        return CompositeReplayCheckpoint(
+            replay=self.checkpoint(),
+            runtime_components=runtime_components,
+            build_sha=build_sha,
+            protocol_ref=protocol_ref,
+        )
+
+
+def resume_from_composite_checkpoint(
+    events: Iterable[ReplayEvent],
+    *,
+    start_at: str,
+    checkpoint: CompositeReplayCheckpoint,
+    runtime_components: Mapping[str, str],
+    build_sha: str,
+    protocol_ref: str,
+) -> CausalReplay:
+    """Validate the whole runtime cut before exposing the next source event."""
+
+    if not isinstance(checkpoint, CompositeReplayCheckpoint):
+        raise TypeError("checkpoint must be CompositeReplayCheckpoint")
+    current = CompositeReplayCheckpoint(
+        replay=checkpoint.replay,
+        runtime_components=runtime_components,
+        build_sha=build_sha,
+        protocol_ref=protocol_ref,
+    )
+    if current.fingerprint != checkpoint.fingerprint:
+        raise ReplayError(
+            "composite replay checkpoint does not match current runtime state cut"
+        )
+    return CausalReplay(
+        events,
+        start_at=start_at,
+        checkpoint=checkpoint.replay,
+    )

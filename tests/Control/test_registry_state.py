@@ -32,9 +32,24 @@ SERVICE_IDENTITY = {
     ],
 }
 
+ADMISSION_EVIDENCE = {
+    "work_package_id": "WP-04",
+    "bank_revision": "b" * 40,
+    "readiness": "READY",
+    "dependencies_satisfied": True,
+    "blocking_findings_clear": True,
+    "evidence_digest": "sha256:" + ("c" * 64),
+}
+
 
 def claim(*args, **kwargs):
     kwargs.setdefault("service_identity", SERVICE_IDENTITY)
+    request_value = args[1] if len(args) > 1 else kwargs.get("request")
+    if (
+        isinstance(request_value, dict)
+        and request_value.get("claim_mode") in {"SOURCE_MUTATION", "INTEGRATION"}
+    ):
+        kwargs.setdefault("admission_evidence", ADMISSION_EVIDENCE)
     return registry_claim(*args, **kwargs)
 
 
@@ -87,6 +102,16 @@ class RegistryTests(unittest.TestCase):
                 now=NOW,
             )
 
+    def test_mutating_claim_requires_admission_evidence(self):
+        with self.assertRaisesRegex(RegistryProtocolError, "admission_evidence"):
+            registry_claim(
+                empty_registry(),
+                request(),
+                expected_generation=0,
+                now=NOW,
+                service_identity=SERVICE_IDENTITY,
+            )
+
     def test_service_identity_is_account_and_mode_bound(self):
         wrong_account = dict(SERVICE_IDENTITY)
         wrong_account["authorized_account_id"] = "worker-account-b"
@@ -121,6 +146,7 @@ class RegistryTests(unittest.TestCase):
                 expected_generation=1,
                 now=NOW,
                 service_identity=other_owner,
+                admission_evidence=ADMISSION_EVIDENCE,
             )
 
     def test_claim_lease_is_issued_from_service_time_and_bounded_policy(self):

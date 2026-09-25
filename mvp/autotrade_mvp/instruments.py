@@ -389,6 +389,13 @@ class InstrumentVersion:
         if derivative:
             if self.payoff not in {"LINEAR", "INVERSE", "OPTION"}:
                 raise InstrumentRegistryError("derivative payoff is required")
+            if self.asset_class in {"FUTURE", "PERPETUAL"} and self.payoff not in {
+                "LINEAR",
+                "INVERSE",
+            }:
+                raise InstrumentRegistryError(
+                    "future/perpetual payoff must be LINEAR or INVERSE"
+                )
             if self.underlying_id is None:
                 raise InstrumentRegistryError("derivative underlying_id is required")
             if self.settlement_method is None:

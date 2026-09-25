@@ -156,11 +156,19 @@ class OnlineEnvelope:
             raise ValueError(
                 "minimum_update_interval_seconds must be a non-negative integer"
             )
-        bounds = tuple(parameter_bounds)
-        if not bounds:
+        raw_bounds = tuple(parameter_bounds)
+        if not raw_bounds:
             raise ValueError("online envelope requires parameter bounds")
-        if any(not isinstance(bound, ParameterBound) for bound in bounds):
+        if any(not isinstance(bound, ParameterBound) for bound in raw_bounds):
             raise TypeError("parameter_bounds must contain ParameterBound")
+        bounds = tuple(
+            ParameterBound.create(
+                name=bound.name,
+                minimum=bound.minimum,
+                maximum=bound.maximum,
+            )
+            for bound in raw_bounds
+        )
         names = tuple(bound.name for bound in bounds)
         if len(set(names)) != len(names):
             raise ValueError("online envelope parameter names must be unique")
@@ -526,6 +534,15 @@ class ChampionRegistry:
     ) -> dict:
         if not isinstance(envelope, OnlineEnvelope):
             raise TypeError("envelope must be OnlineEnvelope")
+        envelope = OnlineEnvelope.create(
+            envelope_id=envelope.envelope_id,
+            champion_artifact_hash=envelope.champion_artifact_hash,
+            authority_scope_id=envelope.authority_scope_id,
+            parameter_bounds=envelope.parameter_bounds,
+            minimum_update_interval_seconds=envelope.minimum_update_interval_seconds,
+            maximum_update_cost=envelope.maximum_update_cost,
+            eligible_label_refs=envelope.eligible_label_refs,
+        )
         update_id = _text(update_id, name="update_id")
         if (
             not isinstance(expected_generation, int)

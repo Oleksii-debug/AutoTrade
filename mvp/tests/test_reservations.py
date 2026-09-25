@@ -170,6 +170,29 @@ class ReservationFoundationTests(unittest.TestCase):
             snapshot.remaining["CASH:USD"] = Decimal("0")
         self.assertEqual(book.total_reserved("CASH:USD"), Decimal("10"))
 
+    def test_normalized_resource_identity_collision_fails_closed(self):
+        book = ReservationBook()
+        with self.assertRaisesRegex(ValueError, "duplicate normalized resource identity"):
+            book.reserve(
+                reservation_id="r-collision",
+                intent_id="i-collision",
+                requirements={
+                    "CASH:USD": "10",
+                    " CASH:USD ": "90",
+                },
+                available={"CASH:USD": "100"},
+            )
+        with self.assertRaisesRegex(ValueError, "duplicate normalized resource identity"):
+            book.reserve(
+                reservation_id="r-availability-collision",
+                intent_id="i-availability-collision",
+                requirements={"CASH:USD": "10"},
+                available={
+                    "CASH:USD": "10",
+                    " CASH:USD ": "1000",
+                },
+            )
+
     def test_binary_float_inputs_fail_closed(self):
         book = ReservationBook()
         with self.assertRaises(TypeError):

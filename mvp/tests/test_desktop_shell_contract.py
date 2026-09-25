@@ -71,6 +71,14 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn(").Validated();", code)
         self.assertLess(code.index(").Validated();"), code.index("if (status.Connected)"))
 
+    def test_future_host_status_cannot_be_presented_as_current_evidence(self):
+        client = CLIENT.read_text(encoding="utf-8")
+        self.assertIn("ObservedAtUtc > DateTimeOffset.UtcNow", client)
+        self.assertIn(
+            "Host status evidence time cannot be in the future.",
+            client,
+        )
+
     def test_connected_environment_and_state_version_use_canonical_contracts(self):
         client = CLIENT.read_text(encoding="utf-8")
         self.assertIn(

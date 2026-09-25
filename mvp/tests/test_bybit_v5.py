@@ -118,6 +118,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         result = parse_submission_response(
             attempt_id=attempt,
             client_order_id="client-123",
+            environment="MAINNET",
             response=response,
         )
         self.assertEqual(result["outcome"], "ACKNOWLEDGED")
@@ -126,10 +127,43 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertNotIn("fill", repr(result).lower())
         self.assertTrue(result["evidence"][0]["sha256"].startswith("sha256:"))
 
+    def test_response_evidence_is_bound_to_provider_environment(self):
+        base = {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {"orderId": "provider-env", "orderLinkId": "client-env"},
+            "time": 1790280000123,
+        }
+        expected = {
+            "MAINNET": "https://api.bybit.com/v5/order/create",
+            "TESTNET": "https://api-testnet.bybit.com/v5/order/create",
+            "DEMO": "https://api-demo.bybit.com/v5/order/create",
+        }
+        for environment, source_uri in expected.items():
+            with self.subTest(environment=environment):
+                result = parse_submission_response(
+                    attempt_id=str(uuid4()),
+                    client_order_id="client-env",
+                    environment=environment,
+                    response=base,
+                )
+                evidence = result["evidence"][0]
+                self.assertEqual(evidence["provider_environment"], environment)
+                self.assertEqual(evidence["source_uri"], source_uri)
+
+        with self.assertRaisesRegex(ProviderCoreError, "environment"):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                client_order_id="client-env",
+                environment="UNKNOWN",
+                response=base,
+            )
+
     def test_explicit_observation_time_is_validated_and_normalized_to_utc(self):
         accepted = parse_submission_response(
             attempt_id=str(uuid4()),
             client_order_id="client-time",
+            environment="MAINNET",
             response={
                 "retCode": 0,
                 "retMsg": "OK",
@@ -149,6 +183,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             parse_submission_response(
                 attempt_id=str(uuid4()),
                 client_order_id="client-bad-time",
+                environment="MAINNET",
                 response={
                     "retCode": 0,
                     "result": {
@@ -165,6 +200,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 result = parse_submission_response(
                     attempt_id=str(uuid4()),
                     client_order_id=f"client-{code}",
+                    environment="MAINNET",
                     response={
                         "retCode": code,
                         "retMsg": "ambiguous",
@@ -180,6 +216,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         result = parse_submission_response(
             attempt_id=str(uuid4()),
             client_order_id="client-reject",
+            environment="MAINNET",
             response={
                 "retCode": 10001,
                 "retMsg": "parameter error",
@@ -196,6 +233,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             parse_submission_response(
                 attempt_id=str(uuid4()),
                 client_order_id="expected",
+                environment="MAINNET",
                 response={
                     "retCode": 0,
                     "retMsg": "OK",

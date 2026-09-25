@@ -54,6 +54,8 @@ _SNAPSHOT_FIELDS = {
     "jobs",
     "reason_codes",
 }
+_PERMISSION_SUMMARY_FIELDS = {"actor", "session", "role", "capabilities"}
+_PERMISSION_SUMMARY_REQUIRED_FIELDS = {"actor", "session", "role"}
 
 
 def public_session_reference(token: str) -> str:
@@ -98,10 +100,11 @@ class HostPrincipal:
 
 @dataclass(frozen=True)
 class SnapshotPrincipal:
-    """Non-secret identity exposed to presentation-only snapshot projection."""
+    """Non-secret authenticated identity exposed to snapshot projection."""
 
     actor: str
     session: str
+    role: str
 
 
 @dataclass(frozen=True)
@@ -266,7 +269,7 @@ class AuthenticatedHostApplication:
             action,
         )
 
-    def _principal(self, headers: Mapping[str, str]) -> HostPrincipal:
+    def _principal(self, headers: Mapping[str, str]) -> tuple[HostPrincipal, str]:
         principal = self._principal_resolver(headers, self.public_origin)
         if not isinstance(principal, HostPrincipal):
             raise TypeError("principal_resolver must return HostPrincipal")
@@ -276,13 +279,21 @@ class AuthenticatedHostApplication:
         )
         if session.subject != principal.actor:
             raise PermissionError("Authenticated actor mismatch")
-        return principal
+        return principal, session.role
 
-    def _snapshot(self, principal: HostPrincipal) -> Mapping[str, object]:
+    def _snapshot(
+        self,
+        principal: HostPrincipal,
+        authenticated_role: str,
+    ) -> Mapping[str, object]:
         durable = self.store.snapshot()
         projected = self._snapshot_provider(
             MappingProxyType(dict(durable)),
-            SnapshotPrincipal(actor=principal.actor, session=principal.session),
+            SnapshotPrincipal(
+                actor=principal.actor,
+                session=principal.session,
+                role=authenticated_role,
+            ),
         )
         if not isinstance(projected, Mapping):
             raise TypeError("snapshot_provider must return a mapping")
@@ -306,10 +317,35 @@ class AuthenticatedHostApplication:
         if not payload["connection_freshness"]:
             raise ValueError("UiSnapshot connection_freshness evidence is required")
         permission = payload["permission_summary"]
+        permission_fields = set(permission)
+        if (
+            not _PERMISSION_SUMMARY_REQUIRED_FIELDS.issubset(permission_fields)
+            or permission_fields - _PERMISSION_SUMMARY_FIELDS
+        ):
+            raise ValueError(
+                "UiSnapshot permission_summary does not match the canonical contract"
+            )
         if permission.get("actor") != principal.actor:
             raise ValueError("UiSnapshot actor does not match authenticated principal")
         if permission.get("session") != principal.session:
             raise ValueError("UiSnapshot session does not match authenticated principal")
+        if permission.get("role") != authenticated_role:
+            raise ValueError("UiSnapshot role does not match authenticated session")
+        capabilities = permission.get("capabilities")
+        if capabilities is not None:
+            if (
+                not isinstance(capabilities, list)
+                or any(
+                    not isinstance(item, str)
+                    or not item
+                    or item != item.strip()
+                    for item in capabilities
+                )
+                or len(capabilities) != len(set(capabilities))
+            ):
+                raise ValueError(
+                    "UiSnapshot capabilities must be unique canonical non-empty strings"
+                )
         if not isinstance(payload["jobs"], list) or any(
             not isinstance(item, Mapping) for item in payload["jobs"]
         ):
@@ -417,12 +453,12 @@ class AuthenticatedHostApplication:
                     headers=(("Cache-Control", "no-store"),),
                 )
 
-            principal = self._principal(normalized_headers)
+            principal, authenticated_role = self._principal(normalized_headers)
 
             if method == "GET" and path == "/api/v1/state":
                 return _json_response(
                     200,
-                    dict(self._snapshot(principal)),
+                    dict(self._snapshot(principal, authenticated_role)),
                     headers=(("Cache-Control", "no-store"),),
                 )
 

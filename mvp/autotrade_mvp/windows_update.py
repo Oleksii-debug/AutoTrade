@@ -14,7 +14,13 @@ import json
 import re
 from typing import Any
 
-from .release_candidate import ReleaseCandidateDecision
+from .release_candidate import (
+    ReleaseArtifactEvidence,
+    ReleaseCandidateDecision,
+    ReleaseCandidateError,
+    ReleaseCandidateInput,
+    freeze_release_candidate,
+)
 
 
 class WindowsUpdateError(ValueError):
@@ -214,6 +220,8 @@ class WindowsUpdatePlan:
 
 
 def _release_manifest(decision: ReleaseCandidateDecision, *, name: str) -> dict[str, Any]:
+    """Re-derive frozen release truth instead of trusting a constructed decision."""
+
     if not isinstance(decision, ReleaseCandidateDecision):
         raise TypeError(f"{name} must be ReleaseCandidateDecision")
     if decision.status != "FROZEN":
@@ -234,6 +242,67 @@ def _release_manifest(decision: ReleaseCandidateDecision, *, name: str) -> dict[
         raise WindowsUpdateError(f"{name} manifest is not valid JSON") from error
     if not isinstance(manifest, dict):
         raise WindowsUpdateError(f"{name} manifest must be an object")
+    expected_manifest_fields = {
+        "release_id",
+        "source_sha",
+        "baseline_hash",
+        "schema_contract_hash",
+        "artifacts",
+    }
+    if set(manifest) != expected_manifest_fields:
+        raise WindowsUpdateError(f"{name} manifest structure is not canonical")
+
+    try:
+        artifacts_raw = manifest["artifacts"]
+        if not isinstance(artifacts_raw, list):
+            raise WindowsUpdateError(f"{name}.artifacts must be a list")
+        artifacts = tuple(
+            ReleaseArtifactEvidence.create(
+                role=raw["role"],
+                artifact_sha256=raw["artifact_sha256"],
+                source_sha=raw["source_sha"],
+                signature_status=raw["signature_status"],
+                evidence_status=raw["evidence_status"],
+            )
+            if isinstance(raw, dict)
+            and set(raw)
+            == {
+                "role",
+                "artifact_sha256",
+                "source_sha",
+                "signature_status",
+                "evidence_status",
+            }
+            else (_ for _ in ()).throw(
+                WindowsUpdateError(f"{name} artifact structure is not canonical")
+            )
+            for raw in artifacts_raw
+        )
+        reconstructed = ReleaseCandidateInput.create(
+            release_id=manifest["release_id"],
+            source_sha=manifest["source_sha"],
+            baseline_hash=manifest["baseline_hash"],
+            schema_contract_hash=manifest["schema_contract_hash"],
+            artifacts=artifacts,
+            unresolved_blockers=(),
+        )
+        refrozen = freeze_release_candidate(reconstructed)
+    except (KeyError, TypeError, ValueError, ReleaseCandidateError) as error:
+        if isinstance(error, WindowsUpdateError):
+            raise
+        raise WindowsUpdateError(
+            f"{name} frozen release evidence is invalid"
+        ) from error
+
+    if refrozen.status != "FROZEN":
+        raise WindowsUpdateError(f"{name} frozen release evidence no longer qualifies")
+    if (
+        refrozen.manifest_json != decision.manifest_json
+        or refrozen.manifest_sha256 != decision.manifest_sha256
+    ):
+        raise WindowsUpdateError(
+            f"{name} frozen release manifest is not canonical for its evidence"
+        )
 
     release_id = _text(manifest.get("release_id"), name=f"{name}.release_id")
     source_sha = _git_sha(manifest.get("source_sha"), name=f"{name}.source_sha")
@@ -241,47 +310,11 @@ def _release_manifest(decision: ReleaseCandidateDecision, *, name: str) -> dict[
         manifest.get("schema_contract_hash"),
         name=f"{name}.schema_contract_hash",
     )
-    artifacts = manifest.get("artifacts")
-    if not isinstance(artifacts, list):
-        raise WindowsUpdateError(f"{name}.artifacts must be a list")
-
-    windows_packages = []
-    seen_roles: set[str] = set()
-    for raw in artifacts:
-        if not isinstance(raw, dict):
-            raise WindowsUpdateError(f"{name} artifact must be an object")
-        role = _text(raw.get("role"), name=f"{name}.artifact.role").upper()
-        if role in seen_roles:
-            raise WindowsUpdateError(f"{name} contains duplicate artifact role")
-        seen_roles.add(role)
-        artifact_sha = _sha256(
-            raw.get("artifact_sha256"),
-            name=f"{name}.{role}.artifact_sha256",
-        )
-        artifact_source = _git_sha(
-            raw.get("source_sha"),
-            name=f"{name}.{role}.source_sha",
-        )
-        if artifact_source != source_sha:
-            raise WindowsUpdateError(
-                f"{name} artifact source does not match release source"
-            )
-        if role == "WINDOWS_PACKAGE":
-            if _text(
-                raw.get("signature_status"),
-                name=f"{name}.WINDOWS_PACKAGE.signature_status",
-            ).upper() != "VERIFIED":
-                raise WindowsUpdateError(
-                    f"{name} Windows package signature is not verified"
-                )
-            if _text(
-                raw.get("evidence_status"),
-                name=f"{name}.WINDOWS_PACKAGE.evidence_status",
-            ).upper() != "PASS":
-                raise WindowsUpdateError(
-                    f"{name} Windows package evidence is not PASS"
-                )
-            windows_packages.append(artifact_sha)
+    windows_packages = [
+        artifact.artifact_sha256
+        for artifact in artifacts
+        if artifact.role == "WINDOWS_PACKAGE"
+    ]
     if len(windows_packages) != 1:
         raise WindowsUpdateError(
             f"{name} must contain exactly one WINDOWS_PACKAGE artifact"
@@ -293,6 +326,7 @@ def _release_manifest(decision: ReleaseCandidateDecision, *, name: str) -> dict[
         "schema_contract_hash": schema_contract_hash,
         "windows_package_sha256": windows_packages[0],
         "manifest_sha256": decision.manifest_sha256,
+        "manifest_json": decision.manifest_json,
     }
 
 
@@ -468,7 +502,46 @@ class WindowsUpdateCheckpoint:
             )
 
 
+def _validated_plan_release(
+    value: object,
+    *,
+    name: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise WindowsUpdateError(f"{name} must be an object")
+    expected_fields = {
+        "release_id",
+        "source_sha",
+        "schema_contract_hash",
+        "windows_package_sha256",
+        "manifest_sha256",
+        "manifest_json",
+    }
+    if set(value) != expected_fields:
+        raise WindowsUpdateError(f"{name} structure is not canonical")
+    manifest_json = value.get("manifest_json")
+    if not isinstance(manifest_json, str) or not manifest_json:
+        raise WindowsUpdateError(f"{name}.manifest_json is required")
+    decision = ReleaseCandidateDecision(
+        status="FROZEN",
+        reasons=(),
+        manifest_json=manifest_json,
+        manifest_sha256=_sha256(
+            value.get("manifest_sha256"),
+            name=f"{name}.manifest_sha256",
+        ),
+    )
+    canonical = _release_manifest(decision, name=name)
+    if value != canonical:
+        raise WindowsUpdateError(
+            f"{name} does not match its immutable frozen release manifest"
+        )
+    return canonical
+
+
 def _plan_document(plan: WindowsUpdatePlan) -> dict[str, Any]:
+    """Validate executable plan bytes as strongly as the original planner."""
+
     if not isinstance(plan, WindowsUpdatePlan):
         raise TypeError("plan must be WindowsUpdatePlan")
     if plan.status != "PLAN_READY" or plan.plan_json is None or plan.plan_sha256 is None:
@@ -482,6 +555,16 @@ def _plan_document(plan: WindowsUpdatePlan) -> dict[str, Any]:
         raise WindowsUpdateError("update plan is not valid JSON") from error
     if not isinstance(document, dict):
         raise WindowsUpdateError("update plan must be an object")
+    canonical = json.dumps(
+        document,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    if canonical != plan.plan_json:
+        raise WindowsUpdateError("update plan JSON is not canonical")
+
     expected_fields = {
         "schema_version",
         "current_release",
@@ -499,6 +582,119 @@ def _plan_document(plan: WindowsUpdatePlan) -> dict[str, Any]:
         raise WindowsUpdateError("unsupported update plan schema_version")
     if document.get("trading_authority_granted_by_plan") is not False:
         raise WindowsUpdateError("update plan cannot grant trading authority")
+
+    current = _validated_plan_release(
+        document.get("current_release"),
+        name="current_release",
+    )
+    candidate = _validated_plan_release(
+        document.get("candidate_release"),
+        name="candidate_release",
+    )
+    if (
+        current["release_id"] == candidate["release_id"]
+        and current["source_sha"] == candidate["source_sha"]
+        and current["windows_package_sha256"]
+        == candidate["windows_package_sha256"]
+    ):
+        raise WindowsUpdateError("candidate is identical to current release")
+
+    transition = document.get("journal_schema_transition")
+    if not isinstance(transition, dict) or set(transition) != {"from", "to"}:
+        raise WindowsUpdateError("journal schema transition is not canonical")
+    current_schema = _positive_version(
+        transition.get("from"),
+        name="journal_schema_transition.from",
+    )
+    candidate_schema = _positive_version(
+        transition.get("to"),
+        name="journal_schema_transition.to",
+    )
+
+    backup_raw = document.get("pre_update_backup")
+    backup_fields = {
+        "manifest_sha256",
+        "source_sha",
+        "journal_schema_version",
+        "verification_status",
+        "reconciliation_required_after_restore",
+    }
+    if not isinstance(backup_raw, dict) or set(backup_raw) != backup_fields:
+        raise WindowsUpdateError("pre-update backup evidence is not canonical")
+    try:
+        backup = BackupEvidence(
+            manifest_sha256=backup_raw["manifest_sha256"],
+            source_sha=backup_raw["source_sha"],
+            journal_schema_version=backup_raw["journal_schema_version"],
+            verification_status=backup_raw["verification_status"],
+            reconciliation_required_after_restore=backup_raw[
+                "reconciliation_required_after_restore"
+            ],
+        )
+    except (TypeError, ValueError, WindowsUpdateError) as error:
+        raise WindowsUpdateError("pre-update backup evidence is invalid") from error
+    if backup.verification_status != "PASS":
+        raise WindowsUpdateError("pre-update backup is not verified")
+    if not backup.reconciliation_required_after_restore:
+        raise WindowsUpdateError("backup restore reconciliation gate is missing")
+    if backup.journal_schema_version != current_schema:
+        raise WindowsUpdateError("backup schema does not match current runtime")
+    if backup.source_sha != current["source_sha"]:
+        raise WindowsUpdateError("backup source does not match current release")
+
+    migration_raw = document.get("migration_evidence")
+    schema_changes = current_schema != candidate_schema
+    migration: MigrationEvidence | None = None
+    if schema_changes:
+        migration_fields = {
+            "from_schema_version",
+            "to_schema_version",
+            "source_sha",
+            "evidence_sha256",
+            "verification_status",
+            "rollback_mode",
+            "reverse_evidence_sha256",
+        }
+        if not isinstance(migration_raw, dict) or set(migration_raw) != migration_fields:
+            raise WindowsUpdateError(
+                "schema change requires canonical migration evidence"
+            )
+        try:
+            migration = MigrationEvidence(
+                from_schema_version=migration_raw["from_schema_version"],
+                to_schema_version=migration_raw["to_schema_version"],
+                source_sha=migration_raw["source_sha"],
+                evidence_sha256=migration_raw["evidence_sha256"],
+                verification_status=migration_raw["verification_status"],
+                rollback_mode=migration_raw["rollback_mode"],
+                reverse_evidence_sha256=migration_raw["reverse_evidence_sha256"],
+            )
+        except (TypeError, ValueError, WindowsUpdateError) as error:
+            raise WindowsUpdateError("migration evidence is invalid") from error
+        if migration.verification_status != "PASS":
+            raise WindowsUpdateError("migration evidence is not verified")
+        if migration.from_schema_version != current_schema:
+            raise WindowsUpdateError("migration source schema mismatch")
+        if migration.to_schema_version != candidate_schema:
+            raise WindowsUpdateError("migration target schema mismatch")
+        if migration.source_sha != candidate["source_sha"]:
+            raise WindowsUpdateError("migration source release mismatch")
+    elif migration_raw is not None:
+        raise WindowsUpdateError(
+            "migration evidence cannot exist without schema change"
+        )
+
+    rollback = document.get("rollback")
+    if not isinstance(rollback, dict) or set(rollback) != {"mode", "steps"}:
+        raise WindowsUpdateError("rollback plan structure is not canonical")
+    expected_rollback_mode = (
+        migration.rollback_mode
+        if migration is not None
+        else "REINSTALL_PREVIOUS_BUNDLE"
+    )
+    if rollback.get("mode") != expected_rollback_mode:
+        raise WindowsUpdateError("rollback mode does not match migration evidence")
+
     return document
 
 

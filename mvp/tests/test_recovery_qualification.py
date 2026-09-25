@@ -17,6 +17,7 @@ from mvp.autotrade_mvp.recovery_qualification import (
     RecoveryScenario,
     RecoveryScenarioEvidence,
     qualify_recovery_release,
+    recovery_evidence_receipt_bytes,
     recovery_evidence_receipt_metadata,
 )
 from mvp.tests.test_qualification_attestation import (
@@ -91,21 +92,14 @@ def evidence(
             f"autotrade-recovery-evidence:{scenario.value}",
         )
     )
-    receipt_bytes = (
-        "autotrade-recovery-evidence:" + scenario.value
-    ).encode("utf-8")
-    receipt_hash = (
-        evidence_artifact_sha256
-        or "sha256:" + sha256(receipt_bytes).hexdigest()
-    )
-    return RecoveryScenarioEvidence(
+    values = dict(
         scenario=scenario,
         status=status,
         source_sha=source_sha,
         release_artifact_id=artifact_id,
         release_artifact_sha256=artifact,
         evidence_artifact_id=receipt_id,
-        evidence_artifact_sha256=receipt_hash,
+        evidence_artifact_sha256="sha256:" + "0" * 64,
         evidence_refs=(f"artifact://recovery/{scenario.value.lower()}",),
         evidence_schema_version=evidence_schema_version,
         protocol_id=protocol_id,
@@ -126,6 +120,16 @@ def evidence(
         open_risk_present=open_risk_present,
         protection_state=protection_state,
     )
+    provisional = RecoveryScenarioEvidence(**values)
+    receipt_hash = (
+        evidence_artifact_sha256
+        or "sha256:" + sha256(
+            recovery_evidence_receipt_bytes(provisional)
+        ).hexdigest()
+    )
+    return RecoveryScenarioEvidence(
+        **{**values, "evidence_artifact_sha256": receipt_hash}
+    )
 
 
 def complete_evidence():
@@ -133,7 +137,7 @@ def complete_evidence():
 
 
 def _receipt_bytes(item):
-    return ("autotrade-recovery-evidence:" + item.scenario.value).encode("utf-8")
+    return recovery_evidence_receipt_bytes(item)
 
 
 def qualify(
@@ -271,6 +275,65 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
         self.assertIn(
             f"{target.scenario.value.lower()}:evidence_integrity_unverified",
             corrupt.blockers,
+        )
+
+    def test_recovery_receipt_bytes_bind_decision_relevant_facts(self):
+        items = complete_evidence()
+        original = items[0]
+        original_bytes = recovery_evidence_receipt_bytes(original)
+        mutated = evidence(
+            original.scenario,
+            downtime_ms=original.downtime_ms + 1,
+            evidence_artifact_id=original.evidence_artifact_id,
+            evidence_artifact_sha256=original.evidence_artifact_sha256,
+        )
+        self.assertNotEqual(
+            recovery_evidence_receipt_bytes(mutated),
+            original_bytes,
+        )
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            current_policy = policy()
+            store.publish_bytes(
+                artifact_id=current_policy.release_artifact_id,
+                data=RELEASE_ARTIFACT_BYTES,
+                media_type="application/vnd.autotrade.release-artifact",
+                rights={"storage": True, "export": False},
+                source_refs=[f"git:{current_policy.source_sha}"],
+                metadata={
+                    "evidence_kind": "RECOVERY_RELEASE_ARTIFACT",
+                    "source_sha": current_policy.source_sha,
+                },
+            )
+            store.publish_bytes(
+                artifact_id=mutated.evidence_artifact_id,
+                data=original_bytes,
+                media_type="application/vnd.autotrade.recovery-evidence",
+                rights={"storage": True, "export": False},
+                source_refs=[f"git:{mutated.source_sha}"],
+                metadata=recovery_evidence_receipt_metadata(mutated),
+            )
+            for item in items[1:]:
+                store.publish_bytes(
+                    artifact_id=item.evidence_artifact_id,
+                    data=recovery_evidence_receipt_bytes(item),
+                    media_type="application/vnd.autotrade.recovery-evidence",
+                    rights={"storage": True, "export": False},
+                    source_refs=[f"git:{item.source_sha}"],
+                    metadata=recovery_evidence_receipt_metadata(item),
+                )
+            decision = qualify_recovery_release(
+                policy=current_policy,
+                evidence=[mutated, *items[1:]],
+                evidence_store=store,
+            )
+        self.assertEqual(
+            decision.status,
+            RecoveryEvidenceStatus.INCONCLUSIVE,
+        )
+        self.assertIn(
+            f"{mutated.scenario.value.lower()}:evidence_integrity_unverified",
+            decision.blockers,
         )
 
     def test_missing_release_artifact_fails_closed(self):
@@ -661,25 +724,11 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "canonical sha256"):
             policy(artifact=ARTIFACT_SHA + " ")
 
-    def test_decision_copies_measured_mapping_and_rejects_boolean_downtime(self):
+    def test_direct_pass_decision_cannot_impersonate_canonical_qualification(self):
         measured = {scenario: 10 for scenario in RecoveryScenario}
-        decision = RecoveryQualificationDecision(
-            status=RecoveryEvidenceStatus.PASS,
-            source_sha=SOURCE_SHA,
-            release_artifact_id=RELEASE_ARTIFACT_ID,
-            release_artifact_sha256=ARTIFACT_SHA,
-            evidence_schema_version=EVIDENCE_SCHEMA,
-            protocol_id=PROTOCOL_ID,
-            evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
-            blockers=(),
-            measured_downtime_ms=measured,
-        )
-        measured[RecoveryScenario.POWER_LOSS] = 999
-        self.assertEqual(
-            decision.measured_downtime_ms[RecoveryScenario.POWER_LOSS],
-            10,
-        )
-        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+        with self.assertRaisesRegex(
+            ValueError, "requires accepted qualification trust"
+        ):
             RecoveryQualificationDecision(
                 status=RecoveryEvidenceStatus.PASS,
                 source_sha=SOURCE_SHA,
@@ -689,6 +738,32 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
                 protocol_id=PROTOCOL_ID,
                 evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
                 blockers=(),
+                measured_downtime_ms=measured,
+            )
+
+    def test_decision_copies_measured_mapping_and_rejects_boolean_downtime(self):
+        decision = qualify(
+            policy=policy(),
+            evidence=complete_evidence(),
+            trusted=True,
+        )
+        before = decision.measured_downtime_ms[RecoveryScenario.POWER_LOSS]
+        external = dict(decision.measured_downtime_ms)
+        external[RecoveryScenario.POWER_LOSS] = 999
+        self.assertEqual(
+            decision.measured_downtime_ms[RecoveryScenario.POWER_LOSS],
+            before,
+        )
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            RecoveryQualificationDecision(
+                status=RecoveryEvidenceStatus.INCONCLUSIVE,
+                source_sha=SOURCE_SHA,
+                release_artifact_id=RELEASE_ARTIFACT_ID,
+                release_artifact_sha256=ARTIFACT_SHA,
+                evidence_schema_version=EVIDENCE_SCHEMA,
+                protocol_id=PROTOCOL_ID,
+                evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
+                blockers=("test:blocker",),
                 measured_downtime_ms={
                     scenario: (True if scenario is RecoveryScenario.POWER_LOSS else 10)
                     for scenario in RecoveryScenario

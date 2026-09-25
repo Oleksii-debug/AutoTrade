@@ -163,6 +163,7 @@ class PerpetualStress:
     exit_cost_fraction: Decimal
     additional_funding_loss: Decimal = Decimal("0")
     unavailable_exit_extra_loss: Decimal = Decimal("0")
+    notional_increase_fraction: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
         for name in (
@@ -190,6 +191,11 @@ class PerpetualStress:
                 name="unavailable_exit_extra_loss",
             ),
         )
+        notional_growth = _non_negative(
+            self.notional_increase_fraction,
+            name="notional_increase_fraction",
+        )
+        object.__setattr__(self, "notional_increase_fraction", notional_growth)
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +203,8 @@ class PerpetualMarginResult:
     verdict: Literal["ALLOW_NEW_RISK", "BLOCK_NEW_RISK", "LIQUIDATION_STRESS"]
     notional: Decimal
     maintenance_requirement: Decimal
+    stressed_maintenance_requirement: Decimal
+    stressed_notional: Decimal
     current_equity_settlement: Decimal
     stressed_equity_settlement: Decimal
     liquidation_headroom: Decimal
@@ -273,6 +281,11 @@ def evaluate_perpetual_margin(
 
     tier = _select_tier(notional, evidence.margin_tiers)
     maintenance = tier.maintenance_requirement(notional)
+    stressed_notional = notional * (
+        Decimal("1") + stress.notional_increase_fraction
+    )
+    stressed_tier = _select_tier(stressed_notional, evidence.margin_tiers)
+    stressed_maintenance = stressed_tier.maintenance_requirement(stressed_notional)
 
     now = _instant(evaluated_at, name="evaluated_at")
     max_age = timedelta(seconds=maximum_evidence_age_seconds)
@@ -320,7 +333,7 @@ def evaluate_perpetual_margin(
         - stress.additional_funding_loss
         - stress.unavailable_exit_extra_loss
     )
-    headroom = stressed_equity - maintenance
+    headroom = stressed_equity - stressed_maintenance
 
     if current_equity < maintenance:
         reasons.append("CURRENT_MAINTENANCE_BREACH")
@@ -341,6 +354,8 @@ def evaluate_perpetual_margin(
         verdict=verdict,
         notional=notional,
         maintenance_requirement=maintenance,
+        stressed_maintenance_requirement=stressed_maintenance,
+        stressed_notional=stressed_notional,
         current_equity_settlement=current_equity,
         stressed_equity_settlement=stressed_equity,
         liquidation_headroom=headroom,

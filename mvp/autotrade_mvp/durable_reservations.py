@@ -25,6 +25,7 @@ from .reservations import (
 
 _AGGREGATE_TYPE = "reservation_book"
 _EVENT_TYPE = "ReservationMutationCommitted"
+_COMMAND_ACTOR = "autotrade-reservation-authority"
 
 
 def _text(value: str, *, name: str) -> str:
@@ -380,6 +381,8 @@ class DurableReservationBook:
         try:
             self.store.commit_command(
                 command_id=journal_command_id,
+                actor=_COMMAND_ACTOR,
+                environment=self.environment,
                 idempotency_key=journal_idempotency_key,
                 request={
                     "environment": self.environment,

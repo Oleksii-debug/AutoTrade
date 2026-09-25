@@ -5,6 +5,7 @@ import json
 from tempfile import TemporaryDirectory
 
 from mvp.autotrade_mvp.authority import (
+    AuthorityConflict,
     AuthorityPolicy,
     AuthorityService,
     InstrumentVersionIdentity,
@@ -649,7 +650,12 @@ class AuthorityTests(unittest.TestCase):
                 instrument_version=1,
                 action="ORDER.SUBMIT",
             )
-            dispatcher = GuardedDispatcher(store, owner_token="owner")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+                owner_token="owner",
+            )
             outbound = 0
 
             def transport(client_id, request, final_guard):
@@ -853,6 +859,124 @@ class AuthorityTests(unittest.TestCase):
                 Exception, "consumed by multiple admissions"
             ):
                 AuthorityService(store)
+
+    def test_stale_authority_process_cannot_double_consume_confirmation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            seed = AuthorityService(store)
+            seed.register_policy(policy())
+            seed.add_confirmation(
+                confirmation_id="concurrent-single-use",
+                policy_id="p1",
+                intent_hash="h-concurrent",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                expires_at="2026-09-24T23:00:00Z",
+            )
+
+            first = AuthorityService(store)
+            stale = AuthorityService(store)
+
+            admitted = first.admit(
+                admission_id="winner",
+                policy_id="p1",
+                intent_hash="h-concurrent",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                state_version=1,
+                risk_admitted=True,
+                now="2026-09-24T18:00:00Z",
+                confirmation_id="concurrent-single-use",
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "journal advanced|changed concurrently",
+            ):
+                stale.admit(
+                    admission_id="stale-loser",
+                    policy_id="p1",
+                    intent_hash="h-concurrent",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    state_version=1,
+                    risk_admitted=True,
+                    now="2026-09-24T18:00:01Z",
+                    confirmation_id="concurrent-single-use",
+                )
+
+            restarted = AuthorityService(store)
+            self.assertEqual(
+                restarted.dispatch_allowed(
+                    "winner",
+                    intent_hash="h-concurrent",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    now="2026-09-24T18:00:02Z",
+                ),
+                (True, "allowed"),
+            )
+            events = store.load_events("authority_state", "canonical")
+            admissions = [
+                event for event in events
+                if event["event_type"] == "AuthorityAdmissionRecorded"
+            ]
+            self.assertEqual(len(admissions), 1)
+
+    def test_stale_authority_process_cannot_append_after_revocation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            seed = AuthorityService(store)
+            seed.register_policy(policy(autonomous=True))
+
+            stale = AuthorityService(store)
+            revoker = AuthorityService(store)
+            revoker.revoke_policy(
+                "p1",
+                reason="operator revoke",
+                revoked_at="2026-09-24T18:00:01Z",
+            )
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "journal advanced|changed concurrently",
+            ):
+                stale.admit(
+                    admission_id="stale-after-revoke",
+                    policy_id="p1",
+                    intent_hash="h-stale",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    state_version=1,
+                    risk_admitted=True,
+                    now="2026-09-24T18:00:02Z",
+                )
+
+            restarted = AuthorityService(store)
+            self.assertEqual(
+                restarted.epoch,
+                2,
+            )
 
 
 if __name__ == "__main__":

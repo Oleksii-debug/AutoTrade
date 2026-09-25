@@ -10,6 +10,12 @@ import json
 from typing import Any, Callable, FrozenSet, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from .borrow import (
+    BorrowLifecycleJournal,
+    BorrowResourceIdentity,
+    borrow_reservation_requirement,
+    incremental_short_borrow_quantity,
+)
 from .durable_reservations import DurableReservationBook
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reconciliation_journal import load_account_resource_availability_evidence
@@ -1224,7 +1230,53 @@ class AuthorityService:
         if policy is None:
             raise KeyError(pid)
 
+        provider_id = _text(
+            reservation_provider_id,
+            name="reservation_provider_id",
+        ).upper()
+        normalized_caller_requirements = normalize_reservation_requirements(
+            reservation_requirements
+        )
+        caller_requirement_map = dict(normalized_caller_requirements)
+        if any(
+            resource.startswith("BORROW:")
+            for resource in caller_requirement_map
+        ):
+            raise AuthorityConflict(
+                "securities-borrow reservation requirements are derived by financial authority"
+            )
+
+        borrow_requirement: dict[str, str] = {}
+        borrow_journal: BorrowLifecycleJournal | None = None
+        borrow_snapshot: Mapping[str, Any] | None = None
+        borrow_needed = incremental_short_borrow_quantity(
+            risk_intent,
+            risk_context,
+        )
+        if borrow_needed > 0:
+            borrow_resource = BorrowResourceIdentity(
+                provider_id=provider_id,
+                account_id=account_id,
+                environment=environment,
+                instrument_id=instrument_id,
+                instrument_version=instrument_version,
+            )
+            borrow_requirement = borrow_reservation_requirement(
+                borrow_resource,
+                risk_intent,
+                risk_context,
+            )
+            borrow_journal = BorrowLifecycleJournal(
+                self.store,
+                borrow_resource,
+            )
+        effective_requirements: dict[str, object] = dict(
+            caller_requirement_map
+        )
+        effective_requirements.update(borrow_requirement)
+
         existing = self._admissions.get(aid)
+        existing_risk_payload: Mapping[str, Any] | None = None
         if existing is None:
             reservation_version = reservation_book.version
             evaluated_at = _text(now, name="now")
@@ -1246,6 +1298,7 @@ class AuthorityService:
                     "existing admission risk evidence is missing or ambiguous"
                 )
             payload = risk_events[0]["payload"]
+            existing_risk_payload = payload
             reservation_version = payload.get("reservation_version")
             if (
                 not isinstance(reservation_version, int)
@@ -1268,14 +1321,78 @@ class AuthorityService:
                     "risk_valid_until changed for an existing financial command"
                 )
 
+        effective_risk_context = risk_context
+        if borrow_requirement:
+            if existing is not None:
+                if existing_risk_payload is None:
+                    raise AuthorityConflict(
+                        "existing admission risk evidence is missing"
+                    )
+                checks = existing_risk_payload.get("checks")
+                if not isinstance(checks, list):
+                    raise AuthorityConflict(
+                        "existing admission risk checks are malformed"
+                    )
+                borrow_checks = [
+                    item
+                    for item in checks
+                    if isinstance(item, Mapping)
+                    and item.get("rule_id") == "short_borrow"
+                ]
+                if (
+                    len(borrow_checks) != 1
+                    or not isinstance(borrow_checks[0].get("passed"), bool)
+                ):
+                    raise AuthorityConflict(
+                        "existing admission borrow verdict is missing or ambiguous"
+                    )
+                borrow_allowed = borrow_checks[0]["passed"]
+            else:
+                assert borrow_journal is not None
+                try:
+                    candidate_borrow_snapshot = borrow_journal.authority_snapshot(
+                        risk_context,
+                        symbol=risk_intent.symbol,
+                        now=now,
+                    )
+                    raw_borrow_available = candidate_borrow_snapshot.get(
+                        "availability"
+                    )
+                    if not isinstance(raw_borrow_available, Mapping):
+                        raise ValueError(
+                            "borrow authority availability is malformed"
+                        )
+                    resource_key, required_amount = next(
+                        iter(borrow_requirement.items())
+                    )
+                    available_amount = _decimal(
+                        raw_borrow_available.get(resource_key),
+                        name="borrow_authority.available",
+                    )
+                    borrow_allowed = (
+                        available_amount
+                        >= _decimal(
+                            required_amount,
+                            name="borrow_requirement",
+                        )
+                    )
+                    if borrow_allowed:
+                        borrow_snapshot = candidate_borrow_snapshot
+                except (KeyError, TypeError, ValueError):
+                    borrow_allowed = False
+            effective_risk_context = replace(
+                risk_context,
+                borrow_available=borrow_allowed,
+            )
+
         decision = evaluate_bound_risk(
             risk_intent,
-            risk_context,
+            effective_risk_context,
             risk_policy,
             intent_hash=_text(intent_hash, name="intent_hash"),
             policy_version=policy.version,
             reservation_version=reservation_version,
-            reservation_requirements=reservation_requirements,
+            reservation_requirements=effective_requirements,
             capability_snapshot_id=capability,
             evaluated_at=evaluated_at,
             valid_until=valid_until,
@@ -1288,10 +1405,6 @@ class AuthorityService:
                 reservation_checkpoint_event_id,
                 name="reservation_checkpoint_event_id",
             )
-            provider_id = _text(
-                reservation_provider_id,
-                name="reservation_provider_id",
-            ).upper()
             max_age = _decimal(
                 reservation_max_age_seconds,
                 name="reservation_max_age_seconds",
@@ -1335,7 +1448,12 @@ class AuthorityService:
                 availability_evidence = dict(durable_evidence)
             else:
                 normalized_requirements = normalize_reservation_requirements(
-                    reservation_requirements
+                    effective_requirements
+                )
+                account_resources = tuple(
+                    resource
+                    for resource, _amount in normalized_requirements
+                    if not resource.startswith("BORROW:")
                 )
                 loaded = load_account_resource_availability_evidence(
                     self.store,
@@ -1343,17 +1461,36 @@ class AuthorityService:
                     provider_id=provider_id,
                     account_id=account_id,
                     environment=environment,
-                    resources=tuple(
-                        resource
-                        for resource, _amount in normalized_requirements
-                    ),
+                    resources=account_resources,
                     now=now,
                     max_age_seconds=normalized_max_age,
                 )
+                merged_availability = dict(loaded.get("availability") or {})
+                if borrow_requirement:
+                    if borrow_snapshot is None:
+                        raise AuthorityConflict(
+                            "admitted short is missing provider borrow authority evidence"
+                        )
+                    raw_borrow_available = borrow_snapshot.get("availability")
+                    if not isinstance(raw_borrow_available, Mapping):
+                        raise AuthorityConflict(
+                            "borrow authority availability is malformed"
+                        )
+                    for resource, amount in raw_borrow_available.items():
+                        if resource in merged_availability:
+                            raise AuthorityConflict(
+                                "borrow authority resource collides with account availability"
+                            )
+                        merged_availability[resource] = amount
                 availability_evidence = {
                     **loaded,
+                    "availability": merged_availability,
                     "max_age_seconds": normalized_max_age,
                 }
+                if borrow_requirement:
+                    availability_evidence["borrow_authority"] = dict(
+                        borrow_snapshot
+                    )
 
             raw_authoritative = availability_evidence.get("availability")
             if not isinstance(raw_authoritative, Mapping):
@@ -1374,6 +1511,10 @@ class AuthorityService:
                     raise ValueError(
                         "reservation_available resources must be unique after normalization"
                     )
+                if resource.startswith("BORROW:"):
+                    raise AuthorityConflict(
+                        "securities-borrow availability is derived by financial authority"
+                    )
                 amount = _decimal(
                     raw_amount,
                     name=f"reservation_available[{resource}]",
@@ -1393,7 +1534,12 @@ class AuthorityService:
                 )
                 for resource, amount in authoritative_available.items()
             }
-            if caller_available != canonical_available:
+            canonical_caller_available = {
+                resource: amount
+                for resource, amount in canonical_available.items()
+                if not resource.startswith("BORROW:")
+            }
+            if caller_available != canonical_caller_available:
                 raise AuthorityConflict(
                     "reservation_available does not match authoritative reconciliation checkpoint"
                 )
@@ -1411,12 +1557,12 @@ class AuthorityService:
             instrument_version=instrument_version,
             action=action,
             notional=notional,
-            current_state_version=risk_context.state_version,
+            current_state_version=effective_risk_context.state_version,
             capability_snapshot_id=capability,
             risk_decision=decision,
             reservation_book=reservation_book,
             reservation_id=reservation_id,
-            reservation_requirements=reservation_requirements,
+            reservation_requirements=effective_requirements,
             reservation_available=authoritative_available,
             now=now,
             reservation_availability_evidence=availability_evidence,

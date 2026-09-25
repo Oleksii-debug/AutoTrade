@@ -860,6 +860,7 @@ class AuthorityTests(unittest.TestCase):
                 authority_check=guard,
                 transport_send=transport,
                 final_barrier_clock=lambda: "2026-09-24T18:00:02Z",
+                sender_check=lambda _owner_token, _owner_epoch: None,
             )
             self.assertEqual(result.status, "BLOCKED")
             self.assertEqual(result.reason, "policy_revoked")

@@ -149,11 +149,9 @@ class PerpetualMarginEvidence:
                 name,
                 _text(getattr(self, name), name=name),
             )
-        object.__setattr__(
-            self,
-            "provider_id",
-            self.provider_id.upper(),
-        )
+        # Provider/account capability identity must use the exact canonical
+        # representation owned by CapabilitySnapshot. Do not introduce a second
+        # case-normalization rule inside margin evidence.
         object.__setattr__(
             self,
             "environment",
@@ -163,11 +161,6 @@ class PerpetualMarginEvidence:
             self,
             "margin_mode",
             _text(self.margin_mode, name="margin_mode").upper(),
-        )
-        object.__setattr__(
-            self,
-            "position_mode",
-            self.position_mode.upper(),
         )
         object.__setattr__(
             self,

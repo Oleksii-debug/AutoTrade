@@ -326,9 +326,16 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 "risk_decision",
                 first.risk_decision_id,
             )[0]
-            adjustment = risk_event["payload"][
+            availability_evidence = risk_event["payload"][
                 "reservation_availability_evidence"
-            ]["borrow_capacity_adjustments"][key]
+            ]
+            self.assertEqual(
+                availability_evidence["availability"][key],
+                "60",
+            )
+            adjustment = availability_evidence[
+                "borrow_capacity_adjustments"
+            ][key]
             self.assertEqual(adjustment["total_capacity"], "100")
             self.assertEqual(
                 adjustment["current_borrowed_quantity"],
@@ -346,6 +353,62 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                     reserved="-50",
                 )
             self.assertEqual(reservations.total_reserved(key), Decimal("50"))
+
+    def test_adjusted_borrow_availability_survives_restart_exact_retry(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            authority = _authority(store)
+            checkpoint = _checkpoint(store)
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+
+            first = _admit_short(
+                authority,
+                reservations,
+                checkpoint,
+                suffix="restart-exact",
+                reserved="-30",
+            )
+            self.assertEqual(first.outcome, "ADMITTED")
+            risk_event = store.load_events(
+                "risk_decision",
+                first.risk_decision_id,
+            )[0]
+            evidence = risk_event["payload"][
+                "reservation_availability_evidence"
+            ]
+            self.assertEqual(
+                evidence["availability"][_borrow_key()],
+                "60",
+            )
+
+            restarted_store = JournalStore(path)
+            restarted_authority = _authority(restarted_store)
+            restarted_reservations = DurableReservationBook(
+                restarted_store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            replay = _admit_short(
+                restarted_authority,
+                restarted_reservations,
+                checkpoint,
+                suffix="restart-exact",
+                reserved="-30",
+            )
+            self.assertEqual(replay, first)
+            self.assertEqual(
+                restarted_reservations.total_reserved(_borrow_key()),
+                Decimal("20"),
+            )
+            restarted_authority._validate_durable_financial_evidence(
+                replay,
+                restarted_authority._policies["borrow-policy"],
+            )
 
     def test_recall_after_admission_blocks_final_dispatch_until_provider_resolution(self):
         with TemporaryDirectory() as directory:

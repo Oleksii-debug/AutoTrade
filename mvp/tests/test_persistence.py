@@ -838,7 +838,7 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(legacy.current_schema_version(), 1)
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 6)
+            self.assertEqual(upgraded.current_schema_version(), 7)
             self.assertEqual(
                 upgraded.load_events("account", "paper-1")[0]["event_id"],
                 "evt-1",
@@ -875,7 +875,7 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 6)
+            self.assertEqual(upgraded.current_schema_version(), 7)
             with self.assertRaisesRegex(ValueError, "legacy unscoped"):
                 upgraded.record_command(
                     actor="alice",
@@ -939,7 +939,7 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 6)
+            self.assertEqual(upgraded.current_schema_version(), 7)
             replayed, inserted = upgraded.record_command(
                 actor="alice",
                 environment="PAPER",
@@ -1224,11 +1224,11 @@ class JournalStoreTests(unittest.TestCase):
 
     def test_failed_migration_rolls_back_schema_and_data_changes(self):
         class BrokenMigrationStore(JournalStore):
-            SCHEMA_VERSION = 7
+            SCHEMA_VERSION = 8
 
             @classmethod
             def _migration_statements(cls, version):
-                if version == 7:
+                if version == 8:
                     return (
                         "CREATE TABLE migration_probe(value TEXT NOT NULL)",
                         "CREATE TABL definitely_invalid(statement TEXT)",
@@ -1239,7 +1239,7 @@ class JournalStoreTests(unittest.TestCase):
             path = f"{directory}/journal.sqlite3"
             healthy = JournalStore(path)
             healthy.append_event(event())
-            self.assertEqual(healthy.current_schema_version(), 6)
+            self.assertEqual(healthy.current_schema_version(), 7)
 
             with self.assertRaises(sqlite3.OperationalError):
                 BrokenMigrationStore(path)
@@ -1262,7 +1262,7 @@ class JournalStoreTests(unittest.TestCase):
             finally:
                 connection.close()
 
-            self.assertEqual(versions, [1, 2, 3, 4, 5, 6])
+            self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7])
             self.assertIsNone(probe)
             self.assertEqual(event_count, 1)
 
@@ -1324,6 +1324,130 @@ class JournalStoreTests(unittest.TestCase):
                 if item["payload"].get("kind") == "fill"
             )
             self.assertEqual(str(rebuilt), checkpoint["state"]["net_quantity"])
+
+    def test_global_projection_checkpoint_replays_exact_multi_aggregate_tail(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            second = event("evt-2", 1, {"kind": "fill", "quantity": "2"})
+            second["aggregate_id"] = "paper-2"
+            second["payload_hash"] = payload_digest(second["payload"])
+            store.append_event(second)
+
+            cut = store.current_journal_sequence()
+            self.assertEqual(cut, 2)
+            self.assertTrue(
+                store.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=cut,
+                    state={"paper-1": "1", "paper-2": "2"},
+                )
+            )
+
+            third = event("evt-3", 2, {"kind": "fill", "quantity": "3"})
+            store.append_event(third)
+
+            reopened = JournalStore(path)
+            checkpoint = reopened.load_global_projection_checkpoint(
+                projection_name="portfolio"
+            )
+            self.assertEqual(checkpoint["journal_sequence"], 2)
+            self.assertEqual(
+                checkpoint["state"],
+                {"paper-1": "1", "paper-2": "2"},
+            )
+            tail = reopened.load_events_after_journal_sequence(
+                checkpoint["journal_sequence"]
+            )
+            self.assertEqual(
+                [item["journal_sequence"] for item in tail],
+                [3],
+            )
+            rebuilt = dict(checkpoint["state"])
+            for item in tail:
+                if item["payload"].get("kind") == "fill":
+                    rebuilt[item["aggregate_id"]] = str(
+                        int(rebuilt.get(item["aggregate_id"], "0"))
+                        + int(item["payload"]["quantity"])
+                    )
+            self.assertEqual(
+                rebuilt,
+                {"paper-1": "4", "paper-2": "2"},
+            )
+
+    def test_global_projection_checkpoint_is_monotonic_and_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            self.assertTrue(
+                store.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=1,
+                    state={"net": "1"},
+                )
+            )
+            self.assertFalse(
+                store.save_global_projection_checkpoint(
+                    projection_name=" portfolio ",
+                    journal_sequence=1,
+                    state={"net": "1"},
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "cannot outrun"):
+                store.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=2,
+                    state={"net": "2"},
+                )
+            with self.assertRaisesRegex(ValueError, "cannot regress or change"):
+                store.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=1,
+                    state={"net": "999"},
+                )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE global_projection_checkpoints SET state_json = ? "
+                    "WHERE projection_name = ?",
+                    ('{"net":"999"}', "portfolio"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "hash does not match"):
+                JournalStore(path).load_global_projection_checkpoint(
+                    projection_name="portfolio"
+                )
+
+    def test_v6_upgrade_adds_global_projection_checkpoint_without_losing_journal(self):
+        class V6JournalStore(JournalStore):
+            SCHEMA_VERSION = 6
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            legacy = V6JournalStore(path)
+            legacy.append_event(event(), outbox_topic="events")
+            self.assertEqual(legacy.current_schema_version(), 6)
+
+            upgraded = JournalStore(path)
+            self.assertEqual(upgraded.current_schema_version(), 7)
+            self.assertEqual(
+                [item["event_id"] for item in upgraded.load_events_after_journal_sequence(0)],
+                ["evt-1"],
+            )
+            self.assertEqual(len(upgraded.pending_outbox()), 1)
+            self.assertTrue(
+                upgraded.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=1,
+                    state={"net": "1"},
+                )
+            )
 
     def test_projection_checkpoint_identity_cannot_split_on_whitespace(self):
         with TemporaryDirectory() as directory:

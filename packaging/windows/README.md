@@ -21,6 +21,8 @@ Secret-like files, private-key formats and symlinks are rejected before archive 
 
 `mvp/autotrade_mvp/windows_update.py` adds a deterministic fail-closed update/rollback planning boundary. It consumes frozen release-candidate manifests, verified pre-update backup evidence and exact journal-schema transition evidence. A plan is blocked on backup mismatch, unresolved migration evidence, forged release metadata or missing reconciliation semantics. Even a ready plan starts the candidate in degraded/no-trading-authority mode and requires post-update or post-restore reconciliation plus separate authority reacquisition.
 
+The canonical update prefix is deliberately fail-closed: verify the candidate signature/hash first, quiesce new admissions, surface and reconcile in-flight/UNKNOWN provider sends, verify the pre-update backup, and only then stop/fence the old financial sender before installing candidate bytes. Rollback likewise quiesces admissions and reconciles in-flight sends before sender fencing/restoration. These are ordered planning/checkpoint requirements; they do not manufacture execution evidence or financial reconciliation truth.
+
 The checkpoint/execution boundary revalidates the nested current/candidate release identity, backup verification/source/schema/reconciliation requirements, migration transition/source/status/rollback compatibility, canonical steps and no-trading-authority invariant. Recomputing a plan digest is not sufficient to bypass those gates.
 
 ## Verified installer input

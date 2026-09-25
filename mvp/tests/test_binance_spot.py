@@ -12,9 +12,25 @@ from mvp.autotrade_mvp.binance_spot import (
     prepare_order_request,
 )
 from mvp.autotrade_mvp.capabilities import CapabilitySnapshot
+from mvp.autotrade_mvp.provider_core import (
+    BoundReconciliationResponse,
+    PreparedReconciliationRead,
+)
 
 
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
+
+def bound_account_trades(payload, *, account_id="paper-1", environment="PAPER"):
+    read = PreparedReconciliationRead.create(
+        provider_id="BINANCE",
+        account_id=account_id,
+        environment=environment,
+        surface="EXECUTIONS",
+        endpoint="/api/v3/myTrades",
+        request={"limit": 100},
+    )
+    return BoundReconciliationResponse.bind(read, payload)
+
 
 
 def capability(*, order_types=("LIMIT", "MARKET"), tif=("GTC", "IOC", "FOK", "NONE")):
@@ -155,12 +171,10 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             }
         ]
         fills = parse_account_trades(
-            [rows[0], dict(rows[0])],
+            bound_account_trades([rows[0], dict(rows[0])]),
             instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
             client_ids_by_order_id={42: "at-ack-1"},
-        
-            account_id="paper-1",
-            environment="PAPER",)
+        )
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].provider_execution_id, "BINANCE-SPOT:BTCUSDT:7")
         self.assertEqual(fills[0].client_order_id, "at-ack-1")
@@ -181,11 +195,9 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         changed = dict(first, qty="0.3")
         with self.assertRaisesRegex(BinanceSpotAdapterError, "conflicting"):
             parse_account_trades(
-                [first, changed],
+                bound_account_trades([first, changed]),
                 instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
-            
-                account_id="paper-1",
-                environment="PAPER",)
+            )
 
     def test_absence_semantics_are_never_assumed_from_empty_surface(self):
         evidence = coverage_evidence(

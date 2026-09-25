@@ -12,7 +12,9 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Mapping
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
+from hashlib import sha256
+import json
 import re
 
 from .capabilities import CapabilitySnapshot
@@ -210,27 +212,117 @@ def prepare_spot_order_request(
     )
 
 
-@dataclass(frozen=True)
-class KrakenSpotSubmissionAck:
-    provider_order_ids: tuple[str, ...]
-    description: str | None
+def _uuid_text(value: object, *, name: str) -> str:
+    text = _text(value, name=name)
+    try:
+        UUID(text)
+    except ValueError as error:
+        raise KrakenSpotAdapterError(f"{name} must be a UUID") from error
+    return text
 
-    @property
-    def proves_fill(self) -> bool:
-        return False
+
+def _iso_utc_text(value: object, *, name: str) -> str:
+    text = _text(value, name=name)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise KrakenSpotAdapterError(f"{name} must be an ISO timestamp") from error
+    if parsed.tzinfo is None:
+        raise KrakenSpotAdapterError(f"{name} must include timezone")
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def parse_spot_submission_response(payload: Mapping[str, object]) -> KrakenSpotSubmissionAck:
-    """Parse AddOrder acknowledgement without converting it into execution."""
+def _submission_evidence(
+    payload: Mapping[str, object],
+    *,
+    observed_at: str,
+    environment: str,
+    source_uri: str,
+) -> dict[str, str]:
+    env = _text(environment, name="environment").upper()
+    source = _text(source_uri, name="source_uri")
+    if not source.startswith("https://") or not source.endswith("/0/private/AddOrder"):
+        raise KrakenSpotAdapterError(
+            "source_uri must be the exact HTTPS Kraken Spot AddOrder endpoint"
+        )
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    digest = sha256(encoded).hexdigest()
+    return {
+        "artifact_id": str(uuid5(NAMESPACE_URL, f"{source}#sha256:{digest}")),
+        "sha256": f"sha256:{digest}",
+        "source_uri": source,
+        "observed_at": _iso_utc_text(observed_at, name="observed_at"),
+        "provider_environment": env,
+        "rights_id": "provider-observation-kraken-spot",
+    }
+
+
+def parse_spot_submission_response(
+    *,
+    attempt_id: str,
+    client_order_id: str,
+    environment: str,
+    observed_at: str,
+    source_uri: str,
+    payload: Mapping[str, object] | None,
+    transport_ambiguous: bool = False,
+) -> dict[str, object]:
+    """Map a recorded AddOrder outcome without confusing ACK with execution."""
+
+    aid = _uuid_text(attempt_id, name="attempt_id")
+    cid = validate_spot_client_order_id(client_order_id)
+    when = _iso_utc_text(observed_at, name="observed_at")
+    env = _text(environment, name="environment").upper()
+    source = _text(source_uri, name="source_uri")
+    if type(transport_ambiguous) is not bool:
+        raise TypeError("transport_ambiguous must be boolean")
+    if transport_ambiguous:
+        if payload is not None:
+            raise KrakenSpotAdapterError(
+                "ambiguous transport must not fabricate a provider response"
+            )
+        return {
+            "attempt_id": aid,
+            "outcome": "UNKNOWN",
+            "client_order_id": cid,
+            "provider_received_at": when,
+            "provider_environment": env,
+            "reason_code": "KRAKEN_SPOT_TRANSPORT_AMBIGUOUS",
+            "evidence": [],
+            "retry_disposition": "RECONCILE_FIRST",
+        }
 
     if not isinstance(payload, Mapping):
         raise TypeError("payload must be a mapping")
+    evidence = [
+        _submission_evidence(
+            payload,
+            observed_at=when,
+            environment=env,
+            source_uri=source,
+        )
+    ]
     errors = payload.get("error", ())
     if isinstance(errors, (str, bytes)) or not isinstance(errors, (list, tuple)):
         raise KrakenSpotAdapterError("Kraken error field must be a sequence")
     nonempty_errors = tuple(str(item) for item in errors if str(item))
     if nonempty_errors:
-        raise KrakenSpotAdapterError("provider rejected request: " + "; ".join(nonempty_errors))
+        return {
+            "attempt_id": aid,
+            "outcome": "REJECTED",
+            "client_order_id": cid,
+            "provider_received_at": when,
+            "provider_environment": env,
+            "reason_code": "KRAKEN_SPOT_" + ";".join(nonempty_errors),
+            "evidence": evidence,
+            "retry_disposition": "NEVER",
+        }
 
     result = payload.get("result")
     if not isinstance(result, Mapping):
@@ -241,11 +333,16 @@ def parse_spot_submission_response(payload: Mapping[str, object]) -> KrakenSpotS
     normalized = tuple(_text(str(value), name="txid") for value in txids)
     if len(set(normalized)) != len(normalized):
         raise KrakenSpotAdapterError("provider transaction ids must be unique")
-    descr = result.get("descr")
-    description = None
-    if isinstance(descr, Mapping) and descr.get("order") is not None:
-        description = _text(str(descr["order"]), name="description")
-    return KrakenSpotSubmissionAck(provider_order_ids=normalized, description=description)
+    return {
+        "attempt_id": aid,
+        "outcome": "ACKNOWLEDGED",
+        "provider_order_ids": normalized,
+        "client_order_id": cid,
+        "provider_received_at": when,
+        "provider_environment": env,
+        "evidence": evidence,
+        "retry_disposition": "NEVER",
+    }
 
 
 @dataclass(frozen=True)

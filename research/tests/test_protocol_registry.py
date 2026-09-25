@@ -179,6 +179,77 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             self.assertEqual(evaluation["prior_access_count"], 1)
             self.assertEqual(evaluation["untouched"], 0)
 
+
+    def test_holdout_alias_rename_cannot_restore_untouched_status(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "science.sqlite3"
+            first = ScientificRegistry(path)
+            p1 = first.register_protocol(protocol())
+            identity = holdout_identity()
+            first.record_holdout_access(
+                p1.protocol_id,
+                holdout_id="forward-display-A",
+                holdout_identity=identity,
+                purpose="manual-inspection",
+            )
+
+            # Reopen to prove the contamination key is durable, then use a
+            # different display alias for the exact same evidence segment.
+            reopened = ScientificRegistry(path)
+            second_payload = protocol()
+            second_payload["hypothesis"] = "second candidate after prior holdout exposure"
+            p2 = reopened.register_protocol(second_payload)
+            evaluation = reopened.register_evaluation(
+                p2.protocol_id,
+                holdout_id="forward-display-B",
+                holdout_identity=identity,
+                result={"net_utility": "0.030"},
+            )
+            self.assertEqual(evaluation["prior_access_count"], 1)
+            self.assertEqual(evaluation["untouched"], 0)
+
+    def test_holdout_alias_cannot_be_rebound_to_different_evidence(self):
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            p = registry.register_protocol(protocol())
+            registry.record_holdout_access(
+                p.protocol_id,
+                holdout_id="locked-forward",
+                holdout_identity=holdout_identity("a"),
+                purpose="initial-inspection",
+            )
+            with self.assertRaisesRegex(ProtocolConflict, "cannot be rebound"):
+                registry.register_evaluation(
+                    p.protocol_id,
+                    holdout_id="locked-forward",
+                    holdout_identity=holdout_identity("b"),
+                    result={"net_utility": "0.030"},
+                )
+
+    def test_holdout_identity_rejects_malformed_or_reversed_segment(self):
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            p = registry.register_protocol(protocol())
+            malformed = holdout_identity()
+            malformed["dataset_digest"] = "sha256:ABC"
+            with self.assertRaisesRegex(ProtocolViolation, "canonical sha256"):
+                registry.record_holdout_access(
+                    p.protocol_id,
+                    holdout_id="locked",
+                    holdout_identity=malformed,
+                    purpose="inspection",
+                )
+            with self.assertRaisesRegex(ProtocolViolation, "cannot follow"):
+                registry.record_holdout_access(
+                    p.protocol_id,
+                    holdout_id="locked",
+                    holdout_identity=holdout_identity(
+                        start="2026-06-30",
+                        end="2026-01-01",
+                    ),
+                    purpose="inspection",
+                )
+
     def test_manual_holdout_access_contaminates_later_locked_evaluation(self):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")

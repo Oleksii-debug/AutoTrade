@@ -1774,6 +1774,11 @@ def book_external_provider_cash_activity(
         },
         "amount": amount_text,
     }
+    if activity.provider_environment != scope:
+        request["provider_environment"] = activity.provider_environment
+        request["activity"]["provider_environment"] = (
+            activity.provider_environment
+        )
     result = {
         "provider_id": provider,
         "account_id": account,
@@ -1783,6 +1788,8 @@ def book_external_provider_cash_activity(
         "amount": amount_text,
         "currency": activity.currency,
     }
+    if activity.provider_environment != scope:
+        result["provider_environment"] = activity.provider_environment
 
     activity_version = store.next_aggregate_version(
         "provider_activity", identity
@@ -1820,6 +1827,8 @@ def book_external_provider_cash_activity(
         "observed_at": observed_text,
         "transaction": _transaction_payload(transaction),
     }
+    if activity.provider_environment != scope:
+        economic_payload["provider_environment"] = activity.provider_environment
     economic_event_id = str(
         uuid5(
             NAMESPACE_URL,
@@ -1865,6 +1874,7 @@ def load_provider_account_economic_book(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> EconomicBook:
     """Rebuild canonical economics from the one durable provider/account journal."""
 
@@ -1873,5 +1883,6 @@ def load_provider_account_economic_book(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     return EconomicBook(durable.transactions)

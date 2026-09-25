@@ -351,6 +351,7 @@ class ProviderResponseObservation:
     """Exact response bytes bound to one immutable authenticated query."""
 
     query_binding: AuthenticatedReadQueryBinding
+    provider_environment: str
     observed_at: str
     http_status: int
     response_sha256: str
@@ -367,6 +368,11 @@ class ProviderResponseObservation:
             raise TypeError(
                 "query_binding must be AuthenticatedReadQueryBinding"
             )
+        object.__setattr__(
+            self,
+            "provider_environment",
+            _text(self.provider_environment, "provider_environment").upper(),
+        )
         if (
             isinstance(self.http_status, bool)
             or not isinstance(self.http_status, int)
@@ -430,6 +436,7 @@ class ProviderResponseObservation:
         endpoint: str,
         account_id: str | None = None,
         environment: str | None = None,
+        provider_environment: str | None = None,
     ) -> None:
         self.query_binding.require_scope(
             provider_id=provider_id,
@@ -438,6 +445,17 @@ class ProviderResponseObservation:
             account_id=account_id,
             environment=environment,
         )
+        if (
+            provider_environment is not None
+            and _text(
+                provider_environment,
+                "provider_environment",
+            ).upper()
+            != self.provider_environment
+        ):
+            raise ProviderCoreError(
+                "provider-read provenance provider-environment mismatch"
+            )
 
 
 def observe_authenticated_json_response(
@@ -446,6 +464,7 @@ def observe_authenticated_json_response(
     http_status: int,
     response_bytes: bytes,
     observed_at: datetime,
+    provider_environment: str | None = None,
 ) -> ProviderResponseObservation:
     if not isinstance(query_binding, AuthenticatedReadQueryBinding):
         raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
@@ -460,9 +479,16 @@ def observe_authenticated_json_response(
         )
     payload = _decode_exact_json(response_bytes)
     observed = _utc_text(observed_at, "observed_at")
+    provider_env = (
+        query_binding.environment
+        if provider_environment is None
+        else _text(provider_environment, "provider_environment").upper()
+    )
     response_digest = "sha256:" + sha256(response_bytes).hexdigest()
     identity_material = (
         query_binding.query_digest
+        + "\n"
+        + provider_env
         + "\n"
         + str(http_status)
         + "\n"
@@ -473,6 +499,7 @@ def observe_authenticated_json_response(
     evidence_ref = "provider-read:sha256:" + sha256(identity_material).hexdigest()
     return ProviderResponseObservation(
         query_binding=query_binding,
+        provider_environment=provider_env,
         observed_at=observed,
         http_status=http_status,
         response_sha256=response_digest,

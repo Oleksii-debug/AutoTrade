@@ -170,6 +170,19 @@ def _validated_fill_evidence(
 
     if provider_fill.provider_id != provider:
         raise AccountingConflict(
+            "provider fill provider scope does not match requested provider"
+        )
+    if provider_fill.account_id != book.account_id:
+        raise AccountingConflict(
+            "provider fill account scope does not match economic book"
+        )
+    if provider_fill.environment != book.environment:
+        raise AccountingConflict(
+            "provider fill environment scope does not match economic book"
+        )
+
+    if provider_fill.provider_id != provider:
+        raise AccountingConflict(
             "provider fill provider_id does not match accounting scope"
         )
     if provider_fill.account_id != book.account_id:

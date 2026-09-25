@@ -88,6 +88,25 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("while (body.children.length > 100)", js)
         self.assertNotIn("innerHTML", js)
 
+    def test_account_or_environment_scope_change_clears_history_and_counter_baseline(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function resetEventHistoryForScope()", js)
+        self.assertIn("const scopeChanged = state.accountId !== null", js)
+        self.assertIn("parsed.accountId !== state.accountId", js)
+        self.assertIn("parsed.environment !== state.environment", js)
+        scope = js.index("if (scopeChanged)")
+        cursor_reset = js.index("state.cursor = 0n", scope)
+        version_reset = js.index("state.version = 0n", scope)
+        history_reset = js.index("resetEventHistoryForScope()", scope)
+        regression_check = js.index("host snapshot counters regressed", scope)
+        self.assertLess(cursor_reset, regression_check)
+        self.assertLess(version_reset, regression_check)
+        self.assertLess(history_reset, regression_check)
+        self.assertIn(
+            "No canonical host events received in this account/environment session.",
+            js,
+        )
+
     def test_event_history_is_recorded_only_after_required_event_processing(self):
         js = APP.read_text(encoding="utf-8")
         poll = js.index("async function pollEvents()")

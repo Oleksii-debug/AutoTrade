@@ -684,5 +684,57 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(pending[0]["topic"], "events")
 
 
+
+    def test_event_reads_fail_closed_after_payload_tamper(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event(), outbox_topic="events")
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE events SET payload_json = ? WHERE event_id = ?",
+                    ('{"kind":"tampered","quantity":"999"}', "evt-1"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "payload hash"):
+                store.get_event("evt-1")
+            with self.assertRaisesRegex(ValueError, "payload hash"):
+                store.load_events("account", "paper-1")
+            with self.assertRaisesRegex(ValueError, "payload hash"):
+                store.pending_outbox()
+
+    def test_pending_outbox_fails_closed_when_envelope_diverges_from_event(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event(), outbox_topic="events")
+
+            connection = sqlite3.connect(path)
+            try:
+                raw = connection.execute(
+                    "SELECT payload_json FROM outbox WHERE event_id = ?",
+                    ("evt-1",),
+                ).fetchone()[0]
+                envelope = json.loads(raw)
+                envelope["aggregate_id"] = "other-account"
+                connection.execute(
+                    "UPDATE outbox SET payload_json = ? WHERE event_id = ?",
+                    (json.dumps(envelope, sort_keys=True, separators=(",", ":")), "evt-1"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox payload does not match authoritative journal event",
+            ):
+                store.pending_outbox()
+
 if __name__ == "__main__":
     unittest.main()

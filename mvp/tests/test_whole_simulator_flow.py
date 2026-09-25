@@ -270,7 +270,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             )
             resolution_artifact_id = "44444444-4444-4444-8444-444444444444"
             resolution_receipt = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "evidence_type": "AUTOTRADE_RESERVATION_RESOLUTION",
                 "environment": "SIMULATION",
                 "account_id": "sim-account",
@@ -289,19 +289,27 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 media_type="application/vnd.autotrade.reservation-resolution+json",
                 rights={"storage": True, "export": False},
             )
-            terminal = reservations.mark_terminal(
-                command_id="reservation-terminal-1",
-                idempotency_key="reservation-terminal-1",
-                reservation_id="reservation-1",
-                outcome="FILLED",
-                provider="SIMULATED",
-                attempt_id=attempt_id,
-                resolution_evidence=(
-                    f"artifact:{resolution_artifact_id}@{resolution_manifest['sha256']}"
-                ),
-            )
-            self.assertEqual(terminal.state, "FILLED")
-            self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("0"))
+            with self.assertRaisesRegex(
+                ReservationConflict,
+                "lacks canonical reconciliation semantics",
+            ):
+                reservations.mark_terminal(
+                    command_id="reservation-terminal-1",
+                    idempotency_key="reservation-terminal-1",
+                    reservation_id="reservation-1",
+                    outcome="FILLED",
+                    provider="SIMULATED",
+                    attempt_id=attempt_id,
+                    resolution_evidence=(
+                        f"artifact:{resolution_artifact_id}@{resolution_manifest['sha256']}"
+                    ),
+                )
+            # One observed execution proves economic activity, not terminal fill.
+            # Until durable order projection proves FILLED, reservation authority
+            # must not publish a terminal state.
+            reservation = reservations.get("reservation-1")
+            self.assertEqual(reservation.state, "WORKING")
+            self.assertIsNone(reservation.resolution_evidence)
             self.assertEqual(snapshot["open_orders"], [])
 
     def test_acknowledgement_without_fill_keeps_reservation_and_working_order_truth(self):

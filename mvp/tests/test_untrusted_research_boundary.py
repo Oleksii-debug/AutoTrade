@@ -177,6 +177,23 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
                 )
             )
 
+    def test_model_proposal_is_deeply_immutable_after_construction(self):
+        nested = {"analysis": {"score": "1"}, "steps": [{"note": "safe"}]}
+        result = ResearchModelResult(
+            result_id="immutable-proposal",
+            proposal=nested,
+            evidence_refs=("evidence:1",),
+        )
+        validate_model_result(result)
+
+        nested["analysis"]["token"] = "late-injection"
+        self.assertNotIn("token", result.proposal["analysis"])
+
+        with self.assertRaisesRegex(TypeError, "immutable"):
+            result.proposal["analysis"]["token"] = "late-injection"
+        with self.assertRaises(TypeError):
+            result.proposal["steps"][0]["authority_grant"] = "TRADE_ALLOWED"
+
     def test_evidence_cannot_be_constructed_as_trusted_or_permission_granting(self):
         base = {
             "evidence_id": "e2",

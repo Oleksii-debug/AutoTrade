@@ -14,7 +14,7 @@ from hashlib import sha256
 import json
 from types import MappingProxyType
 from typing import Any, Literal, Mapping
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .provider_core import ClockGuard, ProviderCoreError, QuotaBucket
 from .simulated_provider import SimulatedProvider, SimulatedProviderConflict
@@ -229,8 +229,31 @@ class SimulatedProviderContractHarness:
             raise SimulatedProviderConflict(
                 "client_order_id already crossed the transport boundary; blind retry is forbidden"
             )
-        host_time = _instant(request["now"], name="now")
-        provider_time = _instant(request.get("provider_now", request["now"]), name="provider_now")
+        # Validate the complete provider request before the final send barrier.
+        # A local shape/value error is provably NOT_SENT and must never consume
+        # outbound identity, quota, or become an ambiguous provider write.
+        attempt_id = _text(request.get("attempt_id"), name="attempt_id")
+        try:
+            UUID(attempt_id)
+        except ValueError as error:
+            raise ValueError("attempt_id must be a UUID") from error
+        instrument_version = _text(
+            request.get("instrument_version"),
+            name="instrument_version",
+        )
+        side = _text(request.get("side"), name="side").upper()
+        if side not in {"BUY", "SELL"}:
+            raise ValueError("side must be BUY or SELL")
+        quantity = _decimal(request.get("quantity"), name="quantity")
+        price = _decimal(request.get("price"), name="price")
+        if quantity <= 0 or price <= 0:
+            raise ValueError("quantity and price must be positive")
+
+        host_time = _instant(request.get("now"), name="now")
+        provider_time = _instant(
+            request.get("provider_now", request.get("now")),
+            name="provider_now",
+        )
         self.clock_guard.require_safe(host_time=host_time, provider_time=provider_time)
         fill_immediately = request.get("fill_immediately", True)
         if type(fill_immediately) is not bool:
@@ -256,18 +279,18 @@ class SimulatedProviderContractHarness:
         )
         if directive.outcome == "ACKNOWLEDGED":
             return self.provider.submit_order(
-                attempt_id=request["attempt_id"],
+                attempt_id=attempt_id,
                 client_order_id=cid,
-                instrument_version=request["instrument_version"],
-                side=request["side"],
-                quantity=request["quantity"],
-                price=request["price"],
+                instrument_version=instrument_version,
+                side=side,
+                quantity=quantity,
+                price=price,
                 now=canonical_now,
                 fill_immediately=fill_immediately,
             )
 
         core = {
-            "attempt_id": request["attempt_id"],
+            "attempt_id": attempt_id,
             "client_order_id": cid,
             "provider_received_at": canonical_now,
             "outcome": directive.outcome,
@@ -284,12 +307,12 @@ class SimulatedProviderContractHarness:
         # UNKNOWN intentionally hides whether the remote side persisted the write.
         if directive.persist_unknown:
             self.provider.submit_order(
-                attempt_id=request["attempt_id"],
+                attempt_id=attempt_id,
                 client_order_id=cid,
-                instrument_version=request["instrument_version"],
-                side=request["side"],
-                quantity=request["quantity"],
-                price=request["price"],
+                instrument_version=instrument_version,
+                side=side,
+                quantity=quantity,
+                price=price,
                 now=canonical_now,
                 fill_immediately=fill_immediately,
             )

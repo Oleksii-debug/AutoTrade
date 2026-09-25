@@ -1411,7 +1411,7 @@ class DurableModelCallOrchestrator:
             "model_budget",
             self.budget.budget_id,
         )
-        expected_context = self._reservation_context(spec)
+        expected_static_context = self._reservation_context(spec, None)
         matching = [
             event
             for event in route_events
@@ -1424,18 +1424,40 @@ class DurableModelCallOrchestrator:
                 "durable route reservation evidence is not unique"
             )
         routing_input = matching[0]["payload"].get("routing_input")
+        durable_context = (
+            routing_input.get("reservation_context")
+            if isinstance(routing_input, Mapping)
+            else None
+        )
+        expected_context_keys = set(expected_static_context) | {
+            "pricing_evidence_digest",
+            "pricing_valid_until",
+        }
         if (
-            not isinstance(routing_input, Mapping)
-            or routing_input.get("reservation_context") != expected_context
+            not isinstance(durable_context, Mapping)
+            or set(durable_context) != expected_context_keys
+            or any(
+                durable_context.get(key) != value
+                for key, value in expected_static_context.items()
+            )
         ):
             raise ModelCallError(
                 "durable route reservation context does not match recovery spec"
             )
+        _digest(
+            durable_context.get("pricing_evidence_digest"),
+            name="pricing_evidence_digest",
+        )
+        _utc_text(
+            durable_context.get("pricing_valid_until"),
+            name="pricing_valid_until",
+        )
+        recovered_context = dict(durable_context)
         payload = {
             "attempt_id": attempt_id,
             "reason": "recovered_reserved_without_call_boundary",
             "released": str(active),
-            "reservation_context_hash": payload_digest(expected_context),
+            "reservation_context_hash": payload_digest(recovered_context),
         }
         self._append(
             attempt_id=attempt_id,

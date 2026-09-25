@@ -20,6 +20,7 @@ class AllocationTests(unittest.TestCase):
             "max_symbol_notional": "1000",
             "max_total_cost": "50",
             "max_stress_loss": "500",
+            "max_turnover_notional": "1000",
             "max_iterations": 64,
             "require_adverse_stress_evidence": False,
         }
@@ -37,6 +38,9 @@ class AllocationTests(unittest.TestCase):
         min_notional="0",
         fee_floor="0",
         max_executable_notional=None,
+        current_quantity="0",
+        turnover_cost_rate=None,
+        holding_cost_rate=None,
     ):
         return AllocationCandidate.create(
             symbol=symbol,
@@ -48,6 +52,9 @@ class AllocationTests(unittest.TestCase):
             min_notional=min_notional,
             fee_floor=fee_floor,
             max_executable_notional=max_executable_notional,
+            current_quantity=current_quantity,
+            turnover_cost_rate=turnover_cost_rate,
+            holding_cost_rate=holding_cost_rate,
         )
 
     def test_funded_request_is_accepted_without_scaling(self):
@@ -56,6 +63,75 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result.scale, Decimal("1"))
         self.assertEqual(result.targets[0].quantity, Decimal("50"))
         self.assertEqual(result.cash_required, Decimal("500"))
+
+    def test_turnover_limit_scales_from_reconciled_current_position(self):
+        result = allocate_targets(
+            [
+                self.candidate(
+                    desired="500",
+                    price="10",
+                    current_quantity="20",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                )
+            ],
+            self.policy(
+                cash_available="2000",
+                max_turnover_notional="100",
+            ),
+        )
+        self.assertEqual(result.status, "ALLOCATED")
+        self.assertLess(result.scale, Decimal("1"))
+        self.assertEqual(result.targets[0].quantity, Decimal("30"))
+        self.assertEqual(result.targets[0].notional, Decimal("300"))
+        self.assertEqual(result.targets[0].turnover_notional, Decimal("100"))
+        self.assertEqual(result.turnover_notional, Decimal("100"))
+
+    def test_zero_turnover_budget_preserves_current_position_fail_closed(self):
+        result = allocate_targets(
+            [
+                self.candidate(
+                    desired="500",
+                    price="10",
+                    current_quantity="20",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                )
+            ],
+            self.policy(
+                cash_available="2000",
+                max_turnover_notional="0",
+            ),
+        )
+        self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.targets[0].quantity, Decimal("20"))
+        self.assertEqual(result.targets[0].notional, Decimal("200"))
+        self.assertEqual(result.turnover_notional, Decimal("0"))
+
+    def test_cost_split_prices_turnover_and_holding_exposure_separately(self):
+        result = allocate_targets(
+            [
+                self.candidate(
+                    desired="300",
+                    price="10",
+                    current_quantity="20",
+                    cost="0.03",
+                    turnover_cost_rate="0.01",
+                    holding_cost_rate="0.02",
+                )
+            ],
+            self.policy(cash_available="2000"),
+        )
+        self.assertEqual(result.targets[0].turnover_notional, Decimal("100"))
+        self.assertEqual(result.targets[0].estimated_cost, Decimal("7.00"))
+        self.assertEqual(result.estimated_cost, Decimal("7.00"))
+
+    def test_nonzero_current_position_requires_explicit_cost_split(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires explicit turnover/holding cost split",
+        ):
+            self.candidate(current_quantity="1")
 
     def test_unfunded_request_is_scaled_without_using_short_proceeds(self):
         result = allocate_targets(
@@ -641,6 +717,50 @@ class AllocationTests(unittest.TestCase):
                 expected_return_rate=0.01,
             )
 
+    def test_objective_stress_penalty_prefers_lower_tail_loss_subset(self):
+        result = allocate_objective_targets(
+            [
+                ObjectiveCandidate.create(
+                    symbol="LOW_STRESS",
+                    desired_notional="1000",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.10",
+                ),
+                ObjectiveCandidate.create(
+                    symbol="HIGH_STRESS",
+                    desired_notional="1000",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.10",
+                ),
+            ],
+            self.policy(
+                cash_available="3000",
+                max_gross_notional="3000",
+                max_net_notional="3000",
+                max_symbol_notional="3000",
+                max_stress_loss="1000",
+                stress_loss_penalty_rate="1",
+                require_adverse_stress_evidence=False,
+            ),
+            stress_scenarios={
+                "joint_down": {
+                    "LOW_STRESS": "-0.01",
+                    "HIGH_STRESS": "-0.20",
+                }
+            },
+        )
+        self.assertEqual(result.allocation.status, "ALLOCATED")
+        self.assertEqual(result.selected_symbols, ("LOW_STRESS",))
+        self.assertEqual(result.allocation.worst_stress_loss, Decimal("10"))
+        self.assertEqual(result.expected_net_utility, Decimal("90"))
+        self.assertEqual(result.objective_version, "deterministic-net-utility-v3")
+
+    def test_stress_loss_penalty_rejects_binary_float(self):
+        with self.assertRaises(TypeError):
+            self.policy(stress_loss_penalty_rate=0.5)
+
     def test_objective_selection_preserves_stress_constraints(self):
         result = allocate_objective_targets(
             [
@@ -822,7 +942,7 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result.allocation.status, "ALLOCATED")
         self.assertEqual(result.selected_symbols, ("CHEAP",))
         self.assertEqual(result.expected_net_utility, Decimal("50"))
-        self.assertEqual(result.objective_version, "deterministic-net-utility-v2")
+        self.assertEqual(result.objective_version, "deterministic-net-utility-v3")
 
 if __name__ == "__main__":
     unittest.main()

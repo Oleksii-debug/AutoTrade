@@ -869,6 +869,73 @@ class IndependentRiskTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             policy(min_futures_delivery_headroom_seconds=3600.0)
 
+    def test_evaluate_risk_revalidates_direct_dataclass_construction(self):
+        good_context = context()
+        good_policy = policy()
+
+        forged_intent = RiskIntent(
+            symbol="ABC",
+            side="BUY",
+            quantity=1.0,
+            price=Decimal("100"),
+            expected_state_version=7,
+        )
+        with self.assertRaisesRegex(TypeError, "quantity must use Decimal"):
+            evaluate_risk(forged_intent, good_context, good_policy)
+
+        forged_context = RiskContext(
+            **{
+                **good_context.__dict__,
+                "capability_allowed": "true",
+            }
+        )
+        with self.assertRaisesRegex(TypeError, "capability_allowed must be a boolean"):
+            evaluate_risk(
+                RiskIntent.create(
+                    symbol="ABC",
+                    side="BUY",
+                    quantity="1",
+                    price="100",
+                    expected_state_version=7,
+                ),
+                forged_context,
+                good_policy,
+            )
+
+        forged_policy = RiskPolicy(
+            **{
+                **good_policy.__dict__,
+                "max_drawdown_fraction": Decimal("1.01"),
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "max_drawdown_fraction cannot exceed 1"):
+            evaluate_risk(
+                RiskIntent.create(
+                    symbol="ABC",
+                    side="BUY",
+                    quantity="1",
+                    price="100",
+                    expected_state_version=7,
+                ),
+                good_context,
+                forged_policy,
+            )
+
+    def test_evaluate_risk_rejects_wrong_boundary_types(self):
+        valid_intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="100",
+            expected_state_version=7,
+        )
+        with self.assertRaisesRegex(TypeError, "intent must be RiskIntent"):
+            evaluate_risk({}, context(), policy())
+        with self.assertRaisesRegex(TypeError, "context must be RiskContext"):
+            evaluate_risk(valid_intent, {}, policy())
+        with self.assertRaisesRegex(TypeError, "policy must be RiskPolicy"):
+            evaluate_risk(valid_intent, context(), {})
+
     def test_risk_decision_fingerprint_is_deterministic_and_evidence_sensitive(self):
         intent = RiskIntent.create(
             symbol="ABC", side="BUY", quantity="1", price="100",

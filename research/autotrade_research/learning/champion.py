@@ -5,8 +5,10 @@ from contextlib import contextmanager
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from hashlib import sha256
+from typing import Mapping
 import json
 import re
 import sqlite3
@@ -44,6 +46,20 @@ def _request_fingerprint(value: dict) -> str:
         ensure_ascii=False,
     )
     return "sha256:" + sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _decimal(value, *, name: str, non_negative: bool = False) -> Decimal:
+    if isinstance(value, bool) or isinstance(value, float):
+        raise TypeError(f"{name} must use exact decimal input")
+    try:
+        result = value if isinstance(value, Decimal) else Decimal(value)
+    except (InvalidOperation, TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be a finite decimal") from error
+    if not result.is_finite():
+        raise ValueError(f"{name} must be a finite decimal")
+    if non_negative and result < 0:
+        raise ValueError(f"{name} cannot be negative")
+    return result
 
 
 @dataclass(frozen=True)
@@ -91,6 +107,131 @@ class CandidateApproval:
 
 
 @dataclass(frozen=True)
+class ParameterBound:
+    name: str
+    minimum: Decimal
+    maximum: Decimal
+
+    @classmethod
+    def create(cls, *, name: str, minimum, maximum) -> "ParameterBound":
+        lower = _decimal(minimum, name="minimum")
+        upper = _decimal(maximum, name="maximum")
+        if lower > upper:
+            raise ValueError("parameter minimum cannot exceed maximum")
+        return cls(
+            name=_text(name, name="parameter name"),
+            minimum=lower,
+            maximum=upper,
+        )
+
+
+@dataclass(frozen=True)
+class OnlineEnvelope:
+    envelope_id: str
+    champion_artifact_hash: str
+    authority_scope_id: str
+    parameter_bounds: tuple[ParameterBound, ...]
+    minimum_update_interval_seconds: int
+    maximum_update_cost: Decimal
+    eligible_label_refs: tuple[str, ...]
+    envelope_hash: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        envelope_id: str,
+        champion_artifact_hash: str,
+        authority_scope_id: str,
+        parameter_bounds,
+        minimum_update_interval_seconds: int,
+        maximum_update_cost,
+        eligible_label_refs,
+    ) -> "OnlineEnvelope":
+        if (
+            not isinstance(minimum_update_interval_seconds, int)
+            or isinstance(minimum_update_interval_seconds, bool)
+            or minimum_update_interval_seconds < 0
+        ):
+            raise ValueError(
+                "minimum_update_interval_seconds must be a non-negative integer"
+            )
+        bounds = tuple(parameter_bounds)
+        if not bounds:
+            raise ValueError("online envelope requires parameter bounds")
+        if any(not isinstance(bound, ParameterBound) for bound in bounds):
+            raise TypeError("parameter_bounds must contain ParameterBound")
+        names = tuple(bound.name for bound in bounds)
+        if len(set(names)) != len(names):
+            raise ValueError("online envelope parameter names must be unique")
+        labels = tuple(
+            _text(item, name="eligible label reference")
+            for item in eligible_label_refs
+        )
+        if not labels:
+            raise ValueError("online envelope requires eligible labels")
+        if len(set(labels)) != len(labels):
+            raise ValueError("eligible label references must be unique")
+        cost = _decimal(
+            maximum_update_cost,
+            name="maximum_update_cost",
+            non_negative=True,
+        )
+        body = {
+            "envelope_id": _text(envelope_id, name="envelope_id"),
+            "champion_artifact_hash": _digest(
+                champion_artifact_hash,
+                name="champion_artifact_hash",
+            ),
+            "authority_scope_id": _text(
+                authority_scope_id,
+                name="authority_scope_id",
+            ),
+            "parameter_bounds": [
+                {
+                    "name": bound.name,
+                    "minimum": str(bound.minimum),
+                    "maximum": str(bound.maximum),
+                }
+                for bound in sorted(bounds, key=lambda item: item.name)
+            ],
+            "minimum_update_interval_seconds": minimum_update_interval_seconds,
+            "maximum_update_cost": str(cost),
+            "eligible_label_refs": sorted(labels),
+        }
+        return cls(
+            envelope_id=body["envelope_id"],
+            champion_artifact_hash=body["champion_artifact_hash"],
+            authority_scope_id=body["authority_scope_id"],
+            parameter_bounds=tuple(sorted(bounds, key=lambda item: item.name)),
+            minimum_update_interval_seconds=minimum_update_interval_seconds,
+            maximum_update_cost=cost,
+            eligible_label_refs=tuple(sorted(labels)),
+            envelope_hash=_request_fingerprint(body),
+        )
+
+    def normalize_updates(self, updates: Mapping[str, object]) -> dict[str, str]:
+        if not isinstance(updates, Mapping) or not updates:
+            raise ValueError("online update requires parameter values")
+        by_name = {bound.name: bound for bound in self.parameter_bounds}
+        normalized: dict[str, str] = {}
+        for raw_name, raw_value in updates.items():
+            name = _text(raw_name, name="update parameter name")
+            bound = by_name.get(name)
+            if bound is None:
+                raise ValueError(
+                    f"parameter {name} is outside the approved online envelope"
+                )
+            value = _decimal(raw_value, name=f"parameter {name}")
+            if value < bound.minimum or value > bound.maximum:
+                raise ValueError(
+                    f"parameter {name} is outside the approved online range"
+                )
+            normalized[name] = str(value)
+        return dict(sorted(normalized.items()))
+
+
+@dataclass(frozen=True)
 class RoutingState:
     generation: int
     champion_candidate_id: str | None
@@ -122,6 +263,23 @@ class ChampionRegistry:
                     existing_position_policy TEXT,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS online_updates(
+                    update_id TEXT PRIMARY KEY,
+                    routing_generation INTEGER NOT NULL,
+                    champion_artifact_hash TEXT NOT NULL,
+                    authority_scope_id TEXT NOT NULL,
+                    envelope_id TEXT NOT NULL,
+                    envelope_hash TEXT NOT NULL,
+                    updates_json TEXT NOT NULL,
+                    label_refs_json TEXT NOT NULL,
+                    evidence_refs_json TEXT NOT NULL,
+                    actual_update_cost TEXT NOT NULL,
+                    request_fingerprint TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_online_updates_envelope
+                    ON online_updates(envelope_id, applied_at, update_id);
+
                 CREATE TABLE IF NOT EXISTS promotion_history(
                     generation INTEGER PRIMARY KEY,
                     action TEXT NOT NULL,
@@ -350,6 +508,146 @@ class ChampionRegistry:
             )
             con.commit()
         return self.state()
+
+
+    def record_online_update(
+        self,
+        *,
+        envelope: OnlineEnvelope,
+        update_id: str,
+        expected_generation: int,
+        updates: Mapping[str, object],
+        label_refs,
+        evidence_refs,
+        actual_update_cost,
+        now: datetime,
+        drift_gate_passed: bool,
+        stop_condition_triggered: bool,
+    ) -> dict:
+        if not isinstance(envelope, OnlineEnvelope):
+            raise TypeError("envelope must be OnlineEnvelope")
+        update_id = _text(update_id, name="update_id")
+        if (
+            not isinstance(expected_generation, int)
+            or isinstance(expected_generation, bool)
+            or expected_generation < 1
+        ):
+            raise ValueError("expected_generation must be a positive integer")
+        if not isinstance(drift_gate_passed, bool):
+            raise TypeError("drift_gate_passed must be boolean")
+        if not isinstance(stop_condition_triggered, bool):
+            raise TypeError("stop_condition_triggered must be boolean")
+        if not drift_gate_passed:
+            raise ValueError("online update is blocked by the registered drift gate")
+        if stop_condition_triggered:
+            raise ValueError("online update is blocked by a registered stop condition")
+
+        normalized_updates = envelope.normalize_updates(updates)
+        labels = tuple(_text(item, name="label reference") for item in label_refs)
+        if not labels:
+            raise ValueError("online update requires label evidence")
+        if not set(labels).issubset(set(envelope.eligible_label_refs)):
+            raise ValueError("online update uses labels outside the approved envelope")
+        evidence = tuple(
+            _text(item, name="online update evidence reference")
+            for item in evidence_refs
+        )
+        if not evidence:
+            raise ValueError("online update requires evidence references")
+        cost = _decimal(
+            actual_update_cost,
+            name="actual_update_cost",
+            non_negative=True,
+        )
+        if cost > envelope.maximum_update_cost:
+            raise ValueError("online update exceeds the approved resource budget")
+        applied = _time(now, name="now")
+        request_fingerprint = _request_fingerprint(
+            {
+                "update_id": update_id,
+                "expected_generation": expected_generation,
+                "envelope_hash": envelope.envelope_hash,
+                "updates": normalized_updates,
+                "label_refs": sorted(labels),
+                "evidence_refs": sorted(evidence),
+                "actual_update_cost": str(cost),
+                "drift_gate_passed": drift_gate_passed,
+                "stop_condition_triggered": stop_condition_triggered,
+            }
+        )
+
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            existing = con.execute(
+                "SELECT * FROM online_updates WHERE update_id=?",
+                (update_id,),
+            ).fetchone()
+            if existing is not None:
+                if existing["request_fingerprint"] != request_fingerprint:
+                    raise PromotionConflict(
+                        "online update identity conflicts with durable request"
+                    )
+                return dict(existing)
+
+            state = con.execute(
+                "SELECT * FROM routing_state WHERE singleton=1"
+            ).fetchone()
+            if int(state["generation"]) != expected_generation:
+                raise PromotionConflict(
+                    "routing generation changed before online update"
+                )
+            if state["champion_artifact_hash"] != envelope.champion_artifact_hash:
+                raise ValueError(
+                    "online envelope is not bound to the active champion artifact"
+                )
+            if state["authority_scope_id"] != envelope.authority_scope_id:
+                raise ValueError(
+                    "online envelope authority scope does not match active champion"
+                )
+
+            latest = con.execute(
+                """SELECT applied_at FROM online_updates
+                   WHERE envelope_id=?
+                   ORDER BY applied_at DESC, update_id DESC LIMIT 1""",
+                (envelope.envelope_id,),
+            ).fetchone()
+            if latest is not None:
+                prior = datetime.fromisoformat(latest["applied_at"])
+                elapsed = (applied - prior.astimezone(timezone.utc)).total_seconds()
+                if elapsed < 0:
+                    raise ValueError("online update time cannot move backwards")
+                if elapsed < envelope.minimum_update_interval_seconds:
+                    raise ValueError(
+                        "online update violates the approved update frequency"
+                    )
+
+            con.execute(
+                """INSERT INTO online_updates(
+                    update_id,routing_generation,champion_artifact_hash,
+                    authority_scope_id,envelope_id,envelope_hash,updates_json,
+                    label_refs_json,evidence_refs_json,actual_update_cost,
+                    request_fingerprint,applied_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    update_id,
+                    expected_generation,
+                    envelope.champion_artifact_hash,
+                    envelope.authority_scope_id,
+                    envelope.envelope_id,
+                    envelope.envelope_hash,
+                    json.dumps(normalized_updates, sort_keys=True, separators=(",", ":")),
+                    json.dumps(sorted(labels), separators=(",", ":")),
+                    json.dumps(sorted(evidence), separators=(",", ":")),
+                    str(cost),
+                    request_fingerprint,
+                    applied.isoformat(),
+                ),
+            )
+            row = con.execute(
+                "SELECT * FROM online_updates WHERE update_id=?",
+                (update_id,),
+            ).fetchone()
+            return dict(row)
 
     def history(self) -> tuple[dict, ...]:
         with self._connect() as con:

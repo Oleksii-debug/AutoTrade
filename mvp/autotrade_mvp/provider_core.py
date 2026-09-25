@@ -479,11 +479,22 @@ def observe_authenticated_json_response(
         )
     payload = _decode_exact_json(response_bytes)
     observed = _utc_text(observed_at, "observed_at")
+    if provider_environment is None and query_binding.provider_id == "BYBIT":
+        raise ProviderCoreError(
+            "BYBIT authenticated provider read requires explicit provider_environment"
+        )
     provider_env = (
         query_binding.environment
         if provider_environment is None
         else _text(provider_environment, "provider_environment").upper()
     )
+    if (
+        query_binding.provider_id == "BYBIT"
+        and provider_env not in {"MAINNET", "TESTNET", "DEMO"}
+    ):
+        raise ProviderCoreError(
+            "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+        )
     response_digest = "sha256:" + sha256(response_bytes).hexdigest()
     identity_material = (
         query_binding.query_digest

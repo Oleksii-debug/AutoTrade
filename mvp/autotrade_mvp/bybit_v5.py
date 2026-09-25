@@ -473,7 +473,7 @@ def parse_executions(
             client_id = _client_order_id(link)
 
         extra_fees = row.get("extraFees")
-        if extra_fees not in (None, "", [], {}):
+        if extra_fees not in (None, "", [], {}, ()):
             raise ProviderCoreError(
                 "Bybit execution has extraFees that are not yet represented "
                 "in canonical fill economics"

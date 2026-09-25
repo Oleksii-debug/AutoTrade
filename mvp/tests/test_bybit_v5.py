@@ -843,20 +843,21 @@ class BybitV5AdapterTests(unittest.TestCase):
             "retMsg": "OK",
             "result": {"list": [
                 {
-                    "execId": "exec-1", "orderLinkId": "client-1", "symbol": "BTCUSDT",
+                    "execId": "exec-1", "orderLinkId": "client-1", "symbol": "BTCUSDT", "side": "Buy", "positionIdx": 0,
                     "execQty": "0.25", "execPrice": "65000.10", "execFee": "1.23",
                     "feeCurrency": "USDT", "execTime": "1790280000123",
                 },
                 {
-                    "execId": "exec-1", "orderLinkId": "client-1", "symbol": "BTCUSDT",
+                    "execId": "exec-1", "orderLinkId": "client-1", "symbol": "BTCUSDT", "side": "Buy", "positionIdx": 0,
                     "execQty": "0.25", "execPrice": "65000.10", "execFee": "1.23",
                     "feeCurrency": "USDT", "execTime": "1790280000123",
                 },
             ]},
             "time": 1790280001000,
         }
+        observation = bound_execution_response(response)
         fills = parse_executions(
-            bound_execution_response(response),
+            observation,
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
         )
         self.assertEqual(len(fills), 1)
@@ -868,10 +869,46 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(fill.price, Decimal("65000.10"))
         self.assertEqual(fill.fee_amount, Decimal("1.23"))
         self.assertEqual(fill.trade_time, "2026-09-24T20:00:00.123Z")
+        self.assertEqual((fill.side, fill.position_side), ("BUY", "BOTH"))
+        self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
+
+    def test_execution_direction_and_hedge_leg_are_provider_evidenced(self):
+        base = {
+            "execId": "exec-direction",
+            "orderLinkId": "",
+            "symbol": "BTCUSDT",
+            "execQty": "1",
+            "execPrice": "10",
+            "execFee": "0",
+            "feeCurrency": "USDT",
+            "execTime": "1790280000000",
+        }
+        for missing in ("side", "positionIdx"):
+            with self.subTest(missing=missing):
+                row = dict(base, side="Sell", positionIdx=2)
+                del row[missing]
+                with self.assertRaisesRegex(ProviderCoreError, missing):
+                    parse_executions(
+                        bound_execution_response(
+                            {"retCode": 0, "result": {"list": [row]}}
+                        ),
+                        instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                    )
+
+        hedge = dict(base, side="Sell", positionIdx=2)
+        observation = bound_execution_response(
+            {"retCode": 0, "result": {"list": [hedge]}}
+        )
+        fill = parse_executions(
+            observation,
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )[0]
+        self.assertEqual((fill.side, fill.position_side), ("SELL", "SHORT"))
+        self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
 
     def test_execution_scope_is_derived_from_prepared_read_not_parser_labels(self):
         response = {"retCode": 0, "result": {"list": [{
-            "execId": "scope-1", "orderLinkId": "", "symbol": "BTCUSDT",
+            "execId": "scope-1", "orderLinkId": "", "symbol": "BTCUSDT", "side": "Buy", "positionIdx": 0,
             "execQty": "1", "execPrice": "10", "execFee": "0",
             "feeCurrency": "USDT", "execTime": "1790280000000",
         }]}}
@@ -886,7 +923,7 @@ class BybitV5AdapterTests(unittest.TestCase):
     def test_documented_linear_execution_requires_qualified_fee_currency(self):
         response = {"retCode": 0, "result": {"category": "linear", "list": [{
             "execId": "e0cbe81d-0f18-5866-9415-cf319b5dab3b", "orderLinkId": "",
-            "symbol": "ETHPERP", "execQty": "0.1", "execPrice": "1190.15",
+            "symbol": "ETHPERP", "side": "Buy", "positionIdx": 0, "execQty": "0.1", "execPrice": "1190.15",
             "execFee": "0.071409", "feeCurrency": "", "extraFees": "",
             "execTime": "1672282722429",
         }]}}
@@ -904,7 +941,7 @@ class BybitV5AdapterTests(unittest.TestCase):
 
     def test_nonempty_extra_fees_cannot_silently_disappear(self):
         response = {"retCode": 0, "result": {"category": "spot", "list": [{
-            "execId": "exec-extra-fee", "orderLinkId": "", "symbol": "BTCUSDT",
+            "execId": "exec-extra-fee", "orderLinkId": "", "symbol": "BTCUSDT", "side": "Buy", "positionIdx": 0,
             "execQty": "0.01", "execPrice": "65000", "execFee": "0.5",
             "feeCurrency": "USDT",
             "extraFees": '[{"feeType":"tax","subFeeType":"regional"}]',
@@ -921,7 +958,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             with self.subTest(extra_fees=extra_fees):
                 row = {
                     "execId": f"exec-{repr(extra_fees)}", "orderLinkId": "",
-                    "symbol": "BTCUSDT", "execQty": "0.01", "execPrice": "65000",
+                    "symbol": "BTCUSDT", "side": "Buy", "positionIdx": 0, "execQty": "0.01", "execPrice": "65000",
                     "execFee": "0.5", "feeCurrency": "USDT", "execTime": "1790280000000",
                 }
                 if extra_fees is not None:
@@ -934,8 +971,8 @@ class BybitV5AdapterTests(unittest.TestCase):
 
     def test_execution_conflict_and_unknown_symbol_fail_closed(self):
         conflict = {"retCode": 0, "result": {"list": [
-            {"execId": "same", "orderLinkId": "", "symbol": "BTCUSDT", "execQty": "1", "execPrice": "10", "execFee": "0", "feeCurrency": "USDT", "execTime": "1790280000000"},
-            {"execId": "same", "orderLinkId": "", "symbol": "BTCUSDT", "execQty": "2", "execPrice": "10", "execFee": "0", "feeCurrency": "USDT", "execTime": "1790280000000"},
+            {"execId": "same", "orderLinkId": "", "symbol": "BTCUSDT", "side": "Buy", "positionIdx": 0, "execQty": "1", "execPrice": "10", "execFee": "0", "feeCurrency": "USDT", "execTime": "1790280000000"},
+            {"execId": "same", "orderLinkId": "", "symbol": "BTCUSDT", "side": "Buy", "positionIdx": 0, "execQty": "2", "execPrice": "10", "execFee": "0", "feeCurrency": "USDT", "execTime": "1790280000000"},
         ]}}
         with self.assertRaisesRegex(ProviderCoreError, "conflicting"):
             parse_executions(
@@ -943,7 +980,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
             )
         unknown = {"retCode": 0, "result": {"list": [{
-            "execId": "x", "orderLinkId": "", "symbol": "UNKNOWN", "execQty": "1",
+            "execId": "x", "orderLinkId": "", "symbol": "UNKNOWN", "side": "Buy", "positionIdx": 0, "execQty": "1",
             "execPrice": "10", "execFee": "0", "feeCurrency": "USD",
             "execTime": "1790280000000",
         }]}}

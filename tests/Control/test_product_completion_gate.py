@@ -105,6 +105,7 @@ class ProductCompletionGateTests(unittest.TestCase):
         self.assertEqual(report["missing_package_evidence"], [])
         self.assertEqual(report["nonpassing_evidence"], [])
         self.assertTrue(report["nvda_source_matches"])
+        self.assertTrue(report["qualification_source_matches"])
 
     def test_one_unfinished_package_blocks_whole_product_completion(self):
         bank = complete_bank()
@@ -193,6 +194,21 @@ class ProductCompletionGateTests(unittest.TestCase):
         self.assertTrue(
             any("exact source SHA" in blocker for blocker in report["blockers"])
         )
+
+    def test_qualification_cannot_self_assert_or_mismatch_exact_source(self):
+        qualification = complete_qualification()
+        qualification["source_sha"] = "b" * 40
+        report = evaluate(qualification=qualification, source_sha=SHA)
+        self.assertFalse(report["complete"])
+        self.assertFalse(report["qualification_source_matches"])
+        self.assertIn(
+            "qualification source SHA is missing, non-canonical, or not the exact source SHA",
+            report["blockers"],
+        )
+
+        qualification["source_sha"] = "NOT_A_SHA"
+        report = evaluate(qualification=qualification, source_sha=SHA)
+        self.assertFalse(report["qualification_source_matches"])
 
 
 if __name__ == "__main__":

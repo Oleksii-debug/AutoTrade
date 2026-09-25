@@ -121,6 +121,9 @@ class QualificationPopulationSnapshot:
     eligible_count: int
     root_hash: str
 
+    def __post_init__(self) -> None:
+        self.verify()
+
     def verify(self) -> None:
         if not isinstance(self.causal_cutoff, str):
             raise MemoryIntegrityError("population snapshot causal_cutoff must be text")

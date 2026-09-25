@@ -12,6 +12,11 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
+from .allocation import (
+    EvidenceBoundObjectiveAllocationResult,
+    ImmutableAllocationEvidence,
+    revalidate_evidence_bound_allocation,
+)
 from .durable_reservations import DurableReservationBook
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reconciliation_journal import load_account_resource_availability_evidence
@@ -385,6 +390,25 @@ class AdmissionRecord:
                 raise ValueError("admission policy_version must be positive")
 
 
+@dataclass(frozen=True)
+class AllocationAuthorityResolution:
+    """Trusted current state used to revalidate one allocation-originated admission."""
+
+    resolved_evidence: Mapping[str, ImmutableAllocationEvidence]
+    current_policy_version: str
+    current_provider_id: str
+    current_instrument_versions: Mapping[str, str]
+    current_capability_snapshot_ids: Mapping[str, str]
+    current_account_id: str
+    current_account_snapshot_id: str
+    current_reconciliation_run_id: str
+    current_account_state_version: int
+    current_reservation_state_version: int
+    current_reservation_state_digest: str
+    selected_instrument_id: str
+    selected_instrument_version: int
+
+
 class AuthorityConflict(ValueError):
     """Raised when immutable authority identity is reused inconsistently."""
 
@@ -399,6 +423,11 @@ class AuthorityService:
         store: JournalStore | None = None,
         *,
         evidence_artifact_store: ArtifactStore | None = None,
+        allocation_authority_resolver: Callable[
+            [str, tuple[tuple[str, str], ...], str, str],
+            AllocationAuthorityResolution,
+        ]
+        | None = None,
     ):
         self.store = store
         if (
@@ -407,6 +436,12 @@ class AuthorityService:
         ):
             raise TypeError("evidence_artifact_store must be ArtifactStore")
         self.evidence_artifact_store = evidence_artifact_store
+        if (
+            allocation_authority_resolver is not None
+            and not callable(allocation_authority_resolver)
+        ):
+            raise TypeError("allocation_authority_resolver must be callable")
+        self.allocation_authority_resolver = allocation_authority_resolver
         self._policies: dict[str, AuthorityPolicy] = {}
         self._revocations: dict[str, tuple[str, str]] = {}
         self._confirmations: dict[str, Confirmation] = {}
@@ -420,6 +455,346 @@ class AuthorityService:
         self._journal_version = 0
         if self.store is not None:
             self._restore_journal()
+
+    def _resolve_allocation_authority(
+        self,
+        binding: Mapping[str, Any],
+        *,
+        as_of: str,
+    ) -> AllocationAuthorityResolution:
+        resolver = self.allocation_authority_resolver
+        if resolver is None:
+            raise AuthorityConflict(
+                "allocation-originated admission requires a trusted allocation authority resolver"
+            )
+        raw_refs = binding.get("evidence_refs")
+        if not isinstance(raw_refs, list):
+            raise AuthorityConflict("allocation binding evidence_refs are malformed")
+        refs: list[tuple[str, str]] = []
+        for item in raw_refs:
+            if not isinstance(item, Mapping):
+                raise AuthorityConflict("allocation binding evidence ref is malformed")
+            refs.append(
+                (
+                    _text(item.get("evidence_id"), name="allocation evidence_id"),
+                    _text(item.get("digest"), name="allocation evidence digest"),
+                )
+            )
+        try:
+            resolved = resolver(
+                _text(
+                    binding.get("decision_digest"),
+                    name="allocation decision_digest",
+                ),
+                tuple(refs),
+                _text(
+                    binding.get("selected_symbol"),
+                    name="allocation selected_symbol",
+                ),
+                _text(as_of, name="allocation authority as_of"),
+            )
+        except Exception as error:
+            raise AuthorityConflict(
+                "trusted allocation authority resolution failed"
+            ) from error
+        if not isinstance(resolved, AllocationAuthorityResolution):
+            raise AuthorityConflict(
+                "trusted allocation authority resolver returned invalid state"
+            )
+        return resolved
+
+    @staticmethod
+    def _allocation_binding(
+        result: EvidenceBoundObjectiveAllocationResult,
+        *,
+        selected_symbol: str,
+    ) -> dict[str, Any]:
+        if not isinstance(result, EvidenceBoundObjectiveAllocationResult):
+            raise TypeError(
+                "allocation_result must be EvidenceBoundObjectiveAllocationResult"
+            )
+        symbol = _text(selected_symbol, name="allocation_symbol")
+        active_targets = [
+            target
+            for target in result.objective.allocation.targets
+            if target.symbol == symbol and target.notional != 0
+        ]
+        if (
+            symbol not in result.objective.selected_symbols
+            or len(active_targets) != 1
+        ):
+            raise AuthorityConflict(
+                "allocation symbol is not an active selected target"
+            )
+        return {
+            "schema_version": "1.0.0",
+            "decision_digest": result.decision_digest,
+            "evidence_refs": [
+                {"evidence_id": evidence_id, "digest": digest}
+                for evidence_id, digest in result.evidence_refs
+            ],
+            "selected_symbol": symbol,
+            "selected_target_notional": str(active_targets[0].notional),
+            "environment": result.environment,
+            "policy_version": result.policy_version,
+            "decision_time": result.decision_time,
+            "provider_id": result.provider_id,
+            "account_id": result.account_id,
+            "instrument_versions": dict(result.instrument_versions),
+            "capability_snapshot_ids": dict(
+                result.capability_snapshot_ids
+            ),
+            "account_snapshot_id": result.account_snapshot_id,
+            "reconciliation_run_id": result.reconciliation_run_id,
+            "account_state_version": result.account_state_version,
+            "reservation_state_version": result.reservation_state_version,
+            "reservation_state_digest": result.reservation_state_digest,
+        }
+
+    def _validate_new_allocation_binding(
+        self,
+        result: EvidenceBoundObjectiveAllocationResult,
+        binding: Mapping[str, Any],
+        *,
+        account_id: str,
+        environment: str,
+        provider_id: str,
+        capability_snapshot_id: str,
+        instrument_id: str,
+        instrument_version: int,
+        account_state_version: int,
+        reservation_state_version: int,
+        as_of: str,
+    ) -> None:
+        resolution = self._resolve_allocation_authority(
+            binding,
+            as_of=as_of,
+        )
+        try:
+            revalidate_evidence_bound_allocation(
+                result,
+                resolved_evidence=resolution.resolved_evidence,
+                environment=environment,
+                as_of=as_of,
+                current_policy_version=resolution.current_policy_version,
+                current_provider_id=resolution.current_provider_id,
+                current_instrument_versions=resolution.current_instrument_versions,
+                current_capability_snapshot_ids=(
+                    resolution.current_capability_snapshot_ids
+                ),
+                current_account_id=resolution.current_account_id,
+                current_account_snapshot_id=(
+                    resolution.current_account_snapshot_id
+                ),
+                current_reconciliation_run_id=(
+                    resolution.current_reconciliation_run_id
+                ),
+                current_account_state_version=(
+                    resolution.current_account_state_version
+                ),
+                current_reservation_state_version=(
+                    resolution.current_reservation_state_version
+                ),
+                current_reservation_state_digest=(
+                    resolution.current_reservation_state_digest
+                ),
+            )
+        except (TypeError, ValueError) as error:
+            raise AuthorityConflict(
+                "allocation proposal failed trusted revalidation"
+            ) from error
+        symbol = _text(
+            binding.get("selected_symbol"),
+            name="allocation selected_symbol",
+        )
+        capabilities = dict(result.capability_snapshot_ids)
+        if result.account_id != _text(account_id, name="account_id"):
+            raise AuthorityConflict("allocation account does not match admission")
+        if result.provider_id != _text(provider_id, name="provider_id").upper():
+            raise AuthorityConflict("allocation provider does not match admission")
+        if result.account_state_version != account_state_version:
+            raise AuthorityConflict(
+                "allocation account state version does not match risk state"
+            )
+        if result.reservation_state_version != reservation_state_version:
+            raise AuthorityConflict(
+                "allocation reservation state version is stale"
+            )
+        if capabilities.get(symbol) != capability_snapshot_id:
+            raise AuthorityConflict(
+                "allocation capability snapshot does not match admission"
+            )
+        if (
+            _text(
+                resolution.selected_instrument_id,
+                name="selected_instrument_id",
+            )
+            != _text(instrument_id, name="instrument_id")
+            or resolution.selected_instrument_version != instrument_version
+        ):
+            raise AuthorityConflict(
+                "allocation selected instrument does not match admission"
+            )
+
+    def _validate_persisted_allocation_binding(
+        self,
+        binding: Mapping[str, Any],
+        *,
+        record: AdmissionRecord,
+        risk_payload: Mapping[str, Any],
+        reservation_book: DurableReservationBook,
+        as_of: str,
+    ) -> None:
+        if not isinstance(binding, Mapping):
+            raise AuthorityConflict("durable allocation binding is malformed")
+        resolution = self._resolve_allocation_authority(
+            binding,
+            as_of=as_of,
+        )
+        if binding.get("schema_version") != "1.0.0":
+            raise AuthorityConflict("durable allocation binding schema is unsupported")
+        symbol = _text(
+            binding.get("selected_symbol"),
+            name="allocation selected_symbol",
+        )
+        raw_refs = binding.get("evidence_refs")
+        if not isinstance(raw_refs, list):
+            raise AuthorityConflict("durable allocation evidence refs are malformed")
+        for item in raw_refs:
+            if not isinstance(item, Mapping):
+                raise AuthorityConflict("durable allocation evidence ref is malformed")
+            evidence_id = _text(
+                item.get("evidence_id"),
+                name="allocation evidence_id",
+            )
+            digest = _text(
+                item.get("digest"),
+                name="allocation evidence digest",
+            )
+            evidence = resolution.resolved_evidence.get(evidence_id)
+            if not isinstance(evidence, ImmutableAllocationEvidence):
+                raise AuthorityConflict(
+                    f"allocation evidence {evidence_id} no longer resolves"
+                )
+            if evidence.digest != digest:
+                raise AuthorityConflict(
+                    f"allocation evidence {evidence_id} changed after admission"
+                )
+            if evidence.environment != record.environment:
+                raise AuthorityConflict(
+                    f"allocation evidence {evidence_id} environment changed"
+                )
+            if not evidence.valid_at(as_of):
+                raise AuthorityConflict(
+                    f"allocation evidence {evidence_id} is stale at dispatch"
+                )
+
+        expected_maps = (
+            (
+                "instrument version scope",
+                dict(resolution.current_instrument_versions),
+                binding.get("instrument_versions"),
+            ),
+            (
+                "capability snapshot scope",
+                dict(resolution.current_capability_snapshot_ids),
+                binding.get("capability_snapshot_ids"),
+            ),
+        )
+        for name, current, bound in expected_maps:
+            if not isinstance(bound, Mapping) or current != dict(bound):
+                raise AuthorityConflict(
+                    f"allocation {name} changed after admission"
+                )
+        scalar_checks = (
+            (
+                "policy version",
+                resolution.current_policy_version,
+                binding.get("policy_version"),
+            ),
+            (
+                "provider identity",
+                resolution.current_provider_id,
+                binding.get("provider_id"),
+            ),
+            (
+                "account identity",
+                resolution.current_account_id,
+                binding.get("account_id"),
+            ),
+            (
+                "account snapshot",
+                resolution.current_account_snapshot_id,
+                binding.get("account_snapshot_id"),
+            ),
+            (
+                "reconciliation identity",
+                resolution.current_reconciliation_run_id,
+                binding.get("reconciliation_run_id"),
+            ),
+        )
+        for name, current, bound in scalar_checks:
+            if current != bound:
+                raise AuthorityConflict(
+                    f"allocation {name} changed after admission"
+                )
+        if resolution.current_account_state_version != binding.get(
+            "account_state_version"
+        ):
+            raise AuthorityConflict(
+                "allocation account state version changed after admission"
+            )
+        bound_reservation_version = binding.get("reservation_state_version")
+        if (
+            not isinstance(bound_reservation_version, int)
+            or isinstance(bound_reservation_version, bool)
+            or bound_reservation_version < 0
+        ):
+            raise AuthorityConflict(
+                "durable allocation reservation version is invalid"
+            )
+        expected_current_reservation_version = bound_reservation_version + (
+            1 if record.outcome == "ADMITTED" else 0
+        )
+        if (
+            reservation_book.version != expected_current_reservation_version
+            or resolution.current_reservation_state_version
+            != expected_current_reservation_version
+        ):
+            raise AuthorityConflict(
+                "allocation reservation state changed after admission"
+            )
+        if risk_payload.get("reservation_version") != bound_reservation_version:
+            raise AuthorityConflict(
+                "allocation reservation cut does not match risk decision"
+            )
+        if (
+            record.account_id != binding.get("account_id")
+            or record.environment != binding.get("environment")
+        ):
+            raise AuthorityConflict(
+                "allocation durable scope does not match admission"
+            )
+        capabilities = binding.get("capability_snapshot_ids")
+        if (
+            not isinstance(capabilities, Mapping)
+            or capabilities.get(symbol) != record.capability_snapshot_id
+        ):
+            raise AuthorityConflict(
+                "allocation capability does not match admitted symbol"
+            )
+        if (
+            _text(
+                resolution.selected_instrument_id,
+                name="selected_instrument_id",
+            )
+            != record.instrument_version.instrument_id
+            or resolution.selected_instrument_version
+            != record.instrument_version.version
+        ):
+            raise AuthorityConflict(
+                "allocation selected instrument changed after admission"
+            )
 
     @staticmethod
     def _instrument_payload(value: InstrumentVersionIdentity) -> dict[str, Any]:

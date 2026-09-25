@@ -392,6 +392,22 @@ class OptionRiskEvidenceTests(unittest.TestCase):
             unresolved_limits=(),
         )
 
+    def test_payload_serialization_is_pure_but_consumer_requires_artifact(self):
+        evidence = self._risk()
+        payload = option_risk_evidence_payload(evidence)
+        self.assertEqual(payload["instrument"], "OPT:CALL")
+        self.assertEqual(payload["greeks"]["delta"], "0.52")
+        with TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(OptionError, "immutable artifact evidence_ref"):
+                require_current_option_risk(
+                    evidence,
+                    instrument="OPT:CALL",
+                    at=datetime(2026, 9, 25, 18, 30, tzinfo=timezone.utc),
+                    maximum_calculation_age=timedelta(hours=2),
+                    maximum_market_age=timedelta(hours=2),
+                    artifact_store=ArtifactStore(directory),
+                )
+
     def test_greeks_are_versioned_estimates_and_stress_is_explicit(self):
         evidence = self._risk()
         self.assertEqual(evidence.delta, Decimal("0.52"))

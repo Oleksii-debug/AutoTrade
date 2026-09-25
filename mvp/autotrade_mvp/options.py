@@ -555,7 +555,6 @@ def option_risk_evidence_payload(
 ) -> dict[str, object]:
     if not isinstance(evidence, OptionRiskEvidence):
         raise TypeError("evidence must be OptionRiskEvidence")
-    _verify_option_risk_evidence(evidence, artifact_store)
     return {
         "schema_version": evidence.schema_version,
         "instrument": evidence.instrument,
@@ -691,4 +690,5 @@ def require_current_option_risk(
         raise OptionError("option risk market evidence is stale")
     if point - evidence.market_as_of > maximum_market_age:
         raise OptionError("option risk market evidence exceeds independent policy age")
+    _verify_option_risk_evidence(evidence, artifact_store)
 

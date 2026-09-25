@@ -139,10 +139,9 @@ class HostCommandStore:
 
     @staticmethod
     def _normalize_refs(values: tuple[str, ...]) -> tuple[str, ...]:
-        normalized = tuple(str(item) for item in values)
-        if any(not item.strip() for item in normalized):
-            raise ValueError("affected_refs cannot contain empty values")
-        return normalized
+        if any(not isinstance(item, str) or not item.strip() for item in values):
+            raise ValueError("affected_refs must contain non-empty strings")
+        return tuple(values)
 
     @staticmethod
     def _normalize_evidence(
@@ -272,7 +271,12 @@ class HostCommandStore:
             raise KeyError("Unknown operation")
         if phase not in self.UPDATE_PHASES:
             raise ValueError("Unsupported operation phase")
-        normalized_uncertainty = tuple(str(x) for x in remaining_uncertainty)
+        if any(
+            not isinstance(item, str) or not item.strip()
+            for item in remaining_uncertainty
+        ):
+            raise ValueError("remaining_uncertainty must contain non-empty strings")
+        normalized_uncertainty = tuple(remaining_uncertainty)
         normalized_refs = (
             current.affected_refs
             if affected_refs is None

@@ -191,6 +191,10 @@ def _validated_fill_evidence(
         )
     if provider_fill.side != projected_fill.side:
         raise AccountingConflict("provider fill side does not match projection")
+    if provider_fill.position_side in {"LONG", "SHORT"}:
+        raise AccountingConflict(
+            "hedge-mode provider fill requires leg-aware economic accounting"
+        )
 
     if projected_fill.correction_of is not None and not allow_correction:
         raise AccountingConflict(

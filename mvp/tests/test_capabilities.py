@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import unittest
 
 from mvp.autotrade_mvp.capabilities import (
+    CapabilitySnapshot,
     CapabilityClaim,
     CapabilityError,
     CapabilityRegistry,
@@ -71,6 +72,32 @@ def complete_claims(**overrides):
 
 
 class CapabilityFoundationTests(unittest.TestCase):
+    def test_direct_verified_snapshot_cannot_bypass_evidence_derivation(self):
+        with self.assertRaisesRegex(
+            CapabilityError,
+            "canonical evidence derivation",
+        ):
+            CapabilitySnapshot(
+                snapshot_id=SNAPSHOT_1,
+                provider_id="provider",
+                account_id="account",
+                entity_id="entity",
+                environment="PAPER",
+                instrument_version="instrument-v1",
+                observed_at=NOW,
+                expires_at=NOW + timedelta(minutes=5),
+                supported_order_types=frozenset({"LIMIT"}),
+                time_in_force=frozenset({"DAY"}),
+                permission_scopes=frozenset({"ORDER.WRITE"}),
+                position_mode="NET",
+                native_protection=frozenset(),
+                rate_limit_policy_id="rate-v1",
+                data_entitlements=frozenset(),
+                evidence=(),
+                status="VERIFIED",
+                sources=frozenset(),
+            )
+
     def test_self_asserted_evidence_without_verifier_is_unknown(self):
         snapshot = _derive_capability_snapshot(
             snapshot_id=SNAPSHOT_1,

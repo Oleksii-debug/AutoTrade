@@ -1356,7 +1356,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
         body = (
             b'[{"symbol":"BTCUSDT","id":7,"orderId":42,'
             b'"price":"100.2500","qty":"0.2000","commission":"0.0010",'
-            b'"commissionAsset":"BNB","time":1790272800123}]'
+            b'"commissionAsset":"BNB","isBuyer":true,"time":1790272800123}]'
         )
         transport, _resolver = self.make_read_transport(
             events=events,

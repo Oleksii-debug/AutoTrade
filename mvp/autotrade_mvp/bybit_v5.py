@@ -832,6 +832,9 @@ def parse_executions(
                 name="qualified fee currency",
             )
 
+        side = _text(row.get("side"), name="side").upper()
+        if side not in {"BUY", "SELL"}:
+            raise ProviderCoreError("execution side must be BUY or SELL")
         fill = ProviderFillEvidence.create(
             provider_id="BYBIT",
             account_id=account_id,
@@ -839,11 +842,13 @@ def parse_executions(
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=instrument,
+            side=side,
             quantity=row.get("execQty"),
             price=row.get("execPrice"),
             fee_amount=row.get("execFee"),
             fee_currency=fee_currency,
             trade_time=_millis_to_utc(row.get("execTime"), name="execTime"),
+            evidence_refs=(observation.evidence_ref,),
         )
         previous = by_execution.get(execution_id)
         if previous is not None and previous != fill:

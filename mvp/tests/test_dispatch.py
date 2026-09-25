@@ -171,6 +171,87 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(result.reason, "policy_revoked")
             self.assertEqual(outbound, 0)
 
+    def test_request_mutation_before_final_barrier_is_blocked(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            outbound = 0
+
+            def authority(intent_hash, now):
+                return True, "allowed"
+
+            def transport(client_id, request, final_guard):
+                nonlocal outbound
+                request["order"]["qty"] = "999"
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            original = {"order": {"qty": "1"}}
+            result = dispatcher.dispatch(
+                attempt_id="mutate-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request=original,
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "request_changed_before_final_barrier")
+            self.assertEqual(outbound, 0)
+            self.assertEqual(original, {"order": {"qty": "1"}})
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("mutate-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+
+    def test_caller_nested_mutation_cannot_alias_dispatch_payload(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            outbound = []
+
+            def authority(intent_hash, now):
+                return True, "allowed"
+
+            original = {"order": {"qty": "1"}}
+
+            def transport(client_id, request, final_guard):
+                original["order"]["qty"] = "999"
+                final_guard()
+                outbound.append(request["order"]["qty"])
+                return {"provider_order_id": "p1"}
+
+            result = dispatcher.dispatch(
+                attempt_id="alias-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request=original,
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+            )
+            self.assertEqual(result.status, "SENT")
+            self.assertEqual(outbound, ["1"])
+            self.assertEqual(original["order"]["qty"], "999")
+
     def test_timeout_after_outbound_becomes_unknown_and_never_blindly_retries(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)

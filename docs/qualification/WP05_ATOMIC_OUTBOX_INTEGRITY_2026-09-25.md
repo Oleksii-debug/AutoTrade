@@ -17,7 +17,7 @@ This record covers a bounded repair in the existing SQLite journal/outbox author
 
 Schema v4 requires an `outbox.envelope_hash` integrity value and `pending_outbox()` verifies that value before exposing a publication intent. The single-event `append_event()` path already persisted the SHA-256 value. The atomic `commit_command()` path did not, so a transaction could durably commit command dedupe, financial events and an outbox row that subsequently failed its own integrity gate.
 
-The repair computes SHA-256 over the canonical stored outbox envelope and writes the hash in the same SQLite transaction as command dedupe, journal events and outbox intent. No schema migration is required.
+The repair computes SHA-256 over the canonical stored outbox envelope and writes the hash in the same SQLite transaction as command dedupe, journal events and outbox intent. Schema v5 also adds integrity binding for stored command results. During v4→v5 migration, a hashless outbox row is backfilled only when its entire legacy envelope is exactly reconstructable from the authoritative journal row; unknown/extra bytes are rejected rather than blessed with a new hash.
 
 The same integrity identity now crosses the delivery boundary. `pending_outbox()` returns the verified immutable `envelope_hash`; `mark_outbox_delivered()` requires the caller to echo that exact hash, revalidates the stored envelope and authoritative journal event inside one `BEGIN IMMEDIATE` transaction, and uses the hash in the delivery compare-and-set. A stale process cannot acknowledge a different or tampered publication intent merely because its `outbox_id` is unchanged.
 
@@ -31,7 +31,7 @@ The focused atomic-command test now:
 5. proves a pre-restart delivery receipt cannot mark a replaced envelope delivered;
 6. proves delivery acknowledgement revalidates authoritative event integrity before setting `delivered_at`.
 
-Existing tests continue to cover event/payload tamper rejection, aggregate-version gaps, transaction rollback, migration rollback, scoped command dedupe and legacy migration.
+Existing tests continue to cover event/payload tamper rejection, aggregate-version gaps, transaction rollback, migration rollback, scoped command dedupe and legacy migration. A dedicated regression now proves that v5 migration rejects a hashless legacy outbox envelope containing an unverifiable extra field instead of minting a fresh integrity hash for it.
 
 ## Remaining WP-05/product work
 

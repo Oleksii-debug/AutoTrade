@@ -18,11 +18,11 @@ from control.tools.registry_state import (
 NOW = "2026-09-22T10:00:00Z"
 
 
-def empty_registry():
+def empty_registry(mode="ATOMIC_CLAIMS_ENABLED"):
     return {
         "schema_version": "1.0.0",
         "generation": 0,
-        "mode": "BOOTSTRAP_NOT_ENABLED",
+        "mode": mode,
         "updated_at": NOW,
         "claims": [],
     }
@@ -48,6 +48,35 @@ class RegistryTests(unittest.TestCase):
         registry, created = claim(empty_registry(), request(), expected_generation=0, now=NOW)
         self.assertEqual(registry["generation"], 1)
         self.assertEqual(created["status"], "ACTIVE")
+
+    def test_disabled_registry_rejects_mutating_claims_but_allows_read_only(self):
+        for mode in ("BOOTSTRAP_NOT_ENABLED", "PROTOCOL_IMPLEMENTED_NOT_ENABLED"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(
+                RegistryProtocolError, "mutation claims are disabled"
+            ):
+                claim(
+                    empty_registry(mode),
+                    request(),
+                    expected_generation=0,
+                    now=NOW,
+                )
+            read_only, created = claim(
+                empty_registry(mode),
+                request(mode="READ_ONLY_AUDIT"),
+                expected_generation=0,
+                now=NOW,
+            )
+            self.assertEqual(read_only["generation"], 1)
+            self.assertEqual(created["claim_mode"], "READ_ONLY_AUDIT")
+
+    def test_unknown_registry_mode_fails_closed(self):
+        with self.assertRaisesRegex(RegistryProtocolError, "registry mode"):
+            claim(
+                empty_registry("MAYBE_ENABLED"),
+                request(mode="READ_ONLY_AUDIT"),
+                expected_generation=0,
+                now=NOW,
+            )
 
     def test_same_request_is_idempotent(self):
         first, created = claim(empty_registry(), request(), expected_generation=0, now=NOW)

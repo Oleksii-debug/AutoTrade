@@ -1,6 +1,8 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import subprocess
 import unittest
+from unittest.mock import patch
 
 from tools.qualification.prepare_lean_composition import (
     DOTNETZIP_NEW,
@@ -8,6 +10,7 @@ from tools.qualification.prepare_lean_composition import (
     DRAWING_ANCHOR,
     DRAWING_REF,
     FILES,
+    _canonical_preimage,
     git_blob_digest,
     prepare,
 )
@@ -88,6 +91,44 @@ class LeanCompositionTests(unittest.TestCase):
                 prepare(lean, expected_blobs=expected)
             self.assertEqual(first_path.read_bytes(), before_first)
             self.assertIn(DOTNETZIP_OLD, first_path.read_text(encoding="utf-8"))
+
+
+    def test_git_preimage_uses_committed_bytes_not_checkout_line_endings(self):
+        with TemporaryDirectory() as directory:
+            lean = self._tree(Path(directory))
+            (lean / ".git").mkdir()
+            relative = "Compression/QuantConnect.Compression.csproj"
+            path = lean / relative
+            committed = path.read_bytes()
+            expected_blob = git_blob_digest(committed)
+            path.write_bytes(committed.replace(b"\n", b"\r\n"))
+
+            responses = [
+                subprocess.CompletedProcess([], 0, stdout=b"", stderr=b""),
+                subprocess.CompletedProcess([], 0, stdout=expected_blob + "\n", stderr=""),
+                subprocess.CompletedProcess([], 0, stdout=committed, stderr=b""),
+            ]
+            with patch(
+                "tools.qualification.prepare_lean_composition.subprocess.run",
+                side_effect=responses,
+            ):
+                observed_bytes, observed_blob = _canonical_preimage(lean, relative, path)
+
+            self.assertEqual(observed_bytes, committed)
+            self.assertEqual(observed_blob, expected_blob)
+
+    def test_git_preimage_rejects_dirty_tracked_file_before_composition(self):
+        with TemporaryDirectory() as directory:
+            lean = self._tree(Path(directory))
+            (lean / ".git").mkdir()
+            relative = "Compression/QuantConnect.Compression.csproj"
+            path = lean / relative
+            with patch(
+                "tools.qualification.prepare_lean_composition.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 1, stdout=b"", stderr=b""),
+            ):
+                with self.assertRaisesRegex(ValueError, "working tree differs"):
+                    _canonical_preimage(lean, relative, path)
 
     def test_default_blob_map_rejects_noncanonical_fixture_tree(self):
         with TemporaryDirectory() as directory:

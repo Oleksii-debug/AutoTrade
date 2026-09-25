@@ -132,8 +132,30 @@ class PopulationCoverageManifest:
         _sha_identity(self.frozen_protocol_hash, name="frozen_protocol_hash")
         _sha_identity(self.input_snapshot_hash, name="input_snapshot_hash")
         _sha_identity(self.digest, name="population coverage digest")
+
+        normalized_cutoff = _time(self.causal_cutoff, name="causal_cutoff")
+        if normalized_cutoff != self.causal_cutoff:
+            raise ValueError("causal_cutoff must use canonical UTC ISO form")
+        if self.task is not None and _text(self.task, name="task") != self.task:
+            raise ValueError("task must use canonical text")
+        if (
+            self.instrument_family is not None
+            and _text(self.instrument_family, name="instrument_family")
+            != self.instrument_family
+        ):
+            raise ValueError("instrument_family must use canonical text")
+
         if not isinstance(self.permission_classes, tuple) or not self.permission_classes:
             raise ValueError("permission_classes must be a non-empty tuple")
+        normalized_permissions = tuple(
+            _text(value, name="permission_class")
+            for value in self.permission_classes
+        )
+        if normalized_permissions != self.permission_classes:
+            raise ValueError("permission_classes must use canonical text")
+        if tuple(sorted(set(normalized_permissions))) != normalized_permissions:
+            raise ValueError("permission_classes must be sorted and unique")
+
         tuple_fields = (
             "eligible_episode_ids",
             "included_episode_ids",
@@ -146,28 +168,147 @@ class PopulationCoverageManifest:
         )
         if any(not isinstance(getattr(self, name), tuple) for name in tuple_fields):
             raise TypeError("population manifest collections must be immutable tuples")
-        if len(self.eligible_episode_ids) != len(set(self.eligible_episode_ids)):
-            raise ValueError("eligible episode identities must be unique")
-        if len(self.included_episode_ids) != len(set(self.included_episode_ids)):
-            raise ValueError("included episode identities must be unique")
+
+        eligible_ids = tuple(
+            _text(value, name="eligible episode_id")
+            for value in self.eligible_episode_ids
+        )
+        included_ids = tuple(
+            _text(value, name="included episode_id")
+            for value in self.included_episode_ids
+        )
+        if eligible_ids != self.eligible_episode_ids or included_ids != self.included_episode_ids:
+            raise ValueError("episode identities must use canonical text")
+        if tuple(sorted(set(eligible_ids))) != eligible_ids:
+            raise ValueError("eligible episode identities must be sorted and unique")
+        if tuple(sorted(set(included_ids))) != included_ids:
+            raise ValueError("included episode identities must be sorted and unique")
+
+        normalized_exclusions = []
+        for item in self.exclusions:
+            if not isinstance(item, tuple) or len(item) != 2:
+                raise TypeError("exclusions must contain (episode_id, reason) tuples")
+            episode_id = _text(item[0], name="excluded episode_id")
+            reason = _text(item[1], name="exclusion reason")
+            if (episode_id, reason) != item:
+                raise ValueError("exclusions must use canonical text")
+            normalized_exclusions.append(item)
+        if tuple(sorted(normalized_exclusions)) != self.exclusions:
+            raise ValueError("exclusions must be sorted")
         excluded_ids = tuple(episode_id for episode_id, _reason in self.exclusions)
         if len(excluded_ids) != len(set(excluded_ids)):
             raise ValueError("excluded episode identities must be unique")
-        included = set(self.included_episode_ids)
+
+        included = set(included_ids)
         excluded = set(excluded_ids)
-        eligible = set(self.eligible_episode_ids)
+        eligible = set(eligible_ids)
         if included & excluded:
             raise ValueError("episode cannot be both included and excluded")
         if included | excluded != eligible:
             raise ValueError("population manifest must account for every eligible episode")
-        if not isinstance(self.eligible_no_trade_count, int) or isinstance(
-            self.eligible_no_trade_count, bool
-        ) or self.eligible_no_trade_count < 0:
-            raise ValueError("eligible_no_trade_count must be a non-negative integer")
-        if not isinstance(self.included_no_trade_count, int) or isinstance(
-            self.included_no_trade_count, bool
-        ) or self.included_no_trade_count < 0:
-            raise ValueError("included_no_trade_count must be a non-negative integer")
+
+        digest_ids = []
+        for item in self.episode_digests:
+            if not isinstance(item, tuple) or len(item) != 2:
+                raise TypeError("episode_digests must contain (episode_id, digest) tuples")
+            episode_id = _text(item[0], name="episode digest episode_id")
+            evidence_digest = _sha_identity(item[1], name="episode fact digest")
+            if (episode_id, evidence_digest) != item:
+                raise ValueError("episode_digests must use canonical values")
+            digest_ids.append(episode_id)
+        if tuple(sorted(self.episode_digests)) != self.episode_digests:
+            raise ValueError("episode_digests must be sorted")
+        if len(digest_ids) != len(set(digest_ids)) or set(digest_ids) != eligible:
+            raise ValueError("episode_digests must cover every eligible episode exactly once")
+
+        def validate_outcomes(value, *, name):
+            if len(value) != len(_OUTCOME_CLASSES):
+                raise ValueError(f"{name} must contain every canonical outcome class")
+            result = {}
+            for index, item in enumerate(value):
+                if not isinstance(item, tuple) or len(item) != 3:
+                    raise TypeError(f"{name} rows must be (class, count, digest) tuples")
+                outcome_class, count, outcome_digest = item
+                if outcome_class != _OUTCOME_CLASSES[index]:
+                    raise ValueError(f"{name} must use canonical outcome ordering")
+                if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                    raise ValueError(f"{name} counts must be non-negative integers")
+                _sha_identity(outcome_digest, name=f"{name} digest")
+                result[outcome_class] = count
+            return result
+
+        eligible_counts = validate_outcomes(
+            self.eligible_outcomes,
+            name="eligible_outcomes",
+        )
+        included_counts = validate_outcomes(
+            self.included_outcomes,
+            name="included_outcomes",
+        )
+        if sum(eligible_counts.values()) != len(eligible_ids):
+            raise ValueError("eligible outcome counts do not match eligible population")
+        if sum(included_counts.values()) != len(included_ids):
+            raise ValueError("included outcome counts do not match included population")
+        for outcome_class in _OUTCOME_CLASSES:
+            if included_counts[outcome_class] > eligible_counts[outcome_class]:
+                raise ValueError("included outcome count exceeds eligible outcome count")
+
+        for name, value in (
+            ("eligible_no_trade_count", self.eligible_no_trade_count),
+            ("included_no_trade_count", self.included_no_trade_count),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.eligible_no_trade_count > eligible_counts["NULL"]:
+            raise ValueError("eligible NO_TRADE count cannot exceed NULL outcomes")
+        if self.included_no_trade_count > included_counts["NULL"]:
+            raise ValueError("included NO_TRADE count cannot exceed NULL outcomes")
+        if self.included_no_trade_count > self.eligible_no_trade_count:
+            raise ValueError("included NO_TRADE count cannot exceed eligible count")
+
+        regime_ids = []
+        total_regime_observations = 0
+        for item in self.included_regime_counts:
+            if not isinstance(item, tuple) or len(item) != 2:
+                raise TypeError("included_regime_counts must contain (regime, count) tuples")
+            regime = _text(item[0], name="regime")
+            count = item[1]
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                raise ValueError("regime observation count must be a non-negative integer")
+            if (regime, count) != item:
+                raise ValueError("regime identities must use canonical text")
+            regime_ids.append(regime)
+            total_regime_observations += count
+        if tuple(sorted(self.included_regime_counts)) != self.included_regime_counts:
+            raise ValueError("included_regime_counts must be sorted")
+        if len(regime_ids) != len(set(regime_ids)):
+            raise ValueError("included regime identities must be unique")
+        if total_regime_observations != len(included_ids):
+            raise ValueError("regime observation counts do not match included population")
+
+        label_regimes = []
+        for item in self.included_labels_complete_by_regime:
+            if not isinstance(item, tuple) or len(item) != 2:
+                raise TypeError(
+                    "included_labels_complete_by_regime must contain (regime, bool) tuples"
+                )
+            regime = _text(item[0], name="label regime")
+            complete = item[1]
+            if not isinstance(complete, bool):
+                raise TypeError("regime label completeness must be boolean")
+            if (regime, complete) != item:
+                raise ValueError("label regime identities must use canonical text")
+            label_regimes.append(regime)
+        if (
+            tuple(sorted(self.included_labels_complete_by_regime))
+            != self.included_labels_complete_by_regime
+        ):
+            raise ValueError("included label completeness rows must be sorted")
+        if len(label_regimes) != len(set(label_regimes)):
+            raise ValueError("label regime identities must be unique")
+        if set(label_regimes) != set(regime_ids):
+            raise ValueError("label completeness must cover every included regime exactly once")
+
         expected = _digest(
             {
                 "candidate_hash": self.candidate_hash,

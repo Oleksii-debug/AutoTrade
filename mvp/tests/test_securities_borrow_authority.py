@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 from tempfile import TemporaryDirectory
 import unittest
@@ -592,6 +593,98 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                     max_age_seconds="60",
                     evidence_artifact_store=artifact_store_for(store),
                 )
+
+    def test_altered_capacity_under_same_artifact_fails_before_checkpoint(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = artifact_store_for(store)
+            genuine = bind_provider_evidence(
+                artifacts,
+                _borrow_evidence("100"),
+            )
+            forged = replace(
+                genuine,
+                capacity_quantity=Decimal("101"),
+            )
+            key = forged.resource_key
+            availability = ResourceAvailabilityEvidence(
+                provider_id=PROVIDER_ID,
+                account_id=ACCOUNT_ID,
+                environment=ENVIRONMENT,
+                snapshot_id="forged-borrow-cut",
+                query_started_at="2026-09-25T05:00:00Z",
+                query_completed_at="2026-09-25T05:00:30Z",
+                valid_until="2026-09-25T05:04:00Z",
+                provider_as_of="2026-09-25T05:00:30Z",
+                available_resources={key: "101"},
+                evidence_refs=(genuine.evidence_ref,),
+                resource_details={key: forged.resource_detail()},
+            )
+            result = replace(
+                _result(store),
+                resource_availability=availability,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "does not match supplied economics",
+            ):
+                record_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id="forged-borrow-capacity",
+                    result=result,
+                    observed_at="2026-09-25T05:00:30Z",
+                    host_id="borrow-test-host",
+                    owner_epoch="1",
+                    evidence_artifact_store=artifacts,
+                )
+    def test_corrupt_capacity_artifact_after_admission_blocks_final_dispatch(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = artifact_store_for(store)
+            authority = _authority(store)
+            checkpoint = _checkpoint(store)
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            admitted = _admit_short(
+                authority,
+                reservations,
+                checkpoint,
+                suffix="corrupt-capacity",
+                reserved=None,
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+
+            detail = checkpoint["payload"]["resource_availability"][
+                "resource_details"
+            ][_borrow_key()]
+            evidence_ref = detail["evidence_ref"]
+            artifact_id = evidence_ref[len("artifact:"):].split(
+                "@sha256:",
+                1,
+            )[0]
+            manifest = artifacts.load_manifest(artifact_id)
+            digest = manifest["sha256"].removeprefix("sha256:")
+            (artifacts.objects / digest[:2] / digest).write_bytes(
+                b"corrupt-capacity-evidence"
+            )
+
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    admitted.admission_id,
+                    intent_hash="sha256:" + ("a" * 64),
+                    account_id=ACCOUNT_ID,
+                    environment=ENVIRONMENT,
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    now="2026-09-25T05:01:30Z",
+                    capability_snapshot_id="borrow-capability-1",
+                ),
+                (False, "financial_evidence_invalid"),
+            )
 
     def test_borrow_detail_scope_and_capacity_are_revalidated_before_checkpoint(self):
         borrow = _borrow_evidence()

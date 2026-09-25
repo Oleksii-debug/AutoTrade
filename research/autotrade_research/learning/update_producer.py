@@ -32,6 +32,10 @@ from .online import (
     OnlineUpdateInput,
     evaluate_online_update,
 )
+from .population_coverage import (
+    PopulationCoverageManifest,
+    build_population_coverage,
+)
 
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -812,6 +816,111 @@ def _online_envelope_evidence(
     }
 
 
+
+def _coverage_selection(
+    rows: tuple[_LearningRow, ...],
+    exclusions: tuple[tuple[str, str], ...],
+    aliases: tuple[tuple[str, tuple[str, ...]], ...],
+) -> tuple[tuple[str, ...], dict[str, str]]:
+    """Map deduplicated learner rows back to the complete episode population.
+
+    Multiple immutable episodes may be aliases of one physical observation.
+    They remain first-class population members even though the gradient consumes
+    the physical fact once. Only episodes that are genuinely unusable are
+    exclusions in the canonical population manifest.
+    """
+
+    accepted_physical = {row.physical_observation_id for row in rows}
+    included: set[str] = set()
+    for physical_id, episode_ids in aliases:
+        if physical_id in accepted_physical:
+            included.update(episode_ids)
+
+    exclusion_map: dict[str, str] = {}
+    for episode_id, reason in exclusions:
+        if episode_id in included and reason == "PHYSICAL_DUPLICATE":
+            continue
+        if episode_id in included:
+            # An accepted physical fact cannot simultaneously be excluded from
+            # population coverage for another reason.
+            raise ValueError(
+                "accepted learning episode has incompatible population exclusion"
+            )
+        prior = exclusion_map.get(episode_id)
+        if prior is not None and prior != reason:
+            raise ValueError(
+                "learning episode has multiple incompatible exclusion reasons"
+            )
+        exclusion_map[episode_id] = reason
+    return tuple(sorted(included)), exclusion_map
+
+
+def _population_authority_reason(
+    manifest: PopulationCoverageManifest | None,
+    *,
+    population: CoveragePopulationSnapshot,
+    rows: tuple[_LearningRow, ...],
+    exclusions: tuple[tuple[str, str], ...],
+    aliases: tuple[tuple[str, tuple[str, ...]], ...],
+    candidate_hash: str,
+    cutoff: datetime,
+    permission_classes: tuple[str, ...],
+    task: str,
+    instrument_family: str | None,
+    population_name: str,
+) -> tuple[str | None, PopulationCoverageManifest | None]:
+    """Verify one caller-supplied manifest against the canonical memory cut."""
+
+    if manifest is None:
+        return f"LEARNING.{population_name}_POPULATION_COVERAGE_REQUIRED", None
+    if not isinstance(manifest, PopulationCoverageManifest):
+        raise TypeError(
+            f"{population_name.lower()}_population_manifest must be PopulationCoverageManifest"
+        )
+    if manifest.candidate_hash != candidate_hash:
+        return f"LEARNING.{population_name}_POPULATION_CANDIDATE_MISMATCH", manifest
+
+    included_episode_ids, coverage_exclusions = _coverage_selection(
+        rows,
+        exclusions,
+        aliases,
+    )
+    try:
+        expected = build_population_coverage(
+            population,
+            candidate_hash=candidate_hash,
+            frozen_protocol_hash=manifest.frozen_protocol_hash,
+            input_snapshot_hash=population.root_hash,
+            causal_cutoff=cutoff,
+            permission_classes=permission_classes,
+            included_episode_ids=included_episode_ids,
+            exclusions=coverage_exclusions,
+            task=task,
+            instrument_family=instrument_family,
+        )
+    except (TypeError, ValueError):
+        return f"LEARNING.{population_name}_POPULATION_CANONICAL_INVALID", manifest
+
+    if manifest != expected:
+        return f"LEARNING.{population_name}_POPULATION_COVERAGE_MISMATCH", manifest
+
+    outcome_counts = {
+        outcome_class: count
+        for outcome_class, count, _digest in manifest.included_outcomes
+    }
+    labels_complete = all(
+        complete
+        for _regime, complete in manifest.included_labels_complete_by_regime
+    )
+    if (
+        not labels_complete
+        or outcome_counts.get("PENDING", 0) != 0
+        or outcome_counts.get("UNKNOWN", 0) != 0
+    ):
+        return f"LEARNING.{population_name}_OUTCOME_EVIDENCE_INCOMPLETE", manifest
+    return None, manifest
+
+
 def produce_bounded_online_update(
     *,
     memory: ExperienceMemory,
@@ -824,6 +933,8 @@ def produce_bounded_online_update(
     update_cutoff: datetime,
     calibration_cutoff: datetime,
     granted_permissions: set[str],
+    update_population_manifest: PopulationCoverageManifest | None = None,
+    calibration_population_manifest: PopulationCoverageManifest | None = None,
 ) -> ProducedOnlineUpdate:
     if not isinstance(memory, ExperienceMemory):
         raise TypeError("memory must be ExperienceMemory")
@@ -911,7 +1022,53 @@ def produce_bounded_online_update(
         )
     )
 
+    checkpoint_candidate_hash = _sha256_identity(
+        "sha256:" + checkpoint_reference.rsplit("@sha256:", 1)[1],
+        name="checkpoint candidate hash",
+    )
+    update_population_reason, verified_update_manifest = (
+        _population_authority_reason(
+            update_population_manifest,
+            population=update_population,
+            rows=update_rows,
+            exclusions=update_exclusions,
+            aliases=update_aliases,
+            candidate_hash=checkpoint_candidate_hash,
+            cutoff=update_time,
+            permission_classes=canonical_permissions,
+            task=config.update_task,
+            instrument_family=config.instrument_family,
+            population_name="UPDATE",
+        )
+    )
+    calibration_population_reason, verified_calibration_manifest = (
+        _population_authority_reason(
+            calibration_population_manifest,
+            population=calibration_population,
+            rows=calibration_rows,
+            exclusions=calibration_exclusions,
+            aliases=calibration_aliases,
+            candidate_hash=checkpoint_candidate_hash,
+            cutoff=calibration_time,
+            permission_classes=canonical_permissions,
+            task=config.calibration_task,
+            instrument_family=config.instrument_family,
+            population_name="CALIBRATION",
+        )
+    )
+
     reasons: list[str] = []
+    if update_population_reason is not None:
+        reasons.append(update_population_reason)
+    if calibration_population_reason is not None:
+        reasons.append(calibration_population_reason)
+    if (
+        verified_update_manifest is not None
+        and verified_calibration_manifest is not None
+        and verified_update_manifest.frozen_protocol_hash
+        != verified_calibration_manifest.frozen_protocol_hash
+    ):
+        reasons.append("LEARNING.POPULATION_PROTOCOL_MISMATCH")
     if cross_population_overlap:
         reasons.append("LEARNING.CROSS_POPULATION_CONTAMINATION")
     if update_conflicts:
@@ -1049,6 +1206,27 @@ def produce_bounded_online_update(
             "calibration_evidence_ref": calibration_reference,
             "test_evidence_refs": list(test_references),
             "label_version": config.label_version,
+            "population_authority": {
+                "candidate_hash": checkpoint_candidate_hash,
+                "update_manifest_digest": (
+                    None
+                    if verified_update_manifest is None
+                    else verified_update_manifest.digest
+                ),
+                "calibration_manifest_digest": (
+                    None
+                    if verified_calibration_manifest is None
+                    else verified_calibration_manifest.digest
+                ),
+                "frozen_protocol_hash": (
+                    None
+                    if verified_update_manifest is None
+                    or verified_calibration_manifest is None
+                    or verified_update_manifest.frozen_protocol_hash
+                    != verified_calibration_manifest.frozen_protocol_hash
+                    else verified_update_manifest.frozen_protocol_hash
+                ),
+            },
         },
         "population": {
             "update_included": [

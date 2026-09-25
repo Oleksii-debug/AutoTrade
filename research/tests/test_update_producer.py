@@ -14,6 +14,9 @@ from research.autotrade_research.learning.online import (
     OnlineUpdateEnvelope,
     ParameterRule,
 )
+from research.autotrade_research.learning.population_coverage import (
+    build_population_coverage,
+)
 from research.autotrade_research.learning.update_producer import (
     OnlineUpdateRuntimeState,
     UpdateProducerConfig,
@@ -25,6 +28,7 @@ from research.autotrade_research.memory.episodes import ExperienceMemory
 
 SOURCE_SHA = "a" * 40
 FEATURE_SCHEMA = "sha256:" + "f" * 64
+FROZEN_PROTOCOL = "sha256:" + "e" * 64
 CALIBRATION_CUTOFF = datetime(2026, 10, 5, tzinfo=timezone.utc)
 UPDATE_CUTOFF = datetime(2026, 10, 10, tzinfo=timezone.utc)
 DECISION = datetime(2026, 10, 1, tzinfo=timezone.utc)
@@ -97,6 +101,10 @@ class ProducerFixture:
         decision_time=None,
         evidence_ref=None,
         regime="stable",
+        outcome_class="NULL",
+        canonical_label_mature=True,
+        canonical_reconciliation_state="RECONCILED",
+        intended_side="NO_TRADE",
     ):
         self._episode_counter += 1
         decision = decision_time or (
@@ -109,9 +117,16 @@ class ProducerFixture:
         )
         payload = {
             "evidence_refs": [physical_evidence],
-            "intended_action": {"kind": "NO_TRADE"},
+            "intended_action": {
+                "kind": "NO_TRADE",
+                "side": intended_side,
+            },
             "actual_execution": {"kind": "NO_TRADE"},
-            "outcome": {"class": "NULL"},
+            "outcome": {
+                "class": outcome_class,
+                "label_mature": canonical_label_mature,
+                "reconciliation_state": canonical_reconciliation_state,
+            },
             "costs": {"total": "0"},
             "learning": {
                 "observation_id": observation_id,
@@ -289,6 +304,50 @@ class ProducerFixture:
             max_drift_score="100",
         )
 
+
+    def population_manifest(
+        self,
+        *,
+        checkpoint_ref,
+        task,
+        cutoff,
+        extra_exclusions=None,
+        frozen_protocol_hash=FROZEN_PROTOCOL,
+    ):
+        snapshot = self.memory.coverage_population_snapshot(
+            causal_cutoff=cutoff,
+            granted_permissions={"research"},
+            task=task,
+            instrument_family="equity",
+        )
+        exclusions = {
+            row["episode_id"]: "TOMBSTONED"
+            for row in snapshot.rows
+            if row["tombstone_lineage"]
+        }
+        for episode_id, reason in (extra_exclusions or {}).items():
+            exclusions[episode_id] = reason
+        included = [
+            row["episode_id"]
+            for row in snapshot.rows
+            if row["episode_id"] not in exclusions
+        ]
+        candidate_hash = (
+            "sha256:" + checkpoint_ref.rsplit("@sha256:", 1)[1]
+        )
+        return build_population_coverage(
+            snapshot,
+            candidate_hash=candidate_hash,
+            frozen_protocol_hash=frozen_protocol_hash,
+            input_snapshot_hash=snapshot.root_hash,
+            causal_cutoff=cutoff,
+            permission_classes=["research"],
+            included_episode_ids=included,
+            exclusions=exclusions,
+            task=task,
+            instrument_family="equity",
+        )
+
     def produce(
         self,
         *,
@@ -300,7 +359,24 @@ class ProducerFixture:
         update_cutoff=UPDATE_CUTOFF,
         runtime_state=None,
         granted_permissions=None,
+        with_population_manifests=True,
+        update_population_manifest=None,
+        calibration_population_manifest=None,
     ):
+        permissions = granted_permissions or {"research"}
+        if with_population_manifests:
+            if update_population_manifest is None:
+                update_population_manifest = self.population_manifest(
+                    checkpoint_ref=checkpoint_ref,
+                    task=config.update_task,
+                    cutoff=update_cutoff,
+                )
+            if calibration_population_manifest is None:
+                calibration_population_manifest = self.population_manifest(
+                    checkpoint_ref=checkpoint_ref,
+                    task=config.calibration_task,
+                    cutoff=calibration_cutoff,
+                )
         return produce_bounded_online_update(
             memory=self.memory,
             artifact_store=self.artifacts,
@@ -314,7 +390,9 @@ class ProducerFixture:
             ),
             update_cutoff=update_cutoff,
             calibration_cutoff=calibration_cutoff,
-            granted_permissions=granted_permissions or {"research"},
+            granted_permissions=permissions,
+            update_population_manifest=update_population_manifest,
+            calibration_population_manifest=calibration_population_manifest,
         )
 
 
@@ -408,6 +486,142 @@ class UpdateProducerTests(unittest.TestCase):
             )
             self.assertTrue(
                 artifact["online_envelope_sha256"].startswith("sha256:")
+            )
+
+
+    def test_population_authority_is_required_before_any_update_proposal(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref),
+                with_population_manifests=False,
+            )
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIsNone(produced.proposed_parameters)
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIn(
+                "LEARNING.UPDATE_POPULATION_COVERAGE_REQUIRED",
+                artifact["reasons"],
+            )
+            self.assertIn(
+                "LEARNING.CALIBRATION_POPULATION_COVERAGE_REQUIRED",
+                artifact["reasons"],
+            )
+            self.assertIsNone(
+                artifact["evidence"]["population_authority"][
+                    "update_manifest_digest"
+                ]
+            )
+
+    def test_valid_episode_cannot_be_omitted_by_favorable_population_manifest(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            omitted = fixture.append_learning(
+                task="update",
+                feature="-9",
+                target="-10",
+                observation_id="negative-evidence",
+                label_available_at=datetime(
+                    2026, 10, 8, 1, tzinfo=timezone.utc
+                ),
+                outcome_class="NEGATIVE",
+                intended_side="BUY",
+            )
+            forged_manifest = fixture.population_manifest(
+                checkpoint_ref=checkpoint,
+                task="update",
+                cutoff=UPDATE_CUTOFF,
+                extra_exclusions={
+                    omitted: "CALLER_SELECTED_FAVORABLE_SUBSET",
+                },
+            )
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref),
+                update_population_manifest=forged_manifest,
+            )
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIsNone(produced.proposed_parameters)
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIn(
+                "LEARNING.UPDATE_POPULATION_COVERAGE_MISMATCH",
+                artifact["reasons"],
+            )
+
+    def test_learning_timestamps_cannot_override_incomplete_canonical_outcome(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            fixture.append_learning(
+                task="update",
+                feature="2",
+                target="1",
+                observation_id="caller-claims-mature",
+                label_available_at=datetime(
+                    2026, 10, 8, 2, tzinfo=timezone.utc
+                ),
+                canonical_label_mature=False,
+                canonical_reconciliation_state="PENDING",
+            )
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref),
+            )
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIsNone(produced.proposed_parameters)
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIn(
+                "LEARNING.UPDATE_OUTCOME_EVIDENCE_INCOMPLETE",
+                artifact["reasons"],
+            )
+
+    def test_population_protocol_identity_must_match_across_update_and_calibration(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            update_manifest = fixture.population_manifest(
+                checkpoint_ref=checkpoint,
+                task="update",
+                cutoff=UPDATE_CUTOFF,
+                frozen_protocol_hash=FROZEN_PROTOCOL,
+            )
+            calibration_manifest = fixture.population_manifest(
+                checkpoint_ref=checkpoint,
+                task="calibration",
+                cutoff=CALIBRATION_CUTOFF,
+                frozen_protocol_hash="sha256:" + "d" * 64,
+            )
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref),
+                update_population_manifest=update_manifest,
+                calibration_population_manifest=calibration_manifest,
+            )
+            self.assertEqual(produced.status, "NO_UPDATE")
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIn(
+                "LEARNING.POPULATION_PROTOCOL_MISMATCH",
+                artifact["reasons"],
+            )
+            self.assertIsNone(
+                artifact["evidence"]["population_authority"][
+                    "frozen_protocol_hash"
+                ]
             )
 
     def test_early_no_update_still_binds_full_config_envelope_and_runtime(self):
@@ -518,10 +732,9 @@ class UpdateProducerTests(unittest.TestCase):
                 envelope=envelope,
                 config=config,
             )
-            self.assertEqual(
-                baseline.proposed_parameters,
-                with_future.proposed_parameters,
-            )
+            self.assertEqual(baseline.status, "UPDATE_PROPOSED")
+            self.assertEqual(with_future.status, "NO_UPDATE")
+            self.assertIsNone(with_future.proposed_parameters)
             artifact = json.loads(with_future.artifact_bytes)
             self.assertIn(
                 "LABEL_NOT_CAUSALLY_MATURE",
@@ -530,6 +743,10 @@ class UpdateProducerTests(unittest.TestCase):
                     for _episode, reason
                     in artifact["population"]["update_exclusions"]
                 },
+            )
+            self.assertIn(
+                "LEARNING.UPDATE_POPULATION_COVERAGE_MISMATCH",
+                artifact["reasons"],
             )
 
     def test_visible_correction_is_applied_once_and_lineage_is_bound(self):

@@ -1079,8 +1079,9 @@ class JournalStore:
                         connection.execute(
                             """
                             INSERT INTO outbox(
-                                outbox_id, event_id, topic, payload_json, created_at
-                            ) VALUES (?, ?, ?, ?, ?)
+                                outbox_id, event_id, topic, payload_json,
+                                created_at, envelope_hash
+                            ) VALUES (?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 outbox_id,
@@ -1088,6 +1089,10 @@ class JournalStore:
                                 item["outbox_topic"],
                                 item["outbox_payload"],
                                 self._now(),
+                                "sha256:"
+                                + sha256(
+                                    item["outbox_payload"].encode("utf-8")
+                                ).hexdigest(),
                             ),
                         )
                     appended.append(

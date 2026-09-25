@@ -1048,6 +1048,10 @@ class RiskDecision:
 def _fingerprint_value(value):
     if isinstance(value, Decimal):
         return str(value)
+    if isinstance(value, datetime):
+        return _utc_text(value)
+    if hasattr(value, "__dataclass_fields__"):
+        return _fingerprint_value(vars(value))
     if isinstance(value, Mapping):
         return {
             str(key): _fingerprint_value(item)
@@ -1111,7 +1115,13 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
     return sha256(encoded).hexdigest()
 
 
-def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) -> RiskDecision:
+def evaluate_risk(
+    intent: RiskIntent,
+    context: RiskContext,
+    policy: RiskPolicy,
+    *,
+    evidence_store: object | None = None,
+) -> RiskDecision:
     if not isinstance(intent, RiskIntent):
         raise TypeError("intent must be RiskIntent")
     if not isinstance(context, RiskContext):
@@ -1147,6 +1157,9 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         stress_scenario_labels=context.stress_scenario_labels,
         tail_scenarios=context.tail_scenarios,
         liquidation_headroom=context.liquidation_headroom,
+        liquidation_scope=context.liquidation_scope,
+        liquidation_headroom_evidence=context.liquidation_headroom_evidence,
+        decision_time=context.decision_time,
         asset_buckets=context.asset_buckets,
         venues=context.venues,
         liquidity_capacity=context.liquidity_capacity,
@@ -1780,20 +1793,36 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
             "equal-weight expected shortfall over the configured worst tail must stay within policy",
         )
     if policy.min_liquidation_headroom is not None:
+        liquidation_evidence_verified = _verify_liquidation_headroom_evidence(
+            evidence=context.liquidation_headroom_evidence,
+            expected_scope=context.liquidation_scope,
+            expected_state_version=context.state_version,
+            decision_time=context.decision_time,
+            evidence_store=evidence_store,
+        )
         add(
             "liquidation_headroom",
-            context.liquidation_headroom is not None
+            liquidation_evidence_verified
+            and context.liquidation_headroom is not None
             and (
                 context.liquidation_headroom >= policy.min_liquidation_headroom
                 or protective_reduction
             ),
             (
                 context.liquidation_headroom
-                if context.liquidation_headroom is not None
-                else "UNKNOWN"
+                if liquidation_evidence_verified
+                and context.liquidation_headroom is not None
+                else (
+                    "UNVERIFIED"
+                    if context.liquidation_headroom is not None
+                    else "UNKNOWN"
+                )
             ),
             policy.min_liquidation_headroom,
-            "evidenced liquidation headroom must meet policy or the action must strictly reduce risk",
+            (
+                "scope-bound immutable liquidation evidence must verify before "
+                "the headroom floor or protective-reduction exception can admit risk"
+            ),
         )
 
     opens_short = resulting < 0 and resulting < base_position

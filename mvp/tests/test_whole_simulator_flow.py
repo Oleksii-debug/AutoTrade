@@ -16,7 +16,11 @@ from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.reconciliation import (
     ProviderFillEvidence,
     SnapshotConsistencyEvidence,
+    UnknownSubmission,
     reconcile_account,
+)
+from mvp.autotrade_mvp.reconciliation_journal import (
+    record_reconciliation_checkpoint,
 )
 from mvp.autotrade_mvp.reservations import ReservationBook
 from mvp.autotrade_mvp.risk import RiskContext, RiskIntent, RiskPolicy
@@ -197,39 +201,6 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 reservation_id="reservation-1",
                 usage={"CASH:USD": "200.2"},
             )
-            resolution_artifact_id = "44444444-4444-4444-8444-444444444444"
-            resolution_receipt = {
-                "schema_version": 1,
-                "evidence_type": "AUTOTRADE_RESERVATION_RESOLUTION",
-                "environment": "SIMULATION",
-                "account_id": "sim-account",
-                "reservation_id": "reservation-1",
-                "intent_id": "intent-1",
-                "provider": "SIMULATED",
-                "attempt_id": attempt_id,
-                "outcome": "FILLED",
-                "reconciliation_complete": True,
-            }
-            resolution_manifest = artifacts.publish_bytes(
-                artifact_id=resolution_artifact_id,
-                data=canonical_json(resolution_receipt).encode("utf-8"),
-                media_type="application/vnd.autotrade.reservation-resolution+json",
-                rights={"storage": True, "export": False},
-            )
-            terminal = reservations.mark_terminal(
-                command_id="reservation-terminal-1",
-                idempotency_key="reservation-terminal-1",
-                reservation_id="reservation-1",
-                outcome="FILLED",
-                provider="SIMULATED",
-                attempt_id=attempt_id,
-                resolution_evidence=(
-                    f"artifact:{resolution_artifact_id}@{resolution_manifest['sha256']}"
-                ),
-            )
-            self.assertEqual(terminal.state, "FILLED")
-            self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("0"))
-
             economic.append(
                 book_equity_fill(
                     transaction_id="economic-fill-1",
@@ -257,6 +228,11 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 fee_currency=fee["currency"],
                 trade_time=fill["trade_time"],
             )
+            unresolved_submission = UnknownSubmission.create(
+                attempt_id=attempt_id,
+                client_order_id=dispatched.client_order_id,
+                started_at=NOW,
+            )
             reconciled = reconcile_account(
                 local_cash={"USD": economic.cash("USD")},
                 provider_cash={"USD": snapshot["balances"][0]["total"]},
@@ -272,13 +248,60 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                     query_started_at=LATER,
                     query_completed_at=LATER,
                 ),
+                unknown_submissions=(unresolved_submission,),
+                searched_client_order_ids=(dispatched.client_order_id,),
                 coverage_start="2026-09-24T17:00:00Z",
                 coverage_end="2026-09-24T19:00:00Z",
                 pagination_complete=True,
             )
             self.assertTrue(reconciled.complete)
             self.assertFalse(reconciled.blocks_new_risk)
-            self.assertEqual(reconciled.matched_execution_ids, (fill["provider_execution_id"],))
+            self.assertEqual(
+                reconciled.matched_execution_ids,
+                (fill["provider_execution_id"],),
+            )
+            self.assertEqual(reconciled.submission_resolutions[0].outcome, "OBSERVED_EXECUTION")
+
+            checkpoint = record_reconciliation_checkpoint(
+                journal,
+                reconciliation_id="sim-account:whole-flow",
+                result=reconciled,
+                observed_at=LATER,
+            )
+            resolution_artifact_id = "44444444-4444-4444-8444-444444444444"
+            resolution_receipt = {
+                "schema_version": 1,
+                "evidence_type": "AUTOTRADE_RESERVATION_RESOLUTION",
+                "environment": "SIMULATION",
+                "account_id": "sim-account",
+                "reservation_id": "reservation-1",
+                "intent_id": "intent-1",
+                "provider": "SIMULATED",
+                "attempt_id": attempt_id,
+                "outcome": "FILLED",
+                "reconciliation_complete": True,
+                "reconciliation_event_id": checkpoint["event_id"],
+                "reconciliation_payload_hash": checkpoint["payload_hash"],
+            }
+            resolution_manifest = artifacts.publish_bytes(
+                artifact_id=resolution_artifact_id,
+                data=canonical_json(resolution_receipt).encode("utf-8"),
+                media_type="application/vnd.autotrade.reservation-resolution+json",
+                rights={"storage": True, "export": False},
+            )
+            terminal = reservations.mark_terminal(
+                command_id="reservation-terminal-1",
+                idempotency_key="reservation-terminal-1",
+                reservation_id="reservation-1",
+                outcome="FILLED",
+                provider="SIMULATED",
+                attempt_id=attempt_id,
+                resolution_evidence=(
+                    f"artifact:{resolution_artifact_id}@{resolution_manifest['sha256']}"
+                ),
+            )
+            self.assertEqual(terminal.state, "FILLED")
+            self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("0"))
             self.assertEqual(snapshot["open_orders"], [])
 
     def test_acknowledgement_without_fill_keeps_reservation_and_working_order_truth(self):

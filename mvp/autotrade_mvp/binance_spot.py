@@ -299,11 +299,14 @@ def parse_account_trades(
 
     if not isinstance(observation, ProviderResponseObservation):
         raise TypeError("observation must be ProviderResponseObservation")
-    observation.require_scope(
-        provider_id="BINANCE",
-        surface=Surface.ACTIVITIES,
-        endpoint=BINANCE_SPOT_ENDPOINTS["EXECUTIONS"],
-    )
+    try:
+        observation.require_scope(
+            provider_id="BINANCE",
+            surface=Surface.ACTIVITIES,
+            endpoint=BINANCE_SPOT_ENDPOINTS["EXECUTIONS"],
+        )
+    except ProviderCoreError as error:
+        raise BinanceSpotAdapterError("trade observation scope mismatch") from error
     rows = observation.payload
     account_id = observation.account_id
     environment = observation.environment

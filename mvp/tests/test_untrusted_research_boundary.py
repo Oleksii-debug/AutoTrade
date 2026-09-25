@@ -344,6 +344,26 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
             result.proposal["analysis"]["token"] = "late-injection"
         with self.assertRaises(TypeError):
             result.proposal["steps"][0]["authority_grant"] = "TRADE_ALLOWED"
+        with self.assertRaises(TypeError):
+            dict.__setitem__(result.proposal, "token", "base-class-bypass")
+        self.assertNotIn("token", result.proposal)
+
+    def test_admitted_arguments_cannot_be_mutated_via_dict_base_class(self):
+        admitted = self.boundary().admit(
+            ResearchToolRequest(
+                request_id="dict-bypass",
+                tool_name="statistics",
+                requested_capabilities=("COMPUTE_STATISTICS",),
+                arguments={"window": {"size": 20}},
+            )
+        )
+        with self.assertRaises(TypeError):
+            dict.__setitem__(
+                admitted.arguments["window"],
+                "size",
+                999,
+            )
+        self.assertEqual(admitted.arguments["window"]["size"], 20)
 
     def test_evidence_cannot_be_constructed_as_trusted_or_permission_granting(self):
         base = {

@@ -7,11 +7,13 @@ mint credentials, tools, execution authority, or redistribution rights.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping as MappingABC
 from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
 import json
 from math import isfinite
+from types import MappingProxyType
 from typing import Iterable, Mapping
 
 
@@ -19,8 +21,26 @@ class ResearchBoundaryError(ValueError):
     pass
 
 
-class _FrozenDict(dict):
-    """JSON-compatible dict that cannot be mutated after construction."""
+class _FrozenDict(MappingABC[str, object]):
+    """Read-only mapping with no mutable dict base class."""
+
+    __slots__ = ("_values",)
+
+    def __init__(self, values: Mapping[str, object]) -> None:
+        object.__setattr__(
+            self,
+            "_values",
+            MappingProxyType(dict(values)),
+        )
+
+    def __getitem__(self, key: str) -> object:
+        return self._values[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
 
     @staticmethod
     def _blocked(*args, **kwargs):
@@ -28,6 +48,8 @@ class _FrozenDict(dict):
 
     __setitem__ = _blocked
     __delitem__ = _blocked
+    __setattr__ = _blocked
+    __delattr__ = _blocked
     clear = _blocked
     pop = _blocked
     popitem = _blocked
@@ -44,16 +66,16 @@ def _freeze_proposal(
     if depth > 32:
         raise ResearchBoundaryError(f"{label} exceeds maximum nesting depth")
     if isinstance(value, Mapping):
-        frozen = _FrozenDict()
+        frozen: dict[str, object] = {}
         for key, nested in value.items():
             if not isinstance(key, str):
                 raise ResearchBoundaryError(f"{label} object keys must be strings")
-            dict.__setitem__(
-                frozen,
-                key,
-                _freeze_proposal(nested, depth=depth + 1, label=label),
+            frozen[key] = _freeze_proposal(
+                nested,
+                depth=depth + 1,
+                label=label,
             )
-        return frozen
+        return _FrozenDict(frozen)
     if isinstance(value, (list, tuple)):
         return tuple(
             _freeze_proposal(item, depth=depth + 1, label=label)

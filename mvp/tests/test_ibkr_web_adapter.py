@@ -9,6 +9,7 @@ from mvp.autotrade_mvp.ibkr_web import (
     IbkrBrokerageSessionStatus,
     IbkrContractIdentity,
     IbkrExecutionEvidence,
+    IbkrReplyRequest,
     IbkrWebAdapterError,
     IbkrWebOrderIntent,
     execution_to_reconciliation_fill,
@@ -400,7 +401,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertFalse(outcome.proves_fill)
         self.assertFalse(outcome.retry_same_economic_action)
 
-    def test_reply_message_requires_separate_explicit_guarded_authorization(self):
+    def test_unrecorded_reply_message_cannot_prepare_second_request(self):
         outcome = parse_order_submission_response(
             [
                 {
@@ -413,14 +414,56 @@ class IbkrWebAdapterTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "REPLY_REQUIRED")
         self.assertFalse(outcome.proves_fill)
-        with self.assertRaisesRegex(IbkrWebAdapterError, "explicit authorization"):
-            prepare_reply_confirmation(outcome, explicit_authorization=False)
-        request = prepare_reply_confirmation(outcome, explicit_authorization=True)
-        self.assertEqual(
-            request.endpoint,
-            "/iserver/reply/07a13a5a-4a48-44a5-bb25-5ab37b79186c",
-        )
+        with self.assertRaisesRegex(TypeError, "recorded"):
+            prepare_reply_confirmation(
+                outcome,
+                expected_attempt_id="attempt-1",
+                expected_account_id="U1234567",
+                expected_client_order_id="coid-1",
+                explicit_authorization=True,
+            )
+
+    def test_reply_identity_cannot_escape_reply_endpoint_or_mutate_confirmation_body(self):
+        with self.assertRaisesRegex(IbkrWebAdapterError, "path segment"):
+            parse_order_submission_response(
+                [{"id": "../orders", "message": ["Confirm"], "messageIds": ["o1"]}]
+            )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "path segment"):
+            parse_order_submission_response(
+                [{"id": "reply?confirmed=false", "message": ["Confirm"], "messageIds": ["o1"]}]
+            )
+        for unsafe_id in (".", ".."):
+            with self.subTest(unsafe_id=unsafe_id), self.assertRaisesRegex(
+                IbkrWebAdapterError, "path segment"
+            ):
+                parse_order_submission_response(
+                    [{"id": unsafe_id, "message": ["Confirm"], "messageIds": ["o1"]}]
+                )
+        for invalid_reply_id in (None, True, 123):
+            with self.subTest(reply_id=invalid_reply_id), self.assertRaisesRegex(
+                IbkrWebAdapterError,
+                "reply id must be a string",
+            ):
+                parse_order_submission_response(
+                    [{"id": invalid_reply_id, "message": ["Confirm"], "messageIds": ["o1"]}]
+                )
+
+        base = {
+            "endpoint": "/iserver/reply/safe-reply-id",
+            "body": {"confirmed": True},
+            "attempt_id": "attempt-1",
+            "account_id": "U1234567",
+            "client_order_id": "at-reply-direct",
+            "response_sha256": "sha256:" + "a" * 64,
+        }
+        request = IbkrReplyRequest(**base)
         self.assertEqual(dict(request.body), {"confirmed": True})
+        with self.assertRaisesRegex(IbkrWebAdapterError, "reply endpoint|path segment"):
+            IbkrReplyRequest(**{**base, "endpoint": "/iserver/reply/../orders"})
+        with self.assertRaisesRegex(IbkrWebAdapterError, "path segment"):
+            IbkrReplyRequest(**{**base, "endpoint": "/iserver/reply/.."})
+        with self.assertRaisesRegex(IbkrWebAdapterError, "confirmed=true"):
+            IbkrReplyRequest(**{**base, "body": {"confirmed": False}})
 
     def test_ambiguous_ack_and_reply_shape_fails_closed(self):
         with self.assertRaisesRegex(IbkrWebAdapterError, "ambiguous"):
@@ -549,6 +592,47 @@ class IbkrWebAdapterTests(unittest.TestCase):
             "07a13a5a-4a48-44a5-bb25-5ab37b79186c",
         )
         self.assertFalse(recorded.retry_same_economic_action)
+
+        with self.assertRaisesRegex(IbkrWebAdapterError, "explicit authorization"):
+            prepare_reply_confirmation(
+                recorded,
+                expected_attempt_id="attempt-ibkr-reply",
+                expected_account_id="U1234567",
+                expected_client_order_id="at-ibkr-reply",
+                explicit_authorization=False,
+            )
+
+        request = prepare_reply_confirmation(
+            recorded,
+            expected_attempt_id="attempt-ibkr-reply",
+            expected_account_id="U1234567",
+            expected_client_order_id="at-ibkr-reply",
+            explicit_authorization=True,
+        )
+        self.assertEqual(
+            request.endpoint,
+            "/iserver/reply/07a13a5a-4a48-44a5-bb25-5ab37b79186c",
+        )
+        self.assertEqual(dict(request.body), {"confirmed": True})
+        self.assertEqual(request.attempt_id, "attempt-ibkr-reply")
+        self.assertEqual(request.account_id, "U1234567")
+        self.assertEqual(request.client_order_id, "at-ibkr-reply")
+        self.assertEqual(request.response_sha256, recorded.response_sha256)
+
+        for field, value in (
+            ("expected_attempt_id", "other-attempt"),
+            ("expected_account_id", "OTHER"),
+            ("expected_client_order_id", "other-coid"),
+        ):
+            kwargs = {
+                "expected_attempt_id": "attempt-ibkr-reply",
+                "expected_account_id": "U1234567",
+                "expected_client_order_id": "at-ibkr-reply",
+                "explicit_authorization": True,
+            }
+            kwargs[field] = value
+            with self.subTest(field=field), self.assertRaises(IbkrWebAdapterError):
+                prepare_reply_confirmation(recorded, **kwargs)
 
     def test_recorded_submission_rejects_cross_account_binding(self):
         intent = IbkrWebOrderIntent.create(

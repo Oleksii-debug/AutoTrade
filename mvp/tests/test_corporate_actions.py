@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 import unittest
 
@@ -13,6 +13,56 @@ from mvp.autotrade_mvp.corporate_actions import (
     record_unsettled_purchase,
     settle_cash,
 )
+from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
+
+
+INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
+OTHER_INSTRUMENT_ID = "22222222-2222-4222-8222-222222222222"
+
+
+def instrument(
+    *,
+    instrument_id=INSTRUMENT_ID,
+    version=1,
+    symbol="AAA",
+    effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+):
+    return InstrumentVersion(
+        instrument_id=instrument_id,
+        version=version,
+        provider_id="simulated",
+        venue_id="simulated-venue",
+        provider_symbol=symbol,
+        asset_class="CASH_EQUITY",
+        base_currency="AAA",
+        quote_currency="USD",
+        settlement_currency="USD",
+        quantity_unit="AAA",
+        contract_multiplier=Decimal("1"),
+        price_tick=Decimal("0.01"),
+        quantity_step=Decimal("1"),
+        minimum_quantity=Decimal("1"),
+        calendar_id="CONTINUOUS_24_7",
+        timezone_id="UTC",
+        effective_from=effective_from,
+        status="ACTIVE",
+    )
+
+
+def bound_book(state_value, *, current=None, registry=None):
+    current = current or instrument()
+    registry = registry or InstrumentRegistry(versions=(current,))
+    return CorporateActionBook(
+        state_value,
+        instrument_version=current,
+        registry=registry,
+    )
+
+
+def corporate_event(**kwargs):
+    kwargs.setdefault("instrument_id", INSTRUMENT_ID)
+    kwargs.setdefault("instrument_version", 1)
+    return corporate_event(**kwargs)
 
 
 def state(**overrides):
@@ -30,8 +80,8 @@ def state(**overrides):
 
 class CorporateSettlementTests(unittest.TestCase):
     def test_split_changes_quantity_not_total_basis_or_pnl(self):
-        book = CorporateActionBook(state())
-        event = CorporateEvent.create(
+        book = bound_book(state())
+        event = corporate_event(
             event_id="split-1",
             kind="SPLIT",
             effective_date=date(2026, 1, 2),
@@ -46,7 +96,7 @@ class CorporateSettlementTests(unittest.TestCase):
         self.assertEqual(book.apply(event), result)
 
     def test_split_scales_short_borrow_and_recall_obligations(self):
-        book = CorporateActionBook(
+        book = bound_book(
             state(
                 quantity="-10",
                 total_basis="1000",
@@ -54,7 +104,7 @@ class CorporateSettlementTests(unittest.TestCase):
                 recalled_quantity="4",
             )
         )
-        event = CorporateEvent.create(
+        event = corporate_event(
             event_id="short-split-1",
             kind="SPLIT",
             effective_date=date(2026, 1, 2),
@@ -68,8 +118,8 @@ class CorporateSettlementTests(unittest.TestCase):
         self.assertEqual(result.after.total_basis, Decimal("1000"))
 
     def test_cash_dividend_stays_unsettled_until_explicit_settlement(self):
-        book = CorporateActionBook(state())
-        event = CorporateEvent.create(
+        book = bound_book(state())
+        event = corporate_event(
             event_id="div-1",
             kind="CASH_DIVIDEND",
             effective_date=date(2026, 1, 2),
@@ -89,8 +139,8 @@ class CorporateSettlementTests(unittest.TestCase):
             total_basis="1000",
             borrowed_quantity="10",
         )
-        book = CorporateActionBook(short_state)
-        event = CorporateEvent.create(
+        book = bound_book(short_state)
+        event = corporate_event(
             event_id="short-div-1",
             kind="CASH_DIVIDEND",
             effective_date=date(2026, 1, 2),
@@ -118,8 +168,8 @@ class CorporateSettlementTests(unittest.TestCase):
             settle_cash(payable, "-16")
 
     def test_cash_merger_extinguishes_position_once(self):
-        book = CorporateActionBook(state())
-        event = CorporateEvent.create(
+        book = bound_book(state())
+        event = corporate_event(
             event_id="merger-1",
             kind="MERGER_CASH",
             effective_date=date(2026, 1, 2),
@@ -133,8 +183,8 @@ class CorporateSettlementTests(unittest.TestCase):
         self.assertEqual(result.economic_pnl, Decimal("100"))
 
     def test_delist_without_evidenced_consideration_fails_closed(self):
-        book = CorporateActionBook(state())
-        event = CorporateEvent.create(
+        book = bound_book(state())
+        event = corporate_event(
             event_id="delist-1",
             kind="DELIST",
             effective_date=date(2026, 1, 2),
@@ -210,7 +260,7 @@ class CorporateSettlementTests(unittest.TestCase):
 
     def test_corporate_event_rejects_duplicate_normalized_payload_keys(self):
         with self.assertRaisesRegex(ValueError, "unique after normalization"):
-            CorporateEvent.create(
+            corporate_event(
                 event_id="ambiguous-split",
                 kind="SPLIT",
                 effective_date=date(2026, 1, 2),
@@ -244,6 +294,8 @@ class CorporateSettlementTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "exact decimal"):
             CorporateEvent(
                 event_id="direct-float",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
                 kind="cash_dividend",
                 effective_date=date(2026, 1, 2),
                 source_revision="r1",
@@ -252,7 +304,7 @@ class CorporateSettlementTests(unittest.TestCase):
 
     def test_corporate_event_rejects_binary_float_economics(self):
         with self.assertRaisesRegex(TypeError, "exact decimal"):
-            CorporateEvent.create(
+            corporate_event(
                 event_id="split-float",
                 kind="SPLIT",
                 effective_date=date(2026, 1, 2),
@@ -260,7 +312,7 @@ class CorporateSettlementTests(unittest.TestCase):
                 payload={"numerator": 2.0, "denominator": 1},
             )
         with self.assertRaisesRegex(TypeError, "exact decimal"):
-            CorporateEvent.create(
+            corporate_event(
                 event_id="div-float",
                 kind="CASH_DIVIDEND",
                 effective_date=date(2026, 1, 2),
@@ -269,15 +321,15 @@ class CorporateSettlementTests(unittest.TestCase):
             )
 
     def test_duplicate_event_identity_with_changed_content_is_rejected(self):
-        book = CorporateActionBook(state())
-        first = CorporateEvent.create(
+        book = bound_book(state())
+        first = corporate_event(
             event_id="split-1",
             kind="SPLIT",
             effective_date=date(2026, 1, 2),
             source_revision="r1",
             payload={"numerator": 2, "denominator": 1},
         )
-        second = CorporateEvent.create(
+        second = corporate_event(
             event_id="split-1",
             kind="SPLIT",
             effective_date=date(2026, 1, 2),
@@ -287,6 +339,132 @@ class CorporateSettlementTests(unittest.TestCase):
         book.apply(first)
         with self.assertRaises(ValueError):
             book.apply(second)
+
+
+    def test_corporate_event_for_other_instrument_or_version_fails_before_mutation(self):
+        book = bound_book(state())
+        original_state = book.state
+        original_instrument = book.instrument_version
+
+        for event in (
+            corporate_event(
+                event_id="wrong-instrument",
+                instrument_id=OTHER_INSTRUMENT_ID,
+                kind="SPLIT",
+                effective_date=date(2026, 1, 2),
+                source_revision="r1",
+                payload={"numerator": 2, "denominator": 1},
+            ),
+            corporate_event(
+                event_id="wrong-version",
+                instrument_version=2,
+                kind="CASH_DIVIDEND",
+                effective_date=date(2026, 1, 2),
+                source_revision="r1",
+                payload={"per_share": "1"},
+            ),
+        ):
+            with self.subTest(event=event.event_id):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "instrument identity mismatch",
+                ):
+                    book.apply(event)
+                self.assertEqual(book.state, original_state)
+                self.assertEqual(book.instrument_version, original_instrument)
+                self.assertEqual(book.applied_event_ids, ())
+
+    def test_symbol_change_requires_registered_next_instrument_version_and_is_zero_pnl(self):
+        first = instrument()
+        second = instrument(
+            version=2,
+            symbol="BBB",
+            effective_from=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        )
+        registry = InstrumentRegistry(versions=(first, second))
+        book = bound_book(state(), current=first, registry=registry)
+        before = book.state
+        event = corporate_event(
+            event_id="symbol-change-1",
+            kind="SYMBOL_CHANGE",
+            effective_date=date(2026, 6, 1),
+            source_revision="provider-revision-7",
+            payload={"successor_instrument_version": 2},
+        )
+
+        result = book.apply(event)
+        self.assertEqual(result.economic_pnl, Decimal("0"))
+        self.assertEqual(result.before, before)
+        self.assertEqual(result.after.symbol, "BBB")
+        self.assertEqual(result.after.quantity, before.quantity)
+        self.assertEqual(result.after.total_basis, before.total_basis)
+        self.assertEqual(result.after.settled_cash, before.settled_cash)
+        self.assertEqual(result.after.unsettled_cash, before.unsettled_cash)
+        self.assertEqual(book.instrument_version, second)
+        self.assertEqual(book.apply(event), result)
+
+    def test_symbol_change_rejects_unregistered_or_non_next_successor(self):
+        first = instrument()
+        registry = InstrumentRegistry(versions=(first,))
+        book = bound_book(state(), current=first, registry=registry)
+        event = corporate_event(
+            event_id="symbol-change-missing",
+            kind="SYMBOL_CHANGE",
+            effective_date=date(2026, 6, 1),
+            source_revision="r1",
+            payload={"successor_instrument_version": 2},
+        )
+        with self.assertRaisesRegex(ValueError, "not registered"):
+            book.apply(event)
+        self.assertEqual(book.instrument_version, first)
+        self.assertEqual(book.state, state())
+
+    def test_split_then_symbol_change_replay_is_deterministic(self):
+        first = instrument()
+        second = instrument(
+            version=2,
+            symbol="BBB",
+            effective_from=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        )
+        registry = InstrumentRegistry(versions=(first, second))
+        events = (
+            corporate_event(
+                event_id="split-before-rename",
+                kind="SPLIT",
+                effective_date=date(2026, 1, 2),
+                source_revision="r1",
+                payload={"numerator": 2, "denominator": 1},
+            ),
+            corporate_event(
+                event_id="symbol-change-after-split",
+                kind="SYMBOL_CHANGE",
+                effective_date=date(2026, 6, 1),
+                source_revision="r2",
+                payload={"successor_instrument_version": 2},
+            ),
+        )
+        first_run = CorporateActionBook.replay(
+            state(),
+            instrument_version=first,
+            registry=registry,
+            events=events,
+        )
+        restarted = CorporateActionBook.replay(
+            state(),
+            instrument_version=first,
+            registry=registry,
+            events=events,
+        )
+        self.assertEqual(first_run.state, restarted.state)
+        self.assertEqual(first_run.instrument_version, restarted.instrument_version)
+        self.assertEqual(first_run.state.quantity, Decimal("20"))
+        self.assertEqual(first_run.state.total_basis, Decimal("1000"))
+        self.assertEqual(first_run.state.symbol, "BBB")
+        self.assertEqual(
+            first_run.applied_event_ids,
+            ("split-before-rename", "symbol-change-after-split"),
+        )
+
 
 
 if __name__ == "__main__":

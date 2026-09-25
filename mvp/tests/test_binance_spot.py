@@ -309,6 +309,14 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         with self.assertRaisesRegex(BinanceSpotAdapterError, "boolean"):
             symbol_rules(apply_to_market="false")
 
+    def test_exchange_info_rules_cannot_be_forged_by_direct_construction(self):
+        parsed = symbol_rules()
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "canonical provider payload parsing",
+        ):
+            BinanceSpotSymbolRules(**parsed.__dict__)
+
     def test_ack_is_never_promoted_to_fill(self):
         result = parse_order_ack(
             attempt_id=str(uuid4()),

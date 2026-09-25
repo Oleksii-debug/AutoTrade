@@ -127,6 +127,20 @@ class HostCommandStateTests(unittest.TestCase):
         self.assertIn("stale_state_version", stale.reason_codes)
         self.assertEqual(stale.state_version, "1")
 
+    def test_unknown_or_noncanonical_action_is_rejected_before_mutation(self):
+        for action in (
+            "FUTURE_PRIVILEGED_ACTION",
+            "block_new_exposure",
+            " BLOCK_NEW_EXPOSURE",
+        ):
+            with self.subTest(action=action), self.assertRaisesRegex(
+                ValueError,
+                "host action",
+            ):
+                self.store.submit(self.command(action=action))
+            self.assertEqual(self.store.state_version, 0)
+            self.assertEqual(self.store.cursor, 0)
+
     def test_unauthorized_session_is_rejected_before_mutation(self):
         with self.assertRaises(PermissionError):
             self.store.submit(self.command(session="forged"))

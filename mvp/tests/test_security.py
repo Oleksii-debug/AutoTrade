@@ -335,6 +335,16 @@ class SecurityBoundaryTests(unittest.TestCase):
             store.submit(forged)
         self.assertEqual(store.state_version, 1)
 
+    def test_unknown_host_action_is_not_authorized_even_for_owner(self):
+        self.assertFalse(
+            self.boundary.validate_host_session(
+                self.owner.token,
+                self.owner.subject,
+                self.owner.origin,
+                "FUTURE_PRIVILEGED_ACTION",
+            )
+        )
+
     def test_host_validator_allows_operator_but_rejects_read_only_roles(self):
         store = HostCommandStore(
             account_id="paper-account-1",

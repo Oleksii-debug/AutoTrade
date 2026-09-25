@@ -6,6 +6,8 @@ from pathlib import Path
 from referencing import Registry, Resource
 from jsonschema import Draft202012Validator, FormatChecker
 
+from mvp.autotrade_mvp.host_actions import SUPPORTED_HOST_ACTIONS
+
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACTS = ROOT / "contracts"
 SCHEMAS = CONTRACTS / "jsonschema"
@@ -189,6 +191,25 @@ class ContractSchemaTests(unittest.TestCase):
         schema = self.schemas["ui.schema.json"]
         validator = Draft202012Validator({"$ref": f"{schema['$id']}#/$defs/UiCommand"}, registry=self.registry)
         self.assertFalse(validator.is_valid(fixture))
+
+    def test_ui_command_action_set_matches_runtime_policy_and_rejects_unknown(self):
+        fixture = json.loads((FIXTURES / "ui-command.valid.json").read_text())
+        schema = self.schemas["ui.schema.json"]
+        action_schema = schema["$defs"]["UiCommand"]["properties"]["action"]
+        self.assertEqual(tuple(action_schema["enum"]), SUPPORTED_HOST_ACTIONS)
+        validator = Draft202012Validator(
+            {"$ref": f"{schema['$id']}#/$defs/UiCommand"},
+            registry=self.registry,
+        )
+        for action in (
+            "AUTHORITY.REVOKE",
+            "FUTURE_PRIVILEGED_ACTION",
+            "block_new_exposure",
+        ):
+            candidate = dict(fixture)
+            candidate["action"] = action
+            with self.subTest(action=action):
+                self.assertFalse(validator.is_valid(candidate))
 
     def test_ui_command_requires_account_and_environment_scope(self):
         fixture = json.loads((FIXTURES / "ui-command.valid.json").read_text())

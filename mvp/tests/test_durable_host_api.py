@@ -82,6 +82,21 @@ class JournalBackedHostApiTests(unittest.TestCase):
         self.assertEqual(snapshot["account_id"], "paper-account-1")
         self.assertEqual(snapshot["environment"], "PAPER")
 
+    def test_unknown_or_noncanonical_action_is_rejected_before_durable_mutation(self):
+        store = self.store()
+        for action in (
+            "FUTURE_PRIVILEGED_ACTION",
+            "block_new_exposure",
+            " BLOCK_NEW_EXPOSURE",
+        ):
+            with self.subTest(action=action), self.assertRaisesRegex(
+                ValueError,
+                "host action",
+            ):
+                store.submit(self.command(action=action))
+            self.assertEqual(store.state_version, 0)
+            self.assertEqual(store.events_after(0), ())
+
     def test_same_v2_command_has_identical_in_memory_and_durable_admission(self):
         command = self.command()
         memory = HostCommandStore(

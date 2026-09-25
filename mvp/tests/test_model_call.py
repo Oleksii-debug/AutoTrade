@@ -618,17 +618,31 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 budget.active_reservation(attempt_id),
                 Decimal("1.2"),
             )
+            resolver_calls = []
+
+            def changed_pricing_must_not_run(_spec, _descriptors):
+                resolver_calls.append(True)
+                raise AssertionError(
+                    "reserved recovery must use durable pricing identity"
+                )
+
+            restarted = orchestrator_for(
+                budget=budget,
+                clock=clock,
+                pricing_evidence_resolver=changed_pricing_must_not_run,
+            )
             fences = []
-            recovered = orchestrator.recover_reserved_not_started(
+            recovered = restarted.recover_reserved_not_started(
                 spec=call_spec,
                 recovery_fence=lambda: fences.append("fenced"),
             )
             self.assertEqual(recovered.status, "NOT_SENT")
             self.assertEqual(fences, ["fenced"])
+            self.assertEqual(resolver_calls, [])
             self.assertIsNone(budget.active_reservation(attempt_id))
 
             calls = []
-            repeated = orchestrator.execute(
+            repeated = restarted.execute(
                 spec=call_spec,
                 policy=fixed_policy(),
                 request=request,

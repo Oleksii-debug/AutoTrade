@@ -268,6 +268,7 @@ internal static class Program
         List<string> commandBodies = [];
         int posts = 0;
         int stateReads = 0;
+        int operationReads = 0;
         const string operationId = "44444444-4444-4444-4444-444444444444";
 
         DelegateHandler handler = new(async (request, _, cancellationToken) =>
@@ -311,20 +312,24 @@ internal static class Program
                 && request.RequestUri!.AbsolutePath
                     == "/api/v1/operations/" + operationId)
             {
+                operationReads++;
+                bool succeeded = operationReads >= 2;
                 return Json(
                     HttpStatusCode.OK,
                     new
                     {
                         operation_id = operationId,
-                        phase = "QUEUED",
+                        phase = succeeded ? "SUCCEEDED" : "QUEUED",
                         started_at = NowUtc(),
                         updated_at = NowUtc(),
                         affected_refs = Array.Empty<string>(),
                         evidence = Array.Empty<object>(),
-                        remaining_uncertainty = new[]
-                        {
-                            "provider_in_flight_state_unknown",
-                        },
+                        remaining_uncertainty = succeeded
+                            ? Array.Empty<string>()
+                            : new[]
+                            {
+                                "provider_in_flight_state_unknown",
+                            },
                     });
             }
 
@@ -353,6 +358,9 @@ internal static class Program
             await restartedProcess.BlockNewExposureAsync(CancellationToken.None);
 
         Check.True(recovered.Accepted, "restart did not recover durable acceptance");
+        Check.True(
+            !recovered.DurableBlockConfirmed,
+            "queued operation must not fabricate durable block confirmation");
         Check.True(posts == 2, "restart recovery did not perform one exact retry");
         Check.True(
             stateReads == 1,
@@ -362,8 +370,30 @@ internal static class Program
                 && commandBodies[0] == commandBodies[1],
             "restart changed the persisted command bytes");
         Check.True(
+            pendingStore.Payload is not null,
+            "non-terminal accepted operation lost its exact restart recovery record");
+
+        AuthenticatedEmergencyHostClient secondRestart = new(
+            new HttpClient(handler),
+            new Uri("http://127.0.0.1:8765/"),
+            sessions,
+            pendingStore);
+        EmergencyCommandResult terminal =
+            await secondRestart.BlockNewExposureAsync(CancellationToken.None);
+        Check.True(
+            terminal.DurableBlockConfirmed,
+            "succeeded recovered operation did not confirm the durable block");
+        Check.True(posts == 3, "second restart did not recover the same command exactly once");
+        Check.True(
+            stateReads == 1,
+            "accepted-operation recovery minted a fresh snapshot instead of reusing the exact command");
+        Check.True(
+            commandBodies.Count == 3
+                && commandBodies.All(body => body == commandBodies[0]),
+            "accepted-operation restart changed command/idempotency/scope/session bytes");
+        Check.True(
             pendingStore.Payload is null,
-            "accepted command did not clear the secure recovery record");
+            "terminal recovered operation did not clear the secure recovery record");
     }
 
     static async Task RestartedCommandCannotRetargetSessionTest()

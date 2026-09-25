@@ -675,6 +675,7 @@ def reconcile_account(
 
     provider_by_id: dict[str, ProviderFillEvidence] = {}
     provider_client_ids: set[str] = set()
+    provider_client_fill_times: dict[str, list[datetime]] = {}
     for fill in provider_fills:
         if not isinstance(fill, ProviderFillEvidence):
             raise TypeError("provider_fills must contain ProviderFillEvidence")
@@ -691,6 +692,9 @@ def reconcile_account(
         provider_by_id[fill.provider_execution_id] = fill
         if fill.client_order_id is not None:
             provider_client_ids.add(fill.client_order_id)
+            provider_client_fill_times.setdefault(fill.client_order_id, []).append(
+                _instant(fill.trade_time, name="provider_fill.trade_time")
+            )
 
     provider_ids = set(provider_by_id)
     local_id_set = set(local_ids)
@@ -909,13 +913,23 @@ def reconcile_account(
             submission.client_order_id
         )
         provider_order_ids: tuple[str, ...] = ()
-        if submission.client_order_id in provider_client_ids:
+        matching_fill_times = provider_client_fill_times.get(
+            submission.client_order_id, ()
+        )
+        causal_execution_observed = any(
+            submission_time <= trade_time <= end
+            for trade_time in matching_fill_times
+        )
+        if causal_execution_observed:
             outcome = "OBSERVED_EXECUTION"
-            reason = "provider_activity_contains_client_order_id"
+            reason = "provider_execution_observed_after_submission"
         elif provider_working is not None:
             outcome = "OBSERVED_WORKING_ORDER"
             reason = "provider_working_orders_contains_client_order_id"
             provider_order_ids = (provider_working.provider_order_id,)
+        elif submission.client_order_id in provider_client_ids:
+            outcome = "UNKNOWN"
+            reason = "matching_provider_execution_outside_submission_window"
         elif (
             snapshot_is_consistent
             and pagination_complete

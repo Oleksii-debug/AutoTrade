@@ -10,7 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from typing import Mapping
+from typing import Iterable, Mapping
+
+from .instruments import InstrumentRegistry, InstrumentVersion
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -140,6 +142,8 @@ class EquityState:
 @dataclass(frozen=True)
 class CorporateEvent:
     event_id: str
+    instrument_id: str
+    instrument_version: int
     kind: str
     effective_date: date
     source_revision: str
@@ -147,8 +151,21 @@ class CorporateEvent:
 
     def __post_init__(self) -> None:
         kind = _text(self.kind, name="kind").upper()
-        if kind not in {"SPLIT", "CASH_DIVIDEND", "MERGER_CASH", "DELIST"}:
+        if kind not in {
+            "SPLIT",
+            "CASH_DIVIDEND",
+            "MERGER_CASH",
+            "DELIST",
+            "SYMBOL_CHANGE",
+        }:
             raise ValueError("unsupported corporate event kind")
+        instrument_id = _text(self.instrument_id, name="instrument_id")
+        if (
+            not isinstance(self.instrument_version, int)
+            or isinstance(self.instrument_version, bool)
+            or self.instrument_version < 1
+        ):
+            raise ValueError("instrument_version must be a positive integer")
         if not isinstance(self.effective_date, date):
             raise ValueError("effective_date is required")
         if not isinstance(self.payload, Mapping):
@@ -172,6 +189,7 @@ class CorporateEvent:
             normalized_payload[key] = str(raw_value)
 
         object.__setattr__(self, "event_id", _text(self.event_id, name="event_id"))
+        object.__setattr__(self, "instrument_id", instrument_id)
         object.__setattr__(self, "kind", kind)
         object.__setattr__(
             self,
@@ -185,13 +203,21 @@ class CorporateEvent:
         cls,
         *,
         event_id: str,
+        instrument_id: str,
+        instrument_version: int,
         kind: str,
         effective_date: date,
         source_revision: str,
         payload: Mapping[str, object],
     ) -> "CorporateEvent":
         normalized_kind = _text(kind, name="kind").upper()
-        allowed = {"SPLIT", "CASH_DIVIDEND", "MERGER_CASH", "DELIST"}
+        allowed = {
+            "SPLIT",
+            "CASH_DIVIDEND",
+            "MERGER_CASH",
+            "DELIST",
+            "SYMBOL_CHANGE",
+        }
         if normalized_kind not in allowed:
             raise ValueError("unsupported corporate event kind")
         if not isinstance(effective_date, date):
@@ -212,6 +238,8 @@ class CorporateEvent:
             normalized_payload[key] = str(raw_value)
         return cls(
             event_id=_text(event_id, name="event_id"),
+            instrument_id=_text(instrument_id, name="instrument_id"),
+            instrument_version=instrument_version,
             kind=normalized_kind,
             effective_date=effective_date,
             source_revision=_text(source_revision, name="source_revision"),
@@ -229,15 +257,64 @@ class Transition:
 
 
 class CorporateActionBook:
-    def __init__(self, state: EquityState):
+    def __init__(
+        self,
+        state: EquityState,
+        *,
+        instrument_version: InstrumentVersion,
+        registry: InstrumentRegistry,
+    ):
+        if not isinstance(state, EquityState):
+            raise TypeError("state must be EquityState")
+        if not isinstance(instrument_version, InstrumentVersion):
+            raise TypeError("instrument_version must be InstrumentVersion")
+        if not isinstance(registry, InstrumentRegistry):
+            raise TypeError("registry must be InstrumentRegistry")
+        if instrument_version.asset_class != "CASH_EQUITY":
+            raise ValueError("corporate-action book requires a CASH_EQUITY instrument")
+        registered = tuple(
+            item
+            for item in registry.versions(instrument_version.instrument_id)
+            if item.version == instrument_version.version
+        )
+        if len(registered) != 1 or registered[0] != instrument_version:
+            raise ValueError(
+                "instrument_version must be the exact version registered in InstrumentRegistry"
+            )
+        if state.symbol != instrument_version.provider_symbol:
+            raise ValueError(
+                "equity state symbol does not match bound instrument version"
+            )
         self.state = state
+        self.instrument_version = instrument_version
+        self.registry = registry
         self._events: dict[str, tuple[CorporateEvent, Transition]] = {}
+
+    @classmethod
+    def replay(
+        cls,
+        state: EquityState,
+        *,
+        instrument_version: InstrumentVersion,
+        registry: InstrumentRegistry,
+        events: Iterable[CorporateEvent],
+    ) -> "CorporateActionBook":
+        book = cls(
+            state,
+            instrument_version=instrument_version,
+            registry=registry,
+        )
+        for event in events:
+            book.apply(event)
+        return book
 
     @property
     def applied_event_ids(self) -> tuple[str, ...]:
         return tuple(self._events)
 
     def apply(self, event: CorporateEvent) -> Transition:
+        if not isinstance(event, CorporateEvent):
+            raise TypeError("event must be CorporateEvent")
         existing = self._events.get(event.event_id)
         if existing is not None:
             prior_event, transition = existing
@@ -245,7 +322,14 @@ class CorporateActionBook:
                 raise ValueError("corporate event identity was reused with different content")
             return transition
 
-        before = self.state
+        current = self.instrument_version
+        if (
+            event.instrument_id != current.instrument_id
+            or event.instrument_version != current.version
+        ):
+            raise ValueError("corporate event instrument identity mismatch")
+
+        successor = None
         if event.kind == "SPLIT":
             transition = self._split(event)
         elif event.kind == "CASH_DIVIDEND":
@@ -254,9 +338,13 @@ class CorporateActionBook:
             transition = self._merger_cash(event)
         elif event.kind == "DELIST":
             transition = self._delist(event)
+        elif event.kind == "SYMBOL_CHANGE":
+            transition, successor = self._symbol_change(event)
         else:
             raise AssertionError("unreachable event kind")
         self.state = transition.after
+        if successor is not None:
+            self.instrument_version = successor
         self._events[event.event_id] = (event, transition)
         return transition
 
@@ -319,11 +407,78 @@ class CorporateActionBook:
         return self._merger_cash(
             CorporateEvent(
                 event_id=event.event_id,
+                instrument_id=event.instrument_id,
+                instrument_version=event.instrument_version,
                 kind="MERGER_CASH",
                 effective_date=event.effective_date,
                 source_revision=event.source_revision,
                 payload={"cash_per_share": event.payload["cash_per_share"]},
             )
+        )
+
+    def _symbol_change(
+        self,
+        event: CorporateEvent,
+    ) -> tuple[Transition, InstrumentVersion]:
+        if set(event.payload) != {"successor_instrument_version"}:
+            raise ValueError(
+                "symbol change requires only successor_instrument_version"
+            )
+        raw_version = event.payload["successor_instrument_version"]
+        if not raw_version.isdigit():
+            raise ValueError(
+                "successor_instrument_version must be a positive integer"
+            )
+        successor_version = int(raw_version)
+        current = self.instrument_version
+        if successor_version != current.version + 1:
+            raise ValueError(
+                "symbol change successor must be the next instrument version"
+            )
+        matches = tuple(
+            item
+            for item in self.registry.versions(current.instrument_id)
+            if item.version == successor_version
+        )
+        if len(matches) != 1:
+            raise ValueError(
+                "symbol change successor is not registered in InstrumentRegistry"
+            )
+        successor = matches[0]
+        if successor.instrument_id != current.instrument_id:
+            raise ValueError(
+                "symbol change cannot change immutable instrument_id"
+            )
+        if successor.effective_from.date() != event.effective_date:
+            raise ValueError(
+                "symbol change effective date does not match successor version"
+            )
+        if (
+            successor.provider_id != current.provider_id
+            or successor.venue_id != current.venue_id
+        ):
+            raise ValueError(
+                "symbol change successor must preserve provider and venue identity"
+            )
+        if successor.provider_symbol == current.provider_symbol:
+            raise ValueError(
+                "symbol change successor must carry a different provider symbol"
+            )
+
+        before = self.state
+        after = replace(before, symbol=successor.provider_symbol)
+        return (
+            Transition(
+                event_id=event.event_id,
+                before=before,
+                after=after,
+                economic_pnl=Decimal("0"),
+                reason=(
+                    "instrument version advanced to registered successor; "
+                    "economic position unchanged"
+                ),
+            ),
+            successor,
         )
 
 

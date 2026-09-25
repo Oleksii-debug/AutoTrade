@@ -32,6 +32,8 @@ public sealed record EmergencyHostStatus(
             ValidateConnectedIdentity(AccountId, nameof(AccountId));
             ValidateConnectedIdentity(Environment, nameof(Environment));
             ValidateConnectedIdentity(StateVersion, nameof(StateVersion));
+            ValidateEnvironment(Environment);
+            ValidateStateVersion(StateVersion);
         }
 
         return this;
@@ -45,6 +47,31 @@ public sealed record EmergencyHostStatus(
         {
             throw new InvalidOperationException(
                 $"Connected host status requires canonical {name} evidence.");
+        }
+    }
+
+    private static void ValidateEnvironment(string value)
+    {
+        if (value is not ("REPLAY" or "SIMULATION" or "PAPER" or "LIVE"))
+        {
+            throw new InvalidOperationException(
+                "Connected host status environment must be REPLAY, SIMULATION, PAPER, or LIVE.");
+        }
+    }
+
+    private static void ValidateStateVersion(string value)
+    {
+        bool canonical =
+            value == "0"
+            || (
+                value.Length > 0
+                && value[0] is >= '1' and <= '9'
+                && value.All(static character => character is >= '0' and <= '9')
+            );
+        if (!canonical)
+        {
+            throw new InvalidOperationException(
+                "Connected host state version must be a canonical non-negative integer sequence string.");
         }
     }
 

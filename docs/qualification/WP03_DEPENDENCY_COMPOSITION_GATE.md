@@ -15,7 +15,7 @@ This is not an SBOM and does not approve any dependency. It is a deterministic b
 
 ## Resolved in this lineage
 
-The repository and both .NET qualification workflows now select SDK `10.0.100` exactly, with `rollForward=disable`. The isolated research build backend is also pinned to `setuptools==84.0.0`. These remove SDK feature-band and Python build-backend drift from WP-03 evidence; they do not resolve transitive package, rights, SBOM or notice blockers.
+The repository and both .NET qualification workflows now select SDK `10.0.100` exactly, with `rollForward=disable`. The isolated research build backend is pinned to `setuptools==84.0.0`. The five Python CI workflows are pinned to CPython `3.12.10`, the exact patch runtime observed successfully on the hosted Windows runner in baseline run 36110529605. These remove SDK, Python runtime and build-backend drift from WP-03 evidence; they do not resolve transitive package, rights, SBOM or notice blockers.
 
 
 ## Command modes
@@ -24,6 +24,6 @@ The repository and both .NET qualification workflows now select SDK `10.0.100` e
 
 `python tools/check_dependency_composition.py --require-qualified` is the release-enforcement mode. It returns a non-zero exit code whenever any composition blocker remains. Release automation must use this strict form; report mode is not release approval.
 
-## Remaining reproducibility blocker
+## Remaining qualification blockers
 
-Five Python CI workflows still select the mutable minor line `3.12` rather than one qualified cross-platform patch runtime. The audit reports each as `NON_EXACT_CI_PYTHON_VERSION`. This is intentionally unresolved until a Windows/Linux-compatible exact runtime is selected and qualification evidence exists; the gate must not invent a portable patch pin.
+The CI Python runtime reproducibility blocker is resolved by exact CPython `3.12.10` pinning. WP-03 remains fail-closed for the independent unresolved dependency composition, rights, notice, advisory and release-evidence blockers reported by the machine gate.

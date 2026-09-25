@@ -85,22 +85,27 @@ class DependencyCompositionGateTests(unittest.TestCase):
         self.assertNotIn('dotnet-version: "10.0.x"', foundation)
         self.assertNotIn('dotnet-version: "10.0.x"', lean)
 
-    def test_mutable_python_ci_runtime_is_an_explicit_blocker(self):
+    def test_ci_python_runtime_is_exact_and_cross_platform_pinned(self):
         blockers = {
             item
             for item in self.report.blockers
             if item.startswith("NON_EXACT_CI_PYTHON_VERSION:")
         }
-        self.assertEqual(
-            blockers,
-            {
-                "NON_EXACT_CI_PYTHON_VERSION:.github/workflows/baseline.yml:3.12",
-                "NON_EXACT_CI_PYTHON_VERSION:.github/workflows/contracts.yml:3.12",
-                "NON_EXACT_CI_PYTHON_VERSION:.github/workflows/control-plane.yml:3.12",
-                "NON_EXACT_CI_PYTHON_VERSION:.github/workflows/research-primitives.yml:3.12",
-                "NON_EXACT_CI_PYTHON_VERSION:.github/workflows/verify.yml:3.12",
-            },
+        self.assertEqual(blockers, set())
+
+        root = Path(__file__).resolve().parents[2]
+        workflow_paths = (
+            ".github/workflows/baseline.yml",
+            ".github/workflows/contracts.yml",
+            ".github/workflows/control-plane.yml",
+            ".github/workflows/research-primitives.yml",
+            ".github/workflows/verify.yml",
         )
+        for relative in workflow_paths:
+            with self.subTest(workflow=relative):
+                text = (root / relative).read_text(encoding="utf-8")
+                self.assertIn("3.12.10", text)
+                self.assertNotIn("3.12.14", text)
 
     def test_unresolved_first_party_rights_remain_fail_closed(self):
         unresolved = {

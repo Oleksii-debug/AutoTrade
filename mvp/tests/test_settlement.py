@@ -96,9 +96,9 @@ class SettlementBookTests(unittest.TestCase):
         self.assertEqual(before.economic_cash, Decimal("799"))
         self.assertEqual(book.available_to_spend("USD"), Decimal("799"))
         with self.assertRaisesRegex(SettlementConflict, "before contractual"):
-            book.settle("buy-1", as_of=date(2026, 9, 24))
-        self.assertTrue(book.settle("buy-1", as_of=date(2026, 9, 25)))
-        self.assertFalse(book.settle("buy-1", as_of=date(2026, 9, 26)))
+            book.settle("buy-1", as_of=date(2026, 9, 24), settlement_evidence_ref="provider:cash:buy-1")
+        self.assertTrue(book.settle("buy-1", as_of=date(2026, 9, 25), settlement_evidence_ref="provider:cash:buy-1"))
+        self.assertFalse(book.settle("buy-1", as_of=date(2026, 9, 26), settlement_evidence_ref="provider:cash:buy-1"))
         after = book.snapshot("USD")
         self.assertEqual(after.settled_cash, Decimal("799"))
         self.assertEqual(after.unsettled_payable, Decimal("0"))
@@ -112,7 +112,13 @@ class SettlementBookTests(unittest.TestCase):
         ):
             book.add(obligation)
         self.assertEqual(
-            book.settle_due(as_of=date(2026, 9, 22)),
+            book.settle_due(
+                as_of=date(2026, 9, 22),
+                settlement_evidence={
+                    "a": "provider:cash:a",
+                    "b": "provider:cash:b",
+                },
+            ),
             ("a", "b"),
         )
         self.assertEqual(book.snapshot("USD").settled_cash, Decimal("5"))
@@ -284,24 +290,36 @@ class SettlementBookTests(unittest.TestCase):
             date(2026, 9, 24), date(2026, 9, 25),
         )
         book = SettlementBook(settled_cash={"USD": "1000"}, obligations=(obligation,))
-        self.assertTrue(book.settle("buy", as_of=date(2026, 9, 25)))
+        self.assertTrue(
+            book.settle(
+                "buy",
+                as_of=date(2026, 9, 25),
+                settlement_evidence_ref="provider:cash:buy",
+            )
+        )
         snapshot = book.snapshot("USD")
 
         restored = SettlementBook(
             settled_cash={"USD": snapshot.settled_cash},
             obligations=(obligation,),
-            settled_obligation_ids=("buy",),
+            settled_obligation_evidence={"buy": "provider:cash:buy"},
         )
         self.assertTrue(restored.is_settled("buy"))
         self.assertEqual(restored.snapshot("USD"), snapshot)
         self.assertEqual(restored.available_to_spend("USD"), Decimal("799"))
-        self.assertFalse(restored.settle("buy", as_of=date(2026, 9, 26)))
+        self.assertFalse(
+            restored.settle(
+                "buy",
+                as_of=date(2026, 9, 26),
+                settlement_evidence_ref="provider:cash:buy",
+            )
+        )
 
     def test_restart_rejects_unknown_settled_identity(self):
         with self.assertRaisesRegex(SettlementConflict, "unknown obligation"):
             SettlementBook(
                 settled_cash={"USD": "100"},
-                settled_obligation_ids=("missing",),
+                settled_obligation_evidence={"missing": "provider:cash:missing"},
             )
 
 
@@ -375,6 +393,55 @@ class SettlementBookTests(unittest.TestCase):
             settlement.available_to_spend("USD", reserve=reserve),
             Decimal("799"),
         )
+
+
+    def test_due_date_without_provider_evidence_does_not_make_receivable_spendable(self):
+        book = SettlementBook(settled_cash={"USD": "100"})
+        book.add(
+            SettlementObligation(
+                "sale-due",
+                "fill-due",
+                "USD",
+                Decimal("50"),
+                date(2026, 9, 20),
+                date(2026, 9, 22),
+            )
+        )
+        self.assertEqual(
+            book.settle_due(
+                as_of=date(2026, 9, 25),
+                settlement_evidence={},
+            ),
+            (),
+        )
+        self.assertEqual(book.snapshot("USD").unsettled_receivable, Decimal("50"))
+        self.assertEqual(book.available_to_spend("USD"), Decimal("100"))
+
+    def test_settlement_retry_with_different_evidence_fails_closed(self):
+        book = SettlementBook(settled_cash={"USD": "0"})
+        book.add(
+            SettlementObligation(
+                "cash-1",
+                "fill-1",
+                "USD",
+                Decimal("10"),
+                date(2026, 9, 20),
+                date(2026, 9, 22),
+            )
+        )
+        self.assertTrue(
+            book.settle(
+                "cash-1",
+                as_of=date(2026, 9, 22),
+                settlement_evidence_ref="provider:statement:1",
+            )
+        )
+        with self.assertRaisesRegex(SettlementConflict, "different settlement evidence"):
+            book.settle(
+                "cash-1",
+                as_of=date(2026, 9, 22),
+                settlement_evidence_ref="provider:statement:2",
+            )
 
 
 if __name__ == "__main__":

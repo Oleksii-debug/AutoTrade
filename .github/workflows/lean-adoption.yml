@@ -146,13 +146,18 @@ jobs:
             throw "Second LEAN adoption probe failed."
           }
 
-          $firstText = ($first -join [Environment]::NewLine).Trim()
-          $secondText = ($second -join [Environment]::NewLine).Trim()
-          if ($firstText -ne "WP02_LEAN_ADOPTION_PROBE_PASS") {
-            throw "Unexpected first probe output: $firstText"
+          # LEAN emits timestamped TRACE lines to stdout while composing assemblies.
+          # Those diagnostics are expected and intentionally non-deterministic, so they
+          # must not be confused with the probe's machine-readable verdict.
+          $firstLines = @($first | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+          $secondLines = @($second | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+          $firstVerdicts = @($firstLines | Where-Object { $_ -eq "WP02_LEAN_ADOPTION_PROBE_PASS" })
+          $secondVerdicts = @($secondLines | Where-Object { $_ -eq "WP02_LEAN_ADOPTION_PROBE_PASS" })
+          if ($firstVerdicts.Count -ne 1) {
+            throw "First probe did not emit exactly one PASS verdict. Output: $($firstLines -join ' | ')"
           }
-          if ($secondText -ne $firstText) {
-            throw "Repeated probe output changed across clean process starts."
+          if ($secondVerdicts.Count -ne 1) {
+            throw "Second probe did not emit exactly one PASS verdict. Output: $($secondLines -join ' | ')"
           }
 
           $autoTradeTrackedChanges = @(git status --porcelain --untracked-files=no)
@@ -172,7 +177,7 @@ jobs:
             throw "LEAN adoption probe changed source outside the approved security composition."
           }
 
-          Write-Output $firstText
+          Write-Output $firstVerdicts[0]
 
 
       - name: Write exact-head adoption evidence

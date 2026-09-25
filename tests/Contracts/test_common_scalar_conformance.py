@@ -5,7 +5,7 @@ import unittest
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
-from contracts.bindings.python.common_scalars import is_valid_common_scalar
+from contracts.bindings.python.common_scalars import (\n    CONTRACT_VERSION,\n    is_valid_common_scalar,\n)
 
 
 ROOT = Path(__file__).resolve().parents[2]

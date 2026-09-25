@@ -572,6 +572,7 @@ def prepare_order_submission(
     time_in_force: str,
     price: object | None = None,
     reduce_only: bool = False,
+    position_side: str | None = None,
     position_idx: int | None = None,
 ) -> BybitPreparedSubmission:
     if not isinstance(capability, CapabilitySnapshot):
@@ -619,7 +620,13 @@ def prepare_order_submission(
         time_in_force=time_in_force,
         price=price,
         reduce_only=reduce_only,
+        position_side=position_side,
         position_idx=position_idx,
+        capability=capability,
+        capability_at=point,
+        account_id=capability.account_id,
+        instrument_version=capability.instrument_version,
+        provider_environment=provider_env,
     )
     return BybitPreparedSubmission(
         endpoint=BYBIT_DOCUMENTED_ENDPOINTS["PLACE_ORDER"],

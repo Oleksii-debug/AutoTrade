@@ -71,6 +71,7 @@ def prepared(client_order_id="bybit-order-1"):
         time_in_force="GTC",
         price="50000",
         reduce_only=False,
+        position_side="LONG",
         position_idx=1,
     )
     return capability, request
@@ -104,7 +105,7 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
             policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
             provider_environment="TESTNET",
             account_id="paper-1",
-            capability=capability,
+            capability_snapshot_id=capability.snapshot_id,
             capability_registry=registry,
             secret_resolver=resolver,
             credential_handle=read_handle(),

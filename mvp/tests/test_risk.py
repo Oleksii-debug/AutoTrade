@@ -1007,6 +1007,70 @@ class IndependentRiskTests(unittest.TestCase):
             next(x for x in exact.rules if x.rule == "liquidation_headroom").passed
         )
 
+    def test_reduce_only_cannot_use_exception_when_tail_risk_worsens(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="SELL",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                reduce_only=True,
+            ),
+            context(
+                positions={"ABC": "10", "XYZ": "10"},
+                marks={"ABC": "100", "XYZ": "50"},
+                stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.10"},),
+                tail_scenarios=({"ABC": "0.10", "XYZ": "-1.00"},),
+                liquidation_headroom="0.10",
+            ),
+            policy(
+                max_abs_position="5",
+                max_expected_shortfall="405",
+                expected_shortfall_tail_fraction="1",
+                min_liquidation_headroom="0.25",
+            ),
+        )
+        failed = {item.rule for item in decision.rules if not item.passed}
+        self.assertIn("expected_shortfall", failed)
+        self.assertIn("liquidation_headroom", failed)
+        self.assertIn("position_limit", failed)
+        self.assertEqual(
+            next(x for x in decision.rules if x.rule == "expected_shortfall").observed,
+            "410.00",
+        )
+        self.assertFalse(decision.admitted)
+
+    def test_strict_reduce_only_can_pass_known_liquidation_breach_when_tail_improves(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="SELL",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                reduce_only=True,
+            ),
+            context(
+                positions={"ABC": "10"},
+                marks={"ABC": "100"},
+                stress_scenarios=({"ABC": "-0.50"},),
+                tail_scenarios=({"ABC": "-0.50"},),
+                liquidation_headroom="0.10",
+            ),
+            policy(
+                max_abs_position="5",
+                max_expected_shortfall="100",
+                expected_shortfall_tail_fraction="1",
+                min_liquidation_headroom="0.25",
+                max_stress_loss="100",
+            ),
+        )
+        self.assertTrue(decision.admitted)
+        self.assertTrue(
+            next(x for x in decision.rules if x.rule == "liquidation_headroom").passed
+        )
+
     def test_tail_and_liquidation_inputs_reject_binary_float(self):
         with self.assertRaises(TypeError):
             context(tail_scenarios=({"ABC": -0.10},))

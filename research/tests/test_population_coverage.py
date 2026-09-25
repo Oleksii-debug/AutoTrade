@@ -481,5 +481,51 @@ class PopulationCoverageTests(unittest.TestCase):
             self.assertFalse(result.promotable)
 
 
+    def test_mature_but_unreconciled_label_is_not_complete(self):
+        with TemporaryDirectory() as directory:
+            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            payload = episode_payload(
+                "POSITIVE",
+                side="BUY",
+                label_mature=True,
+                label="mature-but-unreconciled",
+            )
+            payload["outcome"]["reconciliation_state"] = "PENDING"
+            episode_id, _ = store.append_episode(
+                episode_id="88888888-8888-4888-8888-888888888888",
+                decision_time=DECISION,
+                information_cutoff=DECISION,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload,
+            )
+            manifest = self._manifest(store, [episode_id])
+            self.assertFalse(
+                dict(manifest.included_labels_complete_by_regime)["calm"]
+            )
+            metrics = {
+                "calm": RegimeMetric.create(
+                    regime="calm",
+                    champion_net_score="0.10",
+                    candidate_net_score="0.11",
+                    observations=1,
+                    label_complete=True,
+                )
+            }
+            result = evaluate_population_bound_retention(
+                metrics,
+                retention_policy(),
+                manifest,
+            )
+            self.assertEqual(result.status, "INCONCLUSIVE")
+            self.assertFalse(result.promotable)
+            self.assertIn(
+                "population label-completeness mismatch for regime calm",
+                result.reasons,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

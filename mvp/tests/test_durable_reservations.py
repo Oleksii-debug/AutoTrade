@@ -33,6 +33,7 @@ class DurableReservationBookTests(unittest.TestCase):
             self.store,
             environment="PAPER",
             account_id="paper-account",
+            resolution_evidence_verifier=lambda reference: reference == EVIDENCE,
         )
 
     def reserve(self, book, *, amount="70", command="cmd-reserve", idem="idem-reserve"):
@@ -463,6 +464,50 @@ class DurableReservationBookTests(unittest.TestCase):
                 available={"CASH:USD": "100"},
             )
         self.assertEqual(book.version, 0)
+
+    def test_terminal_release_requires_authoritative_evidence_verifier(self):
+        book = DurableReservationBook(
+            self.store,
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        self.reserve(book)
+        before = book.total_reserved("CASH:USD")
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "authoritative resolution evidence verifier",
+        ):
+            book.mark_terminal(
+                command_id="cmd-terminal-no-verifier",
+                idempotency_key="idem-terminal-no-verifier",
+                reservation_id="r1",
+                outcome="PROVEN_ABSENT",
+                resolution_evidence=EVIDENCE,
+            )
+        self.assertEqual(book.total_reserved("CASH:USD"), before)
+        self.assertEqual(book.version, 1)
+
+    def test_terminal_release_fails_closed_when_artifact_authority_rejects(self):
+        book = DurableReservationBook(
+            self.store,
+            environment="PAPER",
+            account_id="paper-account",
+            resolution_evidence_verifier=lambda reference: False,
+        )
+        self.reserve(book)
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "not verified",
+        ):
+            book.mark_terminal(
+                command_id="cmd-terminal-rejected-evidence",
+                idempotency_key="idem-terminal-rejected-evidence",
+                reservation_id="r1",
+                outcome="PROVEN_ABSENT",
+                resolution_evidence=EVIDENCE,
+            )
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("70"))
+        self.assertEqual(book.version, 1)
 
     def test_terminal_release_requires_immutable_evidence_before_journal_mutation(self):
         book = self.book()

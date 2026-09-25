@@ -10,6 +10,8 @@ import json
 from typing import Any, Callable, FrozenSet, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from research.autotrade_research.artifacts.store import ArtifactStore
+
 from .durable_reservations import DurableReservationBook
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reconciliation_journal import load_account_resource_availability_evidence
@@ -390,8 +392,19 @@ def _authority_event_id(event_type: str, key: str) -> str:
 
 
 class AuthorityService:
-    def __init__(self, store: JournalStore | None = None):
+    def __init__(
+        self,
+        store: JournalStore | None = None,
+        *,
+        evidence_artifact_store: ArtifactStore | None = None,
+    ):
         self.store = store
+        if (
+            evidence_artifact_store is not None
+            and not isinstance(evidence_artifact_store, ArtifactStore)
+        ):
+            raise TypeError("evidence_artifact_store must be ArtifactStore")
+        self.evidence_artifact_store = evidence_artifact_store
         self._policies: dict[str, AuthorityPolicy] = {}
         self._revocations: dict[str, tuple[str, str]] = {}
         self._confirmations: dict[str, Confirmation] = {}
@@ -858,6 +871,7 @@ class AuthorityService:
                     max_age_seconds=availability_evidence.get(
                         "max_age_seconds"
                     ),
+                    evidence_artifact_store=self.evidence_artifact_store,
                 )
             )
         except (KeyError, TypeError, ValueError) as error:
@@ -1407,6 +1421,7 @@ class AuthorityService:
                     ),
                     now=now,
                     max_age_seconds=normalized_max_age,
+                    evidence_artifact_store=self.evidence_artifact_store,
                 )
                 availability_evidence = {
                     **loaded,

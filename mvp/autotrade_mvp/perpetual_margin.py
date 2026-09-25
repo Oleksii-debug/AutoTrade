@@ -65,7 +65,8 @@ def _instant(value: str, *, name: str) -> datetime:
 class MarginTier:
     notional_upper_bound: Decimal
     maintenance_rate: Decimal
-    maintenance_fixed: Decimal = Decimal("0")
+    maintenance_adjustment: Decimal = Decimal("0")
+    adjustment_convention: Literal["ADD", "DEDUCT"] = "ADD"
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -79,9 +80,28 @@ class MarginTier:
         object.__setattr__(self, "maintenance_rate", rate)
         object.__setattr__(
             self,
-            "maintenance_fixed",
-            _non_negative(self.maintenance_fixed, name="maintenance_fixed"),
+            "maintenance_adjustment",
+            _non_negative(
+                self.maintenance_adjustment,
+                name="maintenance_adjustment",
+            ),
         )
+        if self.adjustment_convention not in {"ADD", "DEDUCT"}:
+            raise PerpetualMarginError(
+                "adjustment_convention must be ADD or DEDUCT"
+            )
+
+    def maintenance_requirement(self, notional: Decimal) -> Decimal:
+        base = notional * self.maintenance_rate
+        if self.adjustment_convention == "ADD":
+            requirement = base + self.maintenance_adjustment
+        else:
+            requirement = base - self.maintenance_adjustment
+        if requirement < 0:
+            raise PerpetualMarginError(
+                "margin tier formula produced negative maintenance"
+            )
+        return requirement
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,7 +272,7 @@ def evaluate_perpetual_margin(
     )
 
     tier = _select_tier(notional, evidence.margin_tiers)
-    maintenance = notional * tier.maintenance_rate + tier.maintenance_fixed
+    maintenance = tier.maintenance_requirement(notional)
 
     now = _instant(evaluated_at, name="evaluated_at")
     max_age = timedelta(seconds=maximum_evidence_age_seconds)

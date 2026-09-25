@@ -1124,7 +1124,10 @@ class EvidenceBoundObjectiveAllocationResult:
     environment: str
     policy_version: str
     decision_time: str
+    provider_id: str
     account_id: str
+    instrument_versions: tuple[tuple[str, str], ...]
+    capability_snapshot_ids: tuple[tuple[str, str], ...]
     account_snapshot_id: str
     reconciliation_run_id: str
     account_state_version: int
@@ -1202,7 +1205,7 @@ def _candidate_evidence_matches(
     market: ImmutableAllocationEvidence,
     *,
     decision_time: str,
-) -> tuple[str, str]:
+) -> tuple[str, str, str, str]:
     symbol = item.candidate.symbol
     if _payload_text(objective, "symbol") != symbol:
         raise ValueError(f"objective evidence symbol mismatch for {symbol}")
@@ -1270,8 +1273,10 @@ def _candidate_evidence_matches(
                 f"market evidence max_executable_notional mismatch for {symbol}"
             )
     return (
+        _payload_text(market, "provider_id"),
         _payload_text(market, "account_id"),
         _payload_text(market, "instrument_version"),
+        _payload_text(market, "capability_snapshot_id"),
     )
 
 
@@ -1282,7 +1287,10 @@ def _allocation_decision_digest(
     environment: str,
     policy_version: str,
     decision_time: str,
+    provider_id: str,
     account_id: str,
+    instrument_versions: Sequence[tuple[str, str]],
+    capability_snapshot_ids: Sequence[tuple[str, str]],
     account_snapshot_id: str,
     reconciliation_run_id: str,
     account_state_version: int,
@@ -1293,7 +1301,16 @@ def _allocation_decision_digest(
         "environment": environment,
         "policy_version": policy_version,
         "decision_time": decision_time,
+        "provider_id": provider_id,
         "account_id": account_id,
+        "instrument_versions": [
+            {"symbol": symbol, "instrument_version": version}
+            for symbol, version in sorted(instrument_versions)
+        ],
+        "capability_snapshot_ids": [
+            {"symbol": symbol, "capability_snapshot_id": snapshot_id}
+            for symbol, snapshot_id in sorted(capability_snapshot_ids)
+        ],
         "account_snapshot_id": account_snapshot_id,
         "reconciliation_run_id": reconciliation_run_id,
         "account_state_version": account_state_version,
@@ -1372,8 +1389,10 @@ def allocate_evidence_bound_objective_targets(
 
     resolved_objective = {}
     resolved_market = {}
+    provider_ids = set()
     account_ids = set()
     instrument_versions = {}
+    capability_snapshot_ids = {}
     for item in materialized:
         symbol = item.candidate.symbol
         objective = _resolve_allocation_evidence(
@@ -1390,7 +1409,12 @@ def allocate_evidence_bound_objective_targets(
             expected_environment=normalized_environment,
             at=normalized_decision_time,
         )
-        account_id, instrument_version = _candidate_evidence_matches(
+        (
+            provider_id,
+            account_id,
+            instrument_version,
+            capability_snapshot_id,
+        ) = _candidate_evidence_matches(
             item,
             objective,
             market,
@@ -1398,10 +1422,15 @@ def allocate_evidence_bound_objective_targets(
         )
         resolved_objective[symbol] = objective
         resolved_market[symbol] = market
+        provider_ids.add(provider_id)
         account_ids.add(account_id)
         instrument_versions[symbol] = instrument_version
+        capability_snapshot_ids[symbol] = capability_snapshot_id
+    if len(provider_ids) != 1:
+        raise ValueError("market evidence candidates must share one provider_id")
     if len(account_ids) != 1:
         raise ValueError("market evidence candidates must share one account_id")
+    provider_id = next(iter(provider_ids))
     account_id = next(iter(account_ids))
 
     resolved_capital = _resolve_allocation_evidence(
@@ -1411,6 +1440,8 @@ def allocate_evidence_bound_objective_targets(
         expected_environment=normalized_environment,
         at=normalized_decision_time,
     )
+    if _payload_text(resolved_capital, "provider_id") != provider_id:
+        raise ValueError("capital evidence provider_id does not match market evidence")
     if _payload_text(resolved_capital, "account_id") != account_id:
         raise ValueError("capital evidence account_id does not match market evidence")
     if _payload_decimal(resolved_capital, "cash_available") != policy.cash_available:
@@ -1505,13 +1536,18 @@ def allocate_evidence_bound_objective_targets(
         (evidence.evidence_id, evidence.digest)
         for evidence in all_evidence
     )
+    bound_instrument_versions = tuple(sorted(instrument_versions.items()))
+    bound_capability_snapshot_ids = tuple(sorted(capability_snapshot_ids.items()))
     decision_digest = _allocation_decision_digest(
         objective_result,
         evidence_refs=evidence_refs,
         environment=normalized_environment,
         policy_version=normalized_policy_version,
         decision_time=normalized_decision_time,
+        provider_id=provider_id,
         account_id=account_id,
+        instrument_versions=bound_instrument_versions,
+        capability_snapshot_ids=bound_capability_snapshot_ids,
         account_snapshot_id=account_snapshot_id,
         reconciliation_run_id=reconciliation_run_id,
         account_state_version=account_state_version,
@@ -1525,13 +1561,32 @@ def allocate_evidence_bound_objective_targets(
         environment=normalized_environment,
         policy_version=normalized_policy_version,
         decision_time=normalized_decision_time,
+        provider_id=provider_id,
         account_id=account_id,
+        instrument_versions=bound_instrument_versions,
+        capability_snapshot_ids=bound_capability_snapshot_ids,
         account_snapshot_id=account_snapshot_id,
         reconciliation_run_id=reconciliation_run_id,
         account_state_version=account_state_version,
         reservation_state_version=reservation_state_version,
         reservation_state_digest=reservation_state_digest,
     )
+
+
+def _normalize_current_scope_mapping(
+    value: Mapping[str, str],
+    *,
+    name: str,
+) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{name} must be a mapping")
+    normalized: dict[str, str] = {}
+    for raw_symbol, raw_identity in value.items():
+        symbol = _text(raw_symbol, name=f"{name} symbol")
+        if symbol in normalized:
+            raise ValueError(f"{name} symbols must be unique")
+        normalized[symbol] = _text(raw_identity, name=f"{name} identity")
+    return tuple(sorted(normalized.items()))
 
 
 def revalidate_evidence_bound_allocation(
@@ -1541,6 +1596,9 @@ def revalidate_evidence_bound_allocation(
     environment: str,
     as_of: str,
     current_policy_version: str,
+    current_provider_id: str,
+    current_instrument_versions: Mapping[str, str],
+    current_capability_snapshot_ids: Mapping[str, str],
     current_account_id: str,
     current_account_snapshot_id: str,
     current_reconciliation_run_id: str,
@@ -1555,12 +1613,28 @@ def revalidate_evidence_bound_allocation(
     normalized_environment = _text(environment, name="allocation environment").upper()
     if normalized_environment != result.environment:
         raise ValueError("allocation result environment does not match authority environment")
-    point = _instant(as_of, name="allocation revalidation time").isoformat().replace(
-        "+00:00",
-        "Z",
+    point_instant = _instant(as_of, name="allocation revalidation time")
+    decision_instant = _instant(
+        result.decision_time,
+        name="allocation proposal decision_time",
     )
+    if point_instant < decision_instant:
+        raise ValueError("allocation revalidation time precedes proposal decision_time")
+    point = point_instant.isoformat().replace("+00:00", "Z")
     if _text(current_policy_version, name="current_policy_version") != result.policy_version:
         raise ValueError("policy version changed after allocation proposal")
+    if _text(current_provider_id, name="current_provider_id") != result.provider_id:
+        raise ValueError("provider identity changed after allocation proposal")
+    if _normalize_current_scope_mapping(
+        current_instrument_versions,
+        name="current_instrument_versions",
+    ) != result.instrument_versions:
+        raise ValueError("instrument version scope changed after allocation proposal")
+    if _normalize_current_scope_mapping(
+        current_capability_snapshot_ids,
+        name="current_capability_snapshot_ids",
+    ) != result.capability_snapshot_ids:
+        raise ValueError("capability snapshot scope changed after allocation proposal")
     if _text(current_account_id, name="current_account_id") != result.account_id:
         raise ValueError("account identity does not match allocation proposal")
     if _text(
@@ -1612,7 +1686,10 @@ def revalidate_evidence_bound_allocation(
         environment=result.environment,
         policy_version=result.policy_version,
         decision_time=result.decision_time,
+        provider_id=result.provider_id,
         account_id=result.account_id,
+        instrument_versions=result.instrument_versions,
+        capability_snapshot_ids=result.capability_snapshot_ids,
         account_snapshot_id=result.account_snapshot_id,
         reconciliation_run_id=result.reconciliation_run_id,
         account_state_version=result.account_state_version,

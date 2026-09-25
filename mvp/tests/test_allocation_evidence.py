@@ -54,7 +54,8 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
         )
 
     def bundle(self, *, objective_rate="0.10", capital_cash="1000",
-               environment="SIMULATION", market_valid_until=None):
+               environment="SIMULATION", market_valid_until=None,
+               capital_provider="SIMULATED"):
         objective = self.evidence(
             evidence_id="objective:aaa:v1",
             kind="OBJECTIVE",
@@ -98,6 +99,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             kind="CAPITAL_STATE",
             environment=environment,
             payload={
+                "provider_id": capital_provider,
                 "account_id": "acct:paper:1",
                 "account_snapshot_id": "snapshot:acct:1:v5",
                 "reconciliation_run_id": "reconciliation:acct:1:v5",
@@ -155,6 +157,9 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 environment="SIMULATION",
                 as_of="2026-09-25T18:40:00Z",
                 current_policy_version="risk-policy:12",
+                current_provider_id="SIMULATED",
+                current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                current_capability_snapshot_ids={"AAA": "capability:1"},
                 current_account_id="acct:paper:1",
                 current_account_snapshot_id="snapshot:acct:1:v5",
                 current_reconciliation_run_id="reconciliation:acct:1:v5",
@@ -262,6 +267,9 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 environment="SIMULATION",
                 as_of="2026-09-25T18:40:00Z",
                 current_policy_version="risk-policy:12",
+                current_provider_id="SIMULATED",
+                current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                current_capability_snapshot_ids={"AAA": "capability:1"},
                 current_account_id="acct:paper:1",
                 current_account_snapshot_id="snapshot:acct:1:v5",
                 current_reconciliation_run_id="reconciliation:acct:1:v5",
@@ -276,6 +284,9 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 environment="SIMULATION",
                 as_of="2026-09-25T18:40:00Z",
                 current_policy_version="risk-policy:12",
+                current_provider_id="SIMULATED",
+                current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                current_capability_snapshot_ids={"AAA": "capability:1"},
                 current_account_id="acct:paper:1",
                 current_account_snapshot_id="snapshot:acct:1:v5",
                 current_reconciliation_run_id="reconciliation:acct:1:v5",
@@ -292,6 +303,9 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             "resolved_evidence": bundle[-1],
             "environment": "SIMULATION",
             "as_of": "2026-09-25T18:40:00Z",
+            "current_provider_id": "SIMULATED",
+            "current_instrument_versions": {"AAA": "instrument:aaa:v3"},
+            "current_capability_snapshot_ids": {"AAA": "capability:1"},
             "current_account_id": "acct:paper:1",
             "current_account_snapshot_id": "snapshot:acct:1:v5",
             "current_account_state_version": 5,
@@ -319,6 +333,68 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 current_reservation_state_digest="4" * 64,
             )
 
+    def test_provider_capability_and_instrument_scope_are_current_at_admission(self):
+        with self.assertRaisesRegex(ValueError, "capital evidence provider_id"):
+            self.allocate(bundle=self.bundle(capital_provider="OTHER_PROVIDER"))
+
+        bundle = self.bundle()
+        result = self.allocate(bundle=bundle)
+        common = {
+            "result": result,
+            "resolved_evidence": bundle[-1],
+            "environment": "SIMULATION",
+            "as_of": "2026-09-25T18:40:00Z",
+            "current_policy_version": "risk-policy:12",
+            "current_provider_id": "SIMULATED",
+            "current_instrument_versions": {"AAA": "instrument:aaa:v3"},
+            "current_capability_snapshot_ids": {"AAA": "capability:1"},
+            "current_account_id": "acct:paper:1",
+            "current_account_snapshot_id": "snapshot:acct:1:v5",
+            "current_reconciliation_run_id": "reconciliation:acct:1:v5",
+            "current_account_state_version": 5,
+            "current_reservation_state_version": 9,
+            "current_reservation_state_digest": "3" * 64,
+        }
+        with self.assertRaisesRegex(ValueError, "provider identity changed"):
+            revalidate_evidence_bound_allocation(
+                **{**common, "current_provider_id": "OTHER_PROVIDER"}
+            )
+        with self.assertRaisesRegex(ValueError, "instrument version scope changed"):
+            revalidate_evidence_bound_allocation(
+                **{
+                    **common,
+                    "current_instrument_versions": {"AAA": "instrument:aaa:v4"},
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "capability snapshot scope changed"):
+            revalidate_evidence_bound_allocation(
+                **{
+                    **common,
+                    "current_capability_snapshot_ids": {"AAA": "capability:2"},
+                }
+            )
+
+    def test_revalidation_cannot_move_before_proposal_time(self):
+        bundle = self.bundle()
+        result = self.allocate(bundle=bundle)
+        with self.assertRaisesRegex(ValueError, "precedes proposal decision_time"):
+            revalidate_evidence_bound_allocation(
+                result,
+                resolved_evidence=bundle[-1],
+                environment="SIMULATION",
+                as_of="2026-09-25T18:29:59Z",
+                current_policy_version="risk-policy:12",
+                current_provider_id="SIMULATED",
+                current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                current_capability_snapshot_ids={"AAA": "capability:1"},
+                current_account_id="acct:paper:1",
+                current_account_snapshot_id="snapshot:acct:1:v5",
+                current_reconciliation_run_id="reconciliation:acct:1:v5",
+                current_account_state_version=5,
+                current_reservation_state_version=9,
+                current_reservation_state_digest="3" * 64,
+            )
+
     def test_evidence_expiry_before_admission_invalidates_proposal(self):
         bundle = self.bundle()
         result = self.allocate(bundle=bundle)
@@ -329,6 +405,9 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 environment="SIMULATION",
                 as_of="2026-09-25T19:01:00Z",
                 current_policy_version="risk-policy:12",
+                current_provider_id="SIMULATED",
+                current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                current_capability_snapshot_ids={"AAA": "capability:1"},
                 current_account_id="acct:paper:1",
                 current_account_snapshot_id="snapshot:acct:1:v5",
                 current_reconciliation_run_id="reconciliation:acct:1:v5",

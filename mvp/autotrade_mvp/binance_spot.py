@@ -7,7 +7,7 @@ recorded provider responses. A successful order ACK is never treated as a fill.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
@@ -38,6 +38,7 @@ BINANCE_SPOT_ENDPOINTS: Mapping[str, str] = MappingProxyType(
 )
 
 _CLIENT_ID = re.compile(r"^[A-Za-z0-9_.:/-]{1,36}$")
+_EXCHANGE_INFO_RULES_TOKEN = object()
 _ALLOWED_TIF = frozenset({"GTC", "IOC", "FOK"})
 
 
@@ -181,8 +182,13 @@ class BinanceSpotSymbolRules:
     max_notional: Decimal | None
     min_notional_applies_to_market: bool
     max_notional_applies_to_market: bool
+    _verification_token: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _verification_token: object | None) -> None:
+        if _verification_token is not _EXCHANGE_INFO_RULES_TOKEN:
+            raise BinanceSpotAdapterError(
+                "exchangeInfo rules must come from canonical provider payload parsing"
+            )
         instrument = _text(self.instrument_version, name="instrument_version")
         symbol = _text(self.symbol, name="symbol")
         digest = _text(self.source_sha256, name="source_sha256")
@@ -330,6 +336,7 @@ class BinanceSpotSymbolRules:
             max_notional=max_notional,
             min_notional_applies_to_market=min_market,
             max_notional_applies_to_market=max_market,
+            _verification_token=_EXCHANGE_INFO_RULES_TOKEN,
         )
 
     @staticmethod

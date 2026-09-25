@@ -51,16 +51,39 @@ class SettlementAccountScope:
     provider_id: str
     account_id: str
     environment: str
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "provider_id", _text(self.provider_id, name="provider_id").upper()
-        )
+        provider = _text(self.provider_id, name="provider_id").upper()
+        object.__setattr__(self, "provider_id", provider)
         object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
         environment = _text(self.environment, name="environment").upper()
         if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("unsupported environment")
         object.__setattr__(self, "environment", environment)
+        if provider == "BYBIT" and self.provider_environment is None:
+            raise ValueError("BYBIT settlement scope requires explicit provider_environment")
+        provider_environment = (
+            environment
+            if self.provider_environment is None
+            else _text(
+                self.provider_environment,
+                name="provider_environment",
+            ).upper()
+        )
+        if provider == "BYBIT" and provider_environment not in {
+            "MAINNET",
+            "TESTNET",
+            "DEMO",
+        }:
+            raise ValueError(
+                "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+            )
+        object.__setattr__(
+            self,
+            "provider_environment",
+            provider_environment,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,23 +139,24 @@ class SettlementRuleBinding:
 
     @property
     def digest(self) -> str:
-        return payload_digest(
-            {
-                "schema_version": "1.0.0",
-                "rule_id": self.rule_id,
-                "rule_version": self.rule_version,
-                "provider_id": self.scope.provider_id,
-                "account_id": self.scope.account_id,
-                "environment": self.scope.environment,
-                "instrument_version": self.instrument_version,
-                "settlement_currency": self.settlement_currency,
-                "effective_from": self.effective_from.isoformat(),
-                "effective_to": (
-                    None if self.effective_to is None else self.effective_to.isoformat()
-                ),
-                "evidence_refs": list(self.evidence_refs),
-            }
-        )
+        material = {
+            "schema_version": "1.0.0",
+            "rule_id": self.rule_id,
+            "rule_version": self.rule_version,
+            "provider_id": self.scope.provider_id,
+            "account_id": self.scope.account_id,
+            "environment": self.scope.environment,
+            "instrument_version": self.instrument_version,
+            "settlement_currency": self.settlement_currency,
+            "effective_from": self.effective_from.isoformat(),
+            "effective_to": (
+                None if self.effective_to is None else self.effective_to.isoformat()
+            ),
+            "evidence_refs": list(self.evidence_refs),
+        }
+        if self.scope.provider_environment != self.scope.environment:
+            material["provider_environment"] = self.scope.provider_environment
+        return payload_digest(material)
 
 
 @dataclass(frozen=True, slots=True)

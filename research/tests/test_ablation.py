@@ -3,11 +3,16 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, localcontext
 from hashlib import sha256
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
+from uuid import UUID
 
 from autotrade_research.evaluation.ablation import (
     AblationOutcome,
     AblationPair,
+    AblationOutcomeArtifactRef,
+    AblationQualificationAuthority,
     CanonicalAblationOutcomeEvidence,
     CausalInputEvidence,
     RegisteredAblationPopulation,
@@ -17,6 +22,9 @@ from autotrade_research.evaluation.ablation import (
     summarize_ablation,
     verify_ablation_evidence_bundle,
 )
+from autotrade_research.artifacts.store import ArtifactStore
+from autotrade_research.memory.episodes import ExperienceMemory
+from autotrade_research.science.registry import ScientificRegistry
 
 
 CUT = datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc)
@@ -104,6 +112,7 @@ def pair(
     fingerprint=None,
     full_decision=None,
     ablated_decision=None,
+    cutoff=CUT,
 ):
     case_fingerprint = (
         "sha256:" + sha256(case_id.encode("utf-8")).hexdigest()
@@ -122,6 +131,7 @@ def pair(
             components=("base", "agent"),
             population_unit=population_unit,
             decision=full_decision,
+            cutoff=cutoff,
         ),
         outcome(
             case_id=case_id,
@@ -133,6 +143,7 @@ def pair(
             components=("base",),
             population_unit=population_unit,
             decision=ablated_decision,
+            cutoff=cutoff,
         ),
     )
 
@@ -1061,10 +1072,10 @@ class AblationTests(unittest.TestCase):
             minimum_pairs=2,
             required_lower_bound=Decimal("0"),
         )
-        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertEqual(
             result.reason,
-            "qualified_registered_canonical_ablation_net_of_cost",
+            "untrusted_caller_authored_qualification_evidence",
         )
 
     def test_qualified_post_hoc_registration_cannot_pass(self):
@@ -1122,7 +1133,11 @@ class AblationTests(unittest.TestCase):
             required_lower_bound=Decimal("0"),
         )
         self.assertEqual(first, second)
-        self.assertEqual(first.status, "PASS")
+        self.assertEqual(first.status, "INCONCLUSIVE")
+        self.assertEqual(
+            first.reason,
+            "untrusted_caller_authored_qualification_evidence",
+        )
 
     def test_qualified_canonical_economics_must_match_scored_numbers(self):
         cases = [
@@ -1145,6 +1160,171 @@ class AblationTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertEqual(result.reason, "canonical_outcome_economic_mismatch")
+
+
+    def test_terminal_qualification_requires_persistent_protocol_population_and_artifacts(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            science = ScientificRegistry(root / "science.sqlite3")
+            memory = ExperienceMemory(root / "memory.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            protocol_payload = {
+                "hypothesis": "agent adds after-cost value",
+                "strategy": "matched causal ablation",
+                "features": ["base", "agent"],
+                "search_space": {"agent": ["enabled", "ablated"]},
+                "train_period": {"start": "2026-01-01", "end": "2026-01-02"},
+                "validation_period": {"start": "2026-01-04", "end": "2026-01-05"},
+                "test_period": {"start": "2026-01-07", "end": "2026-01-08"},
+                "forward_period": {"start": "2026-01-10", "end": "2026-01-11"},
+                "labels": ["net_value"],
+                "horizons": ["1d"],
+                "purge_embargo": {"purge": "1d", "embargo": "1d"},
+                "universe": ["TEST"],
+                "cost_fill_model": "canonical-cost-v1",
+                "baselines": ["ablated"],
+                "primary_metrics": ["net_incremental_value"],
+                "secondary_metrics": ["latency"],
+                "trial_budget": 2,
+                "stopping_rules": {"maximum_trials": 2},
+                "statistical_estimator": "matched-lower-bound",
+                "multiplicity_treatment": "pre-registered-single-comparison",
+                "minimum_practical_effect": "0",
+                "risk_constraints": {"authority_expansion": False},
+                "retention_tolerances": {"negative_results": "retain"},
+                "promotion_rule": "qualified-only",
+            }
+            registration = science.register_protocol(
+                protocol_payload,
+                protocol_id="11111111-1111-4111-8111-111111111111",
+            )
+            cutoff = CUT + timedelta(days=1)
+            evaluation_cutoff = cutoff + timedelta(hours=2)
+            units = (
+                "22222222-2222-4222-8222-222222222222",
+                "33333333-3333-4333-8333-333333333333",
+            )
+            cases = [
+                pair(
+                    "qualified-authority-a",
+                    "2",
+                    population_unit=units[0],
+                    cutoff=cutoff,
+                ),
+                pair(
+                    "qualified-authority-b",
+                    "2",
+                    population_unit=units[1],
+                    cutoff=cutoff,
+                ),
+            ]
+            for unit, matched in zip(units, cases):
+                memory.append_episode(
+                    episode_id=unit,
+                    decision_time=matched.full.decision_utc,
+                    information_cutoff=matched.full.input_cutoff_utc,
+                    task="ablation-qualification",
+                    regime="test",
+                    instrument_family="EQUITY",
+                    permission_class="RESEARCH",
+                    payload={
+                        "evidence_refs": ["artifact:source"],
+                        "intended_action": {"case_id": matched.full.case_id},
+                        "actual_execution": {"fills": []},
+                        "outcome": {"status": "observed"},
+                        "costs": {"USD": "0"},
+                    },
+                )
+            population = memory.coverage_population_snapshot(
+                causal_cutoff=evaluation_cutoff,
+                granted_permissions={"RESEARCH"},
+                task="ablation-qualification",
+                instrument_family="EQUITY",
+            )
+            refs = []
+            source_revision = "9" * 40
+            artifact_index = 0
+            for matched in cases:
+                for item in (matched.full, matched.ablated):
+                    artifact_index += 1
+                    artifact_id = str(
+                        UUID(int=0x44444444444440008000000000000000 + artifact_index)
+                    )
+                    payload = {
+                        "schema_version": 1,
+                        "case_id": item.case_id,
+                        "variant": item.variant,
+                        "population_unit_id": item.population_unit_id,
+                        "utility": str(item.utility),
+                        "cost": str(item.cost),
+                        "outcome_available_utc": item.outcome_available_utc.isoformat().replace("+00:00", "Z"),
+                        "source_revision": source_revision,
+                        "protocol_id": registration.protocol_id,
+                        "protocol_hash": registration.protocol_hash,
+                        "population_root": population.root_hash,
+                        "utility_evidence_digest": FINGERPRINT_B,
+                        "cost_evidence_digest": FINGERPRINT_C,
+                        "superseded_at_utc": None,
+                    }
+                    raw = json.dumps(
+                        payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                    manifest = artifacts.publish_bytes(
+                        artifact_id=artifact_id,
+                        data=raw,
+                        media_type="application/vnd.autotrade.ablation-outcome+json",
+                        rights={"storage": True, "export": False},
+                        source_refs=[f"protocol:{registration.protocol_id}"],
+                    )
+                    refs.append(
+                        AblationOutcomeArtifactRef(
+                            artifact_id=artifact_id,
+                            sha256=manifest["sha256"],
+                        )
+                    )
+            authority = AblationQualificationAuthority(
+                scientific_registry=science,
+                experience_memory=memory,
+                artifact_store=artifacts,
+                protocol_id=registration.protocol_id,
+                protocol_hash=registration.protocol_hash,
+                source_revision=source_revision,
+                causal_cutoff=evaluation_cutoff,
+                granted_permissions={"RESEARCH"},
+                task="ablation-qualification",
+                instrument_family="EQUITY",
+            )
+            result = evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                authority=authority,
+                outcome_refs=refs,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+            self.assertEqual(result.status, "PASS")
+            self.assertEqual(
+                result.reason,
+                "qualified_registered_canonical_ablation_net_of_cost",
+            )
+
+            forged = canonical_evidence(cases[0]) + canonical_evidence(cases[1])
+            diagnostic = evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                population=registered_population(cases),
+                canonical_outcomes=forged,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+            self.assertEqual(diagnostic.status, "INCONCLUSIVE")
+            self.assertEqual(
+                diagnostic.reason,
+                "untrusted_caller_authored_qualification_evidence",
+            )
 
 
 if __name__ == "__main__":

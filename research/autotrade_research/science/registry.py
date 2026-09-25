@@ -107,8 +107,11 @@ _DURATION_MULTIPLIERS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
 
 def _duration_seconds(value: Any, name: str, *, allow_zero: bool = False) -> int:
-    raw = _text(value, name)
-    match = _DURATION_RE.fullmatch(raw)
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ProtocolViolation(
+            f"{name} must use canonical duration <integer><s|m|h|d>"
+        )
+    match = _DURATION_RE.fullmatch(value)
     if match is None:
         raise ProtocolViolation(
             f"{name} must use canonical duration <integer><s|m|h|d>"

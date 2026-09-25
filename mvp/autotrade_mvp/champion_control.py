@@ -147,7 +147,8 @@ class DurableChampionControl:
             authority_policy_digest,
             name="authority_policy_digest",
         )
-        if not self.journal.load_events(self._AGGREGATE, self.scope_id):
+        existing_events = self.journal.load_events(self._AGGREGATE, self.scope_id)
+        if not existing_events:
             payload = {
                 "initial_champion_version": self.initial_champion_version,
                 "authority_policy_digest": self.authority_policy_digest,
@@ -167,16 +168,21 @@ class DurableChampionControl:
                 self.journal.append_event(envelope)
             except ValueError:
                 pass
+            existing_events = self.journal.load_events(self._AGGREGATE, self.scope_id)
+        first_payload = existing_events[0]["payload"]
+        durable_initial = _text(
+            first_payload["initial_champion_version"],
+            name="initial_champion_version",
+        )
+        if durable_initial != self.initial_champion_version:
+            raise ChampionControlError(
+                "initial champion conflicts with durable champion control"
+            )
         snapshot = self.snapshot()
         if snapshot.authority_policy_digest != self.authority_policy_digest:
             raise ChampionControlError(
                 "authority policy conflicts with durable champion control"
             )
-        if self.initial_champion_version not in snapshot.retained_versions:
-            raise ChampionControlError(
-                "initial champion conflicts with durable champion control"
-            )
-
     def _event(
         self,
         *,
@@ -294,6 +300,25 @@ class DurableChampionControl:
             raise ChampionControlError(
                 "expected_generation must be a positive integer"
             )
+        event_id = _stable_id(
+            "champion-promote-",
+            self.scope_id,
+            decision.decision_id,
+        )
+        existing = self.journal.get_event(event_id)
+        if existing is not None:
+            payload = existing["payload"]
+            if (
+                existing["event_type"] != "ChampionPromoted"
+                or payload.get("candidate_version") != decision.candidate_version
+                or payload.get("prior_version") != decision.prior_version
+                or payload.get("source_sha256") != decision.source_sha256
+            ):
+                raise ChampionConflict(
+                    "promotion decision identity conflicts with durable event"
+                )
+            return self.snapshot()
+
         state = self.snapshot()
         if state.generation != expected_generation:
             raise ChampionConflict("champion generation changed")
@@ -330,11 +355,7 @@ class DurableChampionControl:
             event_type="ChampionPromoted",
             aggregate_version=version,
             payload=payload,
-            event_id=_stable_id(
-                "champion-promote-",
-                self.scope_id,
-                decision.decision_id,
-            ),
+            event_id=event_id,
         )
         try:
             _, inserted, _ = self.journal.commit_command(

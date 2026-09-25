@@ -182,6 +182,135 @@ def openapi_operation_blocks(
     return {key: tuple(value) for key, value in operations.items()}
 
 
+def openapi_security_surface(
+    root: Path,
+    manifest: dict,
+    *,
+    schema_base_uri: str,
+) -> tuple[
+    tuple[tuple[tuple[str, str], ...], ...],
+    dict[str, tuple[str, ...]],
+]:
+    """Normalize default security and existing security-scheme semantics.
+
+    The repository intentionally avoids a YAML runtime dependency here. This
+    parser is narrow: it accepts the canonical OpenAPI indentation used by the
+    reviewed contract, ignores documentation-only annotations, canonicalizes
+    requirement/scheme order, and fails closed on malformed security blocks.
+    """
+
+    openapi = manifest.get("openapi")
+    if not isinstance(openapi, dict):
+        return (), {}
+    relative = openapi.get("path")
+    if not isinstance(relative, str) or not relative:
+        raise ValueError("manifest openapi.path must be non-empty text")
+    lines = (root / relative).read_text(encoding="utf-8").splitlines()
+
+    requirements: list[dict[str, str]] = []
+    security_index: int | None = None
+    for index, line in enumerate(lines):
+        if re.fullmatch(r"security:\\s*(?:\\[\\])?\\s*", line):
+            security_index = index
+            if re.fullmatch(r"security:\\s*\\[\\]\\s*", line):
+                break
+            current: dict[str, str] | None = None
+            for child in lines[index + 1 :]:
+                if child and not child.startswith(" ") and not child.lstrip().startswith("#"):
+                    break
+                if not child.strip() or child.lstrip().startswith("#"):
+                    continue
+                first = re.fullmatch(r"  - ([A-Za-z0-9_.-]+):\\s*(.+)", child)
+                if first:
+                    if current is not None:
+                        requirements.append(current)
+                    current = {first.group(1): first.group(2).strip()}
+                    continue
+                continuation = re.fullmatch(
+                    r"    ([A-Za-z0-9_.-]+):\\s*(.+)",
+                    child,
+                )
+                if continuation and current is not None:
+                    current[continuation.group(1)] = continuation.group(2).strip()
+                    continue
+                raise ValueError("OpenAPI top-level security block is not canonical")
+            if current is not None:
+                requirements.append(current)
+            break
+
+    canonical_requirements = tuple(
+        sorted(
+            tuple(sorted(requirement.items()))
+            for requirement in requirements
+        )
+    )
+
+    schemes: dict[str, tuple[str, ...]] = {}
+    try:
+        components_index = next(
+            index for index, line in enumerate(lines) if line == "components:"
+        )
+    except StopIteration:
+        return canonical_requirements, schemes
+
+    security_schemes_index: int | None = None
+    for index in range(components_index + 1, len(lines)):
+        line = lines[index]
+        if line and not line.startswith(" ") and not line.lstrip().startswith("#"):
+            break
+        if line == "  securitySchemes:":
+            security_schemes_index = index
+            break
+    if security_schemes_index is None:
+        return canonical_requirements, schemes
+
+    current_name: str | None = None
+    current_lines: list[str] = []
+    skip_annotation_indent: int | None = None
+
+    def flush_scheme() -> None:
+        nonlocal current_name, current_lines
+        if current_name is not None:
+            if current_name in schemes:
+                raise ValueError(f"duplicate OpenAPI security scheme: {current_name}")
+            schemes[current_name] = tuple(sorted(current_lines))
+        current_name = None
+        current_lines = []
+
+    for line in lines[security_schemes_index + 1 :]:
+        if line and not line.startswith(" ") and not line.lstrip().startswith("#"):
+            break
+        if line.startswith("  ") and not line.startswith("    ") and line.strip():
+            break
+        scheme_match = re.fullmatch(r"    ([A-Za-z0-9_.-]+):\\s*", line)
+        if scheme_match:
+            flush_scheme()
+            current_name = scheme_match.group(1)
+            skip_annotation_indent = None
+            continue
+        if current_name is None or not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        normalized = line.strip()
+        if skip_annotation_indent is not None:
+            if indent > skip_annotation_indent:
+                continue
+            skip_annotation_indent = None
+        if normalized.startswith(("description:", "summary:")):
+            skip_annotation_indent = indent
+            continue
+        if indent < 6:
+            raise ValueError("OpenAPI securitySchemes block is not canonical")
+        if schema_base_uri:
+            normalized = normalized.replace(
+                schema_base_uri.rstrip("/") + "/",
+                "{SCHEMA_BASE}/",
+            )
+        current_lines.append(normalized)
+    flush_scheme()
+    return canonical_requirements, schemes
+
+
 def contract_bytes(root: Path) -> dict[str, bytes]:
     base = root / "contracts"
     files: dict[str, bytes] = {}
@@ -256,6 +385,26 @@ def evaluate(base_root: Path, current_root: Path) -> list[str]:
         if base_operations[key] != current_operations[key]
     )
 
+    base_default_security, base_security_schemes = openapi_security_surface(
+        base_root,
+        base,
+        schema_base_uri=str(base.get("schema_base_uri", "")),
+    )
+    current_default_security, current_security_schemes = openapi_security_surface(
+        current_root,
+        current,
+        schema_base_uri=str(current.get("schema_base_uri", "")),
+    )
+    default_security_changed = base_default_security != current_default_security
+    removed_security_schemes = sorted(
+        set(base_security_schemes) - set(current_security_schemes)
+    )
+    changed_security_schemes = sorted(
+        name
+        for name in set(base_security_schemes) & set(current_security_schemes)
+        if base_security_schemes[name] != current_security_schemes[name]
+    )
+
     breaking_change = bool(
         removed_schemas
         or removed_defs
@@ -263,6 +412,9 @@ def evaluate(base_root: Path, current_root: Path) -> list[str]:
         or changed_defs
         or removed_operations
         or changed_operations
+        or default_security_changed
+        or removed_security_schemes
+        or changed_security_schemes
     )
     if breaking_change and current_version[0] <= base_version[0]:
         details = []
@@ -286,6 +438,18 @@ def evaluate(base_root: Path, current_root: Path) -> list[str]:
             details.append(
                 "changed OpenAPI operations: "
                 + ", ".join(f"{method.upper()} {path}" for path, method in changed_operations)
+            )
+        if default_security_changed:
+            details.append("changed OpenAPI default security requirements")
+        if removed_security_schemes:
+            details.append(
+                "removed OpenAPI security schemes: "
+                + ", ".join(removed_security_schemes)
+            )
+        if changed_security_schemes:
+            details.append(
+                "changed OpenAPI security schemes: "
+                + ", ".join(changed_security_schemes)
             )
         errors.append("breaking contract change requires a new major version; " + "; ".join(details))
 

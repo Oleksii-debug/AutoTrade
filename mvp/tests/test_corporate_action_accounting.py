@@ -612,11 +612,14 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                     store=store,
                     evidence_store=durable_evidence,
                     economic_book=economics,
-                    corporate_book=CorporateActionBook.replay(
-                        pure_book().checkpoint("before-split"),
-                        (first.event,),
-                        registry=pure_book().registry,
-                    ),
+                    corporate_book=(
+                        lambda initial: CorporateActionBook.replay(
+                            initial.state,
+                            instrument_version=initial.instrument_version,
+                            registry=initial.registry,
+                            events=(first.event,),
+                        )
+                    )(pure_book()),
                     accepted=correction,
                 )
 

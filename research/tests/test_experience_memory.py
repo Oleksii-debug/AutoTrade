@@ -125,7 +125,11 @@ class ExperienceMemoryTests(unittest.TestCase):
                     "evidence_ref": "artifact:correction",
                 },
             )
-            source = store.source_episode(episode)
+            source = store.source_episode(
+                episode,
+                information_cutoff=BASE,
+                granted_permissions={"research"},
+            )
             self.assertEqual(source["payload"]["outcome"]["label"], "pending")
             retrieved = store.retrieve(
                 information_cutoff=BASE,
@@ -416,7 +420,11 @@ class ExperienceMemoryTests(unittest.TestCase):
                     (tampered, episode),
                 )
             with self.assertRaisesRegex(MemoryIntegrityError, "episode integrity mismatch"):
-                store.source_episode(episode)
+                store.source_episode(
+                episode,
+                information_cutoff=BASE,
+                granted_permissions={"research"},
+            )
             with self.assertRaisesRegex(MemoryIntegrityError, "episode integrity mismatch"):
                 store.retrieve(
                     information_cutoff=BASE,
@@ -465,7 +473,11 @@ class ExperienceMemoryTests(unittest.TestCase):
                     (episode,),
                 )
             with self.assertRaises(MemoryIntegrityError):
-                store.source_episode(episode)
+                store.source_episode(
+                episode,
+                information_cutoff=BASE,
+                granted_permissions={"research"},
+            )
 
     def test_correction_payload_and_hash_tamper_fail_closed(self):
         with TemporaryDirectory() as directory:
@@ -653,6 +665,55 @@ class ExperienceMemoryTests(unittest.TestCase):
                 ["loss", "no-trade"],
             )
 
+    def test_source_episode_cannot_bypass_cutoff_permission_or_tombstone(self):
+        with TemporaryDirectory() as directory:
+            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            episode, _ = store.append_episode(
+                decision_time=BASE + timedelta(hours=1),
+                information_cutoff=BASE + timedelta(minutes=30),
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="private-research",
+                payload=payload(),
+            )
+
+            with self.assertRaisesRegex(PermissionError, "causally available"):
+                store.source_episode(
+                    episode,
+                    information_cutoff=BASE,
+                    granted_permissions={"private-research"},
+                )
+            with self.assertRaisesRegex(PermissionError, "permission"):
+                store.source_episode(
+                    episode,
+                    information_cutoff=BASE + timedelta(hours=1),
+                    granted_permissions={"public-research"},
+                )
+
+            source = store.source_episode(
+                episode,
+                information_cutoff=BASE + timedelta(hours=1),
+                granted_permissions={"private-research"},
+            )
+            self.assertEqual(source["episode_id"], episode)
+            self.assertEqual(source["permission_class"], "private-research")
+
+            store.tombstone(episode, reason="source rights revoked")
+            with self.assertRaisesRegex(PermissionError, "tombstoned"):
+                store.source_episode(
+                    episode,
+                    information_cutoff=BASE + timedelta(hours=1),
+                    granted_permissions={"private-research"},
+                )
+            audit = store.source_episode(
+                episode,
+                information_cutoff=BASE + timedelta(hours=1),
+                granted_permissions={"private-research"},
+                include_tombstoned=True,
+            )
+            self.assertEqual(audit["tombstones"][0]["reason"], "source rights revoked")
+
     def test_tombstone_access_flag_requires_real_boolean(self):
         with TemporaryDirectory() as directory:
             store = ExperienceMemory(Path(directory) / "memory.sqlite3")
@@ -796,7 +857,11 @@ class ExperienceMemoryTests(unittest.TestCase):
                 payload=payload(),
             )
             second = ExperienceMemory(path)
-            self.assertEqual(second.source_episode(episode)["episode_id"], episode)
+            self.assertEqual(second.source_episode(
+                episode,
+                information_cutoff=BASE,
+                granted_permissions={"research"},
+            )["episode_id"], episode)
 
 
     def test_binary_float_economics_are_rejected_before_immutable_memory_write(self):

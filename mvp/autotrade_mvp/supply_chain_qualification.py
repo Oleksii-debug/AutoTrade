@@ -294,7 +294,7 @@ def qualify_supply_chain(
                 ),
             )
         )
-        for item in evidence.components:
+        for item in sorted(evidence.components, key=lambda value: value.component_id):
             immutable_checks.append(
                 (
                     "component:" + item.component_id,
@@ -333,7 +333,7 @@ def qualify_supply_chain(
                         ),
                     )
                 )
-        for item in evidence.model_data_rights:
+        for item in sorted(evidence.model_data_rights, key=lambda value: value.artifact_id):
             immutable_checks.append(
                 (
                     "rights:" + item.artifact_id,

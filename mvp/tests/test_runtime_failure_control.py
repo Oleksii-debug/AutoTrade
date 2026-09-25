@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.recovery import (
@@ -121,6 +124,35 @@ class RuntimeRecoveryTests(unittest.TestCase):
             controller.validate_sender(new_owner.owner_id, new_owner.epoch)
         controller.record_reconciliation(consistent=True)
         controller.validate_sender(new_owner.owner_id, new_owner.epoch)
+
+    def test_owner_fence_snapshot_roundtrips_without_granting_readiness(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "owner-fence.json"
+            source = RecoveryController()
+            owner = source.start("host-a")
+            source.persist_owner_fence(path)
+
+            restored_fence = RecoveryController.load_owner_fence(path)
+            self.assertEqual(restored_fence, owner)
+
+            restored = RecoveryController()
+            restored.restore_owner(restored_fence)
+            self.assertEqual(restored.owner, owner)
+            self.assertEqual(restored.state, HostState.RECOVERING)
+            with self.assertRaises(PermissionError):
+                restored.validate_sender(owner.owner_id, owner.epoch)
+
+    def test_tampered_owner_fence_epoch_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "owner-fence.json"
+            source = RecoveryController()
+            source.start("host-a")
+            source.persist_owner_fence(path)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["owner_epoch"] = True
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "epoch"):
+                RecoveryController.load_owner_fence(path)
 
     def test_provider_uncertainty_prevents_false_ready(self):
         controller = RecoveryController()

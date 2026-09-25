@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import json
+import os
+from pathlib import Path
 from typing import Iterable
 
 
@@ -33,6 +36,13 @@ class SendPhase(str, Enum):
 class OwnerFence:
     owner_id: str
     epoch: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.owner_id, str) or not self.owner_id.strip():
+            raise ValueError("Owner identity is required")
+        if isinstance(self.epoch, bool) or not isinstance(self.epoch, int) or self.epoch < 1:
+            raise ValueError("Owner epoch must be a positive integer")
+        object.__setattr__(self, "owner_id", self.owner_id.strip())
 
 
 @dataclass
@@ -95,6 +105,8 @@ class OutboundAttempt:
 class RecoveryController:
     """Tracks sender ownership, host readiness and unresolved external truth."""
 
+    OWNER_FENCE_SCHEMA_VERSION = 1
+
     def __init__(self) -> None:
         self.state = HostState.STOPPED
         self.owner: OwnerFence | None = None
@@ -105,8 +117,6 @@ class RecoveryController:
         self.provider_reconciled = False
 
     def start(self, owner_id: str) -> OwnerFence:
-        if not owner_id:
-            raise ValueError("Owner identity is required")
         if self.owner is not None:
             raise RuntimeError("Host already has an owner")
         self.owner = OwnerFence(owner_id=owner_id, epoch=1)
@@ -114,6 +124,71 @@ class RecoveryController:
         self.provider_reconciled = False
         self.reason_codes = {"startup_reconciliation_required"}
         return self.owner
+
+    def restore_owner(self, fence: OwnerFence) -> OwnerFence:
+        """Restore a durable prior owner fence without granting send readiness."""
+        if self.owner is not None:
+            raise RuntimeError("Host already has an owner")
+        if not isinstance(fence, OwnerFence):
+            raise TypeError("fence must be OwnerFence")
+        self.owner = fence
+        self.state = HostState.RECOVERING
+        self.provider_reconciled = False
+        self.reason_codes = {"startup_reconciliation_required", "restored_owner_fence"}
+        return self.owner
+
+    def persist_owner_fence(self, path: str | Path) -> Path:
+        """Durably snapshot the current sender identity for backup/recovery evidence."""
+        if self.owner is None:
+            raise RuntimeError("No active owner")
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = (
+            json.dumps(
+                {
+                    "schema_version": self.OWNER_FENCE_SCHEMA_VERSION,
+                    "owner_id": self.owner.owner_id,
+                    "owner_epoch": self.owner.epoch,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        try:
+            with temporary.open("wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        return target
+
+    @classmethod
+    def load_owner_fence(cls, path: str | Path) -> OwnerFence:
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError("Owner fence snapshot is unreadable") from error
+        if not isinstance(payload, dict) or set(payload) != {
+            "schema_version",
+            "owner_id",
+            "owner_epoch",
+        }:
+            raise ValueError("Owner fence snapshot structure is invalid")
+        if payload["schema_version"] != cls.OWNER_FENCE_SCHEMA_VERSION:
+            raise ValueError("Owner fence snapshot version is unsupported")
+        return OwnerFence(
+            owner_id=payload["owner_id"],
+            epoch=payload["owner_epoch"],
+        )
 
     def record_reconciliation(self, *, consistent: bool, uncertainty: Iterable[str] = ()) -> None:
         if self.owner is None:

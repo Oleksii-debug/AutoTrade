@@ -17,16 +17,20 @@ from pathlib import Path, PurePosixPath
 import shutil
 import sqlite3
 import tempfile
-from typing import Any
+from uuid import UUID
+from typing import Any, Mapping, Sequence
 
 from .diagnostics import build_diagnostic_snapshot
 from .persistence import JournalStore
+from .reconciliation import ReconciliationResult
+from .recovery import HostState, OwnerFence, RecoveryController
 
 
 BACKUP_SCHEMA_VERSION = 1
 MANIFEST_NAME = "backup-manifest.json"
 MANIFEST_DIGEST_NAME = "backup-manifest.sha256"
 RESTORE_MARKER_NAME = "RESTORE_RECONCILIATION_REQUIRED.json"
+RESTORE_COMPLETION_PROOF_NAME = "RESTORE_RECONCILIATION_COMPLETE.json"
 
 
 class BackupError(RuntimeError):
@@ -221,10 +225,105 @@ def _validate_artifact_source(root: Path) -> None:
                 raise BackupIntegrityError("Artifact manifest references a missing or corrupt object")
 
 
+def _text(value: object, *, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise BackupError(f"{name} must be non-empty text")
+    return value.strip()
+
+
+def _canonical_sha256_ref(value: str, *, name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.startswith("sha256:")
+        or len(value) != 71
+        or any(character not in "0123456789abcdef" for character in value[7:])
+    ):
+        raise BackupIntegrityError(f"{name} must be a canonical SHA-256 reference")
+    return value
+
+
+def _exact_git_sha(value: object, *, name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 40
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise BackupCompatibilityError(
+            f"{name} must be an exact lowercase 40-character Git SHA"
+        )
+    return value
+
+
+def _load_typed_artifact(
+    artifact_root: Path,
+    digest_ref: str,
+    *,
+    expected_kind: str,
+) -> dict[str, Any]:
+    canonical = _canonical_sha256_ref(digest_ref, name="artifact digest")
+    digest = canonical.removeprefix("sha256:")
+    manifest_path = (
+        artifact_root
+        / "manifests"
+        / "sha256"
+        / digest[:2]
+        / f"{digest}.json"
+    )
+    object_path = artifact_root / "objects" / "sha256" / digest[:2] / digest
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        payload_bytes = object_path.read_bytes()
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise BackupIntegrityError("Referenced evidence artifact is missing") from error
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != 1
+        or manifest.get("algorithm") != "sha256"
+        or manifest.get("digest") != digest
+        or manifest.get("size_bytes") != len(payload_bytes)
+        or _sha256_bytes(payload_bytes) != digest
+    ):
+        raise BackupIntegrityError(
+            "Referenced evidence artifact manifest/object does not verify"
+        )
+    try:
+        payload = json.loads(payload_bytes)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise BackupIntegrityError("Referenced typed artifact is not valid JSON") from error
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+        or payload.get("kind") != expected_kind
+    ):
+        raise BackupCompatibilityError(
+            f"Referenced artifact is not {expected_kind}"
+        )
+    return payload
+
+
+def _load_build_identity(
+    artifact_root: Path,
+    digest_ref: str,
+) -> tuple[str, str]:
+    payload = _load_typed_artifact(
+        artifact_root,
+        digest_ref,
+        expected_kind="AUTOTRADE_BUILD_IDENTITY",
+    )
+    source_sha = _exact_git_sha(payload.get("source_sha"), name="build identity source_sha")
+    composition = _canonical_sha256_ref(
+        payload.get("composition_sha256"),
+        name="build identity composition_sha256",
+    )
+    return source_sha, composition
+
+
 def create_backup(
     state_dir: str | Path,
     artifact_root: str | Path,
     destination: str | Path,
+    *,
+    build_identity_sha256: str | None = None,
 ) -> Path:
     """Create an atomic verified backup bundle.
 
@@ -244,6 +343,44 @@ def create_backup(
     if _inside(target, state) or _inside(target, artifacts):
         raise BackupError("Backup destination must be outside source directories")
     _validate_artifact_source(artifacts)
+    build_identity_ref_path = state / "build-identity.sha256"
+    state_build_identity: str | None = None
+    if build_identity_ref_path.is_file():
+        try:
+            state_build_identity = _canonical_sha256_ref(
+                build_identity_ref_path.read_text(encoding="ascii").strip(),
+                name="state build identity",
+            )
+        except (OSError, UnicodeError) as error:
+            raise BackupIntegrityError("Runtime build identity reference is unreadable") from error
+    if build_identity_sha256 is not None:
+        build_identity_sha256 = _canonical_sha256_ref(
+            build_identity_sha256,
+            name="build_identity_sha256",
+        )
+        if state_build_identity is not None and build_identity_sha256 != state_build_identity:
+            raise BackupIntegrityError(
+                "Caller build identity conflicts with durable runtime build identity"
+            )
+    elif state_build_identity is not None:
+        build_identity_sha256 = state_build_identity
+
+    source_sha: str | None = None
+    composition_sha256: str | None = None
+    owner_fence_path = state / "owner-fence.json"
+    source_owner: OwnerFence | None = None
+    source_owner_fence_sha256: str | None = None
+    if owner_fence_path.is_file():
+        try:
+            source_owner = RecoveryController.load_owner_fence(owner_fence_path)
+        except ValueError as error:
+            raise BackupIntegrityError("Runtime owner fence snapshot is invalid") from error
+        source_owner_fence_sha256 = "sha256:" + _sha256_file(owner_fence_path)
+    if build_identity_sha256 is not None:
+        source_sha, composition_sha256 = _load_build_identity(
+            artifacts,
+            build_identity_sha256,
+        )
 
     target.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".autotrade-backup-", dir=target.parent))
@@ -267,6 +404,8 @@ def create_backup(
         for source in [
             state / "checkpoint.json",
             state / "learning-evidence.jsonl",
+            build_identity_ref_path,
+            owner_fence_path,
         ]:
             if source.exists():
                 relative = Path("state") / source.name
@@ -317,9 +456,22 @@ def create_backup(
                     "Runtime state, journal and evidence are not one consistent snapshot"
                 ) from error
 
+        unresolved_limits = ["RECONCILIATION_REQUIRED_AFTER_RESTORE"]
+        if build_identity_sha256 is None:
+            unresolved_limits.append("SOURCE_SHA_UNBOUND")
+        if source_owner is None:
+            unresolved_limits.append("OWNER_FENCE_UNBOUND")
         manifest = {
             "schema_version": BACKUP_SCHEMA_VERSION,
             "created_at": _utc_now(),
+            "source_sha": source_sha,
+            "source_sha_bound": source_sha is not None,
+            "build_identity_sha256": build_identity_sha256,
+            "composition_sha256": composition_sha256,
+            "source_owner_id": source_owner.owner_id if source_owner is not None else None,
+            "source_owner_epoch": source_owner.epoch if source_owner is not None else None,
+            "source_owner_fence_sha256": source_owner_fence_sha256,
+            "unresolved_limits": unresolved_limits,
             "journal_schema_version": journal_schema,
             "reconciliation_required_after_restore": True,
             "runtime_consistency_check": "DURABLE_TRACE_RECONSTRUCTION",
@@ -340,7 +492,12 @@ def create_backup(
         raise
 
 
-def verify_backup(backup_root: str | Path) -> dict[str, Any]:
+def verify_backup(
+    backup_root: str | Path,
+    *,
+    expected_source_sha: str | None = None,
+    expected_build_identity_sha256: str | None = None,
+) -> dict[str, Any]:
     """Verify the backup manifest, every payload byte and compatibility gates."""
 
     root = Path(backup_root)
@@ -359,6 +516,90 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
 
     if not isinstance(manifest, dict) or manifest.get("schema_version") != BACKUP_SCHEMA_VERSION:
         raise BackupCompatibilityError("Unsupported backup schema version")
+    source_sha = manifest.get("source_sha")
+    source_bound = manifest.get("source_sha_bound")
+    build_identity = manifest.get("build_identity_sha256")
+    composition = manifest.get("composition_sha256")
+    unresolved_limits = manifest.get("unresolved_limits")
+    if not isinstance(unresolved_limits, list) or any(
+        not isinstance(item, str) or not item for item in unresolved_limits
+    ):
+        raise BackupIntegrityError("Backup unresolved limits are invalid")
+    if source_bound is True:
+        source_sha = _exact_git_sha(source_sha, name="backup source_sha")
+        if not isinstance(build_identity, str):
+            raise BackupIntegrityError("Bound backup is missing build identity")
+        build_identity = _canonical_sha256_ref(
+            build_identity,
+            name="backup build_identity_sha256",
+        )
+        verified_source_sha, verified_composition = _load_build_identity(
+            root / "artifacts",
+            build_identity,
+        )
+        if source_sha != verified_source_sha or composition != verified_composition:
+            raise BackupIntegrityError(
+                "Backup build identity does not match immutable artifact"
+            )
+        if "SOURCE_SHA_UNBOUND" in unresolved_limits:
+            raise BackupIntegrityError("Bound backup cannot declare SOURCE_SHA_UNBOUND")
+    elif source_bound is False:
+        if source_sha is not None or build_identity is not None or composition is not None:
+            raise BackupIntegrityError("Unbound backup contains build identity metadata")
+        if "SOURCE_SHA_UNBOUND" not in unresolved_limits:
+            raise BackupIntegrityError("Unbound backup must declare SOURCE_SHA_UNBOUND")
+    else:
+        raise BackupIntegrityError("Backup source-SHA binding flag is invalid")
+    owner_id = manifest.get("source_owner_id")
+    owner_epoch = manifest.get("source_owner_epoch")
+    owner_fence_sha256 = manifest.get("source_owner_fence_sha256")
+    owner_path = root / "state" / "owner-fence.json"
+    if owner_id is None and owner_epoch is None and owner_fence_sha256 is None:
+        if "OWNER_FENCE_UNBOUND" not in unresolved_limits:
+            raise BackupIntegrityError("Unbound backup must declare OWNER_FENCE_UNBOUND")
+    else:
+        if "OWNER_FENCE_UNBOUND" in unresolved_limits:
+            raise BackupIntegrityError("Bound owner fence cannot declare OWNER_FENCE_UNBOUND")
+        if (
+            not isinstance(owner_id, str)
+            or not owner_id.strip()
+            or isinstance(owner_epoch, bool)
+            or not isinstance(owner_epoch, int)
+            or owner_epoch < 1
+        ):
+            raise BackupIntegrityError("Backup owner fence metadata is invalid")
+        owner_fence_sha256 = _canonical_sha256_ref(
+            owner_fence_sha256,
+            name="source_owner_fence_sha256",
+        )
+        if not owner_path.is_file():
+            raise BackupIntegrityError("Backed-up owner fence snapshot is missing")
+        if owner_fence_sha256 != "sha256:" + _sha256_file(owner_path):
+            raise BackupIntegrityError("Backed-up owner fence digest does not match")
+        try:
+            owner_fence = RecoveryController.load_owner_fence(owner_path)
+        except ValueError as error:
+            raise BackupIntegrityError("Backed-up owner fence snapshot is invalid") from error
+        if owner_fence.owner_id != owner_id or owner_fence.epoch != owner_epoch:
+            raise BackupIntegrityError("Backup owner fence metadata does not match snapshot")
+    if expected_source_sha is not None:
+        requested_source = _exact_git_sha(
+            expected_source_sha,
+            name="expected_source_sha",
+        )
+        if source_sha != requested_source:
+            raise BackupCompatibilityError(
+                "Backup source SHA does not match requested build"
+            )
+    if expected_build_identity_sha256 is not None:
+        requested_identity = _canonical_sha256_ref(
+            expected_build_identity_sha256,
+            name="expected_build_identity_sha256",
+        )
+        if build_identity != requested_identity:
+            raise BackupCompatibilityError(
+                "Backup build identity does not match requested artifact"
+            )
     if manifest.get("journal_schema_version") != JournalStore.SCHEMA_VERSION:
         raise BackupCompatibilityError("Unsupported backed-up journal schema version")
     if manifest.get("reconciliation_required_after_restore") is not True:
@@ -436,11 +677,21 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
     return manifest
 
 
-def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Path:
+def restore_backup(
+    backup_root: str | Path,
+    destination_root: str | Path,
+    *,
+    expected_source_sha: str | None = None,
+    expected_build_identity_sha256: str | None = None,
+) -> Path:
     """Restore through staging and leave a mandatory reconciliation marker."""
 
     backup = Path(backup_root)
-    manifest = verify_backup(backup)
+    manifest = verify_backup(
+        backup,
+        expected_source_sha=expected_source_sha,
+        expected_build_identity_sha256=expected_build_identity_sha256,
+    )
     destination = Path(destination_root)
     if destination.exists():
         raise BackupError("Restore destination already exists")
@@ -459,12 +710,18 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
                 raise BackupIntegrityError("Restored payload digest mismatch")
 
         marker = {
-            "schema_version": 1,
+            "schema_version": 2,
+            "status": "RECONCILIATION_REQUIRED",
             "restored_at": _utc_now(),
             "reason": "RECONCILIATION_AND_OWNERSHIP_FENCING_REQUIRED",
             "backup_manifest_sha256": (backup / MANIFEST_DIGEST_NAME)
             .read_text(encoding="ascii")
             .strip(),
+            "source_sha": manifest["source_sha"],
+            "build_identity_sha256": manifest["build_identity_sha256"],
+            "source_owner_id": manifest["source_owner_id"],
+            "source_owner_epoch": manifest["source_owner_epoch"],
+            "source_owner_fence_sha256": manifest["source_owner_fence_sha256"],
         }
         _write_bytes_durable(stage / RESTORE_MARKER_NAME, _canonical_json(marker))
         os.replace(stage, destination)
@@ -474,21 +731,500 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
         raise
 
 
-def restore_requires_reconciliation(destination_root: str | Path) -> bool:
-    """Fail closed until a future qualified reconciliation flow is implemented.
-
-    Missing, unreadable or merely present restore metadata can never grant
-    execution authority. The current recovery foundation has no gate-clearing
-    operation, so every restored or uncertain state requires reconciliation.
-    """
-
+def _read_restore_marker(destination_root: str | Path) -> dict[str, Any]:
     marker = Path(destination_root) / RESTORE_MARKER_NAME
     if not marker.is_file():
-        return True
+        raise BackupIntegrityError("Restore reconciliation marker is missing")
     try:
         payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise BackupIntegrityError("Restore reconciliation marker is unreadable") from error
+    if (
+        not isinstance(payload, dict)
+        or payload.get("reason") != "RECONCILIATION_AND_OWNERSHIP_FENCING_REQUIRED"
+        or not isinstance(payload.get("backup_manifest_sha256"), str)
+        or not payload["backup_manifest_sha256"].startswith("sha256:")
+    ):
+        raise BackupIntegrityError("Restore reconciliation marker is invalid")
+    return payload
+
+
+def _normalize_fencing_evidence(
+    root: Path,
+    values: Sequence[str],
+    marker: Mapping[str, object],
+    *,
+    completed_at: datetime,
+) -> tuple[dict[str, object], ...]:
+    """Load and verify immutable typed evidence for one sender-fence transition."""
+
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise TypeError("fencing_evidence must be a sequence of artifact SHA-256 refs")
+    if not values:
+        raise BackupError("immutable old-sender fencing evidence is required")
+
+    source_sha = marker.get("source_sha")
+    old_owner_id = marker.get("source_owner_id")
+    old_owner_epoch = marker.get("source_owner_epoch")
+    backup_manifest_sha256 = marker.get("backup_manifest_sha256")
+    if source_sha is None or marker.get("build_identity_sha256") is None:
+        raise BackupError("Restore completion requires an exact immutable build identity")
+    source_sha = _exact_git_sha(source_sha, name="restore source_sha")
+    if (
+        not isinstance(old_owner_id, str)
+        or not old_owner_id.strip()
+        or isinstance(old_owner_epoch, bool)
+        or not isinstance(old_owner_epoch, int)
+        or old_owner_epoch < 1
+    ):
+        raise BackupError("Restore completion requires a durable source owner fence")
+    backup_manifest_sha256 = _canonical_sha256_ref(
+        backup_manifest_sha256,
+        name="backup_manifest_sha256",
+    )
+
+    restored_at = marker.get("restored_at")
+    if not isinstance(restored_at, str) or not restored_at.endswith("Z"):
+        raise BackupIntegrityError("Restore marker restored_at is invalid")
+    try:
+        restored = datetime.fromisoformat(restored_at.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise BackupIntegrityError("Restore marker restored_at is invalid") from error
+    if restored.tzinfo is None:
+        raise BackupIntegrityError("Restore marker restored_at is invalid")
+    restored = restored.astimezone(timezone.utc)
+
+    normalized: list[dict[str, object]] = []
+    seen_digests: set[str] = set()
+    transition: tuple[str, int] | None = None
+    allowed_mechanisms = {
+        "PROVIDER_SESSION_REVOKED",
+        "EXTERNAL_SENDER_FENCE_CONFIRMED",
+    }
+    for raw_digest in values:
+        digest = _canonical_sha256_ref(raw_digest, name="fencing evidence sha256")
+        if digest in seen_digests:
+            raise BackupError("fencing evidence artifact digest must be unique")
+        seen_digests.add(digest)
+        payload = _load_typed_artifact(
+            root / "artifacts",
+            digest,
+            expected_kind="AUTOTRADE_FENCING_ATTESTATION",
+        )
+        required = {
+            "schema_version",
+            "kind",
+            "backup_manifest_sha256",
+            "source_sha",
+            "old_owner_id",
+            "old_owner_epoch",
+            "new_owner_id",
+            "new_owner_epoch",
+            "mechanism",
+            "observed_at",
+        }
+        if set(payload) != required:
+            raise BackupError("fencing attestation structure is invalid")
+        if payload["backup_manifest_sha256"] != backup_manifest_sha256:
+            raise BackupError("fencing attestation belongs to another backup")
+        if payload["source_sha"] != source_sha:
+            raise BackupError("fencing attestation belongs to another source build")
+        if payload["old_owner_id"] != old_owner_id or payload["old_owner_epoch"] != old_owner_epoch:
+            raise BackupError("fencing attestation old owner/epoch does not match backup")
+        new_owner_id = _text(payload["new_owner_id"], name="new_owner_id")
+        new_owner_epoch = payload["new_owner_epoch"]
+        if (
+            isinstance(new_owner_epoch, bool)
+            or not isinstance(new_owner_epoch, int)
+            or new_owner_epoch != old_owner_epoch + 1
+        ):
+            raise BackupError("fencing attestation new owner epoch must advance exactly once")
+        if new_owner_id == old_owner_id:
+            raise BackupError("fencing attestation must transfer to a different owner")
+        mechanism = _text(payload["mechanism"], name="fencing mechanism").upper()
+        if mechanism not in allowed_mechanisms:
+            raise BackupError("fencing attestation mechanism is unsupported")
+        observed_at = payload["observed_at"]
+        if not isinstance(observed_at, str) or not observed_at.endswith("Z"):
+            raise BackupError("fencing attestation observed_at must be UTC with Z")
+        try:
+            observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise BackupError("fencing attestation observed_at is invalid") from error
+        if observed.tzinfo is None:
+            raise BackupError("fencing attestation observed_at must include timezone")
+        observed = observed.astimezone(timezone.utc)
+        if observed < restored:
+            raise BackupError("fencing attestation cannot predate the restored runtime")
+        if observed > completed_at:
+            raise BackupError("fencing attestation cannot postdate restore completion")
+        candidate = (new_owner_id, new_owner_epoch)
+        if transition is None:
+            transition = candidate
+        elif transition != candidate:
+            raise BackupError("fencing attestations disagree on the new owner transition")
+        normalized.append(
+            {
+                "sha256": digest,
+                "backup_manifest_sha256": backup_manifest_sha256,
+                "source_sha": source_sha,
+                "old_owner_id": old_owner_id,
+                "old_owner_epoch": old_owner_epoch,
+                "new_owner_id": new_owner_id,
+                "new_owner_epoch": new_owner_epoch,
+                "mechanism": mechanism,
+                "observed_at": observed.isoformat().replace("+00:00", "Z"),
+            }
+        )
+    return tuple(normalized)
+
+
+
+def _validate_reconciliation_completion_rows(
+    resolutions: object,
+    matched_execution_ids: object,
+) -> None:
+    """Validate durable reconciliation proof identities without trusting its hash alone."""
+
+    if not isinstance(matched_execution_ids, list):
+        raise BackupError("matched execution proof must be a list")
+    matched: set[str] = set()
+    for value in matched_execution_ids:
+        identity = _text(value, name="matched execution id")
+        if identity != value or identity in matched:
+            raise BackupError("matched execution identities must be unique canonical strings")
+        matched.add(identity)
+
+    if not isinstance(resolutions, list):
+        raise BackupError("submission resolution proof must be a list")
+    seen_attempts: set[str] = set()
+    seen_clients: set[str] = set()
+    seen_executions: set[str] = set()
+    seen_orders: set[str] = set()
+    allowed = {"PROVEN_ABSENT", "OBSERVED_EXECUTION", "OBSERVED_WORKING_ORDER"}
+    required_keys = {
+        "attempt_id",
+        "client_order_id",
+        "outcome",
+        "provider_execution_ids",
+        "provider_order_ids",
+    }
+    for item in resolutions:
+        if not isinstance(item, dict) or set(item) != required_keys:
+            raise BackupError("submission resolution proof structure is invalid")
+        attempt_id = _text(item["attempt_id"], name="attempt_id")
+        client_order_id = _text(item["client_order_id"], name="client_order_id")
+        if attempt_id != item["attempt_id"] or client_order_id != item["client_order_id"]:
+            raise BackupError("submission identities must be canonical strings")
+        if attempt_id in seen_attempts or client_order_id in seen_clients:
+            raise BackupError("submission resolution identities must be unique")
+        seen_attempts.add(attempt_id)
+        seen_clients.add(client_order_id)
+
+        outcome = item["outcome"]
+        if outcome not in allowed:
+            raise BackupError("submission resolution outcome is not canonical")
+        execution_ids = item["provider_execution_ids"]
+        order_ids = item["provider_order_ids"]
+        if not isinstance(execution_ids, list) or not isinstance(order_ids, list):
+            raise BackupError("provider identity proof fields must be lists")
+        for values, seen, label in (
+            (execution_ids, seen_executions, "provider execution"),
+            (order_ids, seen_orders, "provider order"),
+        ):
+            local: set[str] = set()
+            for value in values:
+                identity = _text(value, name=f"{label} identity")
+                if identity != value or identity in local or identity in seen:
+                    raise BackupError(f"{label} identities must be globally unique")
+                local.add(identity)
+                seen.add(identity)
+
+        if outcome == "PROVEN_ABSENT" and (execution_ids or order_ids):
+            raise BackupError("PROVEN_ABSENT cannot carry provider execution/order identities")
+        if outcome == "OBSERVED_EXECUTION":
+            if not execution_ids:
+                raise BackupError("OBSERVED_EXECUTION requires provider execution identity")
+            if any(value not in matched for value in execution_ids):
+                raise BackupError(
+                    "observed execution must be present in matched execution proof"
+                )
+        if outcome == "OBSERVED_WORKING_ORDER":
+            if not order_ids:
+                raise BackupError("OBSERVED_WORKING_ORDER requires provider order identity")
+            if execution_ids:
+                raise BackupError(
+                    "OBSERVED_WORKING_ORDER cannot simultaneously claim execution"
+                )
+
+def complete_restore_reconciliation(
+    destination_root: str | Path,
+    *,
+    controller: RecoveryController,
+    reconciliation: ReconciliationResult,
+    fencing_evidence: Sequence[str],
+    completed_at: str,
+) -> dict[str, Any]:
+    """Clear restore fencing only from exact build, owner and immutable evidence."""
+
+    root = Path(destination_root)
+    marker = _read_restore_marker(root)
+    if marker.get("status") == "RECONCILIATION_COMPLETE":
+        if restore_requires_reconciliation(root):
+            raise BackupIntegrityError("Existing restore completion proof is invalid")
+        proof_path = root / RESTORE_COMPLETION_PROOF_NAME
+        return json.loads(proof_path.read_text(encoding="utf-8"))
+    if marker.get("status") not in {None, "RECONCILIATION_REQUIRED"}:
+        raise BackupIntegrityError("Restore reconciliation marker status is invalid")
+    if not isinstance(controller, RecoveryController):
+        raise TypeError("controller must be RecoveryController")
+    if not isinstance(reconciliation, ReconciliationResult):
+        raise TypeError("reconciliation must be ReconciliationResult")
+    if not isinstance(completed_at, str) or not completed_at.strip():
+        raise BackupError("completed_at is required")
+    try:
+        completed = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise BackupError("completed_at must be an ISO timestamp") from error
+    if completed.tzinfo is None:
+        raise BackupError("completed_at must include a timezone")
+    completed_utc = completed.astimezone(timezone.utc)
+
+    refs = _normalize_fencing_evidence(
+        root,
+        fencing_evidence,
+        marker,
+        completed_at=completed_utc,
+    )
+    source_owner = OwnerFence(
+        owner_id=marker["source_owner_id"],
+        epoch=marker["source_owner_epoch"],
+    )
+    expected_new_owner = OwnerFence(
+        owner_id=refs[0]["new_owner_id"],
+        epoch=refs[0]["new_owner_epoch"],
+    )
+    if controller.owner not in {source_owner, expected_new_owner}:
+        raise BackupError(
+            "Recovery controller owner does not match the source or evidenced restored owner"
+        )
+
+    unresolved = tuple(
+        item.attempt_id
+        for item in reconciliation.submission_resolutions
+        if item.outcome == "UNKNOWN"
+    )
+    if not reconciliation.complete or reconciliation.blocks_new_risk or unresolved:
+        raise BackupError("Restore cannot complete while reconciliation is incomplete")
+
+    controller.record_reconciliation(consistent=True, uncertainty=unresolved)
+    if (
+        controller.state is not HostState.READY
+        or not controller.provider_reconciled
+        or controller.unresolved_attempts
+        or not controller.storage_writable
+        or not controller.clock_trusted
+    ):
+        raise BackupError("Recovery controller is not READY before ownership finalization")
+
+    resolution_proof: list[dict[str, Any]] = []
+    allowed_resolution_outcomes = {
+        "PROVEN_ABSENT",
+        "OBSERVED_EXECUTION",
+        "OBSERVED_WORKING_ORDER",
+    }
+    for item in reconciliation.submission_resolutions:
+        outcome = item.outcome
+        if outcome not in allowed_resolution_outcomes:
+            raise BackupError(
+                "Restore reconciliation contains a non-canonical submission outcome"
+            )
+        execution_ids = tuple(getattr(item, "provider_execution_ids", ()))
+        provider_order_ids = tuple(getattr(item, "provider_order_ids", ()))
+        for values, label in (
+            (execution_ids, "provider execution"),
+            (provider_order_ids, "provider order"),
+        ):
+            if any(not isinstance(value, str) or not value.strip() for value in values):
+                raise BackupError(f"{label} identities must be non-empty strings")
+            if len(values) != len(set(values)):
+                raise BackupError(f"{label} identities must be unique")
+        if outcome == "OBSERVED_EXECUTION" and not execution_ids:
+            raise BackupError(
+                "Observed execution cannot clear restore without exact provider execution identity"
+            )
+        if outcome == "OBSERVED_WORKING_ORDER" and not provider_order_ids:
+            raise BackupError(
+                "Observed working order cannot clear restore without exact provider order identity"
+            )
+        resolution_proof.append(
+            {
+                "attempt_id": item.attempt_id,
+                "client_order_id": item.client_order_id,
+                "outcome": outcome,
+                "provider_execution_ids": list(execution_ids),
+                "provider_order_ids": list(provider_order_ids),
+            }
+        )
+
+    matched_execution_ids = list(reconciliation.matched_execution_ids)
+    _validate_reconciliation_completion_rows(
+        resolution_proof,
+        matched_execution_ids,
+    )
+
+    new_owner_id = expected_new_owner.owner_id
+    expected_new_epoch = expected_new_owner.epoch
+    if controller.owner == source_owner:
+        transferred = controller.transfer_owner(
+            new_owner_id=new_owner_id,
+            old_sender_fenced=True,
+            reconciled=True,
+        )
+        if transferred != expected_new_owner:
+            raise BackupError("Recovery owner transition does not match fencing attestation")
+        controller.record_reconciliation(consistent=True, uncertainty=unresolved)
+    else:
+        # A prior attempt may have crashed after the new owner fence was
+        # persisted but before the completion marker was committed.  Resuming
+        # that exact evidenced owner is safe; advancing the epoch again is not.
+        transferred = controller.owner
+        if transferred != expected_new_owner:
+            raise BackupError("Durable recovery owner does not match fencing attestation")
+
+    if controller.state is not HostState.READY or not controller.provider_reconciled:
+        raise BackupError("Recovery controller is not READY after ownership transfer")
+
+    durable_owner_path = root / "state" / "owner-fence.json"
+    controller.persist_owner_fence(durable_owner_path)
+    try:
+        durable_owner = RecoveryController.load_owner_fence(durable_owner_path)
+    except ValueError as error:
+        raise BackupIntegrityError("Persisted restored owner fence is invalid") from error
+    if durable_owner != expected_new_owner:
+        raise BackupIntegrityError(
+            "Persisted restored owner fence does not match fencing attestation"
+        )
+
+    proof = {
+        "schema_version": 2,
+        "backup_manifest_sha256": marker["backup_manifest_sha256"],
+        "source_sha": marker["source_sha"],
+        "build_identity_sha256": marker["build_identity_sha256"],
+        "completed_at": completed_utc.isoformat().replace("+00:00", "Z"),
+        "source_owner_id": source_owner.owner_id,
+        "source_owner_epoch": source_owner.epoch,
+        "owner_id": transferred.owner_id,
+        "owner_epoch": transferred.epoch,
+        "fencing_evidence": [dict(item) for item in refs],
+        "matched_execution_ids": matched_execution_ids,
+        "submission_resolutions": resolution_proof,
+        "blocking_resources": list(reconciliation.blocking_resources),
+    }
+    proof_bytes = _canonical_json(proof)
+    proof_path = root / RESTORE_COMPLETION_PROOF_NAME
+    _write_bytes_durable(proof_path, proof_bytes)
+    proof_hash = f"sha256:{_sha256_bytes(proof_bytes)}"
+
+    completed_marker = {
+        **marker,
+        "schema_version": 2,
+        "status": "RECONCILIATION_COMPLETE",
+        "completed_at": proof["completed_at"],
+        "completion_proof_sha256": proof_hash,
+    }
+    _write_bytes_durable(root / RESTORE_MARKER_NAME, _canonical_json(completed_marker))
+    return proof
+
+
+def restore_requires_reconciliation(destination_root: str | Path) -> bool:
+    """Return False only for a durable, internally consistent completion proof."""
+
+    root = Path(destination_root)
+    try:
+        marker = _read_restore_marker(root)
+    except BackupIntegrityError:
+        return True
+    if marker.get("status") != "RECONCILIATION_COMPLETE":
+        return True
+    expected = marker.get("completion_proof_sha256")
+    if not isinstance(expected, str) or not expected.startswith("sha256:"):
+        return True
+    proof_path = root / RESTORE_COMPLETION_PROOF_NAME
+    if not proof_path.is_file():
+        return True
+    try:
+        proof_bytes = proof_path.read_bytes()
+        proof = json.loads(proof_bytes)
     except (OSError, json.JSONDecodeError):
         return True
-    if not isinstance(payload, dict) or payload.get("reason") != "RECONCILIATION_AND_OWNERSHIP_FENCING_REQUIRED":
+    if expected != f"sha256:{_sha256_bytes(proof_bytes)}":
         return True
-    return True
+    if not isinstance(proof, dict):
+        return True
+    if proof.get("backup_manifest_sha256") != marker.get("backup_manifest_sha256"):
+        return True
+    if (
+        not proof.get("owner_id")
+        or type(proof.get("owner_epoch")) is not int
+        or proof["owner_epoch"] < 1
+    ):
+        return True
+    durable_owner_path = root / "state" / "owner-fence.json"
+    try:
+        durable_owner = RecoveryController.load_owner_fence(durable_owner_path)
+    except ValueError:
+        return True
+    if (
+        durable_owner.owner_id != proof["owner_id"]
+        or durable_owner.epoch != proof["owner_epoch"]
+    ):
+        return True
+    if (
+        proof.get("source_sha") != marker.get("source_sha")
+        or proof.get("build_identity_sha256") != marker.get("build_identity_sha256")
+        or proof.get("source_owner_id") != marker.get("source_owner_id")
+        or proof.get("source_owner_epoch") != marker.get("source_owner_epoch")
+    ):
+        return True
+    stored_evidence = proof.get("fencing_evidence")
+    if not isinstance(stored_evidence, list) or not stored_evidence:
+        return True
+    try:
+        completed_at = proof.get("completed_at")
+        if not isinstance(completed_at, str) or not completed_at.endswith("Z"):
+            return True
+        completed = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        if completed.tzinfo is None:
+            return True
+        digest_refs = [
+            item["sha256"]
+            for item in stored_evidence
+            if isinstance(item, dict) and isinstance(item.get("sha256"), str)
+        ]
+        if len(digest_refs) != len(stored_evidence):
+            return True
+        evidence = _normalize_fencing_evidence(
+            root,
+            digest_refs,
+            marker,
+            completed_at=completed.astimezone(timezone.utc),
+        )
+        if [dict(item) for item in evidence] != stored_evidence:
+            return True
+        if proof["owner_id"] != evidence[0]["new_owner_id"]:
+            return True
+        if proof["owner_epoch"] != evidence[0]["new_owner_epoch"]:
+            return True
+    except (BackupError, BackupIntegrityError, TypeError, ValueError, KeyError):
+        return True
+    if proof.get("blocking_resources") != []:
+        return True
+    try:
+        _validate_reconciliation_completion_rows(
+            proof.get("submission_resolutions"),
+            proof.get("matched_execution_ids"),
+        )
+    except (BackupError, TypeError, ValueError):
+        return True
+    return False

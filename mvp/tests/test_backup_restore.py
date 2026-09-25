@@ -1,4 +1,5 @@
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -13,6 +14,7 @@ from mvp.autotrade_mvp.backup import (
     BackupCompatibilityError,
     BackupError,
     BackupIntegrityError,
+    complete_restore_reconciliation,
     create_backup,
     restore_backup,
     restore_requires_reconciliation,
@@ -20,6 +22,57 @@ from mvp.autotrade_mvp.backup import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.pipeline import run_vertical_slice
+from mvp.autotrade_mvp.reconciliation import (
+    CoverageSurfaceEvidence,
+    SnapshotConsistencyEvidence,
+    UnknownSubmission,
+    reconcile_account,
+)
+from mvp.autotrade_mvp.recovery import HostState, RecoveryController
+
+
+
+def _restore_instant(restored: Path, seconds: int) -> str:
+    marker = json.loads(
+        (restored / "RESTORE_RECONCILIATION_REQUIRED.json").read_text(encoding="utf-8")
+    )
+    base = datetime.fromisoformat(marker["restored_at"].replace("Z", "+00:00"))
+    value = base.astimezone(timezone.utc) + timedelta(seconds=seconds)
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _fencing_evidence(restored: Path, **overrides):
+    marker = json.loads(
+        (restored / "RESTORE_RECONCILIATION_REQUIRED.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    payload = {
+        "schema_version": 1,
+        "kind": "AUTOTRADE_FENCING_ATTESTATION",
+        "backup_manifest_sha256": marker["backup_manifest_sha256"],
+        "source_sha": marker["source_sha"],
+        "old_owner_id": marker["source_owner_id"],
+        "old_owner_epoch": marker["source_owner_epoch"],
+        "new_owner_id": "restored-host",
+        "new_owner_epoch": marker["source_owner_epoch"] + 1,
+        "mechanism": "PROVIDER_SESSION_REVOKED",
+        "observed_at": _restore_instant(restored, 1),
+    }
+    payload.update(overrides)
+    return [_publish_json_artifact(restored / "artifacts", payload)]
+
+
+def _restore_controller(restored: Path) -> RecoveryController:
+    controller = RecoveryController()
+    controller.restore_owner(
+        RecoveryController.load_owner_fence(restored / "state" / "owner-fence.json")
+    )
+    return controller
+
+
+def _completed_at(restored: Path) -> str:
+    return _restore_instant(restored, 10)
 
 
 def _artifact_store(root: Path) -> str:
@@ -46,12 +99,128 @@ def _artifact_store(root: Path) -> str:
     return digest
 
 
+def _publish_json_artifact(root: Path, payload: dict) -> str:
+    data = (
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    digest = sha256(data).hexdigest()
+    object_path = root / "objects" / "sha256" / digest[:2] / digest
+    object_path.parent.mkdir(parents=True, exist_ok=True)
+    object_path.write_bytes(data)
+    manifest_path = root / "manifests" / "sha256" / digest[:2] / f"{digest}.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "algorithm": "sha256",
+                "digest": digest,
+                "size_bytes": len(data),
+                "media_type": "application/json",
+                "rights_basis": "first-party-test-evidence",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return "sha256:" + digest
+
+
+def _build_identity_artifact(
+    root: Path,
+    *,
+    source_sha: str = "a" * 40,
+    composition_sha256: str = "sha256:" + "c" * 64,
+) -> str:
+    return _publish_json_artifact(
+        root,
+        {
+            "schema_version": 1,
+            "kind": "AUTOTRADE_BUILD_IDENTITY",
+            "source_sha": source_sha,
+            "composition_sha256": composition_sha256,
+        },
+    )
+
+
+def _reconciliation(*, complete: bool = True):
+    return reconcile_account(
+        local_cash={"USD": "1000"},
+        provider_cash={"USD": "1000"},
+        local_positions={},
+        provider_positions={},
+        local_execution_ids=[],
+        provider_fills=[],
+        snapshot_consistency=SnapshotConsistencyEvidence(
+            mode="ATOMIC",
+            query_started_at="2026-09-24T17:00:00Z",
+            query_completed_at="2026-09-24T19:00:00Z",
+        ),
+        coverage_start="2026-09-24T17:00:00Z",
+        coverage_end="2026-09-24T19:00:00Z",
+        pagination_complete=complete,
+    )
+
+
+def _resolved_absence_reconciliation():
+    surfaces = [
+        CoverageSurfaceEvidence(
+            surface=surface,
+            coverage_start="2026-09-24T17:00:00Z",
+            coverage_end="2026-09-24T19:00:00Z",
+            pagination_complete=True,
+            consistency_horizon_satisfied=True,
+            provider_semantics_exclude_execution=True,
+        )
+        for surface in ("OPEN_ORDERS", "ORDER_HISTORY", "EXECUTIONS", "ACTIVITIES")
+    ]
+    return reconcile_account(
+        local_cash={"USD": "1000"},
+        provider_cash={"USD": "1000"},
+        local_positions={},
+        provider_positions={},
+        local_execution_ids=[],
+        provider_fills=[],
+        snapshot_consistency=SnapshotConsistencyEvidence(
+            mode="ATOMIC",
+            query_started_at="2026-09-24T17:00:00Z",
+            query_completed_at="2026-09-24T19:00:00Z",
+        ),
+        unknown_submissions=[
+            UnknownSubmission.create(
+                attempt_id="attempt-absent",
+                client_order_id="client-absent",
+                started_at="2026-09-24T18:00:00Z",
+            )
+        ],
+        searched_client_order_ids=["client-absent"],
+        coverage_start="2026-09-24T17:00:00Z",
+        coverage_end="2026-09-24T19:00:00Z",
+        pagination_complete=True,
+        absence_coverage=surfaces,
+    )
+
+
 class BackupRestoreTests(unittest.TestCase):
     def _build_sources(self, root: Path) -> tuple[Path, Path]:
         state = root / "state"
         artifacts = root / "artifacts"
         run_vertical_slice([100, 101, 102, 103], state)
         _artifact_store(artifacts)
+        build_identity = _build_identity_artifact(artifacts)
+        (state / "build-identity.sha256").write_text(
+            build_identity + "\n",
+            encoding="ascii",
+        )
+        source_controller = RecoveryController()
+        source_controller.start("source-host")
+        source_controller.persist_owner_fence(state / "owner-fence.json")
         return state, artifacts
 
     def test_wal_active_backup_verifies_and_restore_is_fail_closed(self):
@@ -77,6 +246,467 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertTrue((restored / "state" / "journal.sqlite3").is_file())
             self.assertTrue((restored / "artifacts" / "objects" / "sha256").is_dir())
 
+    def test_immutable_build_identity_binds_source_sha_and_restore(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            build_identity = _build_identity_artifact(artifacts)
+            backup = create_backup(
+                state,
+                artifacts,
+                root / "backup",
+                build_identity_sha256=build_identity,
+            )
+            manifest = verify_backup(
+                backup,
+                expected_source_sha="a" * 40,
+                expected_build_identity_sha256=build_identity,
+            )
+            self.assertEqual(manifest["source_sha"], "a" * 40)
+            self.assertTrue(manifest["source_sha_bound"])
+            self.assertEqual(manifest["build_identity_sha256"], build_identity)
+            self.assertEqual(manifest["composition_sha256"], "sha256:" + "c" * 64)
+            self.assertNotIn("SOURCE_SHA_UNBOUND", manifest["unresolved_limits"])
+
+            with self.assertRaisesRegex(BackupCompatibilityError, "source SHA"):
+                restore_backup(
+                    backup,
+                    root / "wrong-build",
+                    expected_source_sha="b" * 40,
+                )
+            self.assertFalse((root / "wrong-build").exists())
+
+            restored = restore_backup(
+                backup,
+                root / "matched-build",
+                expected_source_sha="a" * 40,
+                expected_build_identity_sha256=build_identity,
+            )
+            marker = json.loads(
+                (restored / "RESTORE_RECONCILIATION_REQUIRED.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(marker["source_sha"], "a" * 40)
+            self.assertEqual(marker["build_identity_sha256"], build_identity)
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_unbound_backup_is_truthfully_marked_non_exact(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            (state / "build-identity.sha256").unlink()
+            backup = create_backup(state, artifacts, root / "backup")
+            manifest = verify_backup(backup)
+            self.assertIsNone(manifest["source_sha"])
+            self.assertFalse(manifest["source_sha_bound"])
+            self.assertIsNone(manifest["build_identity_sha256"])
+            self.assertIn("SOURCE_SHA_UNBOUND", manifest["unresolved_limits"])
+            with self.assertRaisesRegex(BackupCompatibilityError, "source SHA"):
+                verify_backup(backup, expected_source_sha="a" * 40)
+
+    def test_missing_or_wrong_build_identity_artifact_blocks_backup_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            (state / "build-identity.sha256").unlink()
+            missing = "sha256:" + "f" * 64
+            with self.assertRaisesRegex(BackupIntegrityError, "missing"):
+                create_backup(
+                    state,
+                    artifacts,
+                    root / "missing-build",
+                    build_identity_sha256=missing,
+                )
+            self.assertFalse((root / "missing-build").exists())
+
+            wrong_kind = _publish_json_artifact(
+                artifacts,
+                {
+                    "schema_version": 1,
+                    "kind": "NOT_A_BUILD_IDENTITY",
+                    "source_sha": "a" * 40,
+                    "composition_sha256": "sha256:" + "c" * 64,
+                },
+            )
+            with self.assertRaisesRegex(
+                BackupCompatibilityError,
+                "AUTOTRADE_BUILD_IDENTITY",
+            ):
+                create_backup(
+                    state,
+                    artifacts,
+                    root / "wrong-kind",
+                    build_identity_sha256=wrong_kind,
+                )
+            self.assertFalse((root / "wrong-kind").exists())
+
+    def test_completed_restore_reconciliation_can_clear_gate_durably(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+            controller = _restore_controller(restored)
+            proof = complete_restore_reconciliation(
+                restored,
+                controller=controller,
+                reconciliation=_reconciliation(),
+                fencing_evidence=_fencing_evidence(restored),
+                completed_at=_completed_at(restored),
+            )
+
+            self.assertEqual(controller.state, HostState.READY)
+            self.assertEqual(proof["source_owner_id"], "source-host")
+            self.assertEqual(proof["source_owner_epoch"], 1)
+            self.assertEqual(proof["owner_id"], "restored-host")
+            self.assertEqual(proof["owner_epoch"], 2)
+            self.assertEqual(proof["blocking_resources"], [])
+            self.assertFalse(restore_requires_reconciliation(restored))
+            self.assertFalse(restore_requires_reconciliation(restored))
+
+    def test_resolved_absence_completion_uses_current_reconciliation_contract(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = _restore_controller(restored)
+
+            proof = complete_restore_reconciliation(
+                restored,
+                controller=controller,
+                reconciliation=_resolved_absence_reconciliation(),
+                fencing_evidence=_fencing_evidence(restored),
+                completed_at=_completed_at(restored),
+            )
+
+            resolution = proof["submission_resolutions"][0]
+            self.assertEqual(resolution["outcome"], "PROVEN_ABSENT")
+            self.assertEqual(resolution["provider_execution_ids"], [])
+            self.assertEqual(resolution["provider_order_ids"], [])
+            self.assertFalse(restore_requires_reconciliation(restored))
+
+    def test_incomplete_reconciliation_never_clears_restore_gate(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = _restore_controller(restored)
+
+            with self.assertRaisesRegex(BackupError, "incomplete"):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation=_reconciliation(complete=False),
+                    fencing_evidence=_fencing_evidence(restored)[:1],
+                    completed_at=_completed_at(restored),
+                )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_missing_fencing_evidence_never_clears_restore_gate(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = _restore_controller(restored)
+
+            with self.assertRaisesRegex(BackupError, "fencing"):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation=_reconciliation(),
+                    fencing_evidence=[],
+                    completed_at=_completed_at(restored),
+                )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_arbitrary_string_is_not_fencing_evidence(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = _restore_controller(restored)
+            with self.assertRaisesRegex(BackupIntegrityError, "canonical SHA-256"):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation=_reconciliation(),
+                    fencing_evidence=["old-host:fenced"],
+                    completed_at=_completed_at(restored),
+                )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_missing_fencing_artifact_cannot_clear_gate(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = _restore_controller(restored)
+            refs = _fencing_evidence(restored)
+            digest = refs[0].removeprefix("sha256:")
+            object_path = restored / "artifacts" / "objects" / "sha256" / digest[:2] / digest
+            object_path.unlink()
+            with self.assertRaisesRegex(BackupIntegrityError, "missing"):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation=_reconciliation(),
+                    fencing_evidence=refs,
+                    completed_at=_completed_at(restored),
+                )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_same_fencing_artifact_cannot_be_counted_twice(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = _restore_controller(restored)
+            ref = _fencing_evidence(restored)[0]
+            with self.assertRaisesRegex(BackupError, "unique"):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation=_reconciliation(),
+                    fencing_evidence=[ref, ref],
+                    completed_at=_completed_at(restored),
+                )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_future_fencing_attestation_never_clears_gate(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = _restore_controller(restored)
+            future = _fencing_evidence(
+                restored,
+                observed_at=_restore_instant(restored, 11),
+            )
+            with self.assertRaisesRegex(BackupError, "postdate"):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation=_reconciliation(),
+                    fencing_evidence=future,
+                    completed_at=_completed_at(restored),
+                )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_wrong_old_owner_epoch_or_unsupported_fence_cannot_clear_gate(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+
+            wrong_epoch = _fencing_evidence(restored, old_owner_epoch=999)
+            with self.assertRaisesRegex(BackupError, "old owner/epoch"):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=_restore_controller(restored),
+                    reconciliation=_reconciliation(),
+                    fencing_evidence=wrong_epoch,
+                    completed_at=_completed_at(restored),
+                )
+
+            unsupported = _fencing_evidence(restored, mechanism="UNVERIFIED_CLAIM")
+            with self.assertRaisesRegex(BackupError, "mechanism"):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=_restore_controller(restored),
+                    reconciliation=_reconciliation(),
+                    fencing_evidence=unsupported,
+                    completed_at=_completed_at(restored),
+                )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_tampered_restore_completion_proof_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = _restore_controller(restored)
+            complete_restore_reconciliation(
+                restored,
+                controller=controller,
+                reconciliation=_reconciliation(),
+                fencing_evidence=_fencing_evidence(restored)[:1],
+                completed_at=_completed_at(restored),
+            )
+            proof_path = restored / "RESTORE_RECONCILIATION_COMPLETE.json"
+            payload = json.loads(proof_path.read_text(encoding="utf-8"))
+            payload["owner_epoch"] = 999
+            proof_path.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_self_consistent_but_unknown_restore_proof_keeps_gate_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = _restore_controller(restored)
+            complete_restore_reconciliation(
+                restored,
+                controller=controller,
+                reconciliation=_reconciliation(),
+                fencing_evidence=_fencing_evidence(restored)[:1],
+                completed_at=_completed_at(restored),
+            )
+
+            proof_path = restored / "RESTORE_RECONCILIATION_COMPLETE.json"
+            marker_path = restored / "RESTORE_RECONCILIATION_REQUIRED.json"
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+            proof["submission_resolutions"] = [
+                {
+                    "attempt_id": "ambiguous-1",
+                    "client_order_id": "client-ambiguous",
+                    "outcome": "UNKNOWN",
+                    "provider_execution_ids": [],
+                }
+            ]
+            proof_bytes = (
+                json.dumps(
+                    proof,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                + "\n"
+            ).encode("utf-8")
+            proof_path.write_bytes(proof_bytes)
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker["completion_proof_sha256"] = "sha256:" + sha256(proof_bytes).hexdigest()
+            marker_path.write_text(
+                json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_self_consistent_but_unmatched_execution_proof_keeps_gate_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            complete_restore_reconciliation(
+                restored,
+                controller=_restore_controller(restored),
+                reconciliation=_reconciliation(),
+                fencing_evidence=_fencing_evidence(restored)[:1],
+                completed_at=_completed_at(restored),
+            )
+
+            proof_path = restored / "RESTORE_RECONCILIATION_COMPLETE.json"
+            marker_path = restored / "RESTORE_RECONCILIATION_REQUIRED.json"
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+            proof["submission_resolutions"] = [
+                {
+                    "attempt_id": "attempt-ghost",
+                    "client_order_id": "client-ghost",
+                    "outcome": "OBSERVED_EXECUTION",
+                    "provider_execution_ids": ["execution-not-matched"],
+                    "provider_order_ids": [],
+                }
+            ]
+            proof["matched_execution_ids"] = []
+            proof_bytes = (
+                json.dumps(
+                    proof,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                + "\n"
+            ).encode("utf-8")
+            proof_path.write_bytes(proof_bytes)
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker["completion_proof_sha256"] = "sha256:" + sha256(proof_bytes).hexdigest()
+            marker_path.write_text(
+                json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_duplicate_submission_identity_in_rehashed_proof_keeps_gate_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            complete_restore_reconciliation(
+                restored,
+                controller=_restore_controller(restored),
+                reconciliation=_reconciliation(),
+                fencing_evidence=_fencing_evidence(restored)[:1],
+                completed_at=_completed_at(restored),
+            )
+            proof_path = restored / "RESTORE_RECONCILIATION_COMPLETE.json"
+            marker_path = restored / "RESTORE_RECONCILIATION_REQUIRED.json"
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+            row = {
+                "attempt_id": "same-attempt",
+                "client_order_id": "same-client",
+                "outcome": "PROVEN_ABSENT",
+                "provider_execution_ids": [],
+                "provider_order_ids": [],
+            }
+            proof["submission_resolutions"] = [row, dict(row)]
+            proof_bytes = (
+                json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("utf-8")
+            proof_path.write_bytes(proof_bytes)
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker["completion_proof_sha256"] = "sha256:" + sha256(proof_bytes).hexdigest()
+            marker_path.write_text(
+                json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_boolean_owner_epoch_cannot_clear_restore_gate(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            controller = _restore_controller(restored)
+            complete_restore_reconciliation(
+                restored,
+                controller=controller,
+                reconciliation=_reconciliation(),
+                fencing_evidence=_fencing_evidence(restored)[:1],
+                completed_at=_completed_at(restored),
+            )
+            proof_path = restored / "RESTORE_RECONCILIATION_COMPLETE.json"
+            marker_path = restored / "RESTORE_RECONCILIATION_REQUIRED.json"
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+            proof["owner_epoch"] = True
+            proof_bytes = (
+                json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("utf-8")
+            proof_path.write_bytes(proof_bytes)
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker["completion_proof_sha256"] = "sha256:" + sha256(proof_bytes).hexdigest()
+            marker_path.write_text(
+                json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
     def test_logically_inconsistent_runtime_snapshot_is_rejected(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -94,13 +724,17 @@ class BackupRestoreTests(unittest.TestCase):
             root = Path(directory)
             state, artifacts = self._build_sources(root)
             backup = create_backup(state, artifacts, root / "backup")
-            object_files = [
-                path
-                for path in (backup / "artifacts" / "objects" / "sha256").rglob("*")
-                if path.is_file()
-            ]
-            self.assertEqual(len(object_files), 1)
-            object_files[0].unlink()
+            digest = sha256(b"immutable-evidence").hexdigest()
+            object_path = (
+                backup
+                / "artifacts"
+                / "objects"
+                / "sha256"
+                / digest[:2]
+                / digest
+            )
+            self.assertTrue(object_path.is_file())
+            object_path.unlink()
             with self.assertRaisesRegex(BackupIntegrityError, "missing"):
                 verify_backup(backup)
 

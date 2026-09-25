@@ -475,6 +475,10 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                 ),
                 Decimal("12.50"),
             )
+            self.assertEqual(
+                restarted_economics.transactions[-1].observed_at,
+                announced.event.effective_at.isoformat().replace("+00:00", "Z"),
+            )
 
             exact_retry = commit_authoritative_corporate_action(
                 store=reopened,

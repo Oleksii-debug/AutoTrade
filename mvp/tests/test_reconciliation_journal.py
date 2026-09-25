@@ -302,6 +302,52 @@ class ReconciliationJournalTests(unittest.TestCase):
             )
             self.assertEqual(evidence["availability"], {"CASH:USD": "850"})
 
+    def test_option_lifecycle_fact_invalidates_cash_availability(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="before-option-lifecycle",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            lifecycle_payload = {
+                "provider_id": "TEST_PROVIDER",
+                "account_id": "test-account",
+                "environment": "PAPER",
+                "external_event_id": "exercise-1",
+                "event_kind": "EXERCISE",
+            }
+            store.append_event(
+                {
+                    "event_id": "option-lifecycle-after-provider-snapshot",
+                    "event_type": "OptionLifecycleApplied",
+                    "aggregate_type": "option_lifecycle",
+                    "aggregate_id": "option-lifecycle-test-scope",
+                    "aggregate_version": "1",
+                    "payload": lifecycle_payload,
+                    "payload_hash": payload_digest(lifecycle_payload),
+                    "committed_at": "2026-09-24T19:00:10Z",
+                }
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "predates option lifecycle financial truth",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                )
+
     def test_settlement_freshness_barrier_is_scoped_to_financial_account(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

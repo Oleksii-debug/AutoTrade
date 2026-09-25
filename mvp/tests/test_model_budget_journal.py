@@ -43,8 +43,10 @@ class DurableModelBudgetTests(unittest.TestCase):
                 clock=lambda: NOW,
             )
             self.assertTrue(first.reserve("req:release:item", "0.2"))
-            self.assertTrue(second.release("item") is False)
             self.assertTrue(second.reserve("item", "0.3"))
+            # Under the old colon-concatenated identity this RELEASE key was
+            # identical to first.reserve("req:release:item").
+            self.assertTrue(second.release("item"))
 
             connection = sqlite3.connect(path)
             try:
@@ -57,8 +59,8 @@ class DurableModelBudgetTests(unittest.TestCase):
                 ]
             finally:
                 connection.close()
-            self.assertEqual(len(keys), 2)
-            self.assertEqual(len(set(keys)), 2)
+            self.assertEqual(len(keys), 3)
+            self.assertEqual(len(set(keys)), 3)
 
     def test_environment_is_required_and_validated_before_mutation(self):
         with TemporaryDirectory() as directory:

@@ -1132,6 +1132,7 @@ class IndependentRiskTests(unittest.TestCase):
                 state_version=7,
                 policy_version=0,
                 reservation_version=0,
+                reservation_requirements={"CASH:USD": "100"},
                 capability_snapshot_id="cap",
                 evaluated_at="2026-09-24T18:00:00Z",
                 valid_until="2026-09-24T18:00:30Z",

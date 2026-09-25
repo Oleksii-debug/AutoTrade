@@ -50,23 +50,42 @@ def _freeze_evidence(value: Mapping[str, object]) -> Mapping[str, object]:
         raise CapabilityError("evidence_ref is missing required fields")
     if keys - allowed:
         raise CapabilityError("evidence_ref contains unknown fields")
-    artifact_id = _text(value["artifact_id"], "artifact_id")
+    artifact_id = value["artifact_id"]
+    if not isinstance(artifact_id, str) or artifact_id != artifact_id.strip():
+        raise CapabilityError("evidence artifact_id must be a canonical UUID")
     try:
-        UUID(artifact_id)
+        canonical_artifact_id = str(UUID(artifact_id))
     except (ValueError, TypeError, AttributeError) as error:
-        raise CapabilityError("evidence artifact_id must be a UUID") from error
-    digest = _text(value["sha256"], "sha256")
-    if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+        raise CapabilityError("evidence artifact_id must be a canonical UUID") from error
+    if canonical_artifact_id != artifact_id:
+        raise CapabilityError("evidence artifact_id must be a canonical UUID")
+
+    digest = value["sha256"]
+    if (
+        not isinstance(digest, str)
+        or digest != digest.strip()
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+    ):
         raise CapabilityError("evidence sha256 must be a canonical SHA-256 digest")
-    observed_at = _text(value["observed_at"], "observed_at")
-    if not observed_at.endswith("Z"):
-        raise CapabilityError("evidence observed_at must be UTC and end in Z")
+
+    observed_at = value["observed_at"]
+    if (
+        not isinstance(observed_at, str)
+        or observed_at != observed_at.strip()
+        or not observed_at.endswith("Z")
+    ):
+        raise CapabilityError("evidence observed_at must be canonical UTC text")
     try:
         parsed = datetime.fromisoformat(observed_at[:-1] + "+00:00")
     except ValueError as error:
         raise CapabilityError("evidence observed_at must be an ISO date-time") from error
     if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
         raise CapabilityError("evidence observed_at must be UTC")
+    canonical_observed_at = (
+        parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
+    if observed_at != canonical_observed_at:
+        raise CapabilityError("evidence observed_at must be canonical UTC text")
     normalized: dict[str, object] = {
         "artifact_id": artifact_id,
         "sha256": digest,

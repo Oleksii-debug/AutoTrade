@@ -62,7 +62,7 @@ class AuthorityTests(unittest.TestCase):
             notional="100",
             expires_at="2026-09-24T23:00:00Z",
         )
-        rejected = service.admit(
+        rejected = service._admit_unverified(
             admission_id="a-bad", policy_id="p1", intent_hash="hash-b",
             account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
@@ -72,7 +72,7 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(rejected.outcome, "REJECTED")
         self.assertEqual(rejected.reason, "confirmation_intent_mismatch")
 
-        admitted = service.admit(
+        admitted = service._admit_unverified(
             admission_id="a-good", policy_id="p1", intent_hash="hash-a",
             account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
@@ -81,7 +81,7 @@ class AuthorityTests(unittest.TestCase):
         )
         self.assertEqual(admitted.outcome, "ADMITTED")
 
-        reused = service.admit(
+        reused = service._admit_unverified(
             admission_id="a-reuse", policy_id="p1", intent_hash="hash-a",
             account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
@@ -109,7 +109,7 @@ class AuthorityTests(unittest.TestCase):
                     expires_at="2026-09-24T23:00:00Z",
                     **confirmation_scope,
                 )
-                result = service.admit(
+                result = service._admit_unverified(
                     admission_id=f"admission-{index}",
                     policy_id="p1",
                     intent_hash="same-hash",
@@ -133,7 +133,7 @@ class AuthorityTests(unittest.TestCase):
     def test_policy_is_bound_to_exact_instrument_version(self):
         service = AuthorityService()
         service.register_policy(policy(autonomous=True))
-        rejected = service.admit(
+        rejected = service._admit_unverified(
             admission_id="wrong-version",
             policy_id="p1",
             intent_hash="h-version",
@@ -167,7 +167,7 @@ class AuthorityTests(unittest.TestCase):
             notional="100",
             expires_at="2026-09-24T23:00:00Z",
         )
-        rejected = service.admit(
+        rejected = service._admit_unverified(
             admission_id="version-mismatch",
             policy_id="p1",
             intent_hash="same-hash",
@@ -188,7 +188,7 @@ class AuthorityTests(unittest.TestCase):
     def test_dispatch_blocks_instrument_version_change_after_admission(self):
         service = AuthorityService()
         service.register_policy(policy(autonomous=True))
-        service.admit(
+        service._admit_unverified(
             admission_id="versioned-admission",
             policy_id="p1",
             intent_hash="h1",
@@ -248,7 +248,7 @@ class AuthorityTests(unittest.TestCase):
             valid_from="2026-09-24T19:00:00Z",
             expires_at="2026-09-24T20:00:00Z",
         ))
-        early = service.admit(
+        early = service._admit_unverified(
             admission_id="future-early", policy_id="p1", intent_hash="h1",
             account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
@@ -257,7 +257,7 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(early.outcome, "REJECTED")
         self.assertEqual(early.reason, "policy_not_yet_active")
 
-        active = service.admit(
+        active = service._admit_unverified(
             admission_id="future-active", policy_id="p1", intent_hash="h2",
             account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
@@ -318,7 +318,7 @@ class AuthorityTests(unittest.TestCase):
     def test_policy_expiry_and_revocation_fail_dispatch_barrier(self):
         service = AuthorityService()
         service.register_policy(policy(autonomous=True))
-        admitted = service.admit(
+        admitted = service._admit_unverified(
             admission_id="a1", policy_id="p1", intent_hash="h1",
             account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
@@ -345,7 +345,7 @@ class AuthorityTests(unittest.TestCase):
 
         second = AuthorityService()
         second.register_policy(policy(autonomous=True))
-        expired = second.admit(
+        expired = second._admit_unverified(
             admission_id="a2", policy_id="p1", intent_hash="h2",
             account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
@@ -356,7 +356,7 @@ class AuthorityTests(unittest.TestCase):
     def test_changed_intent_hash_is_blocked_at_dispatch(self):
         service = AuthorityService()
         service.register_policy(policy(autonomous=True))
-        service.admit(
+        service._admit_unverified(
             admission_id="a1", policy_id="p1", intent_hash="original",
             account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
@@ -373,7 +373,7 @@ class AuthorityTests(unittest.TestCase):
     def test_dispatch_scope_cannot_change_after_admission(self):
         service = AuthorityService()
         service.register_policy(policy(autonomous=True))
-        service.admit(
+        service._admit_unverified(
             admission_id="a1", policy_id="p1", intent_hash="h1",
             account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
@@ -396,7 +396,7 @@ class AuthorityTests(unittest.TestCase):
     def test_future_revocation_applies_only_at_its_effective_time(self):
         service = AuthorityService()
         service.register_policy(policy(autonomous=True))
-        service.admit(
+        service._admit_unverified(
             admission_id="a1", policy_id="p1", intent_hash="h1",
             account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
@@ -419,7 +419,7 @@ class AuthorityTests(unittest.TestCase):
     def test_unrelated_policy_registration_does_not_cancel_admission(self):
         service = AuthorityService()
         service.register_policy(policy(autonomous=True))
-        service.admit(
+        service._admit_unverified(
             admission_id="a1", policy_id="p1", intent_hash="h1",
             account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
@@ -450,7 +450,7 @@ class AuthorityTests(unittest.TestCase):
             protection_only=True,
             actions={"ORDER.SUBMIT", "ORDER.CANCEL"},
         ))
-        rejected = service.admit(
+        rejected = service._admit_unverified(
             admission_id="a1", policy_id="protect", intent_hash="h1",
             account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
@@ -458,7 +458,7 @@ class AuthorityTests(unittest.TestCase):
             now="2026-09-24T18:00:00Z",
         )
         self.assertEqual(rejected.reason, "protection_policy_requires_risk_reduction")
-        allowed = service.admit(
+        allowed = service._admit_unverified(
             admission_id="a2", policy_id="protect", intent_hash="h2",
             account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1,
             action="ORDER.CANCEL", notional="0", state_version=1,
@@ -481,7 +481,7 @@ class AuthorityTests(unittest.TestCase):
         for index, case in enumerate(cases):
             with self.subTest(reason=case["reason"]):
                 reason = case.pop("reason")
-                record = service.admit(
+                record = service._admit_unverified(
                     admission_id=f"a{index}", policy_id="p1", intent_hash=f"h{index}",
                     state_version=1, now="2026-09-24T18:00:00Z", **case
                 )
@@ -510,8 +510,8 @@ class AuthorityTests(unittest.TestCase):
             risk_admitted=True, now="2026-09-24T18:00:00Z",
             confirmation_id="c1",
         )
-        first = service.admit(**kwargs)
-        second = service.admit(**kwargs)
+        first = service._admit_unverified(**kwargs)
+        second = service._admit_unverified(**kwargs)
         self.assertEqual(first, second)
         self.assertEqual(second.outcome, "ADMITTED")
 
@@ -524,11 +524,11 @@ class AuthorityTests(unittest.TestCase):
             action="ORDER.SUBMIT", notional="100", state_version=1,
             risk_admitted=True, now="2026-09-24T18:00:00Z",
         )
-        service.admit(**base)
+        service._admit_unverified(**base)
         with self.assertRaisesRegex(Exception, "admission_id"):
-            service.admit(**{**base, "notional": "101"})
+            service._admit_unverified(**{**base, "notional": "101"})
         with self.assertRaisesRegex(Exception, "admission_id"):
-            service.admit(**{**base, "instrument_version": 2})
+            service._admit_unverified(**{**base, "instrument_version": 2})
 
 
 
@@ -549,7 +549,7 @@ class AuthorityTests(unittest.TestCase):
                 notional="100",
                 expires_at="2026-09-24T23:00:00Z",
             )
-            admitted = service.admit(
+            admitted = service._admit_unverified(
                 admission_id="a-durable", policy_id="p1", intent_hash="h-durable",
                 account_id="paper-1", environment="PAPER",
                 instrument_id=INSTRUMENT_ID, instrument_version=1,
@@ -578,7 +578,7 @@ class AuthorityTests(unittest.TestCase):
                 ),
                 (False, "admission_scope_changed"),
             )
-            reused = restarted.admit(
+            reused = restarted._admit_unverified(
                 admission_id="a-durable-2", policy_id="p1", intent_hash="h-durable",
                 account_id="paper-1", environment="PAPER",
                 instrument_id=INSTRUMENT_ID, instrument_version=1,
@@ -593,7 +593,7 @@ class AuthorityTests(unittest.TestCase):
             store = JournalStore(f"{directory}/journal.sqlite3")
             process_a = AuthorityService(store)
             process_a.register_policy(policy(autonomous=True))
-            process_a.admit(
+            process_a._admit_unverified(
                 admission_id="a-stale-read",
                 policy_id="p1",
                 intent_hash="h-stale-read",
@@ -633,7 +633,7 @@ class AuthorityTests(unittest.TestCase):
             store = JournalStore(f"{directory}/journal.sqlite3")
             process_a = AuthorityService(store)
             process_a.register_policy(policy(autonomous=True))
-            admitted = process_a.admit(
+            admitted = process_a._admit_unverified(
                 admission_id="a-stale-guard",
                 policy_id="p1",
                 intent_hash="h-stale-guard",
@@ -696,7 +696,7 @@ class AuthorityTests(unittest.TestCase):
             store = JournalStore(f"{directory}/journal.sqlite3")
             service = AuthorityService(store)
             service.register_policy(policy(autonomous=True))
-            service.admit(
+            service._admit_unverified(
                 admission_id="a-revoke", policy_id="p1", intent_hash="h-revoke",
                 account_id="paper-1", environment="PAPER",
                 instrument_id=INSTRUMENT_ID, instrument_version=1,
@@ -737,7 +737,7 @@ class AuthorityTests(unittest.TestCase):
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = AuthorityService(store)
             authority.register_policy(policy(autonomous=True))
-            admitted = authority.admit(
+            admitted = authority._admit_unverified(
                 admission_id="a-guard", policy_id="p1", intent_hash="h-guard",
                 account_id="paper-1", environment="PAPER",
                 instrument_id=INSTRUMENT_ID, instrument_version=1,
@@ -909,7 +909,7 @@ class AuthorityTests(unittest.TestCase):
                 notional="100",
                 expires_at="2026-09-24T23:00:00Z",
             )
-            first = service.admit(
+            first = service._admit_unverified(
                 admission_id="first-use",
                 policy_id="p1",
                 intent_hash="same-intent",
@@ -984,7 +984,7 @@ class AuthorityTests(unittest.TestCase):
             first = AuthorityService(store)
             stale = AuthorityService(store)
 
-            admitted = first.admit(
+            admitted = first._admit_unverified(
                 admission_id="winner",
                 policy_id="p1",
                 intent_hash="h-concurrent",
@@ -1005,7 +1005,7 @@ class AuthorityTests(unittest.TestCase):
                 AuthorityConflict,
                 "journal advanced|changed concurrently",
             ):
-                stale.admit(
+                stale._admit_unverified(
                     admission_id="stale-loser",
                     policy_id="p1",
                     intent_hash="h-concurrent",
@@ -1060,7 +1060,7 @@ class AuthorityTests(unittest.TestCase):
                 AuthorityConflict,
                 "journal advanced|changed concurrently",
             ):
-                stale.admit(
+                stale._admit_unverified(
                     admission_id="stale-after-revoke",
                     policy_id="p1",
                     intent_hash="h-stale",

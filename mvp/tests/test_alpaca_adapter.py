@@ -363,6 +363,36 @@ class AlpacaAdapterTests(unittest.TestCase):
         self.assertEqual(result["retry_disposition"], "NEVER")
         self.assertEqual(result["provider_order_id"], order_id)
 
+    def test_transport_ambiguity_is_unknown_and_reconcile_first(self):
+        result = parse_submission_response(
+            attempt_id=str(uuid4()),
+            client_order_id="at-unknown-1",
+            response=None,
+            observed_at="2026-09-24T20:00:00Z",
+            environment="PAPER",
+            transport_ambiguous=True,
+        )
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
+        self.assertIsNone(result["provider_received_at"])
+        self.assertEqual(result["observed_at"], "2026-09-24T20:00:00Z")
+        self.assertEqual(result["provider_environment"], "PAPER")
+        self.assertEqual(result["evidence"], [])
+
+    def test_transport_ambiguity_cannot_claim_provider_response(self):
+        with self.assertRaisesRegex(AlpacaAdapterError, "must not fabricate"):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                client_order_id="at-unknown-2",
+                response={
+                    "id": str(uuid4()),
+                    "client_order_id": "at-unknown-2",
+                },
+                observed_at="2026-09-24T20:00:00Z",
+                environment="PAPER",
+                transport_ambiguous=True,
+            )
+
     def test_trade_activity_requires_order_and_fee_evidence(self):
         order_id = str(uuid4())
         row = {

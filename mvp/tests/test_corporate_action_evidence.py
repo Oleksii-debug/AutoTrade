@@ -28,6 +28,34 @@ def _instant(value: str) -> datetime:
     )
 
 
+def canonical_instrument(
+    *,
+    instrument_id=INSTRUMENT_ID,
+    version=1,
+    provider_id="BINANCE",
+):
+    return InstrumentVersion(
+        instrument_id=instrument_id,
+        version=version,
+        provider_id=provider_id,
+        venue_id="BINANCE",
+        provider_symbol="BTCUSDT",
+        asset_class="CASH_EQUITY",
+        base_currency="BTC",
+        quote_currency="USDT",
+        settlement_currency="USDT",
+        quantity_unit="BTC",
+        contract_multiplier=Decimal("1"),
+        price_tick=Decimal("0.01"),
+        quantity_step=Decimal("0.00000001"),
+        minimum_quantity=Decimal("0.00000001"),
+        calendar_id="CONTINUOUS_24_7",
+        timezone_id="UTC",
+        effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        status="ACTIVE",
+    )
+
+
 def sealed_dividend(
     *,
     external_event_id="corp-1",
@@ -88,33 +116,6 @@ def normalize(source):
         },
         complete=payload["complete"],
         source_sequence=payload["source_sequence"],
-    )
-
-
-def canonical_instrument(
-    *,
-    instrument_id=INSTRUMENT_ID,
-    version=1,
-    provider_id="BINANCE",
-):
-    return InstrumentVersion(
-        instrument_id=instrument_id,
-        version=version,
-        provider_id=provider_id,
-        venue_id="BINANCE",
-        provider_symbol="BTCUSDT",
-        asset_class="CRYPTO_SPOT",
-        base_currency="BTC",
-        quote_currency="USDT",
-        settlement_currency="USDT",
-        quantity_unit="BTC",
-        contract_multiplier=Decimal("1"),
-        price_tick=Decimal("0.01"),
-        quantity_step=Decimal("0.000001"),
-        minimum_quantity=Decimal("0.000001"),
-        calendar_id="CONTINUOUS_24_7",
-        timezone_id="UTC",
-        effective_from=datetime(2020, 1, 1, tzinfo=timezone.utc),
     )
 
 
@@ -209,6 +210,18 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
                 permission_scope="ORDER.READ",
             )
 
+    def test_expected_provider_account_environment_scope_is_authoritative(self):
+        source = sealed_dividend()
+        for field, value in (
+            ("expected_provider_id", "ALPACA"),
+            ("expected_account_id", "other-account"),
+            ("expected_environment", "LIVE"),
+        ):
+            with self.subTest(field=field), self.assertRaisesRegex(
+                CorporateActionEvidenceError, "scope mismatch"
+            ):
+                resolve(source, **{field: value})
+
     def test_changed_provider_scope_from_normalizer_fails_closed(self):
         source = sealed_dividend()
 
@@ -240,6 +253,32 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
         ):
             resolve(source, normalizer=wrong_digest)
 
+    def test_canonical_instrument_binding_is_required(self):
+        source = sealed_dividend()
+
+        for resolver in (
+            lambda _observation: canonical_instrument(
+                instrument_id="22222222-2222-4222-8222-222222222222"
+            ),
+            lambda _observation: canonical_instrument(version=2),
+            lambda _observation: canonical_instrument(provider_id="ALPACA"),
+        ):
+            with self.subTest(resolver=resolver), self.assertRaisesRegex(
+                CorporateActionEvidenceError, "canonical instrument binding"
+            ):
+                resolve(source, instrument_resolver=resolver)
+
+    def test_instrument_resolver_failure_is_fail_closed(self):
+        source = sealed_dividend()
+
+        def broken(_observation):
+            raise RuntimeError("registry unavailable")
+
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError, "instrument could not be resolved"
+        ):
+            resolve(source, instrument_resolver=broken)
+
     def test_incomplete_provider_fact_cannot_authorize_event(self):
         source = sealed_dividend()
 
@@ -254,57 +293,22 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
         ):
             resolve(source, normalizer=incomplete)
 
-    def test_advance_announcement_preserves_observation_before_effective_time(self):
-        source = sealed_dividend(observed_offset=1, effective_offset=60)
+    def test_pre_effective_announcement_preserves_causal_observation_time(self):
+        source = sealed_dividend(observed_offset=1, effective_offset=5)
+        accepted = resolve(source)
 
-        def future_effect(value):
-            item = normalize(value)
-            return CorporateActionObservation(
-                **{
-                    **item.__dict__,
-                    "effective_at": READ_NOW + timedelta(seconds=60),
-                }
-            )
-
-        accepted = resolve(source, normalizer=future_effect)
-        self.assertLess(_instant(accepted.observed_at), accepted.event.effective_at)
-        self.assertEqual(
+        self.assertLess(
+            _instant(accepted.observed_at),
             accepted.event.effective_at,
-            READ_NOW + timedelta(seconds=60),
         )
-
-    def test_requested_scope_is_independent_of_source_self_labels(self):
-        source = sealed_dividend()
-        for label, change in (
-            ("provider", {"expected_provider_id": "BYBIT"}),
-            ("account", {"expected_account_id": "other-account"}),
-            ("environment", {"expected_environment": "LIVE"}),
-        ):
-            with self.subTest(label=label), self.assertRaisesRegex(
-                CorporateActionEvidenceError, "scope mismatch"
-            ):
-                resolve(source, **change)
-
-    def test_normalized_instrument_must_match_trusted_registry_binding(self):
-        source = sealed_dividend()
-        with self.assertRaisesRegex(
-            CorporateActionEvidenceError, "canonical instrument binding"
-        ):
-            resolve(
-                source,
-                instrument_resolver=lambda _observation: canonical_instrument(
-                    instrument_id="22222222-2222-4222-8222-222222222222"
-                ),
-            )
-        with self.assertRaisesRegex(
-            CorporateActionEvidenceError, "canonical instrument binding"
-        ):
-            resolve(
-                source,
-                instrument_resolver=lambda _observation: canonical_instrument(
-                    version=2
-                ),
-            )
+        self.assertEqual(
+            accepted.observed_at,
+            source.observed_at,
+        )
+        self.assertIn(
+            accepted.provenance_digest,
+            accepted.event.source_revision,
+        )
 
     def test_wrong_endpoint_is_rejected_before_normalization(self):
         source = sealed_dividend()

@@ -305,9 +305,10 @@ def parse_submission_response(
     *,
     attempt_id: str,
     client_order_id: str,
-    response: Mapping[str, Any],
+    response: Mapping[str, Any] | None,
     environment: str,
     observed_at: str | None = None,
+    transport_ambiguous: bool = False,
 ) -> dict[str, Any]:
     """Map a recorded Bybit create-order response to SubmissionResult.
 
@@ -318,6 +319,35 @@ def parse_submission_response(
 
     aid = _uuid_text(attempt_id, name="attempt_id")
     cid = _client_order_id(client_order_id)
+    normalized_environment = _text(environment, name="environment").upper()
+    if normalized_environment not in _REST_BASE_BY_ENVIRONMENT:
+        raise ProviderCoreError(
+            "Bybit evidence environment must be MAINNET, TESTNET or DEMO"
+        )
+    if transport_ambiguous:
+        if response is not None:
+            raise ProviderCoreError(
+                "ambiguous transport cannot also claim an authoritative response"
+            )
+        if observed_at is None:
+            raise ProviderCoreError(
+                "ambiguous transport requires explicit local observed_at"
+            )
+        return {
+            "attempt_id": aid,
+            "outcome": "UNKNOWN",
+            "client_order_id": cid,
+            "provider_received_at": None,
+            "observed_at": _utc_text(observed_at, name="observed_at"),
+            "environment": normalized_environment,
+            "reason_code": "BYBIT_TRANSPORT_AMBIGUOUS",
+            "evidence": [],
+            "retry_disposition": "RECONCILE_FIRST",
+        }
+    if response is None:
+        raise ProviderCoreError(
+            "submission response is required unless transport is explicitly ambiguous"
+        )
     envelope = _mapping(response, name="response")
     code = _integer(envelope.get("retCode"), name="retCode")
     when = (
@@ -330,7 +360,7 @@ def parse_submission_response(
             BYBIT_DOCUMENTED_ENDPOINTS["PLACE_ORDER"],
             envelope,
             observed_at=when,
-            environment=environment,
+            environment=normalized_environment,
         )
     ]
 

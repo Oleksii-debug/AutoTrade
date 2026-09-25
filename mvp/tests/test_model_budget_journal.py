@@ -24,6 +24,42 @@ def open_budget(root, *, ceiling="1", budget_id="policy-1", environment="SIMULAT
 
 
 class DurableModelBudgetTests(unittest.TestCase):
+    def test_delimiter_characters_cannot_alias_budget_idempotency_identity(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.db"
+            journal = JournalStore(path)
+            first = DurableModelBudget(
+                journal=journal,
+                budget_id="scope",
+                ceiling="2",
+                environment="SIMULATION",
+                clock=lambda: NOW,
+            )
+            second = DurableModelBudget(
+                journal=journal,
+                budget_id="scope:reserve:req",
+                ceiling="2",
+                environment="SIMULATION",
+                clock=lambda: NOW,
+            )
+            self.assertTrue(first.reserve("req:release:item", "0.2"))
+            self.assertTrue(second.release("item") is False)
+            self.assertTrue(second.reserve("item", "0.3"))
+
+            connection = sqlite3.connect(path)
+            try:
+                keys = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT idempotency_key FROM command_dedupe "
+                        "WHERE actor='autotrade-model-budget' ORDER BY idempotency_key"
+                    )
+                ]
+            finally:
+                connection.close()
+            self.assertEqual(len(keys), 2)
+            self.assertEqual(len(set(keys)), 2)
+
     def test_environment_is_required_and_validated_before_mutation(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(Path(directory) / "journal.db")
@@ -53,8 +89,8 @@ class DurableModelBudgetTests(unittest.TestCase):
             try:
                 actor, environment = connection.execute(
                     "SELECT actor, environment FROM command_dedupe "
-                    "WHERE idempotency_key LIKE ?",
-                    ("%:reserve:req-paper",),
+                    "WHERE actor = ? AND environment = ?",
+                    ("autotrade-model-budget", "PAPER"),
                 ).fetchone()
             finally:
                 connection.close()

@@ -1,4 +1,5 @@
 from hashlib import sha256
+import http.client
 import json
 from pathlib import Path
 import socket
@@ -190,6 +191,31 @@ class HostNetworkTests(unittest.TestCase):
             payload["permission_summary"]["session_id"],
             public_session_reference(self.owner.token),
         )
+        self.assertNotIn(self.owner.token, response.body.decode("utf-8"))
+
+    def test_snapshot_projector_has_no_bearer_and_cannot_serialize_closure_leak(self):
+        observed = {}
+
+        def leaking(durable, principal):
+            observed["has_token"] = hasattr(principal, "token")
+            value = dict(self._snapshot(durable, principal))
+            value["portfolio"] = {"accidental": self.owner.token}
+            return value
+
+        app = self._application(
+            origin=self.origin,
+            boundary=self.boundary,
+            session=self.owner,
+            path=self.path,
+            snapshot_provider=leaking,
+        )
+        response = app.dispatch(
+            method="GET",
+            target="/api/v1/state",
+            headers=self.headers(),
+        )
+        self.assertFalse(observed["has_token"])
+        self.assertEqual(response.status, 400)
         self.assertNotIn(self.owner.token, response.body.decode("utf-8"))
 
     def test_snapshot_projector_cannot_forge_durable_state_or_scope(self):
@@ -398,6 +424,193 @@ class HostNetworkTests(unittest.TestCase):
     def test_listener_port_must_match_authenticated_public_origin(self):
         with self.assertRaisesRegex(ValueError, "listener"):
             AuthenticatedHostServer(("127.0.0.1", 0), self.app)
+
+    def _network_fixture(self):
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        origin = f"http://127.0.0.1:{port}"
+        boundary = self._boundary(origin, f"network-{port}-credentials.json")
+        session = boundary.create_session(
+            subject="owner",
+            role="OWNER",
+            origin=origin,
+            ttl_seconds=600,
+        )
+        app = self._application(
+            origin=origin,
+            boundary=boundary,
+            session=session,
+            path=str(Path(self.directory.name) / f"network-{port}.sqlite3"),
+        )
+        server = AuthenticatedHostServer(("127.0.0.1", port), app)
+        self.addCleanup(server.server_close)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        return origin, session, app, port
+
+    @staticmethod
+    def _wire_headers(session, *, origin=None, json_body=False):
+        headers = {
+            "Authorization": "AutoTrade-Session " + session.token,
+            "X-AutoTrade-Actor": "owner",
+            "Accept": "application/json",
+        }
+        if origin is not None:
+            headers["Origin"] = origin
+        if json_body:
+            headers["Content-Type"] = "application/json"
+        return headers
+
+    def _wire_command(self, session, **overrides):
+        value = {
+            "command_id": "22222222-2222-2222-2222-222222222222",
+            "expected_state_version": "0",
+            "idempotency_key": "host-network-wire-key-1",
+            "actor": "owner",
+            "session": public_session_reference(session.token),
+            "account_id": "paper-account-1",
+            "environment": "PAPER",
+            "action": "BLOCK_NEW_EXPOSURE",
+            "payload": {},
+        }
+        value.update(overrides)
+        return value
+
+    def test_concrete_server_binds_browser_origin_and_explicit_native_channel(self):
+        origin, session, app, port = self._network_fixture()
+        foreign = f"http://127.0.0.1:{port + 1}"
+
+        for supplied_origin, expected in (
+            (foreign, 403),
+            (origin, 200),
+            (None, 200),
+        ):
+            with self.subTest(route="state", origin=supplied_origin):
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+                conn.request(
+                    "GET",
+                    "/api/v1/state",
+                    headers=self._wire_headers(session, origin=supplied_origin),
+                )
+                response = conn.getresponse()
+                response.read()
+                self.assertEqual(response.status, expected)
+                conn.close()
+
+        body = json.dumps(self._wire_command(session)).encode("utf-8")
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn.request(
+            "POST",
+            "/api/v1/commands",
+            body=body,
+            headers=self._wire_headers(
+                session,
+                origin=foreign,
+                json_body=True,
+            ),
+        )
+        response = conn.getresponse()
+        response.read()
+        self.assertEqual(response.status, 403)
+        self.assertEqual(app.store.state_version, 0)
+        conn.close()
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn.request(
+            "POST",
+            "/api/v1/commands",
+            body=body,
+            headers=self._wire_headers(
+                session,
+                origin=origin,
+                json_body=True,
+            ),
+        )
+        response = conn.getresponse()
+        response.read()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(app.store.state_version, 1)
+        conn.close()
+
+        native = self._wire_command(
+            session,
+            command_id="33333333-3333-3333-3333-333333333333",
+            expected_state_version="1",
+            idempotency_key="host-network-wire-key-2",
+        )
+        native_body = json.dumps(native).encode("utf-8")
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn.request(
+            "POST",
+            "/api/v1/commands",
+            body=native_body,
+            headers=self._wire_headers(session, json_body=True),
+        )
+        response = conn.getresponse()
+        response.read()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(app.store.state_version, 2)
+        conn.close()
+
+    def test_concrete_server_rejects_duplicate_sensitive_headers_before_dispatch(self):
+        origin, session, app, port = self._network_fixture()
+        authorization = "AutoTrade-Session " + session.token
+
+        def request_with_duplicate(method, path, duplicate_name, duplicate_values, body=b""):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+            conn.putrequest(method, path)
+            conn.putheader("Authorization", authorization)
+            conn.putheader("X-AutoTrade-Actor", "owner")
+            conn.putheader("Origin", origin)
+            if body:
+                conn.putheader("Content-Type", "application/json")
+                conn.putheader("Content-Length", str(len(body)))
+            for value in duplicate_values:
+                conn.putheader(duplicate_name, value)
+            conn.endheaders(body if body else None)
+            response = conn.getresponse()
+            payload = response.read()
+            status = response.status
+            conn.close()
+            return status, payload
+
+        read_duplicates = {
+            "Authorization": (authorization,),
+            "X-AutoTrade-Actor": ("owner",),
+            "Origin": (origin,),
+        }
+        for name, extra in read_duplicates.items():
+            with self.subTest(route="state", header=name):
+                status, _ = request_with_duplicate(
+                    "GET",
+                    "/api/v1/state",
+                    name,
+                    extra,
+                )
+                self.assertEqual(status, 400)
+
+        command_body = json.dumps(self._wire_command(session)).encode("utf-8")
+        post_duplicates = {
+            "Authorization": (authorization,),
+            "X-AutoTrade-Actor": ("owner",),
+            "Origin": (origin,),
+            "Content-Length": (str(len(command_body)),),
+        }
+        for name, extra in post_duplicates.items():
+            with self.subTest(route="commands", header=name):
+                status, payload = request_with_duplicate(
+                    "POST",
+                    "/api/v1/commands",
+                    name,
+                    extra,
+                    command_body,
+                )
+                self.assertEqual(status, 400)
+                self.assertNotIn(session.token.encode("utf-8"), payload)
+                self.assertEqual(app.store.state_version, 0)
 
     def test_concrete_loopback_server_serves_health_without_request_logging(self):
         probe = socket.socket()

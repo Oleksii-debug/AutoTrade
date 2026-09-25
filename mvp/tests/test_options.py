@@ -1,6 +1,10 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import json
+from tempfile import TemporaryDirectory
 import unittest
+from uuid import uuid4
 
 from mvp.autotrade_mvp.accounting import EconomicBook
 from mvp.autotrade_mvp.options import (
@@ -19,12 +23,59 @@ from mvp.autotrade_mvp.options import (
     require_physical_resources,
     OptionRiskEvidence,
     OptionScenarioResult,
+    option_risk_evidence_metadata,
+    option_risk_evidence_payload,
     require_current_option_risk,
 )
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 
 def at(hour: int):
     return datetime(2026, 9, 25, hour, tzinfo=timezone.utc)
+
+
+def bind_option_risk_evidence(
+    store: ArtifactStore,
+    evidence: OptionRiskEvidence,
+) -> OptionRiskEvidence:
+    payload = option_risk_evidence_payload(evidence)
+    data = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    artifact_id = str(uuid4())
+    manifest = store.publish_bytes(
+        artifact_id=artifact_id,
+        data=data,
+        media_type="application/json",
+        rights={"storage": True, "export": False},
+        source_refs=[
+            f"git:{evidence.source_sha}",
+            f"input:{evidence.input_digest}",
+        ],
+        metadata=option_risk_evidence_metadata(evidence),
+    )
+    return replace(
+        evidence,
+        evidence_ref=f"artifact:{artifact_id}@{manifest['sha256']}",
+    )
+
+
+def require_published_option_risk(
+    evidence: OptionRiskEvidence,
+    **kwargs,
+) -> None:
+    with TemporaryDirectory() as directory:
+        store = ArtifactStore(directory)
+        bound = bind_option_risk_evidence(store, evidence)
+        require_current_option_risk(
+            bound,
+            artifact_store=store,
+            **kwargs,
+        )
 
 
 class OptionLifecycleTests(unittest.TestCase):
@@ -345,13 +396,55 @@ class OptionRiskEvidenceTests(unittest.TestCase):
         evidence = self._risk()
         self.assertEqual(evidence.delta, Decimal("0.52"))
         self.assertEqual(evidence.worst_scenario_loss, Decimal("725.25"))
-        require_current_option_risk(
+        require_published_option_risk(
             evidence,
             instrument="OPT:CALL",
             at=datetime(2026, 9, 25, 18, 30, tzinfo=timezone.utc),
             maximum_calculation_age=timedelta(hours=2),
             maximum_market_age=timedelta(hours=2),
         )
+
+    def test_option_risk_consumer_rejects_duck_typed_artifact_authority(self):
+        evidence = self._risk()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            bound = bind_option_risk_evidence(store, evidence)
+
+            class DuckStore:
+                def load_manifest(self, artifact_id):
+                    return store.load_manifest(artifact_id)
+
+                def read_bytes(self, artifact_id):
+                    return store.read_bytes(artifact_id)
+
+            with self.assertRaisesRegex(OptionError, "canonical ArtifactStore"):
+                require_current_option_risk(
+                    bound,
+                    instrument="OPT:CALL",
+                    at=datetime(2026, 9, 25, 18, 30, tzinfo=timezone.utc),
+                    maximum_calculation_age=timedelta(hours=2),
+                    maximum_market_age=timedelta(hours=2),
+                    artifact_store=DuckStore(),
+                )
+
+    def test_same_option_risk_ref_cannot_authorize_altered_greeks(self):
+        evidence = self._risk()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            bound = bind_option_risk_evidence(store, evidence)
+            altered = replace(bound, delta=Decimal("0.99"))
+            with self.assertRaisesRegex(
+                OptionError,
+                "content does not match supplied economics",
+            ):
+                require_current_option_risk(
+                    altered,
+                    instrument="OPT:CALL",
+                    at=datetime(2026, 9, 25, 18, 30, tzinfo=timezone.utc),
+                    maximum_calculation_age=timedelta(hours=2),
+                    maximum_market_age=timedelta(hours=2),
+                    artifact_store=store,
+                )
 
     def test_stress_scenarios_allow_zero_underlying_but_reject_negative_price(self):
         zero = OptionScenarioResult(
@@ -561,7 +654,7 @@ class OptionRiskEvidenceTests(unittest.TestCase):
             unresolved_limits=("vol-surface provenance not independently qualified",),
         )
         with self.assertRaisesRegex(OptionError, "unresolved limits"):
-            require_current_option_risk(
+            require_published_option_risk(
                 unresolved,
                 instrument="OPT:CALL",
                 at=datetime(2026, 9, 25, 18, 30, tzinfo=timezone.utc),
@@ -572,7 +665,7 @@ class OptionRiskEvidenceTests(unittest.TestCase):
     def test_future_stale_and_cross_instrument_evidence_are_blocked(self):
         evidence = self._risk()
         with self.assertRaisesRegex(OptionError, "future"):
-            require_current_option_risk(
+            require_published_option_risk(
                 evidence,
                 instrument="OPT:CALL",
                 at=at(17),
@@ -580,7 +673,7 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                 maximum_market_age=timedelta(hours=2),
             )
         with self.assertRaisesRegex(OptionError, "stale"):
-            require_current_option_risk(
+            require_published_option_risk(
                 evidence,
                 instrument="OPT:CALL",
                 at=at(19),
@@ -588,7 +681,7 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                 maximum_market_age=timedelta(hours=2),
             )
         with self.assertRaisesRegex(OptionError, "another instrument"):
-            require_current_option_risk(
+            require_published_option_risk(
                 evidence,
                 instrument="OPT:PUT",
                 at=datetime(2026, 9, 25, 18, 30, tzinfo=timezone.utc),
@@ -625,7 +718,7 @@ class OptionRiskEvidenceTests(unittest.TestCase):
             tests_run=("greeks-unit", "scenario-stress"),
             unresolved_limits=(),
         )
-        require_current_option_risk(
+        require_published_option_risk(
             evidence,
             instrument="OPT:CALL",
             at=datetime(2026, 9, 25, 18, 59, tzinfo=timezone.utc),
@@ -633,7 +726,7 @@ class OptionRiskEvidenceTests(unittest.TestCase):
             maximum_market_age=timedelta(hours=2),
         )
         with self.assertRaisesRegex(OptionError, "market evidence is stale"):
-            require_current_option_risk(
+            require_published_option_risk(
                 evidence,
                 instrument="OPT:CALL",
                 at=datetime(2026, 9, 25, 19, 1, tzinfo=timezone.utc),
@@ -670,7 +763,7 @@ class OptionRiskEvidenceTests(unittest.TestCase):
             unresolved_limits=(),
         )
         with self.assertRaisesRegex(OptionError, "calculation exceeds independent policy age"):
-            require_current_option_risk(
+            require_published_option_risk(
                 evidence,
                 instrument="OPT:CALL",
                 at=datetime(2026, 9, 25, 19, 31, tzinfo=timezone.utc),
@@ -678,7 +771,7 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                 maximum_market_age=timedelta(hours=4),
             )
         with self.assertRaisesRegex(OptionError, "market evidence exceeds independent policy age"):
-            require_current_option_risk(
+            require_published_option_risk(
                 evidence,
                 instrument="OPT:CALL",
                 at=datetime(2026, 9, 25, 19, 0, tzinfo=timezone.utc),
@@ -697,7 +790,7 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                 market_age=market_age,
             ):
                 with self.assertRaisesRegex(OptionError, "positive timedelta"):
-                    require_current_option_risk(
+                    require_published_option_risk(
                         evidence,
                         instrument="OPT:CALL",
                         at=datetime(2026, 9, 25, 18, 30, tzinfo=timezone.utc),

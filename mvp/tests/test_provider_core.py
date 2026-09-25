@@ -15,6 +15,8 @@ from mvp.autotrade_mvp.provider_core import (
 
 
 NOW = datetime(2026, 9, 24, 18, tzinfo=timezone.utc)
+CODE_SHA = "a" * 40
+OTHER_SHA = "b" * 40
 
 
 class ProviderCoreTests(unittest.TestCase):
@@ -37,38 +39,51 @@ class ProviderCoreTests(unittest.TestCase):
             provider_id="BYBIT",
             product_family="SPOT",
             environment="TEST",
-            adapter_code_sha="abc123",
+            adapter_code_sha=CODE_SHA,
             documentation_ref="official-docs-snapshot",
             observed_at=NOW,
             expires_at=NOW + timedelta(days=30),
             passed_cases=REQUIRED_QUALIFICATION_CASES,
         )
         self.assertEqual(
-            evidence.status(now=NOW + timedelta(days=1), exact_code_sha="abc123"),
+            evidence.status(now=NOW + timedelta(days=1), exact_code_sha=CODE_SHA),
             "QUALIFIED_FOR_NONLIVE",
         )
         self.assertEqual(
-            evidence.status(now=NOW + timedelta(days=1), exact_code_sha="other"),
+            evidence.status(now=NOW + timedelta(days=1), exact_code_sha=OTHER_SHA),
             "CODE_MISMATCH",
         )
         self.assertEqual(
-            evidence.status(now=NOW + timedelta(days=31), exact_code_sha="abc123"),
+            evidence.status(now=NOW + timedelta(days=31), exact_code_sha=CODE_SHA),
             "EXPIRED",
         )
+
+    def test_qualification_rejects_human_labels_as_exact_code_sha(self):
+        with self.assertRaisesRegex(ProviderCoreError, "canonical"):
+            QualificationEvidence(
+                provider_id="BYBIT",
+                product_family="SPOT",
+                environment="TEST",
+                adapter_code_sha="abc123",
+                documentation_ref="official-docs-snapshot",
+                observed_at=NOW,
+                expires_at=NOW + timedelta(days=1),
+                passed_cases=REQUIRED_QUALIFICATION_CASES,
+            )
 
     def test_incomplete_qualification_fails_closed(self):
         evidence = QualificationEvidence(
             provider_id="ALPACA",
             product_family="EQUITIES",
             environment="PAPER",
-            adapter_code_sha="sha",
+            adapter_code_sha=CODE_SHA,
             documentation_ref="docs",
             observed_at=NOW,
             expires_at=NOW + timedelta(days=1),
             passed_cases=frozenset({"metadata", "authentication"}),
         )
         self.assertEqual(
-            evidence.status(now=NOW, exact_code_sha="sha"),
+            evidence.status(now=NOW, exact_code_sha=CODE_SHA),
             "INCOMPLETE",
         )
 

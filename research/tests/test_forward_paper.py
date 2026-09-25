@@ -25,6 +25,7 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             campaign_id="paper-campaign-1",
             exact_build_sha=BUILD,
             protocol_hash=HASH_A,
+            registered_at="2026-09-24T19:59:00Z",
             starts_at="2026-09-24T20:00:00Z",
             ends_at="2026-09-24T21:00:00Z",
             minimum_predictions=2,
@@ -121,6 +122,13 @@ class ForwardPaperQualificationTests(unittest.TestCase):
         self.assertEqual(result.prediction_count, 2)
         self.assertEqual(result.evaluated_outcome_count, 2)
         self.assertEqual(result.reasons, ())
+
+    def test_protocol_cannot_be_registered_after_campaign_start(self):
+        with self.assertRaisesRegex(
+            ForwardPaperError,
+            "registered_at must not be after campaign starts_at",
+        ):
+            self.protocol(registered_at="2026-09-24T20:00:01Z")
 
     def test_campaign_before_registered_end_is_inconclusive(self):
         result = assess_forward_paper(
@@ -318,6 +326,7 @@ class ForwardPaperQualificationTests(unittest.TestCase):
                 campaign_id="direct-bad",
                 exact_build_sha=BUILD,
                 protocol_hash=HASH_A,
+                registered_at="2026-09-24T19:59:00Z",
                 starts_at="2026-09-24T20:00:00Z",
                 ends_at="2026-09-24T21:00:00Z",
                 minimum_predictions=0,

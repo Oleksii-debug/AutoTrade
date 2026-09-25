@@ -124,6 +124,44 @@ class FinancingTests(unittest.TestCase):
                 )
             )
 
+    def test_direct_event_construction_cannot_bypass_financial_invariants(self):
+        with self.assertRaises(FinancingError):
+            FinancingEvent(
+                charge_id="direct",
+                revision=1,
+                kind="FINAL",
+                effective_at=BASE,
+                available_at=BASE,
+                unit="USD",
+                amount=0.1,
+                source_account="CASH:USD",
+                evidence_ref="artifact:direct",
+            )
+        with self.assertRaises(FinancingError):
+            FinancingEvent(
+                charge_id="direct",
+                revision=0,
+                kind="FINAL",
+                effective_at=BASE,
+                available_at=BASE,
+                unit="USD",
+                amount=Decimal("1"),
+                source_account="CASH:USD",
+                evidence_ref="artifact:direct",
+            )
+        with self.assertRaises(FinancingError):
+            FinancingEvent(
+                charge_id="direct",
+                revision=1,
+                kind="FINAL",
+                effective_at=BASE,
+                available_at=BASE - timedelta(seconds=1),
+                unit="USD",
+                amount=Decimal("1"),
+                source_account="CASH:USD",
+                evidence_ref="artifact:direct",
+            )
+
     def test_float_money_is_rejected(self):
         with self.assertRaises(FinancingError):
             FinancingEvent.create(

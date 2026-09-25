@@ -357,6 +357,11 @@ class DurableReservationBook:
             "requirements": _amount_map(requirements, allow_zero=False),
             "available": _amount_map(available, allow_zero=True),
         }
+        expected_cut = (
+            None
+            if expected_snapshot_digest is None
+            else _text(expected_snapshot_digest, name="expected_snapshot_digest")
+        )
         events = self._events()
         candidate, idempotency = self._replay(events)
         existing = idempotency.get(key)
@@ -415,6 +420,7 @@ class DurableReservationBook:
         reservation_id: str,
         usage: Mapping[str, object],
         committed_at: str,
+        expected_snapshot_digest: str | None = None,
     ) -> PreparedReservationMutation:
         """Prepare one reservation consumption for a shared durable commit.
 
@@ -458,6 +464,13 @@ class DurableReservationBook:
                 ),
                 already_committed=True,
             )
+
+        if expected_cut is not None:
+            current_snapshot = candidate.get(request["reservation_id"])
+            if payload_digest(_snapshot_payload(current_snapshot)) != expected_cut:
+                raise ReservationConflict(
+                    "reservation snapshot changed after provider fill plan derivation"
+                )
 
         snapshot = self._apply(candidate, "CONSUME", request)
         snapshot_value = _snapshot_payload(snapshot)

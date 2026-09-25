@@ -553,6 +553,56 @@ class BackupRestoreTests(unittest.TestCase):
             with self.assertRaisesRegex(BackupError, "outside the backup"):
                 restore_backup(backup, backup / "restored")
 
+    def test_restore_discovers_non_default_recovery_owner_scope(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            source_store = JournalStore(state / "journal.sqlite3")
+            source = RecoveryController(
+                owner_store=source_store,
+                owner_scope="PAPER:acct-non-default",
+            )
+            source.start("source-owner")
+
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            marker = json.loads(
+                (restored / "RESTORE_RECONCILIATION_REQUIRED.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+            self.assertEqual(
+                marker["source_owner_scope"],
+                "PAPER:acct-non-default",
+            )
+            self.assertEqual(marker["source_owner_id"], "source-owner")
+            self.assertEqual(marker["source_owner_epoch"], 1)
+
+    def test_restore_fails_closed_when_multiple_owner_scopes_are_ambiguous(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            store = JournalStore(state / "journal.sqlite3")
+            first = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:acct-a",
+            )
+            second = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:acct-b",
+            )
+            first.start("source-a")
+            second.start("source-b")
+
+            backup = create_backup(state, artifacts, root / "backup")
+            with self.assertRaisesRegex(
+                BackupIntegrityError,
+                "multiple recovery owner scopes",
+            ):
+                restore_backup(backup, root / "restored")
+            self.assertFalse((root / "restored").exists())
+
     def _restored_with_owner(
         self,
         root: Path,

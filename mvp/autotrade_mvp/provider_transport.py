@@ -15,6 +15,7 @@ signer/nonce rules rather than introduce another dispatcher.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from hashlib import sha256
 import hmac
 import json
@@ -29,6 +30,12 @@ from urllib.request import (
 )
 
 from .dispatch import ExactJsonTransportResponse
+from .provider_core import (
+    AuthenticatedReadQueryBinding,
+    ProviderResponseObservation,
+    Surface,
+    observe_authenticated_json_response,
+)
 from .windows_secrets import PersistentCredentialHandle
 
 
@@ -56,11 +63,15 @@ class ProviderSecretResolver(Protocol):
 
 
 class ProviderWireClient(Protocol):
-    def send(self, request: "SignedHttpRequest") -> bytes: ...
+    def send(
+        self,
+        request: "SignedHttpRequest | AuthenticatedReadHttpRequest",
+    ) -> bytes: ...
 
 
 QuotaGate = Callable[[str, str, str, str], None]
 ClockMillis = Callable[[], int]
+ClockUtc = Callable[[], datetime]
 
 
 def _text(value: object, *, name: str) -> str:
@@ -250,6 +261,56 @@ class SignedHttpRequest:
         )
 
 
+@dataclass(frozen=True)
+class AuthenticatedReadHttpRequest:
+    """One immutable authenticated provider GET request.
+
+    This is intentionally separate from SignedHttpRequest so the write transport
+    cannot accidentally broaden its POST-only contract or final-send semantics.
+    """
+
+    url: str
+    headers: Mapping[str, str]
+    timeout_seconds: int
+
+    def __post_init__(self) -> None:
+        parsed = urlsplit(_text(self.url, name="url"))
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+            or not parsed.query
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read URL must be HTTPS with an exact signed query"
+            )
+        if not isinstance(self.headers, Mapping):
+            raise ProviderTransportScopeError("headers must be a mapping")
+        normalized_headers: dict[str, str] = {}
+        for raw_key, raw_value in self.headers.items():
+            key = _text(raw_key, name="header name")
+            value = _text(raw_value, name=f"header {key}")
+            if "\r" in key or "\n" in key or "\r" in value or "\n" in value:
+                raise ProviderTransportScopeError(
+                    "header values must not contain line breaks"
+                )
+            normalized_headers[key] = value
+        if (
+            isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, int)
+            or self.timeout_seconds < 1
+            or self.timeout_seconds > 120
+        ):
+            raise ProviderTransportScopeError("invalid request timeout")
+        object.__setattr__(
+            self,
+            "headers",
+            MappingProxyType(dict(normalized_headers)),
+        )
+
+
 class _NoRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -261,14 +322,28 @@ class UrllibJsonWireClient:
     def __init__(self) -> None:
         self._opener = build_opener(_NoRedirectHandler())
 
-    def send(self, request: SignedHttpRequest) -> bytes:
-        if not isinstance(request, SignedHttpRequest):
-            raise TypeError("request must be SignedHttpRequest")
+    def send(
+        self,
+        request: SignedHttpRequest | AuthenticatedReadHttpRequest,
+    ) -> bytes:
+        if not isinstance(
+            request,
+            (SignedHttpRequest, AuthenticatedReadHttpRequest),
+        ):
+            raise TypeError(
+                "request must be SignedHttpRequest or AuthenticatedReadHttpRequest"
+            )
+        if isinstance(request, SignedHttpRequest):
+            data = request.body
+            method = request.method
+        else:
+            data = None
+            method = "GET"
         outbound = Request(
             request.url,
-            data=request.body,
+            data=data,
             headers=dict(request.headers),
-            method=request.method,
+            method=method,
         )
         try:
             with self._opener.open(
@@ -596,3 +671,254 @@ class BinanceSpotHttpTransport:
         final_guard()
         raw = self.wire_client.send(signed)
         return ExactJsonTransportResponse(raw)
+
+
+class BinanceSpotAuthenticatedReadSigner:
+    """Pure Binance authenticated-GET signer over a canonical read binding."""
+
+    @staticmethod
+    def sign(
+        *,
+        policy: ProviderEndpointPolicy,
+        query_binding: AuthenticatedReadQueryBinding,
+        credential_plaintext: object,
+        timestamp_ms: object,
+        recv_window_ms: int = 5000,
+    ) -> AuthenticatedReadHttpRequest:
+        if not isinstance(query_binding, AuthenticatedReadQueryBinding):
+            raise TypeError(
+                "query_binding must be AuthenticatedReadQueryBinding"
+            )
+        if policy.provider_id != "BINANCE":
+            raise ProviderTransportScopeError(
+                "Binance authenticated-read signer requires BINANCE policy"
+            )
+        if (
+            query_binding.provider_id != policy.provider_id
+            or query_binding.environment != policy.environment
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read binding provider/environment mismatch"
+            )
+        if query_binding.surface not in {
+            Surface.AUTHENTICATED_READ,
+            Surface.ACTIVITIES,
+        }:
+            raise ProviderTransportScopeError(
+                "authenticated-read transport requires read/activity surface"
+            )
+        if "WRITE" in query_binding.permission_scope.upper():
+            raise ProviderTransportScopeError(
+                "authenticated-read transport rejects write permission scope"
+            )
+        if (
+            isinstance(timestamp_ms, bool)
+            or not isinstance(timestamp_ms, int)
+            or timestamp_ms < 0
+        ):
+            raise ProviderTransportScopeError(
+                "timestamp_ms must be a non-negative integer"
+            )
+        if (
+            isinstance(recv_window_ms, bool)
+            or not isinstance(recv_window_ms, int)
+            or recv_window_ms < 1
+            or recv_window_ms > 60000
+        ):
+            raise ProviderTransportScopeError(
+                "recv_window_ms must be an integer from 1 through 60000"
+            )
+        canonical: dict[str, str] = {}
+        for raw_key, raw_value in query_binding.query.items():
+            key = _canonical_text(raw_key, name="query parameter")
+            if not isinstance(raw_value, str) or raw_value != raw_value.strip():
+                raise ProviderTransportScopeError(
+                    "authenticated-read query values must be canonical strings"
+                )
+            if key in {"timestamp", "recvWindow", "signature"}:
+                raise ProviderTransportScopeError(
+                    "query binding must not pre-populate transport signing fields"
+                )
+            canonical[key] = raw_value
+
+        credential = BinanceSpotCredential.parse(credential_plaintext)
+        canonical["recvWindow"] = str(recv_window_ms)
+        canonical["timestamp"] = str(timestamp_ms)
+        unsigned = urlencode(sorted(canonical.items()))
+        signature = hmac.new(
+            credential.api_secret.encode("utf-8"),
+            unsigned.encode("ascii"),
+            sha256,
+        ).hexdigest()
+        exact_query = unsigned + "&signature=" + signature
+        return AuthenticatedReadHttpRequest(
+            url=policy.absolute_url(query_binding.endpoint) + "?" + exact_query,
+            headers=MappingProxyType(
+                {
+                    "Accept": "application/json",
+                    "X-MBX-APIKEY": credential.api_key,
+                }
+            ),
+            timeout_seconds=policy.timeout_seconds,
+        )
+
+
+class BinanceSpotAuthenticatedReadTransport:
+    """One-shot credential-scoped Binance authenticated read.
+
+    The transport reuses the provider-core authenticated query/response
+    identities. It owns no retry, cache, reconciliation, or financial authority.
+    One call emits at most one GET and returns one exact-byte-bound observation.
+    """
+
+    def __init__(
+        self,
+        *,
+        policy: ProviderEndpointPolicy,
+        account_id: str,
+        capability_snapshot_id: str,
+        secret_resolver: ProviderSecretResolver,
+        credential_handle: PersistentCredentialHandle,
+        session_token: str,
+        origin: str,
+        execution_identity: str,
+        clock_millis: ClockMillis,
+        clock_utc: ClockUtc,
+        quota_gate: QuotaGate | None = None,
+        wire_client: ProviderWireClient | None = None,
+        recv_window_ms: int = 5000,
+    ) -> None:
+        if not isinstance(policy, ProviderEndpointPolicy):
+            raise TypeError("policy must be ProviderEndpointPolicy")
+        if policy.provider_id != "BINANCE":
+            raise ProviderTransportScopeError(
+                "Binance authenticated-read transport requires BINANCE policy"
+            )
+        if not isinstance(credential_handle, PersistentCredentialHandle):
+            raise TypeError(
+                "credential_handle must be PersistentCredentialHandle"
+            )
+        if (
+            credential_handle.provider != policy.provider_id
+            or credential_handle.environment != policy.environment
+            or credential_handle.purpose != "READ"
+        ):
+            raise ProviderTransportScopeError(
+                "READ credential handle provider/environment/purpose mismatch"
+            )
+        account = _canonical_text(account_id, name="account_id")
+        if credential_handle.account_id != account:
+            raise ProviderTransportScopeError(
+                "credential handle account mismatch"
+            )
+        capability = _canonical_text(
+            capability_snapshot_id,
+            name="capability_snapshot_id",
+        )
+        if not hasattr(secret_resolver, "resolve_for_execution"):
+            raise TypeError(
+                "secret_resolver must implement resolve_for_execution"
+            )
+        if not callable(clock_millis):
+            raise TypeError("clock_millis must be callable")
+        if not callable(clock_utc):
+            raise TypeError("clock_utc must be callable")
+        if quota_gate is not None and not callable(quota_gate):
+            raise TypeError("quota_gate must be callable or None")
+        if wire_client is not None and not hasattr(wire_client, "send"):
+            raise TypeError("wire_client must implement send")
+        if (
+            isinstance(recv_window_ms, bool)
+            or not isinstance(recv_window_ms, int)
+            or recv_window_ms < 1
+            or recv_window_ms > 60000
+        ):
+            raise ProviderTransportScopeError(
+                "recv_window_ms must be an integer from 1 through 60000"
+            )
+
+        self.policy = policy
+        self.account_id = account
+        self.capability_snapshot_id = capability
+        self.secret_resolver = secret_resolver
+        self.credential_handle = credential_handle
+        self.session_token = _canonical_text(
+            session_token,
+            name="session_token",
+        )
+        self.origin = _canonical_text(origin, name="origin")
+        self.execution_identity = _canonical_text(
+            execution_identity,
+            name="execution_identity",
+        )
+        self.clock_millis = clock_millis
+        self.clock_utc = clock_utc
+        self.quota_gate = quota_gate
+        self.wire_client = wire_client or UrllibJsonWireClient()
+        self.recv_window_ms = recv_window_ms
+
+    def __call__(
+        self,
+        query_binding: AuthenticatedReadQueryBinding,
+    ) -> ProviderResponseObservation:
+        if not isinstance(query_binding, AuthenticatedReadQueryBinding):
+            raise TypeError(
+                "query_binding must be AuthenticatedReadQueryBinding"
+            )
+        if (
+            query_binding.provider_id != self.policy.provider_id
+            or query_binding.account_id != self.account_id
+            or query_binding.environment != self.policy.environment
+            or query_binding.capability_snapshot_id != self.capability_snapshot_id
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read query scope mismatch"
+            )
+        if query_binding.surface not in {
+            Surface.AUTHENTICATED_READ,
+            Surface.ACTIVITIES,
+        }:
+            raise ProviderTransportScopeError(
+                "authenticated-read query surface mismatch"
+            )
+        if "WRITE" in query_binding.permission_scope.upper():
+            raise ProviderTransportScopeError(
+                "authenticated-read transport rejects write permission scope"
+            )
+
+        if self.quota_gate is not None:
+            self.quota_gate(
+                self.policy.provider_id,
+                self.account_id,
+                self.policy.environment,
+                "AUTHENTICATED_READ",
+            )
+
+        credential_plaintext = self.secret_resolver.resolve_for_execution(
+            self.session_token,
+            origin=self.origin,
+            handle=self.credential_handle,
+            execution_identity=self.execution_identity,
+            account_id=self.account_id,
+            provider=self.policy.provider_id,
+            environment=self.policy.environment,
+            purpose="READ",
+        )
+        try:
+            signed = BinanceSpotAuthenticatedReadSigner.sign(
+                policy=self.policy,
+                query_binding=query_binding,
+                credential_plaintext=credential_plaintext,
+                timestamp_ms=self.clock_millis(),
+                recv_window_ms=self.recv_window_ms,
+            )
+        finally:
+            credential_plaintext = None
+
+        raw = self.wire_client.send(signed)
+        observed_at = self.clock_utc()
+        return observe_authenticated_json_response(
+            query_binding=query_binding,
+            response_bytes=raw,
+            observed_at=observed_at,
+        )

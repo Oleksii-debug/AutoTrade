@@ -906,6 +906,7 @@ class WhiteBitHttpTransport:
         return ExactJsonTransportResponse(raw)
 
 
+@dataclass(frozen=True)
 class BinanceSpotCredential:
     api_key: str
     api_secret: str

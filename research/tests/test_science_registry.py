@@ -39,6 +39,15 @@ def protocol():
     }
 
 
+def holdout_identity(dataset_digit="a", *, start="2026-01-01", end="2026-06-30", role="LOCKED_FORWARD"):
+    return {
+        "dataset_digest": "sha256:" + dataset_digit * 64,
+        "segment_start": start,
+        "segment_end": end,
+        "role": role,
+    }
+
+
 class ScientificRegistryTests(unittest.TestCase):
     def test_protocol_is_immutable_after_registration(self):
         with TemporaryDirectory() as directory:
@@ -93,9 +102,9 @@ class ScientificRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")
             p = store.register_protocol(protocol())
-            first = store.register_evaluation(p.protocol_id, holdout_id="holdout-A", result={"score": "0.1"})
+            first = store.register_evaluation(p.protocol_id, holdout_id="holdout-A", holdout_identity=holdout_identity(), result={"score": "0.1"})
             self.assertEqual(first["untouched"], 1)
-            second = store.register_evaluation(p.protocol_id, holdout_id="holdout-A", result={"score": "0.2"})
+            second = store.register_evaluation(p.protocol_id, holdout_id="holdout-A", holdout_identity=holdout_identity(), result={"score": "0.2"})
             self.assertEqual(second["untouched"], 0)
             self.assertGreaterEqual(second["prior_access_count"], 1)
 
@@ -103,8 +112,8 @@ class ScientificRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")
             p = store.register_protocol(protocol())
-            store.record_holdout_access(p.protocol_id, holdout_id="holdout-A", purpose="manual inspection")
-            result = store.register_evaluation(p.protocol_id, holdout_id="holdout-A", result={"score": "0.1"})
+            store.record_holdout_access(p.protocol_id, holdout_id="holdout-A", holdout_identity=holdout_identity(), purpose="manual inspection")
+            result = store.register_evaluation(p.protocol_id, holdout_id="holdout-A", holdout_identity=holdout_identity(), result={"score": "0.1"})
             self.assertEqual(result["untouched"], 0)
             self.assertEqual(result["prior_access_count"], 1)
 

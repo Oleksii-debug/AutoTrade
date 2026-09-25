@@ -341,6 +341,11 @@ def parse_account_trades(
         if client_id is not None:
             client_id = validate_client_order_id(client_id)
 
+        is_buyer = raw.get("isBuyer")
+        if type(is_buyer) is not bool:
+            raise BinanceSpotAdapterError(
+                "trade isBuyer must be provider-evidenced boolean"
+            )
         fill = ProviderFillEvidence.create(
             provider_id="BINANCE",
             account_id=account_id,
@@ -348,6 +353,7 @@ def parse_account_trades(
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=_text(instrument_versions[symbol], name="instrument_version"),
+            side="BUY" if is_buyer else "SELL",
             quantity=raw.get("qty"),
             price=raw.get("price"),
             fee_amount=raw.get("commission", "0"),

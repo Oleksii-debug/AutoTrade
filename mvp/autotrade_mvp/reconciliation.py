@@ -411,6 +411,7 @@ class ProviderFillEvidence:
     trade_time: str
     side: str | None = None
     position_side: str | None = None
+    position_effect: str | None = None
     evidence_refs: tuple[str, ...] = field(default=(), compare=False)
 
     def __post_init__(self) -> None:
@@ -468,6 +469,15 @@ class ProviderFillEvidence:
                     "position_side must be BOTH, LONG or SHORT when provider-evidenced"
                 )
             object.__setattr__(self, "position_side", position_side)
+        if self.position_effect is not None:
+            position_effect = _text(
+                self.position_effect, name="position_effect"
+            ).upper()
+            if position_effect not in {"OPEN", "REDUCE"}:
+                raise ValueError(
+                    "position_effect must be OPEN or REDUCE when provider-evidenced"
+                )
+            object.__setattr__(self, "position_effect", position_effect)
         if not isinstance(self.evidence_refs, tuple):
             raise TypeError("evidence_refs must be a tuple of strings")
         refs: list[str] = []
@@ -495,6 +505,7 @@ class ProviderFillEvidence:
         trade_time: str,
         side: str | None = None,
         position_side: str | None = None,
+        position_effect: str | None = None,
         evidence_refs: tuple[str, ...] = (),
     ) -> "ProviderFillEvidence":
         qty = _decimal(quantity, name="quantity")
@@ -525,6 +536,11 @@ class ProviderFillEvidence:
             position_side=(
                 _text(position_side, name="position_side").upper()
                 if position_side is not None
+                else None
+            ),
+            position_effect=(
+                _text(position_effect, name="position_effect").upper()
+                if position_effect is not None
                 else None
             ),
             evidence_refs=evidence_refs,

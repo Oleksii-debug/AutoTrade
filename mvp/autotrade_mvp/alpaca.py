@@ -685,6 +685,9 @@ def parse_trade_activities(
                 f"missing fee evidence for Alpaca activity: {activity_id}"
             )
         fee_amount, fee_currency = fees_by_activity_id[activity_id]
+        side = _text(raw.get("side"), name="activity.side").upper()
+        if side not in _SIDES:
+            raise AlpacaAdapterError("activity side must be BUY or SELL")
         fill = ProviderFillEvidence.create(
             provider_id="ALPACA",
             account_id=account_id,
@@ -692,6 +695,7 @@ def parse_trade_activities(
             provider_execution_id=activity_id,
             client_order_id=client_id,
             instrument=instrument,
+            side=side,
             quantity=raw.get("qty"),
             price=raw.get("price"),
             fee_amount=fee_amount,
@@ -699,6 +703,7 @@ def parse_trade_activities(
             trade_time=_utc_text(
                 raw.get("transaction_time"), name="transaction_time"
             ),
+            evidence_refs=(observation.evidence_ref,),
         )
         previous = by_activity.get(activity_id)
         if previous is not None and previous != fill:

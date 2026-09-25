@@ -17,6 +17,12 @@ from mvp.autotrade_mvp.alpaca import (
     parse_trade_activities,
     prepare_order_request,
 )
+from mvp.autotrade_mvp.accounting import ScopedEconomicBook
+from mvp.autotrade_mvp.fill_accounting import (
+    ProjectedFillEvidence,
+    build_provider_fill_financial_plan,
+)
+from mvp.autotrade_mvp.reservations import ReservationSnapshot
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
     EvidenceVerification,
@@ -731,6 +737,7 @@ class AlpacaAdapterTests(unittest.TestCase):
             "id": "20190524113406977::fill-1",
             "order_id": order_id,
             "symbol": "AAPL",
+            "side": "buy",
             "qty": "1",
             "price": "220.10",
             "transaction_time": "2026-09-24T20:01:00Z",
@@ -743,8 +750,9 @@ class AlpacaAdapterTests(unittest.TestCase):
                 client_ids_by_order_id={order_id: "at-ack-1"},
                 fees_by_activity_id={},
             )
+        duplicate_observation = bound_activity_response([row, row])
         fills = parse_trade_activities(
-            bound_activity_response([row, row]),
+            duplicate_observation,
             instrument_versions={"AAPL": "AAPL:v1"},
             client_ids_by_order_id={order_id: "at-ack-1"},
             fees_by_activity_id={row["id"]: ("0.01", "USD")},
@@ -752,6 +760,96 @@ class AlpacaAdapterTests(unittest.TestCase):
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].fee_amount, Decimal("0.01"))
         self.assertEqual((fills[0].account_id, fills[0].environment), ("paper-1", "PAPER"))
+        self.assertEqual(fills[0].side, "BUY")
+        self.assertIsNone(fills[0].position_side)
+        self.assertEqual(fills[0].evidence_refs, (duplicate_observation.evidence_ref,))
+
+    def test_trade_activity_requires_provider_evidenced_side(self):
+        order_id = str(uuid4())
+        base = {
+            "activity_type": "FILL",
+            "id": "activity-side-1",
+            "order_id": order_id,
+            "symbol": "AAPL",
+            "qty": "1",
+            "price": "220.10",
+            "transaction_time": "2026-09-24T20:01:00Z",
+        }
+        with self.assertRaisesRegex(AlpacaAdapterError, "activity.side"):
+            parse_trade_activities(
+                bound_activity_response([base]),
+                instrument_versions={"AAPL": "AAPL:v1"},
+                client_ids_by_order_id={order_id: "at-side-1"},
+                fees_by_activity_id={base["id"]: ("0.01", "USD")},
+            )
+
+        invalid = dict(base, side="hold")
+        with self.assertRaisesRegex(AlpacaAdapterError, "activity side"):
+            parse_trade_activities(
+                bound_activity_response([invalid]),
+                instrument_versions={"AAPL": "AAPL:v1"},
+                client_ids_by_order_id={order_id: "at-side-1"},
+                fees_by_activity_id={base["id"]: ("0.01", "USD")},
+            )
+
+        sell = dict(base, side="sell")
+        sell_observation = bound_activity_response([sell])
+        fills = parse_trade_activities(
+            sell_observation,
+            instrument_versions={"AAPL": "AAPL:v1"},
+            client_ids_by_order_id={order_id: "at-side-1"},
+            fees_by_activity_id={base["id"]: ("0.01", "USD")},
+        )
+        self.assertEqual(fills[0].side, "SELL")
+        self.assertIsNone(fills[0].position_side)
+        self.assertEqual(fills[0].evidence_refs, (sell_observation.evidence_ref,))
+
+    def test_equity_fill_remains_compatible_with_cash_equity_financial_plan(self):
+        order_id = str(uuid4())
+        row = {
+            "activity_type": "FILL",
+            "id": "activity-plan-1",
+            "order_id": order_id,
+            "symbol": "AAPL",
+            "side": "buy",
+            "qty": "1",
+            "price": "220.10",
+            "transaction_time": "2026-09-24T20:01:00Z",
+        }
+        provider_fill = parse_trade_activities(
+            bound_activity_response([row]),
+            instrument_versions={"AAPL": "AAPL:v1"},
+            client_ids_by_order_id={order_id: "at-plan-1"},
+            fees_by_activity_id={row["id"]: ("0", "USD")},
+        )[0]
+        self.assertIsNone(provider_fill.position_side)
+        projected = ProjectedFillEvidence.create(
+            fill_id="alpaca-fill-plan-1",
+            provider_execution_id=provider_fill.provider_execution_id,
+            intent_id="alpaca-intent-plan-1",
+            client_order_id=provider_fill.client_order_id,
+            side=provider_fill.side,
+            quantity=provider_fill.quantity,
+            price=provider_fill.price,
+        )
+        reservation = ReservationSnapshot(
+            reservation_id="alpaca-reservation-plan-1",
+            intent_id="alpaca-intent-plan-1",
+            original={"CASH:USD": Decimal("250")},
+            remaining={"CASH:USD": Decimal("250")},
+            consumed={"CASH:USD": Decimal("0")},
+            state="WORKING",
+        )
+        plan = build_provider_fill_financial_plan(
+            book=ScopedEconomicBook(environment="PAPER", account_id="paper-1"),
+            provider_id="ALPACA",
+            projected_fill=projected,
+            provider_fill=provider_fill,
+            expected_instrument="AAPL:v1",
+            settlement_currency="USD",
+            reservation_snapshot=reservation,
+        )
+        self.assertEqual(plan.usage["CASH:USD"], Decimal("220.10"))
 
     def test_trade_activity_scope_cannot_be_relabelled_after_provider_read(self):
         order_id = str(uuid4())
@@ -760,6 +858,7 @@ class AlpacaAdapterTests(unittest.TestCase):
             "id": "activity-scope-1",
             "order_id": order_id,
             "symbol": "AAPL",
+            "side": "buy",
             "qty": "1",
             "price": "220.10",
             "transaction_time": "2026-09-24T20:01:00Z",

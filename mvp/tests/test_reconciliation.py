@@ -20,6 +20,9 @@ def fill(
     fee_amount="0",
     environment="PAPER",
     trade_time="2026-09-24T18:00:00Z",
+    side=None,
+    position_side=None,
+    position_effect=None,
     evidence_refs=(),
 ):
     return ProviderFillEvidence.create(
@@ -34,6 +37,9 @@ def fill(
         fee_amount=fee_amount,
         fee_currency="USD",
         trade_time=trade_time,
+        side=side,
+        position_side=position_side,
+        position_effect=position_effect,
         evidence_refs=evidence_refs,
     )
 
@@ -983,6 +989,34 @@ class ReconciliationTests(unittest.TestCase):
                     ),
                 ]
             )
+
+    def test_provider_execution_position_identity_conflict_fails_closed(self):
+        base_fill = fill(
+            "e-position",
+            "c-position",
+            side="BUY",
+            position_side="LONG",
+            position_effect="OPEN",
+        )
+        for conflicting in (
+            fill(
+                "e-position",
+                "c-position",
+                side="BUY",
+                position_side="SHORT",
+                position_effect="OPEN",
+            ),
+            fill(
+                "e-position",
+                "c-position",
+                side="BUY",
+                position_side="LONG",
+                position_effect="REDUCE",
+            ),
+        ):
+            with self.subTest(conflicting=conflicting):
+                with self.assertRaisesRegex(ValueError, "conflicting"):
+                    self.base(provider_fills=[base_fill, conflicting])
 
     def activity(self, **overrides):
         values = dict(

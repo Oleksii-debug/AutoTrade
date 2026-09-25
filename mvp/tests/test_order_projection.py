@@ -453,6 +453,46 @@ class OrderProjectionTests(unittest.TestCase):
         ):
             book.effective_fills()
 
+    def test_busted_execution_identity_cannot_move_to_another_order(self):
+        book = OrderBookProjection()
+        first = book.create(
+            client_order_id="first",
+            instrument="ABC",
+            side="BUY",
+            requested_quantity="1",
+        )
+        second = book.create(
+            client_order_id="second",
+            instrument="ABC",
+            side="BUY",
+            requested_quantity="1",
+        )
+        first.record_fill(
+            fill_id="fill-first",
+            provider_execution_id="immutable-execution",
+            quantity="1",
+            price="10",
+        )
+        first.bust_fill(
+            "fill-first",
+            provider_revision="r2-bust",
+        )
+        second.record_fill(
+            fill_id="fill-second",
+            provider_execution_id="immutable-execution",
+            quantity="1",
+            price="10",
+        )
+
+        with self.assertRaisesRegex(
+            OrderProjectionConflict,
+            "multiple orders",
+        ):
+            book.effective_fills()
+
+        self.assertEqual(first.filled_quantity, Decimal("0"))
+        self.assertEqual(second.filled_quantity, Decimal("1"))
+
     def test_multi_order_projection_aggregates_effective_fills_and_oco_breach(self):
         book = OrderBookProjection()
         take = book.create(

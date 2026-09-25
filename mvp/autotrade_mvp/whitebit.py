@@ -269,13 +269,26 @@ class WhiteBitPreparedRequest:
 
     def __post_init__(self) -> None:
         endpoint = _text(self.endpoint, name="endpoint")
-        if not endpoint.startswith("/api/v4/") or "?" in endpoint or "#" in endpoint:
-            raise WhiteBitAdapterError("prepared endpoint must be a canonical WhiteBIT v4 path")
+        allowed_endpoints = {
+            "/api/v4/order/market",
+            "/api/v4/order/new",
+            "/api/v4/order/stop_market",
+            "/api/v4/order/stop_limit",
+            "/api/v4/order/stock_market",
+            "/api/v4/order/collateral/market",
+            "/api/v4/order/collateral/limit",
+            "/api/v4/order/collateral/trigger-market",
+            "/api/v4/order/collateral/stop-limit",
+        }
+        if endpoint not in allowed_endpoints:
+            raise WhiteBitAdapterError(
+                "prepared endpoint must be a canonical WhiteBIT order path"
+            )
         if not isinstance(self.body, Mapping):
             raise TypeError("body must be a mapping")
         body = dict(self.body)
-        validate_client_order_id(str(body.get("clientOrderId", "")))
-        _text(str(body.get("market", "")), name="market")
+        validate_client_order_id(body.get("clientOrderId"))
+        _text(body.get("market"), name="market")
         account = _text(self.account_id, name="account_id")
         environment = _text(self.environment, name="environment").upper()
         if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:

@@ -85,6 +85,18 @@ class ExperienceMemory:
                     ON tombstones(episode_id, created_at);
                 """
             )
+            correction_columns = {
+                row["name"]
+                for row in con.execute("PRAGMA table_info(corrections)").fetchall()
+            }
+            if "available_at" not in correction_columns:
+                con.execute("ALTER TABLE corrections ADD COLUMN available_at TEXT")
+            con.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_corrections_causal
+                    ON corrections(episode_id, available_at, created_at, correction_id)
+                """
+            )
 
     @contextmanager
     def _connect(self):
@@ -126,14 +138,18 @@ class ExperienceMemory:
         if not isinstance(payload["evidence_refs"], list) or not payload["evidence_refs"]:
             raise ValueError("episode requires evidence references")
         identifier = _identifier(episode_id)
+        normalized_task = _text(task, name="task")
+        normalized_regime = _text(regime, name="regime")
+        normalized_family = _text(instrument_family, name="instrument_family")
+        normalized_permission = _text(permission_class, name="permission_class")
         digest = _hash(
             {
                 "decision_time": decision.isoformat(),
                 "information_cutoff": cutoff.isoformat(),
-                "task": task,
-                "regime": regime,
-                "instrument_family": instrument_family,
-                "permission_class": permission_class,
+                "task": normalized_task,
+                "regime": normalized_regime,
+                "instrument_family": normalized_family,
+                "permission_class": normalized_permission,
                 "payload": payload,
             }
         )
@@ -160,10 +176,10 @@ class ExperienceMemory:
                     digest,
                     decision.isoformat(),
                     cutoff.isoformat(),
-                    _text(task, name="task"),
-                    _text(regime, name="regime"),
-                    _text(instrument_family, name="instrument_family"),
-                    _text(permission_class, name="permission_class"),
+                    normalized_task,
+                    normalized_regime,
+                    normalized_family,
+                    normalized_permission,
                     canonical,
                     datetime.now(timezone.utc).isoformat(),
                 ),
@@ -176,28 +192,123 @@ class ExperienceMemory:
         episode_id: str,
         *,
         payload: dict[str, Any],
+        available_at: datetime | None = None,
         correction_id: str | None = None,
     ) -> tuple[str, bool]:
         episode = _identifier(episode_id)
+        requested_availability = (
+            _time(available_at, name="available_at")
+            if available_at is not None
+            else None
+        )
         if not isinstance(payload, dict) or not payload:
             raise ValueError("correction payload must be non-empty")
         if "supersedes_fields" not in payload or not isinstance(payload["supersedes_fields"], list):
             raise ValueError("correction must declare supersedes_fields")
+        supersedes = tuple(
+            _text(field, name="supersedes_field")
+            for field in payload["supersedes_fields"]
+        )
+        if not supersedes:
+            raise ValueError("correction supersedes_fields must be non-empty")
+        if len(set(supersedes)) != len(supersedes):
+            raise ValueError("correction supersedes_fields must be unique")
+        missing_fields = tuple(field for field in supersedes if field not in payload)
+        if missing_fields:
+            raise ValueError(
+                "correction must contain every superseded field: "
+                + ", ".join(missing_fields)
+            )
+        normalized_payload = dict(payload)
+        normalized_payload["supersedes_fields"] = list(supersedes)
+        payload = normalized_payload
         identifier = _identifier(correction_id)
-        digest = _hash(payload)
         canonical = _canonical(payload)
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
-            if con.execute("SELECT 1 FROM episodes WHERE episode_id=?", (episode,)).fetchone() is None:
+            episode_row = con.execute(
+                "SELECT decision_time, payload_json FROM episodes WHERE episode_id=?",
+                (episode,),
+            ).fetchone()
+            if episode_row is None:
                 raise KeyError(episode)
+            episode_decision = datetime.fromisoformat(episode_row["decision_time"]).astimezone(
+                timezone.utc
+            )
+            source_payload = json.loads(episode_row["payload_json"])
+            unknown_supersedes = tuple(
+                field for field in supersedes if field not in source_payload
+            )
+            if unknown_supersedes:
+                raise MemoryConflict(
+                    "correction cannot supersede fields absent from source episode: "
+                    + ", ".join(unknown_supersedes)
+                )
+            correction_metadata = {"supersedes_fields", "evidence_ref"}
+            invented_fields = tuple(
+                field
+                for field in payload
+                if field not in correction_metadata and field not in source_payload
+            )
+            if invented_fields:
+                raise MemoryConflict(
+                    "correction cannot introduce fields absent from source episode: "
+                    + ", ".join(invented_fields)
+                )
             existing = con.execute("SELECT * FROM corrections WHERE correction_id=?", (identifier,)).fetchone()
             if existing is not None:
-                if existing["episode_id"] != episode or existing["correction_hash"] != digest:
+                existing_availability = existing["available_at"] or existing["created_at"]
+                effective_availability = (
+                    requested_availability.isoformat()
+                    if requested_availability is not None
+                    else existing_availability
+                )
+                current_digest = _hash(
+                    {
+                        "available_at": existing_availability,
+                        "payload": payload,
+                    }
+                )
+                legacy_digest = _hash(payload)
+                hash_matches = existing["correction_hash"] == current_digest or (
+                    existing["available_at"] is None
+                    and existing["correction_hash"] == legacy_digest
+                )
+                same = (
+                    existing["episode_id"] == episode
+                    and existing["payload_json"] == canonical
+                    and hash_matches
+                    and existing_availability == effective_availability
+                )
+                if not same:
                     raise MemoryConflict("correction identity conflict")
                 return identifier, False
+
+            availability = requested_availability or datetime.now(timezone.utc)
+            if availability < episode_decision:
+                raise MemoryConflict(
+                    "correction availability cannot precede episode decision_time"
+                )
+            digest = _hash(
+                {
+                    "available_at": availability.isoformat(),
+                    "payload": payload,
+                }
+            )
             con.execute(
-                "INSERT INTO corrections(correction_id,episode_id,correction_hash,payload_json,created_at) VALUES(?,?,?,?,?)",
-                (identifier, episode, digest, canonical, datetime.now(timezone.utc).isoformat()),
+                """
+                INSERT INTO corrections(
+                    correction_id,episode_id,correction_hash,payload_json,created_at,available_at
+                ) VALUES(?,?,?,?,?,?)
+                """,
+                (
+                    identifier,
+                    episode,
+                    digest,
+                    canonical,
+                    datetime.now(timezone.utc).isoformat(),
+                    availability.isoformat(),
+                ),
             )
             con.commit()
         return identifier, True
@@ -258,8 +369,13 @@ class ExperienceMemory:
                 if tombstones and not include_tombstoned:
                     continue
                 corrections = con.execute(
-                    "SELECT * FROM corrections WHERE episode_id=? ORDER BY created_at,correction_id",
-                    (row["episode_id"],),
+                    """
+                    SELECT * FROM corrections
+                    WHERE episode_id=?
+                      AND COALESCE(available_at, created_at) <= ?
+                    ORDER BY COALESCE(available_at, created_at), created_at, correction_id
+                    """,
+                    (row["episode_id"], cutoff.isoformat()),
                 ).fetchall()
                 results.append(
                     {

@@ -13,6 +13,7 @@ from mvp.autotrade_mvp.whitebit import (
     WhiteBitAdapterError,
     WhiteBitMarketRules,
     WhiteBitOrderIntent,
+    WhiteBitPreparedRequest,
     WhiteBitPageEvidence,
     WhiteBitRecoveryCheckpoint,
     absence_evidence_from_coverages,
@@ -154,6 +155,34 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertEqual(normalized.market, "BTC_USDT")
         self.assertEqual(normalized.side, "BUY")
         self.assertEqual(normalized.amount, Decimal("0.0100"))
+
+    def test_direct_prepared_request_cannot_bypass_guarded_scope_or_provenance(self):
+        base = {
+            "endpoint": "/api/v4/order/new",
+            "body": {
+                "market": "BTC_USDT",
+                "clientOrderId": "at-direct-guard",
+            },
+            "account_id": "account-1",
+            "environment": "PAPER",
+            "capability_snapshot_id": "cap-1",
+            "documentation_refs": ("https://docs.whitebit.com/order",),
+        }
+        request = WhiteBitPreparedRequest(**base)
+        self.assertEqual(request.environment, "PAPER")
+        self.assertEqual(request.capability_snapshot_id, "cap-1")
+        with self.assertRaisesRegex(WhiteBitAdapterError, "environment"):
+            WhiteBitPreparedRequest(**{**base, "environment": "STAGING"})
+        with self.assertRaisesRegex(WhiteBitAdapterError, "capability_snapshot_id"):
+            WhiteBitPreparedRequest(**{**base, "capability_snapshot_id": " "})
+        with self.assertRaisesRegex(WhiteBitAdapterError, "documentation_refs"):
+            WhiteBitPreparedRequest(**{**base, "documentation_refs": ()})
+        with self.assertRaisesRegex(WhiteBitAdapterError, "client_order_id|clientOrderId"):
+            WhiteBitPreparedRequest(
+                **{**base, "body": {"market": "BTC_USDT", "clientOrderId": ""}}
+            )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "endpoint"):
+            WhiteBitPreparedRequest(**{**base, "endpoint": "https://evil.test/order"})
 
     def test_spot_limit_request_uses_exact_strings_and_dispatcher_client_id(self):
         intent = WhiteBitOrderIntent.create(

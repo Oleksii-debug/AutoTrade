@@ -149,6 +149,99 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
                     )
                 )
 
+    def test_nested_privileged_model_fields_are_rejected(self):
+        for proposal in (
+            {"analysis": {"token": "injected"}},
+            {"steps": [{"authority_grant": "TRADE_ALLOWED"}]},
+            {"wrapper": {"deeper": {"secret": "must-not-pass"}}},
+        ):
+            with self.subTest(proposal=proposal), self.assertRaisesRegex(
+                PermissionError,
+                "privileged fields",
+            ):
+                validate_model_result(
+                    ResearchModelResult(
+                        result_id="nested-privileged",
+                        proposal=proposal,
+                        evidence_refs=("evidence:1",),
+                    )
+                )
+
+    def test_privileged_field_aliases_and_mixed_separators_are_rejected(self):
+        aliases = (
+            "apiKey",
+            "access-token",
+            "private_key",
+            "executionAuthority",
+            "withdrawal authority",
+            "session.cookie",
+        )
+        for alias in aliases:
+            with self.subTest(alias=alias), self.assertRaisesRegex(
+                PermissionError,
+                "privileged fields",
+            ):
+                validate_model_result(
+                    ResearchModelResult(
+                        result_id="privileged-alias",
+                        proposal={"analysis": {alias: "must-not-pass"}},
+                        evidence_refs=("evidence:1",),
+                    )
+                )
+
+    def test_model_proposal_rejects_non_string_nested_keys(self):
+        with self.assertRaisesRegex(ResearchBoundaryError, "keys must be strings"):
+            validate_model_result(
+                ResearchModelResult(
+                    result_id="non-string-key",
+                    proposal={"nested": {1: "value"}},
+                    evidence_refs=("evidence:1",),
+                )
+            )
+
+    def test_model_proposal_rejects_opaque_and_non_finite_leaf_values(self):
+        for value in (object(), {1, 2}, float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=repr(value)), self.assertRaisesRegex(
+                ResearchBoundaryError,
+                "JSON-compatible|finite JSON",
+            ):
+                ResearchModelResult(
+                    result_id="invalid-json-leaf",
+                    proposal={"analysis": {"value": value}},
+                    evidence_refs=("evidence:1",),
+                )
+
+    def test_model_proposal_accepts_json_scalar_leaf_values(self):
+        result = ResearchModelResult(
+            result_id="json-scalars",
+            proposal={
+                "text": "ok",
+                "integer": 1,
+                "number": 1.5,
+                "boolean": True,
+                "null": None,
+            },
+            evidence_refs=("evidence:1",),
+        )
+        self.assertIs(validate_model_result(result), result)
+
+    def test_model_proposal_is_deeply_immutable_after_construction(self):
+        nested = {"analysis": {"score": "1"}, "steps": [{"note": "safe"}]}
+        result = ResearchModelResult(
+            result_id="immutable-proposal",
+            proposal=nested,
+            evidence_refs=("evidence:1",),
+        )
+        validate_model_result(result)
+
+        nested["analysis"]["token"] = "late-injection"
+        self.assertNotIn("token", result.proposal["analysis"])
+
+        with self.assertRaisesRegex(TypeError, "immutable"):
+            result.proposal["analysis"]["token"] = "late-injection"
+        with self.assertRaises(TypeError):
+            result.proposal["steps"][0]["authority_grant"] = "TRADE_ALLOWED"
+
     def test_evidence_cannot_be_constructed_as_trusted_or_permission_granting(self):
         base = {
             "evidence_id": "e2",

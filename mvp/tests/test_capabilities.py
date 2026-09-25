@@ -56,7 +56,9 @@ def claim(
         evidence_ref={
             "artifact_id": f"33333333-3333-4333-8333-33333333333{len(source) % 10}",
             "sha256": "sha256:" + "a" * 64,
-            "observed_at": "2026-09-24T15:59:00Z",
+            "observed_at": observed_at.astimezone(timezone.utc).isoformat().replace(
+                "+00:00", "Z"
+            ),
         },
     )
 
@@ -368,6 +370,71 @@ class CapabilityFoundationTests(unittest.TestCase):
         self.assertEqual(payload["supported_order_types"], ["LIMIT", "MARKET"])
         self.assertEqual(payload["observed_at"], "2026-09-24T16:00:00Z")
         self.assertEqual(len(payload["evidence"]), 4)
+
+
+    def test_snapshot_constructor_fail_closed_on_invalid_identity_and_time(self):
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(),
+            observed_at=NOW,
+        )
+        with self.assertRaisesRegex(CapabilityError, "provider_id is required"):
+            replace(snapshot, provider_id="   ")
+        with self.assertRaisesRegex(CapabilityError, "environment is unsupported"):
+            replace(snapshot, environment="SANDBOX")
+        with self.assertRaisesRegex(CapabilityError, "timezone-aware"):
+            replace(snapshot, observed_at=NOW.replace(tzinfo=None))
+        with self.assertRaisesRegex(CapabilityError, "cannot be before"):
+            replace(snapshot, expires_at=NOW - timedelta(seconds=1))
+
+    def test_snapshot_constructor_normalizes_collections_and_rejects_bad_sources(self):
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(),
+            observed_at=NOW,
+        )
+        rebuilt = replace(
+            snapshot,
+            supported_order_types=[" LIMIT ", "MARKET"],
+            sources={" documented ", "api", "ACCOUNT", "instrument"},
+        )
+        self.assertEqual(rebuilt.supported_order_types, frozenset({"LIMIT", "MARKET"}))
+        self.assertEqual(
+            rebuilt.sources,
+            frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}),
+        )
+        with self.assertRaisesRegex(CapabilityError, "unsupported source"):
+            replace(snapshot, sources={"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT", "MODEL"})
+        with self.assertRaisesRegex(CapabilityError, "must be a collection"):
+            replace(snapshot, permission_scopes="ORDER.WRITE")
+
+    def test_old_evidence_cannot_be_relabelled_as_fresh_claim(self):
+        original = claim(
+            "ACCOUNT",
+            observed_at=NOW - timedelta(minutes=20),
+            expires_at=NOW + timedelta(minutes=10),
+        )
+        with self.assertRaisesRegex(
+            CapabilityError, "must match claim observed_at"
+        ):
+            CapabilityClaim(
+                source=original.source,
+                provider_id=original.provider_id,
+                account_id=original.account_id,
+                entity_id=original.entity_id,
+                environment=original.environment,
+                instrument_version=original.instrument_version,
+                observed_at=NOW,
+                expires_at=NOW + timedelta(minutes=10),
+                supported_order_types=original.supported_order_types,
+                time_in_force=original.time_in_force,
+                permission_scopes=original.permission_scopes,
+                position_mode=original.position_mode,
+                native_protection=original.native_protection,
+                rate_limit_policy_id=original.rate_limit_policy_id,
+                data_entitlements=original.data_entitlements,
+                evidence_ref=original.evidence_ref,
+            )
 
 
 if __name__ == "__main__":

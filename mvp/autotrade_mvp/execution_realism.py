@@ -372,6 +372,7 @@ class LiquidityObservation:
     market_time: str
     available_at: str
     available_volume: Decimal
+    interval_start: str | None = None
     bid: Decimal | None = None
     ask: Decimal | None = None
     bar_high: Decimal | None = None
@@ -386,6 +387,15 @@ class LiquidityObservation:
         if available < market:
             raise ExecutionRealismError("available_at cannot precede market_time")
         volume = _non_negative(self.available_volume, name="available_volume")
+        interval_start = (
+            None
+            if self.interval_start is None
+            else _instant(self.interval_start, name="interval_start")
+        )
+        if interval_start is not None and interval_start >= market:
+            raise ExecutionRealismError(
+                "interval_start must be strictly before market_time"
+            )
         bid = None if self.bid is None else _positive(self.bid, name="bid")
         ask = None if self.ask is None else _positive(self.ask, name="ask")
         if bid is not None and ask is not None and ask < bid:
@@ -402,6 +412,11 @@ class LiquidityObservation:
         object.__setattr__(self, "market_time", _utc(market))
         object.__setattr__(self, "available_at", _utc(available))
         object.__setattr__(self, "available_volume", volume)
+        object.__setattr__(
+            self,
+            "interval_start",
+            None if interval_start is None else _utc(interval_start),
+        )
         object.__setattr__(self, "bid", bid)
         object.__setattr__(self, "ask", ask)
         object.__setattr__(self, "bar_high", high)
@@ -415,6 +430,7 @@ class LiquidityObservation:
         market_time: str,
         available_at: str,
         available_volume,
+        interval_start=None,
         bid=None,
         ask=None,
         bar_high=None,
@@ -425,6 +441,15 @@ class LiquidityObservation:
         if available < market:
             raise ExecutionRealismError(
                 "available_at cannot precede market_time"
+            )
+        normalized_interval_start = (
+            None
+            if interval_start is None
+            else _instant(interval_start, name="interval_start")
+        )
+        if normalized_interval_start is not None and normalized_interval_start >= market:
+            raise ExecutionRealismError(
+                "interval_start must be strictly before market_time"
             )
         normalized_bid = _positive(bid, name="bid") if bid is not None else None
         normalized_ask = _positive(ask, name="ask") if ask is not None else None
@@ -455,6 +480,11 @@ class LiquidityObservation:
             available_volume=_non_negative(
                 available_volume,
                 name="available_volume",
+            ),
+            interval_start=(
+                None
+                if normalized_interval_start is None
+                else _utc(normalized_interval_start)
             ),
             bid=normalized_bid,
             ask=normalized_ask,
@@ -638,6 +668,35 @@ def simulate_execution(
             reason="liquidity is not strictly later than venue arrival",
             warnings=tuple(warnings),
         )
+
+    if model.data_fidelity == "BAR":
+        if observation.interval_start is None:
+            raise ExecutionRealismError(
+                "BAR fidelity requires interval_start for causal volume"
+            )
+        interval_start = _instant(
+            observation.interval_start,
+            name="interval_start",
+        )
+        if arrival >= interval_start:
+            return SimulatedExecution(
+                status="AMBIGUOUS_NO_FILL",
+                filled_quantity=Decimal("0"),
+                fill_price=None,
+                fee=Decimal("0"),
+                arrival_at=arrival_text,
+                trade_time=None,
+                evidence_available_at=observation.available_at,
+                triggered=order.already_triggered,
+                model_fingerprint=model.fingerprint,
+                scenario=model.scenario,
+                data_fidelity=model.data_fidelity,
+                reason=(
+                    "BAR volume includes liquidity from before venue arrival; "
+                    "wait for a fully future interval"
+                ),
+                warnings=tuple(warnings),
+            )
 
     capacity = _capacity_quantity(
         order_quantity=order.quantity,

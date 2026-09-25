@@ -31,6 +31,14 @@ FORBIDDEN_SUFFIXES = {
     ".jks",
     ".keystore",
 }
+FORBIDDEN_PREFIXES = (
+    ".env.",
+)
+WINDOWS_RESERVED_STEMS = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{index}" for index in range(1, 10)}
+    | {f"lpt{index}" for index in range(1, 10)}
+)
 
 
 class BundleError(ValueError):
@@ -51,9 +59,31 @@ def _safe_relative(path: Path, root: Path) -> str:
     return posix
 
 
+def _windows_path_key(relative: str) -> str:
+    normalized: list[str] = []
+    for part in PurePosixPath(relative).parts:
+        if part.endswith((" ", ".")):
+            raise BundleError(
+                f"bundle contains Windows-unsafe trailing space/dot segment: {relative}"
+            )
+        if ":" in part:
+            raise BundleError(
+                f"bundle contains Windows alternate-data-stream path: {relative}"
+            )
+        stem = part.split(".", 1)[0].casefold()
+        if stem in WINDOWS_RESERVED_STEMS:
+            raise BundleError(
+                f"bundle contains Windows reserved device name: {relative}"
+            )
+        normalized.append(part.casefold())
+    return "/".join(normalized)
+
+
 def _is_sensitive(path: Path) -> bool:
     name = path.name.lower()
     if name in FORBIDDEN_BASENAMES:
+        return True
+    if any(name.startswith(prefix) for prefix in FORBIDDEN_PREFIXES):
         return True
     if path.suffix.lower() in FORBIDDEN_SUFFIXES:
         return True
@@ -65,6 +95,7 @@ def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
     if not staging.is_dir():
         raise BundleError("staging must be an existing directory")
     collected: list[tuple[str, Path, bytes]] = []
+    windows_names: dict[str, str] = {}
     for path in sorted(staging.rglob("*"), key=lambda item: item.as_posix()):
         if path.is_symlink():
             raise BundleError(f"symlinks are forbidden in bundles: {path}")
@@ -73,6 +104,14 @@ def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
         if not path.is_file():
             raise BundleError(f"unsupported filesystem entry: {path}")
         relative = _safe_relative(path, staging)
+        windows_key = _windows_path_key(relative)
+        previous = windows_names.get(windows_key)
+        if previous is not None and previous != relative:
+            raise BundleError(
+                "bundle contains Windows path collision: "
+                f"{previous} conflicts with {relative}"
+            )
+        windows_names[windows_key] = relative
         if _is_sensitive(PurePosixPath(relative)):
             raise BundleError(f"sensitive path is forbidden in bundles: {relative}")
         collected.append((relative, path, path.read_bytes()))
@@ -218,11 +257,19 @@ def build_bundle(
 
     digest = sha256(output.read_bytes()).hexdigest()
     hash_path = output.with_suffix(output.suffix + ".sha256")
-    hash_path.write_text(
-        f"{digest}  {output.name}\n",
-        encoding="utf-8",
-        newline="\n",
-    )
+    hash_temporary = hash_path.with_name(hash_path.name + ".tmp")
+    if hash_temporary.exists():
+        hash_temporary.unlink()
+    try:
+        hash_temporary.write_text(
+            f"{digest}  {output.name}\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        hash_temporary.replace(hash_path)
+    finally:
+        if hash_temporary.exists():
+            hash_temporary.unlink()
     return {
         "output": str(output),
         "sha256": digest,

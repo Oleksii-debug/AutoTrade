@@ -2,6 +2,7 @@ import unittest
 
 from research.autotrade_research.evaluation.gates import (
     EvaluationEvidence,
+    GateDecision,
     GateProfile,
     evaluate_gates,
 )
@@ -14,6 +15,11 @@ def profile():
         max_drawdown="0.10",
         max_adverse_cost_loss="0.03",
         min_power="0.80",
+        primary_baseline_id="champion",
+        baseline_ids=("cash", "passive", "champion"),
+        selection_correction="holm-v1",
+        max_trials=20,
+        required_regimes=("normal", "stress"),
     )
 
 
@@ -31,12 +37,64 @@ def evidence(**overrides):
         drawdown="0.05",
         adverse_cost_loss="0.01",
         retention_passed=True,
+        baseline_advantages={
+            "cash": "0.04",
+            "passive": "0.035",
+            "champion": "0.03",
+        },
+        selection_correction_applied="holm-v1",
+        trials_attempted=12,
+        regime_coverage=frozenset({"normal", "stress"}),
     )
     values.update(overrides)
     return EvaluationEvidence.create(**values)
 
 
 class EvaluationGateTests(unittest.TestCase):
+    def test_direct_profile_construction_cannot_bypass_registered_thresholds(self):
+        with self.assertRaisesRegex(ValueError, "minimum_net_advantage"):
+            GateProfile(
+                profile_id="direct-bad",
+                minimum_net_advantage="-0.01",
+                max_drawdown="0.10",
+                max_adverse_cost_loss="0.03",
+                min_power="0.80",
+                primary_baseline_id="champion",
+                baseline_ids=("cash", "champion"),
+                selection_correction="holm-v1",
+                max_trials=20,
+                required_regimes=("normal",),
+                require_complete_trials=True,
+                require_causal_audit=True,
+                require_financial_invariants=True,
+            )
+
+    def test_direct_evidence_construction_enforces_exact_types_and_ranges(self):
+        base = dict(
+            registered_profile_id="gate-v1",
+            profile_unchanged_after_results=True,
+            reproducible=True,
+            causal_audit_passed=True,
+            financial_invariants_passed=True,
+            trial_log_complete=True,
+            dependence_aware_lower_bound="0.02",
+            estimated_power="0.85",
+            net_advantage="0.03",
+            drawdown="0.05",
+            adverse_cost_loss="0.01",
+            retention_passed=True,
+            baseline_advantages={"champion": "0.03"},
+            selection_correction_applied="holm-v1",
+            trials_attempted=1,
+            regime_coverage=frozenset({"normal"}),
+        )
+        with self.assertRaisesRegex(TypeError, "reproducible"):
+            EvaluationEvidence(**{**base, "reproducible": 1})
+        with self.assertRaisesRegex(ValueError, "estimated_power"):
+            EvaluationEvidence(**{**base, "estimated_power": "1.01"})
+        with self.assertRaisesRegex(TypeError, "regime_coverage"):
+            EvaluationEvidence(**{**base, "regime_coverage": frozenset({"normal", 7})})
+
     def test_complete_registered_evidence_can_pass(self):
         self.assertEqual(evaluate_gates(profile(), evidence()).status, "PASS")
 
@@ -67,6 +125,54 @@ class EvaluationGateTests(unittest.TestCase):
                 max_drawdown="0.10",
                 max_adverse_cost_loss="-0.03",
                 min_power="0.80",
+                primary_baseline_id="champion",
+                baseline_ids=("cash", "passive", "champion"),
+                selection_correction="holm-v1",
+                max_trials=20,
+                required_regimes=("normal", "stress"),
+            )
+
+    def test_negative_minimum_net_advantage_is_invalid_protocol(self):
+        with self.assertRaisesRegex(ValueError, "minimum_net_advantage"):
+            GateProfile.create(
+                profile_id="negative-edge",
+                minimum_net_advantage="-0.01",
+                max_drawdown="0.10",
+                max_adverse_cost_loss="0.03",
+                min_power="0.80",
+                primary_baseline_id="champion",
+                baseline_ids=("cash", "champion"),
+                selection_correction="holm-v1",
+                max_trials=20,
+                required_regimes=("normal",),
+            )
+
+    def test_protocol_identity_collections_reject_non_text_values(self):
+        with self.assertRaises(TypeError):
+            GateProfile.create(
+                profile_id="bad-baseline-type",
+                minimum_net_advantage="0.01",
+                max_drawdown="0.10",
+                max_adverse_cost_loss="0.03",
+                min_power="0.80",
+                primary_baseline_id="champion",
+                baseline_ids=("champion", None),
+                selection_correction="holm-v1",
+                max_trials=20,
+                required_regimes=("normal",),
+            )
+        with self.assertRaises(TypeError):
+            GateProfile.create(
+                profile_id="bad-regime-type",
+                minimum_net_advantage="0.01",
+                max_drawdown="0.10",
+                max_adverse_cost_loss="0.03",
+                min_power="0.80",
+                primary_baseline_id="champion",
+                baseline_ids=("champion",),
+                selection_correction="holm-v1",
+                max_trials=20,
+                required_regimes=("normal", None),
             )
 
     def test_profile_changed_after_result_fails(self):
@@ -83,6 +189,119 @@ class EvaluationGateTests(unittest.TestCase):
             evaluate_gates(profile(), evidence(causal_audit_passed=None)).status,
             "INCONCLUSIVE",
         )
+
+
+    def test_selection_correction_mismatch_fails(self):
+        decision = evaluate_gates(
+            profile(),
+            evidence(selection_correction_applied="none"),
+        )
+        self.assertEqual(decision.status, "FAIL")
+        self.assertEqual(decision.checks["selection_correction"], "FAIL")
+
+    def test_trial_budget_exhaustion_fails_and_missing_count_is_inconclusive(self):
+        self.assertEqual(
+            evaluate_gates(profile(), evidence(trials_attempted=21)).status,
+            "FAIL",
+        )
+        self.assertEqual(
+            evaluate_gates(profile(), evidence(trials_attempted=None)).status,
+            "INCONCLUSIVE",
+        )
+
+    def test_missing_registered_regime_fails(self):
+        decision = evaluate_gates(
+            profile(),
+            evidence(regime_coverage=frozenset({"normal"})),
+        )
+        self.assertEqual(decision.status, "FAIL")
+        self.assertEqual(decision.checks["regime_coverage"], "FAIL")
+
+    def test_baseline_set_must_match_registration(self):
+        decision = evaluate_gates(
+            profile(),
+            evidence(
+                baseline_advantages={
+                    "cash": "0.04",
+                    "champion": "0.03",
+                }
+            ),
+        )
+        self.assertEqual(decision.status, "FAIL")
+        self.assertEqual(decision.checks["baselines"], "FAIL")
+
+    def test_primary_baseline_advantage_is_bound_to_net_advantage(self):
+        decision = evaluate_gates(
+            profile(),
+            evidence(
+                baseline_advantages={
+                    "cash": "0.04",
+                    "passive": "0.035",
+                    "champion": "0.031",
+                }
+            ),
+        )
+        self.assertEqual(decision.status, "FAIL")
+        self.assertEqual(decision.checks["primary_baseline"], "FAIL")
+
+    def test_gate_decision_checks_are_immutable_after_evaluation(self):
+        decision = evaluate_gates(profile(), evidence())
+        self.assertEqual(decision.status, "PASS")
+        with self.assertRaises(TypeError):
+            decision.checks["net_advantage"] = "FAIL"
+        self.assertEqual(decision.checks["net_advantage"], "PASS")
+
+    def test_gate_decision_defensively_copies_mutable_checks(self):
+        checks = {"net_advantage": "PASS"}
+        decision = GateDecision(
+            status="PASS",
+            reasons=("registered gate passed",),
+            checks=checks,
+        )
+        checks["net_advantage"] = "FAIL"
+        self.assertEqual(decision.checks["net_advantage"], "PASS")
+
+    def test_forged_gate_decision_statuses_fail_closed(self):
+        with self.assertRaisesRegex(ValueError, "status"):
+            GateDecision(
+                status="APPROVED",
+                reasons=("forged",),
+                checks={"net_advantage": "PASS"},
+            )
+        with self.assertRaisesRegex(ValueError, "check status"):
+            GateDecision(
+                status="PASS",
+                reasons=("forged",),
+                checks={"net_advantage": "APPROVED"},
+            )
+
+    def test_empty_selection_controls_are_invalid_protocol(self):
+        with self.assertRaises(ValueError):
+            GateProfile.create(
+                profile_id="bad",
+                minimum_net_advantage="0.01",
+                max_drawdown="0.1",
+                max_adverse_cost_loss="0.03",
+                min_power="0.8",
+                primary_baseline_id="champion",
+                baseline_ids=(),
+                selection_correction="holm-v1",
+                max_trials=10,
+                required_regimes=("normal",),
+            )
+        with self.assertRaises(ValueError):
+            GateProfile.create(
+                profile_id="bad",
+                minimum_net_advantage="0.01",
+                max_drawdown="0.1",
+                max_adverse_cost_loss="0.03",
+                min_power="0.8",
+                primary_baseline_id="champion",
+                baseline_ids=("champion",),
+                selection_correction="",
+                max_trials=10,
+                required_regimes=("normal",),
+            )
 
 
 if __name__ == "__main__":

@@ -235,6 +235,18 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 unresolved_blockers=(),
             )
 
+    def test_noncanonical_uppercase_evidence_identity_is_rejected(self):
+        with self.assertRaisesRegex(ReleaseCandidateError, "lowercase git SHA"):
+            artifact("HOST", source_sha=SOURCE.upper())
+        with self.assertRaisesRegex(ReleaseCandidateError, "lowercase hex"):
+            ReleaseArtifactEvidence.create(
+                role="SBOM",
+                artifact_sha256=("sha256:" + "A" * 64),
+                source_sha=SOURCE,
+                signature_status="NOT_APPLICABLE",
+                evidence_status="PASS",
+            )
+
     def test_manifest_hash_changes_when_evidence_hash_changes(self):
         original = freeze_release_candidate(self.candidate())
         artifacts = list(self.candidate().artifacts)

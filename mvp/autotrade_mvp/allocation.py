@@ -1126,8 +1126,10 @@ class EvidenceBoundObjectiveAllocationResult:
     decision_time: str
     account_id: str
     account_snapshot_id: str
+    reconciliation_run_id: str
     account_state_version: int
     reservation_state_version: int
+    reservation_state_digest: str
 
 
 def _payload_text(evidence: ImmutableAllocationEvidence, key: str) -> str:
@@ -1212,6 +1214,7 @@ def _candidate_evidence_matches(
         raise ValueError(f"objective evidence risk_penalty_rate mismatch for {symbol}")
     for required_identity in (
         "candidate_id",
+        "proposal_id",
         "strategy_version",
         "protocol_digest",
         "input_snapshot_digest",
@@ -1233,8 +1236,15 @@ def _candidate_evidence_matches(
         "provider_id",
         "account_id",
         "capability_snapshot_id",
+        "source_as_of",
     ):
         _payload_text(market, required_identity)
+    market_as_of = _instant(
+        _payload_text(market, "source_as_of"),
+        name="market evidence source_as_of",
+    )
+    if market_as_of > _instant(decision_time, name="decision_time"):
+        raise ValueError(f"market evidence source_as_of is in the future for {symbol}")
     for key, actual in (
         ("price", candidate.price),
         ("lot_size", candidate.lot_size),
@@ -1274,8 +1284,10 @@ def _allocation_decision_digest(
     decision_time: str,
     account_id: str,
     account_snapshot_id: str,
+    reconciliation_run_id: str,
     account_state_version: int,
     reservation_state_version: int,
+    reservation_state_digest: str,
 ) -> str:
     payload = {
         "environment": environment,
@@ -1283,8 +1295,10 @@ def _allocation_decision_digest(
         "decision_time": decision_time,
         "account_id": account_id,
         "account_snapshot_id": account_snapshot_id,
+        "reconciliation_run_id": reconciliation_run_id,
         "account_state_version": account_state_version,
         "reservation_state_version": reservation_state_version,
+        "reservation_state_digest": reservation_state_digest,
         "objective_version": result.objective_version,
         "selected_symbols": list(result.selected_symbols),
         "expected_net_utility": str(result.expected_net_utility),
@@ -1405,6 +1419,20 @@ def allocate_evidence_bound_objective_targets(
         resolved_capital,
         "account_snapshot_id",
     )
+    reconciliation_run_id = _payload_text(
+        resolved_capital,
+        "reconciliation_run_id",
+    )
+    reservation_state_digest = _payload_text(
+        resolved_capital,
+        "reservation_state_digest",
+    )
+    if (
+        len(reservation_state_digest) != 64
+        or reservation_state_digest.lower() != reservation_state_digest
+        or any(character not in "0123456789abcdef" for character in reservation_state_digest)
+    ):
+        raise ValueError("capital evidence reservation_state_digest must be lowercase sha256 hex")
     account_state_version = _payload_nonnegative_int(
         resolved_capital,
         "account_state_version",
@@ -1485,8 +1513,10 @@ def allocate_evidence_bound_objective_targets(
         decision_time=normalized_decision_time,
         account_id=account_id,
         account_snapshot_id=account_snapshot_id,
+        reconciliation_run_id=reconciliation_run_id,
         account_state_version=account_state_version,
         reservation_state_version=reservation_state_version,
+        reservation_state_digest=reservation_state_digest,
     )
     return EvidenceBoundObjectiveAllocationResult(
         objective=objective_result,
@@ -1497,8 +1527,10 @@ def allocate_evidence_bound_objective_targets(
         decision_time=normalized_decision_time,
         account_id=account_id,
         account_snapshot_id=account_snapshot_id,
+        reconciliation_run_id=reconciliation_run_id,
         account_state_version=account_state_version,
         reservation_state_version=reservation_state_version,
+        reservation_state_digest=reservation_state_digest,
     )
 
 
@@ -1508,9 +1540,13 @@ def revalidate_evidence_bound_allocation(
     resolved_evidence: Mapping[str, ImmutableAllocationEvidence],
     environment: str,
     as_of: str,
+    current_policy_version: str,
+    current_account_id: str,
     current_account_snapshot_id: str,
+    current_reconciliation_run_id: str,
     current_account_state_version: int,
     current_reservation_state_version: int,
+    current_reservation_state_digest: str,
 ) -> bool:
     """Fail closed if evidence or reconciled capital state changed after proposal."""
 
@@ -1523,11 +1559,25 @@ def revalidate_evidence_bound_allocation(
         "+00:00",
         "Z",
     )
+    if _text(current_policy_version, name="current_policy_version") != result.policy_version:
+        raise ValueError("policy version changed after allocation proposal")
+    if _text(current_account_id, name="current_account_id") != result.account_id:
+        raise ValueError("account identity does not match allocation proposal")
     if _text(
         current_account_snapshot_id,
         name="current_account_snapshot_id",
     ) != result.account_snapshot_id:
         raise ValueError("account snapshot identity advanced after allocation proposal")
+    if _text(
+        current_reconciliation_run_id,
+        name="current_reconciliation_run_id",
+    ) != result.reconciliation_run_id:
+        raise ValueError("reconciliation identity advanced after allocation proposal")
+    if _text(
+        current_reservation_state_digest,
+        name="current_reservation_state_digest",
+    ) != result.reservation_state_digest:
+        raise ValueError("reservation state digest changed after allocation proposal")
     for name, actual, expected in (
         (
             "account state version",
@@ -1564,8 +1614,10 @@ def revalidate_evidence_bound_allocation(
         decision_time=result.decision_time,
         account_id=result.account_id,
         account_snapshot_id=result.account_snapshot_id,
+        reconciliation_run_id=result.reconciliation_run_id,
         account_state_version=result.account_state_version,
         reservation_state_version=result.reservation_state_version,
+        reservation_state_digest=result.reservation_state_digest,
     )
     if expected_digest != result.decision_digest:
         raise ValueError("allocation decision digest does not match result content")

@@ -118,6 +118,7 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "userinfo_url": "https://api-user:url-password@provider.test/orders",
                 "dsn": "host=db;password=hunter2;database=autotrade",
                 "key_material": "-----BEGIN PRIVATE KEY-----\\nsecret\\n-----END PRIVATE KEY-----",
+                "encrypted_key_material": "-----BEGIN ENCRYPTED PRIVATE KEY-----\\nencrypted-secret\\n-----END ENCRYPTED PRIVATE KEY-----",
                 "token_text": "token=plain-token-secret",
                 "session_text": "session: plain-session-secret",
                 "safe": "symbol=BTC",
@@ -125,7 +126,7 @@ class DecisionTraceStoreTests(unittest.TestCase):
             store.append(item)
 
             raw = path.read_text(encoding="utf-8")
-            for leaked in ("abc123", "bearer-secret", "url-password", "hunter2", "plain-token-secret", "plain-session-secret", "\\nsecret\\n"):
+            for leaked in ("abc123", "bearer-secret", "url-password", "hunter2", "plain-token-secret", "plain-session-secret", "\\nsecret\\n", "encrypted-secret"):
                 self.assertNotIn(leaked, raw)
             persisted = json.loads(raw)
             attrs = persisted["attributes"]
@@ -134,6 +135,7 @@ class DecisionTraceStoreTests(unittest.TestCase):
             self.assertEqual(attrs["userinfo_url"], "https://[REDACTED]@provider.test/orders")
             self.assertIn("password=[REDACTED]", attrs["dsn"])
             self.assertEqual(attrs["key_material"], "[REDACTED]")
+            self.assertEqual(attrs["encrypted_key_material"], "[REDACTED]")
             self.assertIn("token=[REDACTED]", attrs["token_text"])
             self.assertIn("session:[REDACTED]", attrs["session_text"])
             self.assertEqual(attrs["safe"], "symbol=BTC")

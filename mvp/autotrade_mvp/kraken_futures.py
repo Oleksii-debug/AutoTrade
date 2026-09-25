@@ -317,9 +317,9 @@ def parse_position_executions(
         if client_id is not None:
             client_id = _client_order_id(client_id)
         fill = ProviderFillEvidence.create(
-        fill =     provider_id="KRAKEN",
-        fill =     account_id=account_id,
-        fill =     environment=environment,
+            provider_id="KRAKEN",
+            account_id=account_id,
+            environment=environment,
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=instrument,

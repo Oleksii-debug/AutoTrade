@@ -125,12 +125,49 @@ class MarketNormalizationTests(unittest.TestCase):
         self.assertNotIn("DUPLICATE", first.quality_flags)
         self.assertIn("DUPLICATE", second.quality_flags)
 
-        with self.assertRaisesRegex(SequenceConflict, "different normalized content"):
+        with self.assertRaisesRegex(SequenceConflict, "different causal content"):
             normalizer.normalize(
                 raw(
                     "TRADE",
                     {"price": "101", "quantity": "1"},
                     ingested=at() + timedelta(seconds=2),
+                )
+            )
+
+    def test_same_sequence_cannot_change_causal_identity_with_same_payload(self):
+        normalizer = MarketNormalizer(registry())
+        normalizer.normalize(
+            raw(
+                "TRADE",
+                {"price": "100", "quantity": "1"},
+                source=at(),
+                revision=0,
+            )
+        )
+        with self.assertRaisesRegex(SequenceConflict, "different causal content"):
+            normalizer.normalize(
+                raw(
+                    "TRADE",
+                    {"price": "100", "quantity": "1"},
+                    source=at() + timedelta(milliseconds=1),
+                    revision=0,
+                )
+            )
+
+        other = MarketNormalizer(registry())
+        other.normalize(
+            raw(
+                "TRADE",
+                {"price": "100", "quantity": "1"},
+                revision=0,
+            )
+        )
+        with self.assertRaisesRegex(SequenceConflict, "different causal content"):
+            other.normalize(
+                raw(
+                    "TRADE",
+                    {"price": "100", "quantity": "1"},
+                    revision=1,
                 )
             )
 

@@ -140,6 +140,59 @@ class DurableUnknownRestartTests(unittest.TestCase):
             self.assertEqual(recovery.state, HostState.READY)
             recovery.validate_admission(owner.epoch)
 
+    def test_observed_execution_without_execution_identity_cannot_clear_unknown(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            outcome = self._unknown_dispatch(store)
+            recovery = RecoveryController(
+                owner_store=store,
+                owner_scope="SIMULATION:acct",
+            )
+            recovery.start("host-restarted")
+
+            checkpoint = {
+                "event_id": "reconciliation-event-no-execution-id",
+                "payload_hash": "sha256:" + "c" * 64,
+                "journal_sequence": 101,
+                "payload": {
+                    "provider_id": "SIM",
+                    "account_id": "acct",
+                    "environment": "SIMULATION",
+                    "complete": True,
+                    "snapshot_consistent": True,
+                    "activity_coverage_complete": True,
+                    "blocking_resources": [],
+                    "submission_resolutions": [
+                        {
+                            "attempt_id": "attempt-1",
+                            "intent_id": "intent-1",
+                            "client_order_id": outcome.client_order_id,
+                            "outcome": "OBSERVED_EXECUTION",
+                            "evidence_reason": "malformed execution verdict",
+                            "provider_order_ids": [],
+                            "provider_execution_ids": [],
+                        }
+                    ],
+                },
+            }
+            with patch(
+                "mvp.autotrade_mvp.recovery.load_reconciliation_checkpoint_for_readiness",
+                return_value=checkpoint,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "lacks execution identity",
+                ):
+                    recovery.record_reconciliation_checkpoint(
+                        reconciliation_id="recon-no-execution-id",
+                        provider_id="SIM",
+                        account_id="acct",
+                        environment="SIMULATION",
+                    )
+
+            self.assertEqual(recovery.unresolved_attempts, {"attempt-1"})
+            self.assertEqual(recovery.state, HostState.DEGRADED)
+
     def test_reconciliation_identity_mismatch_cannot_clear_recovered_unknown(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

@@ -1316,6 +1316,60 @@ class ExperienceMemoryTests(unittest.TestCase):
                 episode,
             )
 
+    def test_future_tombstone_does_not_rewrite_historical_memory_visibility(self):
+        with TemporaryDirectory() as directory:
+            store = memory(Path(directory) / "memory.sqlite3")
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=BASE,
+            ):
+                episode, _ = store.append_episode(
+                    decision_time=BASE,
+                    information_cutoff=BASE,
+                    task="research",
+                    regime="calm",
+                    instrument_family="equity",
+                    permission_class="research",
+                    payload=payload(),
+                )
+
+            tombstoned_at = BASE + timedelta(days=2)
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=tombstoned_at,
+            ):
+                store.tombstone(episode, reason="future quality correction")
+
+            historical_cutoff = BASE + timedelta(days=1)
+            historical = store.retrieve(
+                information_cutoff=historical_cutoff,
+                granted_permissions={"research"},
+            )
+            self.assertEqual([item["episode_id"] for item in historical], [episode])
+            self.assertEqual(historical[0]["tombstones"], [])
+            self.assertEqual(
+                store.source_episode(
+                    episode,
+                    information_cutoff=historical_cutoff,
+                    granted_permissions={"research"},
+                )["episode_id"],
+                episode,
+            )
+
+            self.assertEqual(
+                store.retrieve(
+                    information_cutoff=tombstoned_at,
+                    granted_permissions={"research"},
+                ),
+                (),
+            )
+            with self.assertRaisesRegex(PermissionError, "tombstoned"):
+                store.source_episode(
+                    episode,
+                    information_cutoff=tombstoned_at,
+                    granted_permissions={"research"},
+                )
+
     def test_information_cutoff_prevents_future_memory_leakage(self):
         with TemporaryDirectory() as directory:
             store = memory(Path(directory) / "memory.sqlite3")

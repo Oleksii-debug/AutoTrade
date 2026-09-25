@@ -244,6 +244,36 @@ class DurableModelBudget:
     def snapshot(self) -> BudgetSnapshot:
         return self._replay().snapshot()
 
+    def active_reservation(self, request_id: str) -> Decimal | None:
+        """Return the exact currently active reservation for one request identity.
+
+        This query is journal-derived rather than inferred from aggregate totals.
+        Production call boundaries use it to prove that their exact request still
+        owns the reservation returned by admit_route before any inference I/O.
+        """
+        request = _text(request_id, name="request_id")
+        active: Decimal | None = None
+        for event in self._events():
+            payload = event.get("payload")
+            if not isinstance(payload, dict) or payload.get("request_id") != request:
+                continue
+            event_type = event.get("event_type")
+            if event_type in {"ModelCostReserved", "ModelRouteReserved"}:
+                try:
+                    amount = Decimal(payload["amount"])
+                except (KeyError, ValueError, TypeError) as error:
+                    raise ValueError(
+                        "durable model reservation amount is invalid"
+                    ) from error
+                if not amount.is_finite() or amount < 0:
+                    raise ValueError(
+                        "durable model reservation amount is invalid"
+                    )
+                active = amount
+            elif event_type in {"ModelCostReleased", "ModelCostSettled"}:
+                active = None
+        return active
+
     def _commit(
         self,
         *,

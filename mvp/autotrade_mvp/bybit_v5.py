@@ -188,7 +188,6 @@ def _response_evidence(
         ),
         "sha256": f"sha256:{digest}",
         "source_uri": source_uri,
-        "provider_environment": normalized_environment,
         "observed_at": observed_at,
         "rights_id": "provider-observation-bybit",
     }
@@ -235,6 +234,8 @@ def _position_idx_from_capability(
     side: str,
     order_type: str,
     time_in_force: str,
+    reduce_only: bool,
+    position_side: str | None,
 ) -> int:
     """Project verified account-mode authority into Bybit positionIdx.
 
@@ -299,11 +300,30 @@ def _position_idx_from_capability(
             "Bybit derivative action is not admitted by current verified capability"
         )
 
+    if type(reduce_only) is not bool:
+        raise ProviderCoreError("reduce_only must be boolean")
     mode = capability.position_mode.strip().upper()
     if mode == "ONE_WAY":
+        if position_side is not None:
+            normalized_position_side = _text(position_side, name="position_side").upper()
+            if normalized_position_side != "NET":
+                raise ProviderCoreError("ONE_WAY mode accepts only NET position_side")
         return 0
     if mode == "HEDGE":
-        return 1 if normalized_side == "BUY" else 2
+        if position_side is None:
+            raise ProviderCoreError("HEDGE mode requires explicit target position_side")
+        normalized_position_side = _text(position_side, name="position_side").upper()
+        if normalized_position_side not in {"LONG", "SHORT"}:
+            raise ProviderCoreError("HEDGE position_side must be LONG or SHORT")
+        expected_order_side = (
+            "SELL" if reduce_only and normalized_position_side == "LONG"
+            else "BUY" if reduce_only
+            else "BUY" if normalized_position_side == "LONG"
+            else "SELL"
+        )
+        if normalized_side != expected_order_side:
+            raise ProviderCoreError("order side is inconsistent with target hedge position leg")
+        return 1 if normalized_position_side == "LONG" else 2
     raise ProviderCoreError(
         "Bybit position_mode must be explicitly ONE_WAY or HEDGE"
     )
@@ -320,6 +340,7 @@ def build_order_payload(
     time_in_force: str,
     price: object | None = None,
     reduce_only: bool = False,
+    position_side: str | None = None,
     position_idx: int | None = None,
     capability: CapabilitySnapshot | None = None,
     capability_at: datetime | None = None,
@@ -389,6 +410,8 @@ def build_order_payload(
             side=normalized_side,
             order_type=normalized_type,
             time_in_force=tif,
+            reduce_only=reduce_only,
+            position_side=position_side,
         )
         if position_idx is not None:
             if type(position_idx) is not int or position_idx not in {0, 1, 2}:

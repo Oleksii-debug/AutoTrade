@@ -307,7 +307,6 @@ def _submission_evidence(
         "sha256": f"sha256:{digest}",
         "source_uri": source,
         "observed_at": _iso_utc_text(observed_at, name="observed_at"),
-        "provider_environment": env,
         "rights_id": "provider-observation-kraken-spot",
     }
 
@@ -328,7 +327,11 @@ def parse_spot_submission_response(
     cid = validate_spot_client_order_id(client_order_id)
     when = _iso_utc_text(observed_at, name="observed_at")
     env = _text(environment, name="environment").upper()
+    if env != "LIVE":
+        raise KrakenSpotAdapterError("Kraken Spot environment is qualified only for LIVE")
     source = _text(source_uri, name="source_uri")
+    if source != "https://api.kraken.com/0/private/AddOrder":
+        raise KrakenSpotAdapterError("source_uri must be the exact HTTPS Kraken Spot AddOrder endpoint")
     if type(transport_ambiguous) is not bool:
         raise TypeError("transport_ambiguous must be boolean")
     if transport_ambiguous:
@@ -340,9 +343,6 @@ def parse_spot_submission_response(
             "attempt_id": aid,
             "outcome": "UNKNOWN",
             "client_order_id": cid,
-            "provider_received_at": None,
-            "observed_at": when,
-            "provider_environment": env,
             "reason_code": "KRAKEN_SPOT_TRANSPORT_AMBIGUOUS",
             "evidence": [],
             "retry_disposition": "RECONCILE_FIRST",
@@ -368,7 +368,6 @@ def parse_spot_submission_response(
             "outcome": "REJECTED",
             "client_order_id": cid,
             "provider_received_at": when,
-            "provider_environment": env,
             "reason_code": "KRAKEN_SPOT_" + ";".join(nonempty_errors),
             "evidence": evidence,
             "retry_disposition": "NEVER",
@@ -383,13 +382,14 @@ def parse_spot_submission_response(
     normalized = tuple(_text(str(value), name="txid") for value in txids)
     if len(set(normalized)) != len(normalized):
         raise KrakenSpotAdapterError("provider transaction ids must be unique")
+    if len(normalized) != 1:
+        raise KrakenSpotAdapterError("canonical SubmissionResult requires exactly one provider order id")
     return {
         "attempt_id": aid,
         "outcome": "ACKNOWLEDGED",
-        "provider_order_ids": normalized,
+        "provider_order_id": normalized[0],
         "client_order_id": cid,
         "provider_received_at": when,
-        "provider_environment": env,
         "evidence": evidence,
         "retry_disposition": "NEVER",
     }
@@ -500,6 +500,9 @@ def parse_trade_history(
         client_id = client_ids_by_provider_order.get(provider_order_id)
         if client_id is not None:
             client_id = validate_spot_client_order_id(client_id)
+        fee_amount = raw.get("fee")
+        if fee_amount is None:
+            raise KrakenSpotAdapterError("Kraken trade execution must include explicit fee evidence")
         fills.append(
             ProviderFillEvidence.create(
                 provider_execution_id=execution_id,
@@ -507,7 +510,7 @@ def parse_trade_history(
                 instrument=_text(instrument_versions[pair], name="instrument_version"),
                 quantity=raw.get("vol"),
                 price=raw.get("price"),
-                fee_amount=raw.get("fee", "0"),
+                fee_amount=fee_amount,
                 fee_currency=_text(fee_currency_by_pair[pair], name="fee_currency"),
                 trade_time=_seconds_to_utc(raw.get("time"), name="time"),
             )

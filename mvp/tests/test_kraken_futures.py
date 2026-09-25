@@ -143,6 +143,26 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         self.assertEqual(fill.fee_amount, Decimal("1.25"))
         self.assertEqual(fill.trade_time, "2026-09-24T20:00:00.123Z")
 
+    def test_execution_fee_must_be_explicit_and_exact(self):
+        base = {
+            "tradeable": "PI_XBTUSD",
+            "fillTime": 1790280000123,
+            "feeCurrency": "USD",
+            "executionUid": "fee-evidence",
+            "executionPrice": "65000",
+            "executionSize": "1",
+            "timestamp": 1790280000123,
+            "updateReason": "trade",
+        }
+        for missing in ({**base}, {**base, "fee": None}):
+            with self.subTest(missing=missing.get("fee", "<absent>")):
+                with self.assertRaisesRegex(ProviderCoreError, "fee evidence"):
+                    parse_position_executions({"elements": [missing]}, instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"})
+        zero = parse_position_executions({"elements": [{**base, "fee": "0"}]}, instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"})
+        self.assertEqual(zero[0].fee_amount, Decimal("0"))
+        with self.assertRaisesRegex(ProviderCoreError, "exact decimal"):
+            parse_position_executions({"elements": [{**base, "fee": 0.0}]}, instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"})
+
     def test_conflicting_duplicate_execution_id_fails_closed(self):
         base = {
             "tradeable": "PI_XBTUSD",

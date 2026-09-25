@@ -39,7 +39,7 @@ class BybitV5ContractTests(unittest.TestCase):
         accepted = parse_submission_response(
             attempt_id=str(uuid4()),
             client_order_id="contract-ok",
-            environment="DEMO",
+            environment="MAINNET",
             response={
                 "retCode": 0,
                 "retMsg": "OK",
@@ -56,7 +56,7 @@ class BybitV5ContractTests(unittest.TestCase):
         unknown = parse_submission_response(
             attempt_id=str(uuid4()),
             client_order_id="contract-unknown",
-            environment="DEMO",
+            environment="MAINNET",
             response={
                 "retCode": 10000,
                 "retMsg": "Server Timeout",
@@ -71,12 +71,12 @@ class BybitV5ContractTests(unittest.TestCase):
             attempt_id=str(uuid4()),
             client_order_id="contract-transport-unknown",
             environment="MAINNET",
-            observed_at="2026-09-24T20:00:00Z",
             response=None,
+            observed_at="2026-09-24T20:00:00Z",
             transport_ambiguous=True,
         )
-        self.validate_submission(transport_unknown)
         self.assertNotIn("provider_received_at", transport_unknown)
+        self.validate_submission(transport_unknown)
 
 
 if __name__ == "__main__":

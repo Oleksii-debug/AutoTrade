@@ -98,6 +98,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             client_order_id="reduce-1",
             time_in_force="GTC",
             reduce_only=True,
+            position_side="LONG",
             capability=bybit_capability(position_mode="HEDGE"),
             capability_at=BYBIT_NOW,
             account_id="bybit-account",
@@ -105,7 +106,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         )
         self.assertEqual(payload["category"], "linear")
         self.assertTrue(payload["reduceOnly"])
-        self.assertEqual(payload["positionIdx"], 2)
+        self.assertEqual(payload["positionIdx"], 1)
 
     def test_derivative_order_requires_verified_capability_context(self):
         with self.assertRaisesRegex(ProviderCoreError, "capability context"):
@@ -152,6 +153,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 price="70000",
                 client_order_id="wrong-index",
                 time_in_force="GTC",
+                position_side="SHORT",
                 position_idx=1,
                 capability=capability,
                 capability_at=BYBIT_NOW,
@@ -213,10 +215,16 @@ class BybitV5AdapterTests(unittest.TestCase):
                 account_id="bybit-account",
             )
 
-    def test_hedge_mode_derives_index_from_order_side(self):
+    def test_hedge_mode_target_leg_drives_open_and_reduce_only_index(self):
         capability = bybit_capability(position_mode="HEDGE")
-        for side, expected in (("BUY", 1), ("SELL", 2)):
-            with self.subTest(side=side):
+        cases = (
+            ("BUY", False, "LONG", 1),
+            ("SELL", False, "SHORT", 2),
+            ("SELL", True, "LONG", 1),
+            ("BUY", True, "SHORT", 2),
+        )
+        for side, reduce_only, position_side, expected in cases:
+            with self.subTest(side=side, reduce_only=reduce_only, position_side=position_side):
                 payload = build_order_payload(
                     product_family="LINEAR_DERIVATIVES",
                     symbol="BTCUSDT",
@@ -224,14 +232,37 @@ class BybitV5AdapterTests(unittest.TestCase):
                     order_type="LIMIT",
                     quantity="1",
                     price="70000",
-                    client_order_id=f"hedge-{side.lower()}",
+                    client_order_id=f"hedge-{side.lower()}-{position_side.lower()}",
                     time_in_force="GTC",
+                    reduce_only=reduce_only,
+                    position_side=position_side,
                     capability=capability,
                     capability_at=BYBIT_NOW,
                     account_id="bybit-account",
                     instrument_version="BTCUSDT@1",
                 )
                 self.assertEqual(payload["positionIdx"], expected)
+
+    def test_hedge_mode_requires_explicit_compatible_target_leg(self):
+        capability = bybit_capability(position_mode="HEDGE")
+        common = dict(
+            product_family="LINEAR_DERIVATIVES",
+            symbol="BTCUSDT",
+            order_type="LIMIT",
+            quantity="1",
+            price="70000",
+            time_in_force="GTC",
+            capability=capability,
+            capability_at=BYBIT_NOW,
+            account_id="bybit-account",
+            instrument_version="BTCUSDT@1",
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "target position_side"):
+            build_order_payload(**common, side="BUY", client_order_id="missing-leg")
+        with self.assertRaisesRegex(ProviderCoreError, "inconsistent"):
+            build_order_payload(**common, side="SELL", position_side="LONG", client_order_id="open-long-wrong-side")
+        with self.assertRaisesRegex(ProviderCoreError, "inconsistent"):
+            build_order_payload(**common, side="BUY", reduce_only=True, position_side="LONG", client_order_id="reduce-long-wrong-side")
 
     def test_unknown_provider_position_mode_fails_closed(self):
         with self.assertRaisesRegex(ProviderCoreError, "ONE_WAY or HEDGE"):
@@ -334,7 +365,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                     response=base,
                 )
                 evidence = result["evidence"][0]
-                self.assertEqual(evidence["provider_environment"], environment)
+                self.assertNotIn("provider_environment", evidence)
                 self.assertEqual(evidence["source_uri"], source_uri)
 
         with self.assertRaisesRegex(ProviderCoreError, "environment"):

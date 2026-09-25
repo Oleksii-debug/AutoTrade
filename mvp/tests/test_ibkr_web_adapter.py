@@ -797,7 +797,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 fee_currency_by_execution_id={},
             )
 
-    def test_web_api_trade_rejects_binary_float_economics_and_conflicting_execution_id(self):
+    def test_web_api_trade_preserves_exact_json_number_economics_and_conflicting_execution_id(self):
         base = {
             "execution_id": "exec-1",
             "order_ref": "at-ibkr-1",
@@ -808,12 +808,12 @@ class IbkrWebAdapterTests(unittest.TestCase):
             "commission": "0.25",
             "trade_time": "2026-09-24T20:00:01Z",
         }
-        with self.assertRaisesRegex(IbkrWebAdapterError, "exact decimal"):
-            parse_web_api_trades(
-                ibkr_trade_observation([dict(base, size=1.0)]),
-                instrument_versions_by_conid={265598: "AAPL:v1"},
-                fee_currency_by_execution_id={"exec-1": "USD"},
-            )
+        fills = parse_web_api_trades(
+            ibkr_trade_observation([dict(base, size=1.0)]),
+            instrument_versions_by_conid={265598: "AAPL:v1"},
+            fee_currency_by_execution_id={"exec-1": "USD"},
+        )
+        self.assertEqual(fills[0].quantity, Decimal("1.0"))
         with self.assertRaisesRegex(IbkrWebAdapterError, "conflicting"):
             parse_web_api_trades(
                 ibkr_trade_observation([base, dict(base, size="2")]),

@@ -104,6 +104,7 @@ class RecoveryController:
         self.owner: OwnerFence | None = None
         self.reason_codes: set[str] = set()
         self.unresolved_attempts: set[str] = set()
+        self._unresolved_send_attempts: set[str] = set()
         self.storage_writable = True
         self.clock_trusted = True
         self.provider_reconciled = False
@@ -129,10 +130,11 @@ class RecoveryController:
                 "Reconciliation cannot establish readiness without durable journal"
             )
         reported_unresolved = {item for item in uncertainty if item}
-        # A generic account reconciliation cannot erase a previously recorded
-        # SENT_UNKNOWN attempt.  That identity leaves this set only through
-        # resolve_attempt(), which requires an evidence-bound terminal phase.
-        self.unresolved_attempts.update(reported_unresolved)
+        # Generic reconciliation uncertainty is snapshot-scoped and may clear
+        # on a later clean snapshot.  A previously recorded SENT_UNKNOWN
+        # attempt is different: its identity remains sticky until
+        # resolve_attempt() proves an evidence-bound terminal phase.
+        self.unresolved_attempts = self._unresolved_send_attempts | reported_unresolved
         self.provider_reconciled = bool(consistent and not self.unresolved_attempts)
         if self.provider_reconciled:
             self.reason_codes.discard("startup_reconciliation_required")
@@ -173,6 +175,7 @@ class RecoveryController:
     def note_unknown_send(self, attempt: OutboundAttempt) -> None:
         if attempt.phase is not SendPhase.SENT_UNKNOWN:
             raise ValueError("Only uncertain sent attempts block readiness")
+        self._unresolved_send_attempts.add(attempt.attempt_id)
         self.unresolved_attempts.add(attempt.attempt_id)
         self.provider_reconciled = False
         self.reason_codes.add("provider_uncertainty")
@@ -185,6 +188,7 @@ class RecoveryController:
             SendPhase.PROVEN_ABSENT,
         }:
             raise ValueError("Attempt is not externally resolved")
+        self._unresolved_send_attempts.discard(attempt.attempt_id)
         self.unresolved_attempts.discard(attempt.attempt_id)
         if not self.unresolved_attempts:
             self.reason_codes.discard("provider_uncertainty")

@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Iterable, Mapping
+from uuid import UUID
+
+from ..artifacts.store import ArtifactIntegrityError, ArtifactStore
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -17,6 +20,45 @@ def _decimal(value, *, name: str) -> Decimal:
     if not result.is_finite():
         raise ValueError(f"{name} must be a finite decimal")
     return result
+
+
+
+
+_REQUIRED_EVIDENCE_KINDS = frozenset({
+    "profile",
+    "code",
+    "data",
+    "model",
+    "config",
+    "cost",
+    "rights",
+    "environment",
+    "trial_log",
+    "causal_audit",
+    "financial_invariants",
+    "retention",
+    "metrics",
+})
+
+
+@dataclass(frozen=True)
+class GateEvidenceRef:
+    artifact_id: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        try:
+            artifact_id = str(UUID(self.artifact_id))
+        except (ValueError, AttributeError, TypeError) as error:
+            raise ValueError("evidence artifact_id must be a UUID") from error
+        if (
+            not isinstance(self.sha256, str)
+            or len(self.sha256) != 71
+            or not self.sha256.startswith("sha256:")
+            or any(ch not in "0123456789abcdef" for ch in self.sha256[7:])
+        ):
+            raise ValueError("evidence sha256 must be a canonical SHA-256 digest")
+        object.__setattr__(self, "artifact_id", artifact_id)
 
 
 @dataclass(frozen=True)
@@ -228,6 +270,7 @@ class EvaluationEvidence:
     selection_correction_applied: str | None
     trials_attempted: int | None
     regime_coverage: frozenset[str] | None
+    evidence_refs: Mapping[str, GateEvidenceRef] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -289,6 +332,26 @@ class EvaluationEvidence:
                 self,
                 "baseline_advantages",
                 MappingProxyType(normalized_baselines),
+            )
+
+
+        if self.evidence_refs is not None:
+            if not isinstance(self.evidence_refs, Mapping):
+                raise TypeError("evidence_refs must be a mapping or None")
+            normalized_refs: dict[str, GateEvidenceRef] = {}
+            for raw_kind, raw_ref in self.evidence_refs.items():
+                if not isinstance(raw_kind, str) or not raw_kind.strip():
+                    raise ValueError("evidence ref kind is required")
+                kind = raw_kind.strip()
+                if kind in normalized_refs:
+                    raise ValueError("duplicate normalized evidence ref kind")
+                if not isinstance(raw_ref, GateEvidenceRef):
+                    raise TypeError("evidence_refs values must be GateEvidenceRef")
+                normalized_refs[kind] = raw_ref
+            object.__setattr__(
+                self,
+                "evidence_refs",
+                MappingProxyType(normalized_refs),
             )
 
         if self.selection_correction_applied is not None:
@@ -426,7 +489,54 @@ class GateDecision:
         object.__setattr__(self, "checks", MappingProxyType(frozen_checks))
 
 
-def evaluate_gates(profile: GateProfile, evidence: EvaluationEvidence) -> GateDecision:
+
+def _verify_evidence_bundle(
+    profile: GateProfile,
+    evidence: EvaluationEvidence,
+    artifact_store: ArtifactStore | None,
+) -> bool | None:
+    """Verify the immutable G0/G1/G2/G3/G4 evidence references.
+
+    Missing verifier context is INCONCLUSIVE. Once a bundle is supplied,
+    missing/corrupt/mismatched provenance is a hard failure rather than a
+    caller-asserted PASS.
+    """
+
+    if artifact_store is None or evidence.evidence_refs is None:
+        return None
+    refs = evidence.evidence_refs
+    if set(refs) != _REQUIRED_EVIDENCE_KINDS:
+        return False
+    for kind in sorted(_REQUIRED_EVIDENCE_KINDS):
+        ref = refs[kind]
+        try:
+            manifest = artifact_store.load_manifest(ref.artifact_id)
+            artifact_store.read_bytes(ref.artifact_id)
+        except (FileNotFoundError, ArtifactIntegrityError, ValueError, OSError):
+            return False
+        if manifest.get("manifest_hash") is None:
+            return False
+        if manifest.get("sha256") != ref.sha256:
+            return False
+        metadata = manifest.get("metadata")
+        if not isinstance(metadata, dict):
+            return False
+        if metadata.get("evidence_kind") != kind:
+            return False
+        if metadata.get("profile_id") != profile.profile_id:
+            return False
+        rights = manifest.get("rights")
+        if not isinstance(rights, dict) or rights.get("storage") is not True:
+            return False
+    return True
+
+
+def evaluate_gates(
+    profile: GateProfile,
+    evidence: EvaluationEvidence,
+    *,
+    artifact_store: ArtifactStore | None = None,
+) -> GateDecision:
     checks: dict[str, str] = {}
     failures: list[str] = []
     unknowns: list[str] = []
@@ -446,6 +556,12 @@ def evaluate_gates(profile: GateProfile, evidence: EvaluationEvidence) -> GateDe
         evidence.registered_profile_id == profile.profile_id,
         "evaluation used a different gate profile",
         "gate profile identity is unavailable",
+    )
+    check(
+        "evidence_bundle",
+        _verify_evidence_bundle(profile, evidence, artifact_store),
+        "immutable scientific evidence bundle is missing, corrupt, or mismatched",
+        "immutable scientific evidence bundle has not been verified",
     )
     check(
         "profile_lock",

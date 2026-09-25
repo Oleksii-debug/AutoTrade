@@ -421,6 +421,38 @@ class OrderProjectionTests(unittest.TestCase):
                 parent_intent_id="old",
             )
 
+    def test_multi_order_projection_rejects_cross_order_execution_alias(self):
+        book = OrderBookProjection()
+        first = book.create(
+            client_order_id="first",
+            instrument="ABC",
+            side="BUY",
+            requested_quantity="1",
+        )
+        second = book.create(
+            client_order_id="second",
+            instrument="ABC",
+            side="BUY",
+            requested_quantity="1",
+        )
+        first.record_fill(
+            fill_id="fill-first",
+            provider_execution_id="shared-execution",
+            quantity="1",
+            price="10",
+        )
+        second.record_fill(
+            fill_id="fill-second",
+            provider_execution_id="shared-execution",
+            quantity="1",
+            price="10",
+        )
+        with self.assertRaisesRegex(
+            OrderProjectionConflict,
+            "multiple orders",
+        ):
+            book.effective_fills()
+
     def test_multi_order_projection_aggregates_effective_fills_and_oco_breach(self):
         book = OrderBookProjection()
         take = book.create(

@@ -143,7 +143,7 @@ def build_provider_fill_transaction(
     if not isinstance(provider_fill, ProviderFillEvidence):
         raise TypeError("provider_fill must be ProviderFillEvidence")
 
-    provider = _text(provider_id, name="provider_id")
+    provider = _text(provider_id, name="provider_id").upper()
     instrument = _text(expected_instrument, name="expected_instrument")
     settlement = _text(settlement_currency, name="settlement_currency").upper()
 

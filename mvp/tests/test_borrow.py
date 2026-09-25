@@ -144,9 +144,6 @@ class BorrowResourceTests(unittest.TestCase):
 
     def test_provider_loan_truth_must_match_current_filled_short(self):
         scope = resource()
-        state = type("State", (), {})()
-        # Exercise the real immutable state type through journal projection below;
-        # this direct validation uses a minimal value only to make mismatch intent explicit.
         with TemporaryDirectory() as directory:
             journal = BorrowLifecycleJournal(
                 JournalStore(f"{directory}/journal.sqlite3"),

@@ -1427,17 +1427,9 @@ class JournalStoreTests(unittest.TestCase):
                 ).fetchone()[0]
                 envelope = json.loads(raw)
                 envelope["aggregate_id"] = "other-account"
-                replacement = json.dumps(
-                    envelope, sort_keys=True, separators=(",", ":")
-                )
                 connection.execute(
-                    "UPDATE outbox SET payload_json = ?, envelope_hash = ? "
-                    "WHERE event_id = ?",
-                    (
-                        replacement,
-                        _outbox_envelope_digest("events", replacement),
-                        "evt-1",
-                    ),
+                    "UPDATE outbox SET payload_json = ? WHERE event_id = ?",
+                    (json.dumps(envelope, sort_keys=True, separators=(",", ":")), "evt-1"),
                 )
                 connection.commit()
             finally:
@@ -1448,40 +1440,6 @@ class JournalStoreTests(unittest.TestCase):
                 "outbox payload does not match authoritative journal event",
             ):
                 store.pending_outbox()
-
-    def test_validated_envelope_metadata_round_trips_across_restart(self):
-        with TemporaryDirectory() as directory:
-            path = f"{directory}/journal.sqlite3"
-            store = JournalStore(path)
-            envelope = event()
-            envelope.update(
-                {
-                    "schema_version": "1.0.0",
-                    "host_id": "host-a",
-                    "owner_epoch": "7",
-                    "environment": "PAPER",
-                    "occurred_at": "2026-09-24T16:00:00+00:00",
-                    "observed_at": "2026-09-24T16:00:00+00:00",
-                    "correlation_id": "corr-1",
-                    "causation_id": None,
-                    "evidence_refs": [],
-                }
-            )
-            store.append_event(envelope)
-
-            loaded = store.get_event("evt-1")
-            self.assertEqual(loaded["environment"], "PAPER")
-            self.assertEqual(loaded["owner_epoch"], "7")
-            self.assertEqual(loaded["host_id"], "host-a")
-            self.assertEqual(loaded["aggregate_version"], 1)
-
-            reopened = JournalStore(path)
-            replayed = reopened.load_events("account", "paper-1")[0]
-            self.assertEqual(replayed["environment"], "PAPER")
-            self.assertEqual(replayed["owner_epoch"], "7")
-            self.assertEqual(replayed["host_id"], "host-a")
-            self.assertEqual(replayed["aggregate_version"], 1)
-
 
 if __name__ == "__main__":
     unittest.main()

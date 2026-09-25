@@ -161,7 +161,18 @@ class CoveragePopulationSnapshot:
             raise MemoryIntegrityError("coverage rows are not canonical JSON") from error
         if not isinstance(copied, list) or any(not isinstance(row, dict) for row in copied):
             raise MemoryIntegrityError("coverage rows must contain canonical mappings")
-        rows = tuple(copied)
+        normalized_rows: list[dict[str, Any]] = []
+        for row in copied:
+            normalized = dict(row)
+            for lineage_key in ("correction_lineage", "tombstone_lineage"):
+                lineage = normalized.get(lineage_key)
+                if not isinstance(lineage, list):
+                    raise MemoryIntegrityError(
+                        f"coverage {lineage_key} must be canonical JSON arrays"
+                    )
+                normalized[lineage_key] = tuple(lineage)
+            normalized_rows.append(normalized)
+        rows = tuple(normalized_rows)
         if (
             not isinstance(self.eligible_count, int)
             or isinstance(self.eligible_count, bool)

@@ -40,6 +40,7 @@ KRAKEN_FUTURES_ENDPOINTS: Mapping[str, str] = {
     "PLACE_ORDER": "/derivatives/api/v3/sendorder",
     "OPEN_ORDERS": "/derivatives/api/v3/openorders",
     "FILLS": "/derivatives/api/v3/fills",
+    "EXECUTION_HISTORY": "/api/history/v3/executions",
     "ORDER_HISTORY": "/api/history/v3/orders",
     "POSITION_HISTORY": "/api/history/v3/positions",
     "CANCEL_AFTER": "/derivatives/api/v3/cancelallordersafter",
@@ -481,6 +482,129 @@ def parse_submission_response(
     }
 
 
+def parse_execution_events(
+    observation: ProviderResponseObservation,
+    *,
+    provider_environment: str,
+    instrument_versions: Mapping[str, str],
+    qualified_fee_currencies: Mapping[str, str],
+) -> tuple[ProviderFillEvidence, ...]:
+    """Map authenticated Kraken execution-history facts into provider fill truth.
+
+    Direction comes only from the exact provider order embedded in the
+    authenticated execution event. Fee currency is never guessed: callers must
+    supply a separately qualified mapping for every tradeable that is booked.
+    """
+
+    if not isinstance(observation, ProviderResponseObservation):
+        raise TypeError("observation must be ProviderResponseObservation")
+    provider_env = _text(provider_environment, name="provider_environment").upper()
+    futures_base_url(provider_env)
+    observation.require_scope(
+        provider_id="KRAKEN",
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint=KRAKEN_FUTURES_ENDPOINTS["EXECUTION_HISTORY"],
+        provider_environment=provider_env,
+    )
+    if _RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT[provider_env] != observation.environment:
+        raise ProviderCoreError(
+            "Kraken Futures provider environment does not match runtime environment"
+        )
+    if not isinstance(instrument_versions, Mapping):
+        raise ProviderCoreError("instrument_versions must be a mapping")
+    if not isinstance(qualified_fee_currencies, Mapping):
+        raise ProviderCoreError("qualified_fee_currencies must be a mapping")
+
+    envelope = _mapping(observation.payload, name="response")
+    elements = envelope.get("elements")
+    if not isinstance(elements, (list, tuple)):
+        raise ProviderCoreError("Futures execution history elements must be an array")
+
+    by_execution: dict[str, ProviderFillEvidence] = {}
+    for index, value in enumerate(elements):
+        row = _mapping(value, name=f"elements[{index}]")
+        event = _mapping(row.get("event"), name=f"elements[{index}].event")
+        execution_event = _mapping(
+            event.get("execution"),
+            name=f"elements[{index}].event.execution",
+        )
+        execution = _mapping(
+            execution_event.get("execution"),
+            name=f"elements[{index}].event.execution.execution",
+        )
+        execution_id = _text(execution.get("uid"), name="execution.uid")
+        order = _mapping(execution.get("order"), name="execution.order")
+
+        symbol = _text(order.get("tradeable"), name="order.tradeable")
+        try:
+            instrument = _text(
+                instrument_versions[symbol],
+                name="instrument_version",
+            )
+        except KeyError as error:
+            raise ProviderCoreError(
+                f"unmapped Kraken Futures instrument: {symbol}"
+            ) from error
+        try:
+            fee_currency = _text(
+                qualified_fee_currencies[symbol],
+                name="qualified fee currency",
+            ).upper()
+        except KeyError as error:
+            raise ProviderCoreError(
+                f"unqualified Kraken Futures fee currency: {symbol}"
+            ) from error
+
+        raw_side = _text(order.get("direction"), name="order.direction")
+        side_by_provider_value = {"Buy": "BUY", "Sell": "SELL"}
+        if raw_side not in side_by_provider_value:
+            raise ProviderCoreError(
+                "Kraken Futures execution direction must be provider-evidenced Buy or Sell"
+            )
+        side = side_by_provider_value[raw_side]
+
+        client_id_value = order.get("clientId")
+        client_id = (
+            None
+            if client_id_value in (None, "")
+            else _client_order_id(client_id_value)
+        )
+        order_data = _mapping(execution.get("orderData"), name="execution.orderData")
+        fee = order_data.get("fee")
+        if fee is None:
+            raise ProviderCoreError(
+                f"missing provider fee amount for Kraken Futures execution: {execution_id}"
+            )
+
+        fill = ProviderFillEvidence.create(
+            provider_id="KRAKEN",
+            account_id=observation.account_id,
+            environment=observation.environment,
+            provider_environment=provider_env,
+            provider_execution_id=execution_id,
+            client_order_id=client_id,
+            instrument=instrument,
+            side=side,
+            quantity=execution.get("quantity"),
+            price=execution.get("price"),
+            fee_amount=fee,
+            fee_currency=fee_currency,
+            trade_time=_millis_to_utc(
+                execution.get("timestamp"),
+                name="execution.timestamp",
+            ),
+            evidence_refs=(observation.evidence_ref,),
+        )
+        previous = by_execution.get(execution_id)
+        if previous is not None and previous != fill:
+            raise ProviderCoreError(
+                "Kraken Futures execution id has conflicting economic content"
+            )
+        by_execution[execution_id] = fill
+
+    return tuple(by_execution.values())
+
+
 def parse_position_executions(
     observation: ProviderResponseObservation,
     *,
@@ -491,11 +615,21 @@ def parse_position_executions(
 
     if not isinstance(observation, ProviderResponseObservation):
         raise TypeError("observation must be ProviderResponseObservation")
+    provider_env = _text(
+        observation.provider_environment,
+        name="provider_environment",
+    ).upper()
+    futures_base_url(provider_env)
     observation.require_scope(
         provider_id="KRAKEN",
         surface=Surface.AUTHENTICATED_READ,
         endpoint=KRAKEN_FUTURES_ENDPOINTS["POSITION_HISTORY"],
+        provider_environment=provider_env,
     )
+    if _RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT[provider_env] != observation.environment:
+        raise ProviderCoreError(
+            "Kraken Futures provider environment does not match runtime environment"
+        )
     response = observation.payload
     account_id = observation.account_id
     environment = observation.environment
@@ -523,18 +657,25 @@ def parse_position_executions(
         client_id = clients.get(execution_id)
         if client_id is not None:
             client_id = _client_order_id(client_id)
+        fee = row.get("fee")
+        if fee is None:
+            raise ProviderCoreError(
+                f"missing provider fee amount for Kraken Futures position execution: {execution_id}"
+            )
         fill = ProviderFillEvidence.create(
             provider_id="KRAKEN",
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_env,
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=instrument,
             quantity=row.get("executionSize"),
             price=row.get("executionPrice"),
-            fee_amount=row.get("fee", "0"),
+            fee_amount=fee,
             fee_currency=_text(row.get("feeCurrency"), name="feeCurrency"),
             trade_time=_millis_to_utc(fill_time, name="fillTime"),
+            evidence_refs=(observation.evidence_ref,),
         )
         previous = by_execution.get(execution_id)
         if previous is not None and previous != fill:

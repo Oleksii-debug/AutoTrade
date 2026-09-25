@@ -347,7 +347,23 @@ class GuardedDispatcher:
                 now=now,
             )
 
-        allowed, reason = authority_check(intent_hash, now)
+        try:
+            allowed, reason = authority_check(intent_hash, now)
+        except Exception as error:
+            reason = f"authority_check_failed_before_send:{type(error).__name__}"
+            self._append(
+                attempt_id=attempt_id,
+                event_type="SubmissionBlocked",
+                version=2,
+                payload={"client_order_id": client_order_id, "reason": reason},
+                now=now,
+            )
+            return DispatchOutcome(
+                "BLOCKED",
+                client_order_id,
+                None,
+                "authority_check_failed_before_send",
+            )
         if not allowed:
             self._append(
                 attempt_id=attempt_id,
@@ -385,7 +401,21 @@ class GuardedDispatcher:
                         now=barrier_now,
                     )
                     raise DispatchBlocked("final_barrier_clock_moved_backwards")
-            allowed_now, barrier_reason = authority_check(intent_hash, barrier_now)
+            try:
+                allowed_now, barrier_reason = authority_check(intent_hash, barrier_now)
+            except Exception as error:
+                barrier_reason = (
+                    "authority_check_failed_at_final_barrier:"
+                    + type(error).__name__
+                )
+                self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionBlocked",
+                    version=2,
+                    payload={"client_order_id": client_order_id, "reason": barrier_reason},
+                    now=barrier_now,
+                )
+                raise DispatchBlocked(barrier_reason) from error
             if not allowed_now:
                 self._append(
                     attempt_id=attempt_id,

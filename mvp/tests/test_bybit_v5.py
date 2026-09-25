@@ -197,10 +197,43 @@ def bound_execution_response(
         http_status=200,
         response_bytes=raw,
         observed_at=READ_AT,
+        provider_environment="TESTNET",
     )
 
 
 class BybitV5AdapterTests(unittest.TestCase):
+    def test_authenticated_read_requires_explicit_provider_environment(self):
+        capability = read_capability()
+        query = prepare_authenticated_read_query(
+            capability=capability,
+            surface=Surface.AUTHENTICATED_READ,
+            endpoint="/v5/execution/list",
+            query={"category": "spot", "limit": "100"},
+            at=READ_AT,
+            permission_scope="ORDER.READ",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "requires explicit provider_environment",
+        ):
+            observe_authenticated_json_response(
+                query_binding=query,
+                http_status=200,
+                response_bytes=b'{"retCode":0,"result":{"list":[]}}',
+                observed_at=READ_AT,
+            )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "must be MAINNET, TESTNET or DEMO",
+        ):
+            observe_authenticated_json_response(
+                query_binding=query,
+                http_status=200,
+                response_bytes=b'{"retCode":0,"result":{"list":[]}}',
+                observed_at=READ_AT,
+                provider_environment="PAPER",
+            )
+
     def test_spot_market_quantity_is_explicitly_base_coin(self):
         payload = build_order_payload(
             product_family="SPOT",

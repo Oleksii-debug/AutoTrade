@@ -19,7 +19,11 @@ from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .capabilities import CapabilitySnapshot
-from .provider_core import ProviderCoreError
+from .provider_core import (
+    BoundReconciliationResponse,
+    ProviderCoreError,
+    require_reconciliation_response,
+)
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
@@ -353,15 +357,19 @@ def parse_order_ack(
 
 
 def parse_account_trades(
-    rows: object,
+    evidence: BoundReconciliationResponse,
     *,
-    account_id: str,
-    environment: str,
     instrument_versions: Mapping[str, str],
     client_ids_by_order_id: Mapping[int, str] | None = None,
 ) -> tuple[ProviderFillEvidence, ...]:
-    """Map recorded USD-M user-trade rows to unique economic fill evidence."""
+    """Map one provenance-bound USD-M user-trade response to fill evidence."""
 
+    rows, account_id, environment = require_reconciliation_response(
+        evidence,
+        provider_id="BINANCE",
+        surface="EXECUTIONS",
+        endpoint=BINANCE_USDM_ENDPOINTS["EXECUTIONS"],
+    )
     if not isinstance(rows, list):
         raise BinanceUsdmAdapterError("trade rows must be an array")
     if not isinstance(instrument_versions, Mapping):

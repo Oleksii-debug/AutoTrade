@@ -409,12 +409,15 @@ class JournalStore:
                                 "payload_hash": event["payload_hash"],
                                 "committed_at": event["committed_at"],
                             }
-                            for key, expected in expected_envelope.items():
-                                if outbox_payload.get(key) != expected:
-                                    raise ValueError(
-                                        "legacy outbox payload does not match "
-                                        "authoritative journal event"
-                                    )
+                            # A hashless legacy row has no durable integrity
+                            # identity for fields that are not represented by the
+                            # authoritative journal table. Never bless unknown or
+                            # extra bytes by hashing them during migration.
+                            if outbox_payload != expected_envelope:
+                                raise ValueError(
+                                    "legacy outbox payload is not exactly reconstructable "
+                                    "from authoritative journal event"
+                                )
                             envelope_hash = (
                                 "sha256:"
                                 + sha256(raw_outbox_payload.encode("utf-8")).hexdigest()

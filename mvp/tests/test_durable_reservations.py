@@ -157,6 +157,9 @@ class DurableReservationBookTests(unittest.TestCase):
             searched_client_order_ids = (unknown.client_order_id,)
             absence_coverage = tuple(
                 CoverageSurfaceEvidence(
+                    provider_id=unknown.provider_id,
+                    account_id=unknown.account_id,
+                    environment=unknown.environment,
                     surface=surface,
                     coverage_start="2026-09-24T23:59:00Z",
                     coverage_end="2026-09-25T00:05:00Z",
@@ -173,6 +176,9 @@ class DurableReservationBookTests(unittest.TestCase):
             )
         elif outcome == "FILLED":
             fill = ProviderFillEvidence.create(
+                provider_id=unknown.provider_id,
+                account_id=unknown.account_id,
+                environment=unknown.environment,
                 provider_execution_id="exec-" + attempt_id,
                 client_order_id=unknown.client_order_id,
                 instrument="TEST",

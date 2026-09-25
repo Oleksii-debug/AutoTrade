@@ -342,6 +342,60 @@ class FillAccountingTests(unittest.TestCase):
         self.assertEqual(len(book.transactions), 3)
         self.assertEqual(book.cash("USD"), Decimal("-203"))
 
+    def test_corrected_fill_requires_provider_revision_before_any_mutation(self):
+        original_projected, original_provider = matched_fill()
+        corrected_projected = ProjectedFillEvidence.create(
+            fill_id="fill-1-r2",
+            provider_execution_id="exec-1",
+            intent_id="intent-1",
+            client_order_id="client-1",
+            side="BUY",
+            quantity="2",
+            price="101",
+            provider_revision=None,
+            correction_of="fill-1",
+        )
+        corrected_provider = ProviderFillEvidence.create(
+            provider_execution_id="exec-1",
+            client_order_id="client-1",
+            instrument="ABC",
+            quantity="2",
+            price="101",
+            fee_amount="1",
+            fee_currency="USD",
+            trade_time="2026-01-01T00:00:01Z",
+        )
+        book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
+        self.assertTrue(book_provider_fill(
+            book=book,
+            provider_id="provider-a",
+            projected_fill=original_projected,
+            provider_fill=original_provider,
+            expected_instrument="ABC",
+            settlement_currency="USD",
+        ))
+        before_transactions = book.transactions
+        before_digest = book.audit_digest()
+
+        with self.assertRaisesRegex(
+            AccountingConflict,
+            "provider_revision",
+        ):
+            book_provider_fill_correction(
+                book=book,
+                provider_id="provider-a",
+                original_projected_fill=original_projected,
+                original_provider_fill=original_provider,
+                corrected_projected_fill=corrected_projected,
+                corrected_provider_fill=corrected_provider,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+            )
+
+        self.assertEqual(book.transactions, before_transactions)
+        self.assertEqual(book.audit_digest(), before_digest)
+        self.assertEqual(len(book.transactions), 1)
+
     def test_correction_before_original_booking_fails_without_mutation(self):
         original_projected, original_provider = matched_fill()
         corrected_projected = ProjectedFillEvidence.create(

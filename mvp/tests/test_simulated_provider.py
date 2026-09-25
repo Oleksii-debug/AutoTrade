@@ -85,7 +85,7 @@ class SimulatedProviderTests(unittest.TestCase):
             provider = SimulatedProvider()
             dispatcher = GuardedDispatcher(
                 JournalStore(f"{directory}/journal.sqlite3"),
-                owner_token="test-owner",
+                environment="SIMULATION",\n                account_id="sim-account",\n                owner_token="test-owner",
             )
             checks = 0
 

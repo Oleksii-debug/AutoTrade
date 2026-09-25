@@ -15,6 +15,7 @@ def matched_fill(*, price="100", fee="1", revision=None):
         fill_id="fill-1",
         provider_execution_id="exec-1",
         intent_id="intent-1",
+        client_order_id="client-1",
         side="BUY",
         quantity="2",
         price=price,
@@ -137,6 +138,26 @@ class FillAccountingTests(unittest.TestCase):
                 settlement_currency="USD",
             )
 
+        wrong_client = ProviderFillEvidence.create(
+            provider_execution_id="exec-1",
+            client_order_id="client-other",
+            instrument="ABC",
+            quantity="2",
+            price="100",
+            fee_amount="1",
+            fee_currency="USD",
+            trade_time="2026-01-01T00:00:00Z",
+        )
+        with self.assertRaisesRegex(AccountingConflict, "client order identity"):
+            build_provider_fill_transaction(
+                book=book,
+                provider_id="provider-a",
+                projected_fill=observed,
+                provider_fill=wrong_client,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+            )
+
         wrong_quantity = ProviderFillEvidence.create(
             provider_execution_id="exec-1",
             client_order_id="client-1",
@@ -235,6 +256,7 @@ class FillAccountingTests(unittest.TestCase):
                 fill_id="f",
                 provider_execution_id="e",
                 intent_id="i",
+                client_order_id="c",
                 side="BUY",
                 quantity=1.0,
                 price="100",

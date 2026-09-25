@@ -9,6 +9,7 @@ from autotrade_research.forward_paper import (
     OperationalObservation,
     SealedPrediction,
     assess_forward_paper,
+    forward_paper_protocol_hash,
 )
 
 
@@ -21,10 +22,10 @@ HASH_D = "sha256:" + "d" * 64
 
 class ForwardPaperQualificationTests(unittest.TestCase):
     def protocol(self, **overrides):
+        provided_hash = overrides.pop("protocol_hash", None)
         values = dict(
             campaign_id="paper-campaign-1",
             exact_build_sha=BUILD,
-            protocol_hash=HASH_A,
             registered_at="2026-09-24T19:59:00Z",
             starts_at="2026-09-24T20:00:00Z",
             ends_at="2026-09-24T21:00:00Z",
@@ -34,6 +35,11 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             required_operational_cases=("RECONNECT", "MANUAL_ACTIVITY"),
         )
         values.update(overrides)
+        values["protocol_hash"] = (
+            provided_hash
+            if provided_hash is not None
+            else forward_paper_protocol_hash(**values)
+        )
         return ForwardPaperProtocol.create(**values)
 
     def predictions(self):
@@ -102,7 +108,7 @@ class ForwardPaperQualificationTests(unittest.TestCase):
     def evidence(self, **overrides):
         values = dict(
             exact_build_sha=BUILD,
-            protocol_hash=HASH_A,
+            protocol_hash=self.protocol().protocol_hash,
             observed_until="2026-09-24T21:01:00Z",
             predictions=self.predictions(),
             outcomes=self.outcomes(),
@@ -122,6 +128,34 @@ class ForwardPaperQualificationTests(unittest.TestCase):
         self.assertEqual(result.prediction_count, 2)
         self.assertEqual(result.evaluated_outcome_count, 2)
         self.assertEqual(result.reasons, ())
+
+    def test_protocol_hash_is_canonical_content_identity_not_caller_label(self):
+        frozen = self.protocol()
+        with self.assertRaisesRegex(
+            ForwardPaperError,
+            "does not match canonical frozen protocol content",
+        ):
+            self.protocol(
+                minimum_predictions=frozen.minimum_predictions + 1,
+                protocol_hash=frozen.protocol_hash,
+            )
+
+        reordered_hash = forward_paper_protocol_hash(
+            campaign_id=frozen.campaign_id,
+            exact_build_sha=frozen.exact_build_sha,
+            registered_at=frozen.registered_at,
+            starts_at=frozen.starts_at,
+            ends_at=frozen.ends_at,
+            minimum_predictions=frozen.minimum_predictions,
+            maximum_decision_latency_ms=frozen.maximum_decision_latency_ms,
+            required_provider_capabilities=tuple(
+                reversed(frozen.required_provider_capabilities)
+            ),
+            required_operational_cases=tuple(
+                reversed(frozen.required_operational_cases)
+            ),
+        )
+        self.assertEqual(reordered_hash, frozen.protocol_hash)
 
     def test_protocol_cannot_be_registered_after_campaign_start(self):
         with self.assertRaisesRegex(

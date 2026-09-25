@@ -2,7 +2,7 @@
 
 // TypeScript-consumable runtime binding for the canonical common scalar subset.
 // Values remain strings; no Number/BigInt coercion is allowed.
-const CONTRACT_VERSION = "2.0.0";
+const CONTRACT_VERSION = "3.0.0";
 
 const patterns = Object.freeze({
   Decimal: /^(?:0|[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]|-(?:[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]))$/,

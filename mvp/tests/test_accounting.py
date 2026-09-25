@@ -10,6 +10,7 @@ from mvp.autotrade_mvp.accounting import (
     book_external_cash_flow,
     book_fx_exchange,
     posting,
+    project_equity_position,
     reverse_transaction,
     transaction_digest,
     validate_transaction,
@@ -486,6 +487,134 @@ class AccountingFoundationTests(unittest.TestCase):
         self.assertEqual(book.transactions, before)
         self.assertEqual(book.audit_digest(), before_digest)
         self.assertEqual(book.cash("GBP"), Decimal("0"))
+
+
+    def test_corrected_fill_restates_fifo_at_original_economic_time(self):
+        book = EconomicBook()
+        original = book_equity_fill(
+            transaction_id="buy-original",
+            cause_event_id="fill-buy-original",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="2",
+            price="100",
+            economic_effective_at="2026-01-01T10:00:00Z",
+            economic_order_key="fill-1",
+        )
+        later_sale = book_equity_fill(
+            transaction_id="sell-later",
+            cause_event_id="fill-sell-later",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="SELL",
+            quantity="1",
+            price="110",
+            economic_effective_at="2026-01-01T11:00:00Z",
+            economic_order_key="fill-2",
+        )
+        book.append(original)
+        book.append(later_sale)
+        replacement = book_equity_fill(
+            transaction_id="buy-corrected",
+            cause_event_id="fill-buy-corrected",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="2",
+            price="101",
+            economic_effective_at=original.economic_effective_at,
+            economic_order_key=original.economic_order_key,
+        )
+        self.assertTrue(
+            book.append_batch(
+                (
+                    reverse_transaction(
+                        original,
+                        transaction_id="buy-original-reversal",
+                        cause_event_id="fill-buy-correction-reversal",
+                    ),
+                    replacement,
+                )
+            )
+        )
+
+        projected = project_equity_position(
+            book,
+            instrument="ABC",
+            settlement_currency="USD",
+        )
+        self.assertEqual(projected.quantity, Decimal("1"))
+        self.assertEqual(projected.open_cost_basis, Decimal("101"))
+        self.assertEqual(projected.realized_pnl, Decimal("9"))
+        self.assertEqual(projected.lots[0].transaction_id, "buy-corrected")
+
+        restarted = EconomicBook(book.transactions)
+        self.assertEqual(
+            project_equity_position(
+                restarted,
+                instrument="ABC",
+                settlement_currency="USD",
+            ),
+            projected,
+        )
+
+    def test_corrected_fifo_fails_closed_when_active_fill_lacks_order_evidence(self):
+        book = EconomicBook()
+        original = book_equity_fill(
+            transaction_id="buy-original",
+            cause_event_id="fill-buy-original",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="2",
+            price="100",
+            economic_effective_at="2026-01-01T10:00:00Z",
+            economic_order_key="fill-1",
+        )
+        book.append(original)
+        book.append(
+            book_equity_fill(
+                transaction_id="sell-without-order-proof",
+                cause_event_id="fill-sell-unordered",
+                instrument="ABC",
+                settlement_currency="USD",
+                side="SELL",
+                quantity="1",
+                price="110",
+            )
+        )
+        replacement = book_equity_fill(
+            transaction_id="buy-corrected",
+            cause_event_id="fill-buy-corrected",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="2",
+            price="101",
+            economic_effective_at=original.economic_effective_at,
+            economic_order_key=original.economic_order_key,
+        )
+        book.append_batch(
+            (
+                reverse_transaction(
+                    original,
+                    transaction_id="buy-original-reversal",
+                    cause_event_id="fill-buy-correction-reversal",
+                ),
+                replacement,
+            )
+        )
+        with self.assertRaisesRegex(
+            AccountingConflict,
+            "economic effective-time",
+        ):
+            project_equity_position(
+                book,
+                instrument="ABC",
+                settlement_currency="USD",
+            )
+
 
 
 

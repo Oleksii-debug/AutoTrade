@@ -124,6 +124,7 @@ def normalize_inspected_components(
         "license",
         "adoption_state",
         "source_import_allowed",
+        "release_distribution_state",
     )
     components: list[dict[str, str]] = []
     unresolved_first_party: list[str] = []
@@ -148,6 +149,33 @@ def normalize_inspected_components(
             raise ValueError(
                 f"component revision is not a canonical Git object id: {record['name']}"
             )
+
+        release_state = record["release_distribution_state"]
+        if release_state not in {"BLOCKED", "APPROVED"}:
+            raise ValueError(
+                "component release_distribution_state must be BLOCKED or APPROVED: "
+                f"{record['name']}"
+            )
+        if release_state == "APPROVED":
+            if record["license"].startswith("UNRESOLVED_"):
+                raise ValueError(
+                    f"release-approved component has unresolved license: {record['name']}"
+                )
+            for evidence_field in (
+                "dependency_graph_sha256",
+                "notice_sha256",
+                "advisory_review_sha256",
+            ):
+                evidence_value = raw.get(evidence_field)
+                if (
+                    not isinstance(evidence_value, str)
+                    or SHA256_ID.fullmatch(evidence_value) is None
+                ):
+                    raise ValueError(
+                        f"release-approved component lacks canonical {evidence_field}: "
+                        f"{record['name']}"
+                    )
+                record[evidence_field] = evidence_value
 
         name_key = record["name"].casefold()
         if name_key in seen_names:
@@ -277,6 +305,20 @@ def build_manifest() -> dict[str, object]:
                 "code": "FIRST_PARTY_RIGHTS_UNRESOLVED",
                 "components": sorted(unresolved_first_party),
                 "detail": "Development authorization is recorded, but release distribution rights chain is unresolved.",
+            }
+        )
+
+    blocked_release_components = sorted(
+        component["name"]
+        for component in components
+        if component["release_distribution_state"] != "APPROVED"
+    )
+    if blocked_release_components:
+        blockers.append(
+            {
+                "code": "COMPONENT_RELEASE_DISTRIBUTION_BLOCKED",
+                "components": blocked_release_components,
+                "detail": "One or more inspected components are not machine-approved for release distribution.",
             }
         )
 

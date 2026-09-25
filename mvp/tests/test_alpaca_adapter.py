@@ -406,12 +406,16 @@ class AlpacaAdapterTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(AlpacaAdapterError, "fee evidence"):
             parse_trade_activities(
+            account_id="account-1",
+            environment="PAPER",
                 [row],
                 instrument_versions={"AAPL": "AAPL:v1"},
                 client_ids_by_order_id={order_id: "at-ack-1"},
                 fees_by_activity_id={},
             )
         fills = parse_trade_activities(
+            account_id="account-1",
+            environment="PAPER",
             [row, row],
             instrument_versions={"AAPL": "AAPL:v1"},
             client_ids_by_order_id={order_id: "at-ack-1"},
@@ -422,6 +426,8 @@ class AlpacaAdapterTests(unittest.TestCase):
 
     def test_canonical_coverage_defaults_to_unproven_absence(self):
         evidence = coverage_evidence(
+            account_id="account-1",
+            environment="PAPER",
             surface="ACTIVITIES",
             coverage_start="2026-09-24T19:00:00Z",
             coverage_end="2026-09-24T21:00:00Z",

@@ -26,6 +26,8 @@ from uuid import UUID
 from ..artifacts.store import ArtifactStore
 from ..jobs import ResearchJobStore
 from ..memory.episodes import CoveragePopulationSnapshot, ExperienceMemory
+from ..science.registry import ProtocolRegistration, ScientificRegistry
+from .population_coverage import PopulationCoverageManifest, build_population_coverage
 from .online import (
     OnlineUpdateDecision,
     OnlineUpdateEnvelope,
@@ -178,6 +180,7 @@ class UpdateProducerConfig:
     update_task: str
     calibration_task: str
     test_evidence_refs: tuple[str, ...]
+    protocol_id: str
     instrument_family: str | None = None
 
     def __post_init__(self) -> None:
@@ -252,6 +255,11 @@ class UpdateProducerConfig:
                 "test_evidence_refs must be a non-empty unique tuple"
             )
         object.__setattr__(self, "test_evidence_refs", refs)
+        object.__setattr__(
+            self,
+            "protocol_id",
+            _text(self.protocol_id, name="protocol_id"),
+        )
         if self.instrument_family is not None:
             object.__setattr__(
                 self,
@@ -343,7 +351,7 @@ def _load_checkpoint(
     *,
     config: UpdateProducerConfig,
     envelope: OnlineUpdateEnvelope,
-) -> tuple[str, _Checkpoint]:
+) -> tuple[str, _Checkpoint, datetime]:
     ref, manifest, payload = _artifact_ref(
         artifact_store,
         reference,
@@ -404,10 +412,56 @@ def _load_checkpoint(
         name: _decimal(raw_means[name], name=f"reference_feature_mean[{name}]")
         for name in names
     }
+    checkpoint_created_at = _time(
+        manifest.get("created_at"),
+        name="checkpoint created_at",
+    )
     return ref, _Checkpoint(
         parameters=MappingProxyType(parameters),
         reference_feature_means=MappingProxyType(means),
+    ), checkpoint_created_at
+
+
+def _verify_frozen_protocol(
+    scientific_registry: ScientificRegistry,
+    *,
+    config: UpdateProducerConfig,
+    calibration_population: CoveragePopulationSnapshot,
+    calibration_cutoff: datetime,
+    permission_classes: tuple[str, ...],
+    checkpoint_created_at: datetime,
+) -> ProtocolRegistration:
+    if not isinstance(scientific_registry, ScientificRegistry):
+        raise TypeError("scientific_registry must be ScientificRegistry")
+    registration, protocol = scientific_registry.protocol_document(
+        config.protocol_id
     )
+    scope = protocol.get("online_update_registration")
+    expected = {
+        "schema_version": "1.0.0",
+        "calibration_population_root_hash": calibration_population.root_hash,
+        "calibration_cutoff": _iso(calibration_cutoff),
+        "update_task": config.update_task,
+        "calibration_task": config.calibration_task,
+        "instrument_family": config.instrument_family,
+        "permission_classes": list(permission_classes),
+        "feature_schema_hash": config.feature_schema_hash,
+        "label_version": config.label_version,
+        "source_sha": config.source_sha,
+    }
+    if not isinstance(scope, dict) or scope != expected:
+        raise ValueError(
+            "frozen protocol does not bind the exact online-update population scope"
+        )
+    registered_at = _time(
+        registration.created_at,
+        name="protocol registration created_at",
+    )
+    if registered_at >= checkpoint_created_at:
+        raise ValueError(
+            "online-update protocol registration must predate candidate checkpoint publication"
+        )
+    return registration
 
 
 def _verify_registered_evidence(
@@ -416,6 +470,7 @@ def _verify_registered_evidence(
     config: UpdateProducerConfig,
     calibration_ref: str,
     calibration_population: CoveragePopulationSnapshot,
+    protocol_hash: str,
 ) -> tuple[str, tuple[str, ...]]:
     calibration, manifest, _payload = _artifact_ref(
         artifact_store,
@@ -429,6 +484,7 @@ def _verify_registered_evidence(
         != "DRIFT_CALIBRATION_POPULATION"
         or metadata.get("population_root_hash")
         != calibration_population.root_hash
+        or metadata.get("protocol_hash") != protocol_hash
     ):
         raise ValueError(
             "calibration evidence does not bind the canonical calibration population"
@@ -536,6 +592,28 @@ def _extract_learning_rows(
         payload = raw.get("effective_payload")
         if not isinstance(payload, Mapping):
             exclusions.append((episode_id, "LEARNING_PAYLOAD_MISSING"))
+            continue
+        outcome = payload.get("outcome")
+        if not isinstance(outcome, Mapping):
+            exclusions.append((episode_id, "CANONICAL_OUTCOME_MISSING"))
+            continue
+        if outcome.get("label_mature") is not True:
+            exclusions.append((episode_id, "CANONICAL_LABEL_NOT_MATURE"))
+            continue
+        try:
+            reconciliation_state = _text(
+                outcome.get("reconciliation_state"),
+                name="outcome.reconciliation_state",
+            ).upper()
+        except ValueError:
+            exclusions.append(
+                (episode_id, "CANONICAL_RECONCILIATION_MISSING")
+            )
+            continue
+        if reconciliation_state != "RECONCILED":
+            exclusions.append(
+                (episode_id, "CANONICAL_EXECUTION_UNRECONCILED")
+            )
             continue
         learning = payload.get("learning")
         if not isinstance(learning, Mapping):
@@ -777,9 +855,81 @@ def _producer_config_evidence(config: UpdateProducerConfig) -> dict[str, Any]:
         "update_task": config.update_task,
         "calibration_task": config.calibration_task,
         "test_evidence_refs": sorted(config.test_evidence_refs),
+        "protocol_id": config.protocol_id,
         "instrument_family": config.instrument_family,
     }
     return value
+
+
+
+def _coverage_selection(
+    rows: tuple[_LearningRow, ...],
+    exclusions: tuple[tuple[str, str], ...],
+    aliases: tuple[tuple[str, tuple[str, ...]], ...],
+) -> tuple[tuple[str, ...], dict[str, str]]:
+    """Map deduplicated learner rows back to the complete episode population.
+
+    Immutable aliases remain first-class population members even though the
+    gradient consumes one physical fact once. Only genuinely unusable episodes
+    remain exclusions in the frozen coverage manifest.
+    """
+
+    accepted_physical = {row.physical_observation_id for row in rows}
+    included: set[str] = set()
+    for physical_id, episode_ids in aliases:
+        if physical_id in accepted_physical:
+            included.update(episode_ids)
+
+    exclusion_map: dict[str, str] = {}
+    for episode_id, reason in exclusions:
+        if episode_id in included and reason == "PHYSICAL_DUPLICATE":
+            continue
+        if episode_id in included:
+            raise ValueError(
+                "accepted learning episode has incompatible population exclusion"
+            )
+        prior = exclusion_map.get(episode_id)
+        if prior is not None and prior != reason:
+            raise ValueError(
+                "learning episode has multiple incompatible exclusion reasons"
+            )
+        exclusion_map[episode_id] = reason
+    return tuple(sorted(included)), exclusion_map
+
+
+def _population_manifest_evidence(
+    manifest: PopulationCoverageManifest,
+) -> dict[str, Any]:
+    if not isinstance(manifest, PopulationCoverageManifest):
+        raise TypeError("manifest must be PopulationCoverageManifest")
+    return {
+        "candidate_hash": manifest.candidate_hash,
+        "frozen_protocol_hash": manifest.frozen_protocol_hash,
+        "input_snapshot_hash": manifest.input_snapshot_hash,
+        "causal_cutoff": _iso(
+            _time(manifest.causal_cutoff, name="population causal_cutoff")
+        ),
+        "permission_classes": list(manifest.permission_classes),
+        "task": manifest.task,
+        "instrument_family": manifest.instrument_family,
+        "eligible_episode_ids": list(manifest.eligible_episode_ids),
+        "included_episode_ids": list(manifest.included_episode_ids),
+        "exclusions": [list(value) for value in manifest.exclusions],
+        "episode_digests": [list(value) for value in manifest.episode_digests],
+        "eligible_outcomes": [list(value) for value in manifest.eligible_outcomes],
+        "included_outcomes": [list(value) for value in manifest.included_outcomes],
+        "eligible_no_trade_count": manifest.eligible_no_trade_count,
+        "included_no_trade_count": manifest.included_no_trade_count,
+        "included_regime_counts": [
+            list(value) for value in manifest.included_regime_counts
+        ],
+        "included_labels_complete_by_regime": [
+            list(value)
+            for value in manifest.included_labels_complete_by_regime
+        ],
+        "complete": manifest.complete,
+        "digest": manifest.digest,
+    }
 
 
 def _online_envelope_evidence(
@@ -816,6 +966,7 @@ def produce_bounded_online_update(
     *,
     memory: ExperienceMemory,
     artifact_store: ArtifactStore,
+    scientific_registry: ScientificRegistry,
     checkpoint_ref: str,
     calibration_evidence_ref: str,
     envelope: OnlineUpdateEnvelope,
@@ -829,6 +980,8 @@ def produce_bounded_online_update(
         raise TypeError("memory must be ExperienceMemory")
     if not isinstance(artifact_store, ArtifactStore):
         raise TypeError("artifact_store must be ArtifactStore")
+    if not isinstance(scientific_registry, ScientificRegistry):
+        raise TypeError("scientific_registry must be ScientificRegistry")
     if not isinstance(envelope, OnlineUpdateEnvelope):
         raise TypeError("envelope must be OnlineUpdateEnvelope")
     if not isinstance(config, UpdateProducerConfig):
@@ -853,7 +1006,7 @@ def produce_bounded_online_update(
         )
     )
 
-    checkpoint_reference, checkpoint = _load_checkpoint(
+    checkpoint_reference, checkpoint, checkpoint_created_at = _load_checkpoint(
         artifact_store,
         checkpoint_ref,
         config=config,
@@ -871,11 +1024,20 @@ def produce_bounded_online_update(
         task=config.calibration_task,
         instrument_family=config.instrument_family,
     )
+    protocol_registration = _verify_frozen_protocol(
+        scientific_registry,
+        config=config,
+        calibration_population=calibration_population,
+        calibration_cutoff=calibration_time,
+        permission_classes=canonical_permissions,
+        checkpoint_created_at=checkpoint_created_at,
+    )
     calibration_reference, test_references = _verify_registered_evidence(
         artifact_store,
         config=config,
         calibration_ref=calibration_evidence_ref,
         calibration_population=calibration_population,
+        protocol_hash=protocol_registration.protocol_hash,
     )
 
     feature_names = tuple(sorted(checkpoint.parameters))
@@ -904,6 +1066,44 @@ def produce_bounded_online_update(
         feature_names=feature_names,
     )
 
+    candidate_hash = "sha256:" + checkpoint_reference.rsplit(
+        "@sha256:", 1
+    )[1]
+    update_included_ids, update_coverage_exclusions = _coverage_selection(
+        update_rows,
+        update_exclusions,
+        update_aliases,
+    )
+    calibration_included_ids, calibration_coverage_exclusions = _coverage_selection(
+        calibration_rows,
+        calibration_exclusions,
+        calibration_aliases,
+    )
+    update_manifest = build_population_coverage(
+        update_population,
+        candidate_hash=candidate_hash,
+        frozen_protocol_hash=protocol_registration.protocol_hash,
+        input_snapshot_hash=update_population.root_hash,
+        causal_cutoff=update_time,
+        permission_classes=canonical_permissions,
+        included_episode_ids=update_included_ids,
+        exclusions=update_coverage_exclusions,
+        task=config.update_task,
+        instrument_family=config.instrument_family,
+    )
+    calibration_manifest = build_population_coverage(
+        calibration_population,
+        candidate_hash=candidate_hash,
+        frozen_protocol_hash=protocol_registration.protocol_hash,
+        input_snapshot_hash=calibration_population.root_hash,
+        causal_cutoff=calibration_time,
+        permission_classes=canonical_permissions,
+        included_episode_ids=calibration_included_ids,
+        exclusions=calibration_coverage_exclusions,
+        task=config.calibration_task,
+        instrument_family=config.instrument_family,
+    )
+
     cross_population_overlap = tuple(
         sorted(
             {row.physical_observation_id for row in update_rows}
@@ -912,6 +1112,10 @@ def produce_bounded_online_update(
     )
 
     reasons: list[str] = []
+    if not update_manifest.complete:
+        reasons.append("LEARNING.UPDATE_POPULATION_INCOMPLETE")
+    if not calibration_manifest.complete:
+        reasons.append("LEARNING.CALIBRATION_POPULATION_INCOMPLETE")
     if cross_population_overlap:
         reasons.append("LEARNING.CROSS_POPULATION_CONTAMINATION")
     if update_conflicts:
@@ -1026,6 +1230,12 @@ def produce_bounded_online_update(
             "updates_in_window": runtime_state.updates_in_window,
         },
         "granted_permissions": list(canonical_permissions),
+        "scientific_registration": {
+            "protocol_id": protocol_registration.protocol_id,
+            "protocol_hash": protocol_registration.protocol_hash,
+            "registered_at": protocol_registration.created_at,
+            "checkpoint_created_at": _iso(checkpoint_created_at),
+        },
         "checkpoint": {
             "artifact_ref": checkpoint_reference,
             "parameters": {
@@ -1051,6 +1261,12 @@ def produce_bounded_online_update(
             "label_version": config.label_version,
         },
         "population": {
+            "update_coverage_manifest": _population_manifest_evidence(
+                update_manifest
+            ),
+            "calibration_coverage_manifest": _population_manifest_evidence(
+                calibration_manifest
+            ),
             "update_included": [
                 _row_evidence(row) for row in update_rows
             ],

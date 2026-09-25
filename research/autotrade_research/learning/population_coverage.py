@@ -521,6 +521,7 @@ def build_population_coverage(
             "outcome_class": outcome_class,
             "no_trade": no_trade,
             "label_mature": label_mature,
+            "reconciliation_state": reconciliation_state,
             "tombstoned": bool(tombstones),
             "digest": fact_digest,
         }
@@ -552,7 +553,9 @@ def build_population_coverage(
         regime = record["regime"]
         regime_counts[regime] = regime_counts.get(regime, 0) + 1
         regime_labels_complete[regime] = (
-            regime_labels_complete.get(regime, True) and record["label_mature"]
+            regime_labels_complete.get(regime, True)
+            and record["label_mature"]
+            and record["reconciliation_state"] == "RECONCILED"
         )
 
     eligible_no_trade = sum(1 for _klass, _digest_value, flag in record_rows if flag)

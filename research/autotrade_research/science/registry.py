@@ -464,6 +464,40 @@ class ScientificRegistry:
             created_at=row["created_at"],
         )
 
+    def protocol_document(
+        self,
+        protocol_id: str,
+    ) -> tuple[ProtocolRegistration, dict[str, Any]]:
+        """Load one immutable protocol registration plus its canonical document.
+
+        The returned payload is a detached JSON value. Mutating it cannot alter
+        the append-only registry. Consumers must use this boundary instead of
+        trusting caller-authored artifact metadata as proof of preregistration.
+        """
+
+        registration = self.protocol_registration(protocol_id)
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT protocol_hash,payload_json,created_at "
+                "FROM protocols WHERE protocol_id=?",
+                (registration.protocol_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(registration.protocol_id)
+        try:
+            payload = json.loads(row["payload_json"])
+        except json.JSONDecodeError as error:
+            raise ProtocolViolation("registered protocol payload is corrupt") from error
+        if (
+            not isinstance(payload, dict)
+            or _canonical(payload) != row["payload_json"]
+            or _hash(payload) != row["protocol_hash"]
+            or row["protocol_hash"] != registration.protocol_hash
+            or row["created_at"] != registration.created_at
+        ):
+            raise ProtocolViolation("registered protocol integrity mismatch")
+        return registration, payload
+
     def record_trial(
         self,
         protocol_id: str,

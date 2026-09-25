@@ -916,6 +916,8 @@ def _population_authority_reason(
 
     if manifest != expected:
         return f"LEARNING.{population_name}_POPULATION_COVERAGE_MISMATCH", manifest
+    if not manifest.complete:
+        return f"LEARNING.{population_name}_POPULATION_COVERAGE_INCOMPLETE", manifest
 
     outcome_counts = {
         outcome_class: count

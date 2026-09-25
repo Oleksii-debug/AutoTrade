@@ -936,6 +936,58 @@ class UpdateProducerTests(unittest.TestCase):
                 artifact["reasons"],
             )
 
+    def test_exact_matching_manifest_cannot_hide_excluded_unresolved_episode(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            config = fixture.config(test_ref)
+            unresolved = fixture.append_learning(
+                task="update",
+                feature="9",
+                target="99",
+                observation_id="future-pending",
+                label_available_at=UPDATE_CUTOFF + timedelta(days=1),
+                outcome_horizon_at=UPDATE_CUTOFF + timedelta(days=1),
+                execution_reconciled_at=UPDATE_CUTOFF + timedelta(days=1),
+                outcome_class="PENDING",
+                canonical_label_mature=False,
+                canonical_reconciliation_state="PENDING",
+            )
+            exact_manifest = fixture.population_manifest(
+                checkpoint_ref=checkpoint,
+                task="update",
+                cutoff=UPDATE_CUTOFF,
+                extra_exclusions={
+                    unresolved: "LABEL_NOT_CAUSALLY_MATURE",
+                },
+            )
+            self.assertFalse(exact_manifest.complete)
+
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=config,
+                update_population_manifest=exact_manifest,
+            )
+
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIsNone(produced.proposed_parameters)
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertNotIn(
+                "LEARNING.UPDATE_POPULATION_COVERAGE_MISMATCH",
+                artifact["reasons"],
+            )
+            self.assertIn(
+                "LEARNING.UPDATE_POPULATION_COVERAGE_INCOMPLETE",
+                artifact["reasons"],
+            )
+            self.assertIn(
+                [unresolved, "LABEL_NOT_CAUSALLY_MATURE"],
+                artifact["population"]["update_exclusions"],
+            )
+
     def test_visible_correction_is_applied_once_and_lineage_is_bound(self):
         with TemporaryDirectory() as directory:
             fixture = ProducerFixture(directory)

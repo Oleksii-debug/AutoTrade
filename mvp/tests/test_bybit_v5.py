@@ -64,6 +64,55 @@ def read_capability(*, account_id="paper-1", environment="PAPER", instrument_ver
     )
 
 
+
+def write_capability(
+    *,
+    family="LINEAR_DERIVATIVES",
+    position_mode="HEDGE",
+    account_id="bybit-account",
+    environment="PAPER",
+    instrument_version="BTCUSDT@1",
+    expires_at=None,
+    permission_scope=None,
+):
+    scope = permission_scope or {
+        "LINEAR_DERIVATIVES": "BYBIT.LINEAR.ORDER.WRITE",
+        "INVERSE_DERIVATIVES": "BYBIT.INVERSE.ORDER.WRITE",
+    }[family]
+    observed_at = READ_AT - timedelta(minutes=1)
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            provider_id="BYBIT",
+            account_id=account_id,
+            entity_id="bybit-unified-account",
+            environment=environment,
+            instrument_version=instrument_version,
+            observed_at=observed_at,
+            expires_at=expires_at or READ_AT + timedelta(minutes=5),
+            supported_order_types=frozenset({"LIMIT", "MARKET"}),
+            time_in_force=frozenset({"GTC", "IOC"}),
+            permission_scopes=frozenset({scope}),
+            position_mode=position_mode,
+            native_protection=frozenset(),
+            rate_limit_policy_id="bybit-v5-write-test",
+            data_entitlements=frozenset(),
+            evidence_ref={
+                "artifact_id": str(uuid4()),
+                "sha256": "sha256:" + "b" * 64,
+                "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+                "source_uri": "https://bybit-exchange.github.io/docs/v5/order/create-order",
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    return derive_capability_snapshot(
+        snapshot_id=str(uuid4()),
+        claims=claims,
+        observed_at=READ_AT,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    )
+
 def bound_execution_response(
     response,
     *,
@@ -130,7 +179,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(payload["price"], "3456.7")
         self.assertEqual(payload["timeInForce"], "PostOnly")
 
-    def test_derivative_scope_maps_reduce_only_and_position_mode(self):
+    def test_derivative_scope_maps_reduce_only_and_verified_hedge_mode(self):
         payload = build_order_payload(
             product_family="LINEAR_DERIVATIVES",
             symbol="BTCUSDT",
@@ -141,11 +190,213 @@ class BybitV5AdapterTests(unittest.TestCase):
             client_order_id="reduce-1",
             time_in_force="GTC",
             reduce_only=True,
-            position_idx=2,
+            position_side="LONG",
+            capability=write_capability(position_mode="HEDGE"),
+            capability_at=READ_AT,
+            account_id="bybit-account",
+            instrument_version="BTCUSDT@1",
+            provider_environment="DEMO",
         )
         self.assertEqual(payload["category"], "linear")
         self.assertTrue(payload["reduceOnly"])
-        self.assertEqual(payload["positionIdx"], 2)
+        self.assertEqual(payload["positionIdx"], 1)
+
+    def test_derivative_order_requires_verified_capability_context(self):
+        with self.assertRaisesRegex(ProviderCoreError, "capability context"):
+            build_order_payload(
+                product_family="LINEAR_DERIVATIVES",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="1",
+                price="70000",
+                client_order_id="mode-required",
+                time_in_force="GTC",
+            )
+
+        one_way = build_order_payload(
+            product_family="INVERSE_DERIVATIVES",
+            symbol="BTCUSD",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="1",
+            price="70000",
+            client_order_id="mode-one-way",
+            time_in_force="GTC",
+            capability=write_capability(
+                family="INVERSE_DERIVATIVES",
+                position_mode="ONE_WAY",
+                instrument_version="BTCUSD@1",
+            ),
+            capability_at=READ_AT,
+            account_id="bybit-account",
+            instrument_version="BTCUSD@1",
+            provider_environment="DEMO",
+        )
+        self.assertEqual(one_way["positionIdx"], 0)
+
+    def test_derivative_position_index_cannot_conflict_with_verified_mode(self):
+        with self.assertRaisesRegex(ProviderCoreError, "conflicts"):
+            build_order_payload(
+                product_family="LINEAR_DERIVATIVES",
+                symbol="BTCUSDT",
+                side="SELL",
+                order_type="LIMIT",
+                quantity="1",
+                price="70000",
+                client_order_id="wrong-index",
+                time_in_force="GTC",
+                position_side="SHORT",
+                position_idx=1,
+                capability=write_capability(position_mode="HEDGE"),
+                capability_at=READ_AT,
+                account_id="bybit-account",
+                instrument_version="BTCUSDT@1",
+                provider_environment="DEMO",
+            )
+
+    def test_derivative_capability_is_bound_to_scope_identity_and_time(self):
+        common = dict(
+            product_family="LINEAR_DERIVATIVES",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="1",
+            price="70000",
+            time_in_force="GTC",
+            capability_at=READ_AT,
+            instrument_version="BTCUSDT@1",
+            provider_environment="DEMO",
+            position_side="LONG",
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "account"):
+            build_order_payload(
+                **common,
+                client_order_id="wrong-account",
+                capability=write_capability(),
+                account_id="other-account",
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "instrument"):
+            build_order_payload(
+                **{**common, "instrument_version": "ETHUSDT@1"},
+                client_order_id="wrong-instrument",
+                capability=write_capability(),
+                account_id="bybit-account",
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "environment"):
+            build_order_payload(
+                **{**common, "provider_environment": "MAINNET"},
+                client_order_id="wrong-environment",
+                capability=write_capability(),
+                account_id="bybit-account",
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "not admitted"):
+            build_order_payload(
+                **common,
+                client_order_id="wrong-category-scope",
+                capability=write_capability(
+                    permission_scope="BYBIT.INVERSE.ORDER.WRITE"
+                ),
+                account_id="bybit-account",
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "not admitted"):
+            build_order_payload(
+                **common,
+                client_order_id="expired-mode",
+                capability=write_capability(
+                    expires_at=READ_AT - timedelta(seconds=1)
+                ),
+                account_id="bybit-account",
+            )
+
+    def test_hedge_mode_target_leg_drives_open_and_reduce_only_index(self):
+        capability = write_capability(position_mode="HEDGE")
+        cases = (
+            ("BUY", False, "LONG", 1),
+            ("SELL", False, "SHORT", 2),
+            ("SELL", True, "LONG", 1),
+            ("BUY", True, "SHORT", 2),
+        )
+        for side, reduce_only, position_side, expected in cases:
+            with self.subTest(
+                side=side,
+                reduce_only=reduce_only,
+                position_side=position_side,
+            ):
+                payload = build_order_payload(
+                    product_family="LINEAR_DERIVATIVES",
+                    symbol="BTCUSDT",
+                    side=side,
+                    order_type="LIMIT",
+                    quantity="1",
+                    price="70000",
+                    client_order_id=f"hedge-{side.lower()}-{position_side.lower()}",
+                    time_in_force="GTC",
+                    reduce_only=reduce_only,
+                    position_side=position_side,
+                    capability=capability,
+                    capability_at=READ_AT,
+                    account_id="bybit-account",
+                    instrument_version="BTCUSDT@1",
+                    provider_environment="DEMO",
+                )
+                self.assertEqual(payload["positionIdx"], expected)
+
+    def test_hedge_mode_requires_explicit_compatible_target_leg(self):
+        capability = write_capability(position_mode="HEDGE")
+        common = dict(
+            product_family="LINEAR_DERIVATIVES",
+            symbol="BTCUSDT",
+            order_type="LIMIT",
+            quantity="1",
+            price="70000",
+            time_in_force="GTC",
+            capability=capability,
+            capability_at=READ_AT,
+            account_id="bybit-account",
+            instrument_version="BTCUSDT@1",
+            provider_environment="DEMO",
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "target position_side"):
+            build_order_payload(
+                **common,
+                side="BUY",
+                client_order_id="missing-leg",
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "inconsistent"):
+            build_order_payload(
+                **common,
+                side="SELL",
+                position_side="LONG",
+                client_order_id="open-long-wrong-side",
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "inconsistent"):
+            build_order_payload(
+                **common,
+                side="BUY",
+                reduce_only=True,
+                position_side="LONG",
+                client_order_id="reduce-long-wrong-side",
+            )
+
+    def test_unknown_provider_position_mode_fails_closed(self):
+        with self.assertRaisesRegex(ProviderCoreError, "ONE_WAY or HEDGE"):
+            build_order_payload(
+                product_family="LINEAR_DERIVATIVES",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="1",
+                price="70000",
+                client_order_id="bad-mode",
+                time_in_force="GTC",
+                position_side="LONG",
+                capability=write_capability(position_mode="NET"),
+                capability_at=READ_AT,
+                account_id="bybit-account",
+                instrument_version="BTCUSDT@1",
+                provider_environment="DEMO",
+            )
 
     def test_unsafe_or_ambiguous_request_shapes_fail_closed(self):
         common = dict(

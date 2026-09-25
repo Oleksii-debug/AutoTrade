@@ -1085,6 +1085,26 @@ class AuthorityService:
             availability_evidence.get("scope_latest_checkpoint_observed_at"),
             name="scope_latest_checkpoint_observed_at",
         )
+        scope_latest_journal_sequence = availability_evidence.get(
+            "scope_latest_checkpoint_journal_sequence"
+        )
+        if scope_latest_journal_sequence is not None:
+            if (
+                type(scope_latest_journal_sequence) is not int
+                or scope_latest_journal_sequence <= 0
+            ):
+                raise AuthorityConflict(
+                    "durable latest reconciliation journal sequence is invalid"
+                )
+            scope_checkpoint = self.store.get_event(scope_latest_event_id)
+            if (
+                scope_checkpoint is None
+                or scope_checkpoint.get("journal_sequence")
+                != scope_latest_journal_sequence
+            ):
+                raise AuthorityConflict(
+                    "durable latest reconciliation journal sequence is inconsistent"
+                )
         if (
             scope_latest_event_id
             != regenerated_availability.get("checkpoint_event_id")
@@ -1114,6 +1134,17 @@ class AuthorityService:
                 "scope_latest_checkpoint_observed_at": scope_latest_observed_at,
             }
         )
+        if scope_latest_journal_sequence is None:
+            # Historical durable evidence created before the explicit v6 cursor
+            # remains verifiable after migration; new v6 evidence always binds it.
+            expected_availability_evidence.pop(
+                "scope_latest_checkpoint_journal_sequence",
+                None,
+            )
+        else:
+            expected_availability_evidence[
+                "scope_latest_checkpoint_journal_sequence"
+            ] = scope_latest_journal_sequence
         borrow_resources = tuple(
             sorted(
                 resource

@@ -165,7 +165,11 @@ def _copy_stable_file(source: Path, destination: Path) -> tuple[str, int]:
     return digest, len(payload)
 
 
-def _sqlite_schema_version(path: Path) -> int:
+def _sqlite_schema_version(
+    path: Path,
+    *,
+    classify_future_source_as_compatibility: bool = False,
+) -> int:
     if not path.is_file():
         raise BackupError("Durable journal is missing")
     uri = path.resolve().as_uri() + "?mode=ro"
@@ -198,7 +202,10 @@ def _sqlite_schema_version(path: Path) -> int:
         raise BackupIntegrityError(
             "Durable journal schema migration history is not contiguous"
         )
-    if latest > JournalStore.SCHEMA_VERSION:
+    if (
+        latest > JournalStore.SCHEMA_VERSION
+        and classify_future_source_as_compatibility
+    ):
         raise BackupCompatibilityError(
             f"Unsupported journal schema version: {latest}"
         )
@@ -206,11 +213,18 @@ def _sqlite_schema_version(path: Path) -> int:
         raise BackupIntegrityError(
             "Durable journal schema migration history is not contiguous"
         )
+    if latest > JournalStore.SCHEMA_VERSION:
+        raise BackupCompatibilityError(
+            f"Unsupported journal schema version: {latest}"
+        )
     return latest
 
 
 def _backup_sqlite(source: Path, destination: Path) -> tuple[str, int, int]:
-    schema_version = _sqlite_schema_version(source)
+    schema_version = _sqlite_schema_version(
+        source,
+        classify_future_source_as_compatibility=True,
+    )
     if schema_version != JournalStore.SCHEMA_VERSION:
         raise BackupCompatibilityError(
             f"Unsupported journal schema version: {schema_version}"

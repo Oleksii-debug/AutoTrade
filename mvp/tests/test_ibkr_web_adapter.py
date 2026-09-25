@@ -36,7 +36,12 @@ from mvp.autotrade_mvp.ibkr_web import (
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
-def capability(*, account_id="U1234567", order_types=("MARKET", "LIMIT", "STOP", "STOP_LIMIT")):
+def capability(
+    *,
+    account_id="U1234567",
+    environment="PAPER",
+    order_types=("MARKET", "LIMIT", "STOP", "STOP_LIMIT"),
+):
     observed_at = NOW - timedelta(hours=1)
     claims = tuple(
         CapabilityClaim(
@@ -44,7 +49,7 @@ def capability(*, account_id="U1234567", order_types=("MARKET", "LIMIT", "STOP",
             provider_id="IBKR",
             account_id=account_id,
             entity_id="web-api",
-            environment="PAPER",
+            environment=environment,
             instrument_version="AAPL-CONID-265598:v1",
             observed_at=observed_at,
             expires_at=NOW + timedelta(hours=1),
@@ -74,6 +79,8 @@ def capability(*, account_id="U1234567", order_types=("MARKET", "LIMIT", "STOP",
 
 def ready_session(**overrides):
     values = dict(
+        account_id="U1234567",
+        environment="PAPER",
         connected=True,
         authenticated=True,
         established=True,
@@ -315,6 +322,50 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 at=NOW,
                 maximum_session_age_seconds=30,
             )
+
+    def test_brokerage_session_account_scope_must_match_intent(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "session account"):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-session-account",
+                capability=capability(),
+                session=ready_session(account_id="OTHER"),
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+
+    def test_brokerage_session_environment_must_match_capability(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "environment"):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-session-environment",
+                capability=capability(environment="PAPER"),
+                session=ready_session(environment="LIVE"),
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+
+    def test_brokerage_session_environment_is_not_free_text(self):
+        with self.assertRaisesRegex(IbkrWebAdapterError, "PAPER or LIVE"):
+            ready_session(environment="SIMULATION")
 
     def test_execution_identity_uses_exec_id_and_perm_id(self):
         execution = IbkrExecutionEvidence.create(

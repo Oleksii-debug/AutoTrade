@@ -18,7 +18,11 @@ from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .capabilities import CapabilitySnapshot
-from .provider_core import ProviderCoreError
+from .provider_core import (
+    BoundReconciliationResponse,
+    ProviderCoreError,
+    require_reconciliation_response,
+)
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
@@ -286,15 +290,19 @@ def parse_order_ack(
 
 
 def parse_account_trades(
-    rows: object,
+    evidence: BoundReconciliationResponse,
     *,
-    account_id: str,
-    environment: str,
     instrument_versions: Mapping[str, str],
     client_ids_by_order_id: Mapping[int, str] | None = None,
 ) -> tuple[ProviderFillEvidence, ...]:
-    """Map recorded account-trade rows to unique economic fills."""
+    """Map one provenance-bound account-trade response to unique fills."""
 
+    rows, account_id, environment = require_reconciliation_response(
+        evidence,
+        provider_id="BINANCE",
+        surface="EXECUTIONS",
+        endpoint=BINANCE_SPOT_ENDPOINTS["EXECUTIONS"],
+    )
     if not isinstance(rows, list):
         raise BinanceSpotAdapterError("trade rows must be an array")
     if not isinstance(instrument_versions, Mapping):

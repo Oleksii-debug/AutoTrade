@@ -524,11 +524,13 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 now_utc=NOW,
                 reservation_context=orchestrator._reservation_context(call_spec),
             )
+            pricing = _pricing_evidence(call_spec, (descriptor(),))
             prepared = orchestrator._prepared_payload(
                 attempt_id=attempt_id,
                 spec=call_spec,
                 decision=decision,
                 descriptor=descriptor(),
+                pricing=pricing,
             )
             orchestrator._append(
                 attempt_id=attempt_id,

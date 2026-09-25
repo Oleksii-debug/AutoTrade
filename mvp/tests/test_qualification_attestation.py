@@ -14,6 +14,9 @@ from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustPolicy,
     SignedQualificationAttestation,
     TrustRoot,
+    parse_qualification_trust_policy,
+    parse_signed_qualification_attestation,
+    qualification_trust_policy_payload,
     verify_qualification_attestation,
 )
 
@@ -145,9 +148,12 @@ def attestation(trust_root, **overrides):
 
 def verify(receipt, store, trust_policy, **overrides):
     values = dict(
+        expected_policy_id=trust_policy.policy_id,
+        expected_policy_version=trust_policy.policy_version,
         expected_source_sha=SOURCE,
         expected_domain="RELEASE",
         expected_gate="FREEZE",
+        expected_package_id="WP-54",
         expected_protocol_id="release-freeze-v1",
         expected_protocol_version="1.0.0",
         expected_requirement_id="release-candidate-freeze",
@@ -177,6 +183,112 @@ class QualificationAttestationTests(unittest.TestCase):
         self.assertEqual(accepted.attestation_digest, value.content_digest)
         self.assertEqual(accepted.policy_id, trust_policy.policy_id)
         self.assertEqual(accepted.trust_root_id, trust_root.root_id)
+
+    def test_candidate_supplied_policy_cannot_replace_pinned_policy(self):
+        trust_root = root()
+        pinned = policy(trust_root)
+        candidate_policy = QualificationTrustPolicy(
+            policy_version="candidate.1",
+            roots=(trust_root,),
+        )
+        value = attestation(trust_root)
+        receipt = SignedQualificationAttestation(value, sign(value))
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            with self.assertRaisesRegex(
+                QualificationTrustError, "pinned policy"
+            ):
+                verify(
+                    receipt,
+                    store,
+                    candidate_policy,
+                    expected_policy_id=pinned.policy_id,
+                    expected_policy_version=pinned.policy_version,
+                )
+
+    def test_attestation_cannot_be_replayed_across_packages(self):
+        trust_root = root()
+        trust_policy = policy(trust_root)
+        value = attestation(trust_root)
+        receipt = SignedQualificationAttestation(value, sign(value))
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            with self.assertRaisesRegex(
+                QualificationTrustError, "package"
+            ):
+                verify(
+                    receipt,
+                    store,
+                    trust_policy,
+                    expected_package_id="WP-60",
+                )
+
+    def test_persisted_receipt_and_policy_round_trip_through_strict_ingress(self):
+        trust_root = root()
+        trust_policy = policy(trust_root)
+        value = attestation(trust_root)
+        serialized_receipt = {
+            "attestation": value.canonical_payload(),
+            "signature_b64": sign(value),
+        }
+        parsed_policy = parse_qualification_trust_policy(
+            qualification_trust_policy_payload(trust_policy)
+        )
+        parsed_receipt = parse_signed_qualification_attestation(
+            serialized_receipt
+        )
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            accepted = verify(
+                parsed_receipt,
+                store,
+                parsed_policy,
+            )
+        self.assertEqual(accepted.attestation_digest, value.content_digest)
+        self.assertEqual(parsed_policy.policy_id, trust_policy.policy_id)
+
+    def test_persisted_trust_ingress_rejects_unknown_fields_and_root_id_drift(self):
+        trust_root = root()
+        value = attestation(trust_root)
+        receipt = {
+            "attestation": {
+                **value.canonical_payload(),
+                "unexpected": "candidate-controlled",
+            },
+            "signature_b64": sign(value),
+        }
+        with self.assertRaisesRegex(
+            QualificationTrustError,
+            "fields mismatch",
+        ):
+            parse_signed_qualification_attestation(receipt)
+
+        policy_payload = qualification_trust_policy_payload(policy(trust_root))
+        policy_payload["roots"][0]["root_id"] = "sha256:" + "0" * 64
+        with self.assertRaisesRegex(
+            QualificationTrustError,
+            "root_id mismatch",
+        ):
+            parse_qualification_trust_policy(policy_payload)
+
+    def test_persisted_attestation_rejects_noncanonical_nested_evidence(self):
+        trust_root = root()
+        value = attestation(trust_root)
+        payload = value.canonical_payload()
+        payload["evidence_refs"][0]["extra"] = "not-signed-schema"
+        with self.assertRaisesRegex(
+            QualificationTrustError,
+            "fields mismatch",
+        ):
+            parse_signed_qualification_attestation(
+                {
+                    "attestation": payload,
+                    "signature_b64": sign(value),
+                }
+            )
 
     def test_self_published_pass_without_valid_signature_fails(self):
         trust_root = root()
@@ -288,7 +400,7 @@ class QualificationAttestationTests(unittest.TestCase):
             ):
                 verify(receipt, store, policy(trust_root))
 
-    def test_revocation_blocks_new_receipts_but_not_historical_one(self):
+    def test_revoked_root_cannot_authorize_backdated_or_new_terminal_receipts(self):
         trust_root = root(
             revoked_at="2026-09-25T03:00:00Z"
         )
@@ -303,27 +415,29 @@ class QualificationAttestationTests(unittest.TestCase):
             completed_at="2026-09-25T03:02:00Z",
             signed_at="2026-09-25T03:03:00Z",
         )
+        backdated_after_compromise = attestation(
+            trust_root,
+            attestation_id=str(
+                uuid5(NAMESPACE_URL, "backdated-after-compromise")
+            ),
+            started_at="2026-09-25T02:50:00Z",
+            completed_at="2026-09-25T02:55:00Z",
+            signed_at="2026-09-25T02:59:59Z",
+        )
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
             publish(store)
-            accepted = verify(
-                SignedQualificationAttestation(
-                    before, sign(before)
-                ),
-                store,
-                trust_policy,
-            )
-            self.assertEqual(accepted.result, "PASS")
-            with self.assertRaisesRegex(
-                QualificationTrustError, "revocation"
-            ):
-                verify(
-                    SignedQualificationAttestation(
-                        after, sign(after)
-                    ),
-                    store,
-                    trust_policy,
-                )
+            for value in (before, after, backdated_after_compromise):
+                with self.subTest(attestation_id=value.attestation_id), self.assertRaisesRegex(
+                    QualificationTrustError, "revoked trust root"
+                ):
+                    verify(
+                        SignedQualificationAttestation(
+                            value, sign(value)
+                        ),
+                        store,
+                        trust_policy,
+                    )
 
     def test_policy_identity_changes_on_revocation_but_root_id_does_not(self):
         active = root()
@@ -412,9 +526,12 @@ class QualificationAttestationTests(unittest.TestCase):
                     ),
                     policy=policy(trust_root),
                     evidence_store=store,
+                    expected_policy_id=policy(trust_root).policy_id,
+                    expected_policy_version=policy(trust_root).policy_version,
                     expected_source_sha=SOURCE,
                     expected_domain="RECOVERY",
                     expected_gate="RESTORE",
+                    expected_package_id="WP-59",
                     expected_protocol_id="recovery-v1",
                     expected_protocol_version="1.0.0",
                     expected_requirement_id="restart-recovery",

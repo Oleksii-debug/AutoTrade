@@ -37,8 +37,18 @@ def _text(value: object, *, name: str) -> str:
 
 def _safe_relative(value: object) -> str:
     raw = _text(value, name="bundle file path")
-    if "\\" in raw or ":" in raw or any(ord(char) < 32 for char in raw):
-        raise InstallerManifestError("bundle file path is unsafe for Windows")
+    if "\\" in raw:
+        raise InstallerManifestError(
+            "bundle file path contains a Windows separator and is unsafe for Windows"
+        )
+    if any(char in raw for char in ':*?"<>|') or any(
+        ord(char) < 32 for char in raw
+    ):
+        raise InstallerManifestError(
+            "bundle file path contains a Windows-forbidden character"
+        )
+    if "//" in raw:
+        raise InstallerManifestError("bundle file path is unsafe and noncanonical")
     path = PurePosixPath(raw)
     if path.is_absolute() or not path.parts or any(
         part in {"", ".", ".."} for part in path.parts
@@ -46,10 +56,15 @@ def _safe_relative(value: object) -> str:
         raise InstallerManifestError("bundle file path is unsafe")
     for part in path.parts:
         if part.endswith((" ", ".")):
-            raise InstallerManifestError("bundle file path is unsafe for Windows")
+            raise InstallerManifestError(
+                "bundle file path has a trailing space or dot and is unsafe for Windows"
+            )
         basename = part.split(".", 1)[0].upper()
         if basename in _WINDOWS_RESERVED_BASENAMES:
-            raise InstallerManifestError("bundle file path uses a reserved Windows name")
+            raise InstallerManifestError(
+                "bundle file path uses a reserved Windows name "
+                "(reserved Windows device)"
+            )
     return path.as_posix()
 
 

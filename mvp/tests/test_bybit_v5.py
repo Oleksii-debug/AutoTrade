@@ -194,6 +194,50 @@ class BybitV5AdapterTests(unittest.TestCase):
                 observed_at="2026-09-24T20:00:00",
             )
 
+    def test_transport_loss_after_possible_write_is_unknown(self):
+        result = parse_submission_response(
+            attempt_id=str(uuid4()),
+            client_order_id="client-transport-loss",
+            environment="MAINNET",
+            response=None,
+            observed_at="2026-09-24T20:00:00Z",
+            transport_ambiguous=True,
+        )
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
+        self.assertEqual(result["reason_code"], "BYBIT_TRANSPORT_AMBIGUOUS")
+        self.assertIsNone(result["provider_received_at"])
+        self.assertEqual(result["evidence"], [])
+
+    def test_transport_ambiguity_cannot_coexist_with_provider_response(self):
+        with self.assertRaisesRegex(ProviderCoreError, "authoritative response"):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                client_order_id="client-contradiction",
+                environment="MAINNET",
+                response={"retCode": 0},
+                observed_at="2026-09-24T20:00:00Z",
+                transport_ambiguous=True,
+            )
+
+    def test_missing_response_requires_explicit_ambiguity_and_timestamp(self):
+        with self.assertRaisesRegex(ProviderCoreError, "required"):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                client_order_id="client-missing",
+                environment="MAINNET",
+                response=None,
+                observed_at="2026-09-24T20:00:00Z",
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "observed_at"):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                client_order_id="client-missing-time",
+                environment="MAINNET",
+                response=None,
+                transport_ambiguous=True,
+            )
+
     def test_ambiguous_bybit_codes_require_reconciliation(self):
         for code in (429, 10000, 10014, 10016):
             with self.subTest(code=code):

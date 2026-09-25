@@ -800,7 +800,7 @@ class AllocationTests(unittest.TestCase):
                     desired_notional="1000",
                     price="10",
                     lot_size="1",
-                    expected_return_rate="0.06",
+                    expected_return_rate="0.01",
                     fee_floor="10",
                 ),
                 ObjectiveCandidate.create(

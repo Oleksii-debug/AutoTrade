@@ -943,6 +943,16 @@ def _canonical_evidence_value(value):
     raise TypeError(f"unsupported allocation evidence value type: {type(value).__name__}")
 
 
+def _freeze_evidence_value(value):
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: _freeze_evidence_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, list):
+        return tuple(_freeze_evidence_value(item) for item in value)
+    return value
+
+
 def _canonical_evidence_json(value) -> str:
     return json.dumps(
         _canonical_evidence_value(value),
@@ -1043,7 +1053,7 @@ class ImmutableAllocationEvidence:
         object.__setattr__(self, "schema_version", schema_version)
         object.__setattr__(self, "observed_at", normalized_observed)
         object.__setattr__(self, "valid_until", normalized_valid_until)
-        object.__setattr__(self, "payload", MappingProxyType(normalized_payload))
+        object.__setattr__(self, "payload", _freeze_evidence_value(normalized_payload))
         object.__setattr__(self, "digest", digest)
 
     @classmethod

@@ -670,7 +670,7 @@ class WhiteBitDurableNonceAllocator:
             }
             allocation_identity = (
                 f"{self.aggregate_id}|{version}|{nonce}|"
-                f"{committed_at.isoformat()}|{id(payload)}"
+                f"{committed_at.isoformat()}"
             )
             envelope = {
                 "event_id": "whitebit-nonce-"
@@ -690,11 +690,10 @@ class WhiteBitDurableNonceAllocator:
                     continue
                 raise
             if not result.inserted:
-                # A generated allocation identity must never alias an existing
-                # allocation. Treat that as an integrity failure, not reuse.
-                raise ProviderTransportError(
-                    "WhiteBIT nonce allocation identity unexpectedly collided"
-                )
+                # Another local allocator committed this exact candidate first.
+                # Re-read the durable aggregate and allocate a strictly larger
+                # nonce; never reuse the already-consumed value.
+                continue
             return nonce
         raise ProviderTransportError(
             "WhiteBIT nonce allocation exceeded local contention budget"

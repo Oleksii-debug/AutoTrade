@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp.authority import (
+    AuthoritativeRiskSnapshot,
     AuthorityConflict,
     AuthorityPolicy,
     AuthorityService,
@@ -76,6 +77,40 @@ def _risk_policy():
         min_margin_headroom="0.20",
         max_stress_loss="500",
     )
+
+
+def _install_risk_resolver(authority, *, context, risk_policy):
+    if authority.risk_authority_resolver is not None:
+        return
+
+    def resolve(request):
+        return AuthoritativeRiskSnapshot(
+            context=context,
+            risk_policy=risk_policy,
+            account_id=request.account_id,
+            environment=request.environment,
+            provider_id=request.provider_id,
+            instrument_version=request.instrument_version,
+            capability_snapshot_id=request.capability_snapshot_id,
+            reconciliation_checkpoint_event_id=request.reconciliation_checkpoint_event_id,
+            journal_sequence_cut=request.journal_sequence_cut,
+            reservation_version=request.reservation_version,
+            reservation_state_digest=request.reservation_state_digest,
+            authority_policy_id=request.authority_policy_id,
+            authority_policy_version=request.authority_policy_version,
+            evaluated_at=request.evaluated_at,
+            evidence_refs={
+                dimension: f"test:{dimension.lower()}"
+                for dimension in (
+                    "PORTFOLIO", "MARKET", "MARGIN", "POLICY",
+                    "RECONCILIATION", "CAPABILITY", "BORROW", "STRESS",
+                    "FX", "FACTORS", "LIQUIDITY", "LIQUIDATION",
+                    "SETTLEMENT", "OPTION_LIFECYCLE", "FUTURES_LIFECYCLE",
+                )
+            },
+        )
+
+    authority.risk_authority_resolver = resolve
 
 
 def _checkpoint(
@@ -193,6 +228,11 @@ def _admit(authority, reservations, checkpoint, **overrides):
         now=NOW,
     )
     values.update(overrides)
+    _install_risk_resolver(
+        authority,
+        context=values["risk_context"],
+        risk_policy=values["risk_policy"],
+    )
     return authority.admit(**values)
 
 

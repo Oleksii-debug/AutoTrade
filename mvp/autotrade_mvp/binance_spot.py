@@ -39,6 +39,7 @@ BINANCE_SPOT_ENDPOINTS: Mapping[str, str] = MappingProxyType(
 
 _CLIENT_ID = re.compile(r"^[A-Za-z0-9_.:/-]{1,36}$")
 _EXCHANGE_INFO_RULES_TOKEN = object()
+_REFERENCE_PRICE_TOKEN = object()
 _ALLOWED_TIF = frozenset({"GTC", "IOC", "FOK"})
 
 
@@ -159,6 +160,87 @@ class BinanceSpotOrderIntent:
             quantity=qty,
             price=px,
             time_in_force=tif,
+        )
+
+
+@dataclass(frozen=True)
+class BinanceSpotReferencePrice:
+    """Provider-originated Spot reference price used for market filter checks."""
+
+    instrument_version: str
+    symbol: str
+    price: Decimal
+    observed_at: datetime
+    source_sha256: str
+    _verification_token: InitVar[object | None] = None
+
+    def __post_init__(self, _verification_token: object | None) -> None:
+        if _verification_token is not _REFERENCE_PRICE_TOKEN:
+            raise BinanceSpotAdapterError(
+                "reference price must come from canonical provider payload parsing"
+            )
+        instrument = _text(self.instrument_version, name="instrument_version")
+        symbol = _text(self.symbol, name="symbol")
+        if symbol != symbol.upper():
+            raise BinanceSpotAdapterError("reference-price symbol must be uppercase")
+        price = _decimal(self.price, name="reference_price", positive=True)
+        observed_at = _utc(self.observed_at, name="reference_price observed_at")
+        digest = _text(self.source_sha256, name="reference_price source_sha256")
+        if (
+            len(digest) != 71
+            or not digest.startswith("sha256:")
+            or any(ch not in "0123456789abcdef" for ch in digest[7:])
+        ):
+            raise BinanceSpotAdapterError(
+                "reference_price source_sha256 must be canonical lowercase SHA-256"
+            )
+        object.__setattr__(self, "instrument_version", instrument)
+        object.__setattr__(self, "symbol", symbol)
+        object.__setattr__(self, "price", price)
+        object.__setattr__(self, "observed_at", observed_at)
+        object.__setattr__(self, "source_sha256", digest)
+
+    @classmethod
+    def from_provider_payload(
+        cls,
+        *,
+        instrument_version: str,
+        payload: Mapping[str, object],
+    ) -> "BinanceSpotReferencePrice":
+        if not isinstance(payload, Mapping):
+            raise TypeError("reference-price payload must be a mapping")
+        symbol = _text(payload.get("symbol"), name="reference-price symbol")
+        if symbol != symbol.upper():
+            raise BinanceSpotAdapterError("reference-price symbol must be uppercase")
+        price = _decimal(
+            payload.get("referencePrice"),
+            name="referencePrice",
+            positive=True,
+        )
+        timestamp_text = _millis(
+            payload.get("timestamp"),
+            name="reference-price timestamp",
+        )
+        observed_at = datetime.fromisoformat(
+            timestamp_text.replace("Z", "+00:00")
+        )
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        return cls(
+            instrument_version=_text(
+                instrument_version,
+                name="instrument_version",
+            ),
+            symbol=symbol,
+            price=price,
+            observed_at=observed_at,
+            source_sha256="sha256:" + sha256(canonical).hexdigest(),
+            _verification_token=_REFERENCE_PRICE_TOKEN,
         )
 
 

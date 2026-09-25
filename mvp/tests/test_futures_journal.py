@@ -61,7 +61,11 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             timezone_id="UTC",
             effective_from=utc(1),
             payoff=payoff,
-            underlying_id="TEST" if payoff == "LINEAR" else "BTC",
+            underlying_id=(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa@1"
+                if payoff == "LINEAR"
+                else "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb@1"
+            ),
             expiry=utc(30, 21),
             last_trade_at=utc(30, 20),
             delivery_cutoff=utc(30, 20),

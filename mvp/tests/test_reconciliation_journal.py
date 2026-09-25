@@ -26,22 +26,22 @@ from mvp.autotrade_mvp.reconciliation_journal import (
 )
 
 
-def snapshot():
+def snapshot(*, account_id="test-account", environment="PAPER"):
     return SnapshotConsistencyEvidence(
         provider_id="TEST_PROVIDER",
-        account_id="test-account",
-        environment="PAPER",
+        account_id=account_id,
+        environment=environment,
         mode="ATOMIC",
         query_started_at="2026-09-24T17:00:00Z",
         query_completed_at="2026-09-24T19:00:00Z",
     )
 
 
-def fill():
+def fill(*, account_id="test-account", environment="PAPER"):
     return ProviderFillEvidence.create(
         provider_id="TEST_PROVIDER",
-        account_id="test-account",
-        environment="PAPER",
+        account_id=account_id,
+        environment=environment,
         provider_execution_id="e1",
         client_order_id="c1",
         instrument="ABC",
@@ -86,6 +86,22 @@ def reconciliation(**overrides):
         provider_activity_account_id="test-account",
     )
     values.update(overrides)
+    # Keep reusable fixture evidence bound to the exact requested account/scope.
+    # Production reconciliation correctly rejects cross-account evidence; tests
+    # that vary account/environment must not accidentally reuse default evidence.
+    account_id = values["account_id"]
+    environment = values["environment"]
+    if "provider_fills" not in overrides:
+        values["provider_fills"] = [
+            fill(account_id=account_id, environment=environment)
+        ]
+    if "snapshot_consistency" not in overrides:
+        values["snapshot_consistency"] = snapshot(
+            account_id=account_id,
+            environment=environment,
+        )
+    if "provider_activity_account_id" not in overrides:
+        values["provider_activity_account_id"] = account_id
     return reconcile_account(**values)
 
 

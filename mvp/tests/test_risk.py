@@ -5,8 +5,11 @@ from mvp.autotrade_mvp.risk import (
     RiskContext,
     RiskIntent,
     RiskPolicy,
+    bind_risk_decision,
+    evaluate_bound_risk,
     evaluate_risk,
     risk_decision_fingerprint,
+    validate_bound_risk_decision,
 )
 
 
@@ -1019,6 +1022,66 @@ class IndependentRiskTests(unittest.TestCase):
     def test_risk_decision_fingerprint_rejects_wrong_type(self):
         with self.assertRaises(TypeError):
             risk_decision_fingerprint({"admitted": True})
+
+    def test_bound_risk_decision_is_content_addressed_and_time_bounded(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        decision = evaluate_bound_risk(
+            intent,
+            context(),
+            policy(),
+            intent_hash="sha256:" + "a" * 64,
+            policy_version=3,
+            capability_snapshot_id="capability-snapshot-17",
+            evaluated_at="2026-09-24T18:00:00Z",
+            valid_until="2026-09-24T18:00:30Z",
+        )
+        self.assertTrue(decision.admitted)
+        self.assertEqual(decision.state_version, 7)
+        self.assertEqual(decision.policy_version, 3)
+        self.assertEqual(
+            decision.decision_id,
+            "risk:sha256:" + risk_decision_fingerprint(decision),
+        )
+        validate_bound_risk_decision(
+            decision, now="2026-09-24T18:00:15Z"
+        )
+        with self.assertRaisesRegex(ValueError, "expired"):
+            validate_bound_risk_decision(
+                decision, now="2026-09-24T18:00:30Z"
+            )
+
+    def test_risk_binding_rejects_partial_or_invalid_evidence(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            ),
+            context(),
+            policy(),
+        )
+        with self.assertRaisesRegex(ValueError, "precede"):
+            bind_risk_decision(
+                decision,
+                intent_hash="h",
+                state_version=7,
+                policy_version=1,
+                capability_snapshot_id="cap",
+                evaluated_at="2026-09-24T18:00:30Z",
+                valid_until="2026-09-24T18:00:30Z",
+            )
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            bind_risk_decision(
+                decision,
+                intent_hash="h",
+                state_version=7,
+                policy_version=0,
+                capability_snapshot_id="cap",
+                evaluated_at="2026-09-24T18:00:00Z",
+                valid_until="2026-09-24T18:00:30Z",
+            )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,83 @@
+openapi: 3.1.0
+info:
+  title: AutoTrade Host API
+  version: 2.0.0
+  description: Canonical UI/host boundary. Accepted commands are not financial-completion claims.
+servers:
+  - url: https://localhost
+paths:
+  /api/v1/state:
+    get:
+      operationId: getState
+      responses:
+        "200":
+          description: Current durable projection snapshot
+          content:
+            application/json:
+              schema:
+                $ref: ../jsonschema/ui.schema.json#/$defs/UiSnapshot
+  /api/v1/commands:
+    post:
+      operationId: submitCommand
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../jsonschema/ui.schema.json#/$defs/UiCommand
+      responses:
+        "200":
+          description: Command admission result, not financial completion
+          content:
+            application/json:
+              schema:
+                $ref: ../jsonschema/ui.schema.json#/$defs/CommandResult
+        "409":
+          description: State/idempotency conflict
+          content:
+            application/json:
+              schema:
+                $ref: ../jsonschema/ui.schema.json#/$defs/CommandResult
+  /api/v1/operations/{operation_id}:
+    get:
+      operationId: getOperation
+      parameters:
+        - in: path
+          name: operation_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Current operation phase
+          content:
+            application/json:
+              schema:
+                $ref: ../jsonschema/ui.schema.json#/$defs/OperationResult
+  /api/v1/events:
+    get:
+      operationId: streamEvents
+      parameters:
+        - in: query
+          name: after
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Resumable projection event stream; a detected cursor gap requires /api/v1/state resnapshot
+          content:
+            text/event-stream:
+              schema:
+                type: string
+  /api/v1/health:
+    get:
+      operationId: getHealth
+      responses:
+        "200":
+          description: Component readiness/degradation status
+          content:
+            application/json:
+              schema:
+                $ref: ../jsonschema/provider.schema.json#/$defs/HealthResult

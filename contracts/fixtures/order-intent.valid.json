@@ -1,0 +1,22 @@
+{
+  "intent_id": "22222222-2222-4222-8222-222222222222",
+  "intent_version": "1",
+  "account_id": "paper-account-1",
+  "environment": "PAPER",
+  "instrument_version": "BTCUSD@provider:1",
+  "side": "BUY",
+  "quantity": {"value": "0.01", "unit": "BTC"},
+  "order_type": "LIMIT",
+  "limit_price": "60000",
+  "time_in_force": "GTC",
+  "reduce_only": false,
+  "maximum_cost": {"amount": "610", "currency": "USD"},
+  "maximum_slippage": "0.002",
+  "expires_at": "2026-09-22T06:31:00Z",
+  "decision_ref": "decision-1",
+  "portfolio_target_ref": "target-1",
+  "capability_snapshot_id": "33333333-3333-4333-8333-333333333333",
+  "expected_state_version": "42",
+  "client_order_id": "at-22222222-v1",
+  "intent_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

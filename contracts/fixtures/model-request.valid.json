@@ -1,0 +1,12 @@
+{
+  "request_id": "11111111-1111-4111-8111-111111111111",
+  "role": "market_critic",
+  "task_schema": "autotrade.task/1.0.0",
+  "data_classification": "PRIVATE",
+  "allowed_model_ids": ["provider/model-a"],
+  "privacy": "PRIVATE",
+  "budget_reservation": {"amount": "0.01", "currency": "USD"},
+  "deadline": "2026-09-22T06:30:00Z",
+  "evidence_refs": [],
+  "allowed_tools": []
+}

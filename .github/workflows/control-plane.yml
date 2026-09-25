@@ -1,0 +1,38 @@
+name: control-plane
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "control/tools/**"
+      - "tests/Control/**"
+      - "provenance/first-party-reuse-autosport-swarm-control-2026-09-22.md"
+      - ".github/workflows/control-plane.yml"
+  pull_request:
+    paths:
+      - "control/tools/**"
+      - "tests/Control/**"
+      - ".github/workflows/control-plane.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  registry:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m unittest discover -s tests/Control -v

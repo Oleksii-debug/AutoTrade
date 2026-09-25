@@ -1,0 +1,82 @@
+{
+  "schema_version": "1.0.0",
+  "baseline_date": "2026-09-22",
+  "policy": "No source import is approved solely because a repository is public. Exact revision, license/rights basis, notices, dependency graph and characterization evidence are required.",
+  "components": [
+    {
+      "name": "QuantConnect LEAN",
+      "repository": "QuantConnect/Lean",
+      "revision": "985ef30ad3ac774218c5ac516b4cb0aa2655730f",
+      "observed_commit_date": "2026-09-18T14:03:24Z",
+      "license": "Apache-2.0",
+      "license_blob_sha": "6faed93d21a1a9551b11434e87c9000a393d73f2",
+      "adoption_state": "SELECTED_FOUNDATION_PENDING_WP02_BUILD_QUALIFICATION",
+      "source_import_allowed": "PENDING_EXACT_COMPOSITION_AND_NOTICE_REVIEW",
+      "revision_type": "commit",
+      "tree": "4b163abf9fca60e731b76510b9ae6721ffff7e6c",
+      "identity_evidence_url": "https://api.github.com/repos/QuantConnect/Lean/commits/985ef30ad3ac774218c5ac516b4cb0aa2655730f"
+    },
+    {
+      "name": "WhiteBit.Net",
+      "repository": "JKorf/WhiteBit.Net",
+      "revision": "5ef49daa517abe86a8e35a85256db184cffdfdb2",
+      "observed_commit_date": "2026-09-21T09:56:08Z",
+      "license": "MIT",
+      "license_blob_sha": "caa4070bbb26bbb7ab7d137725697cf690393d5b",
+      "adoption_state": "CANDIDATE_FOR_WP24",
+      "source_import_allowed": "PREFER_DIRECT_DEPENDENCY_AFTER_EXACT_GRAPH_QUALIFICATION"
+    },
+    {
+      "name": "CryptoExchange.Net",
+      "repository": "JKorf/CryptoExchange.Net",
+      "revision": "cecfbcba48b84ff56109c7d1c67f548ba0eabf22",
+      "observed_commit_date": "2026-09-21T09:54:15Z",
+      "license": "MIT",
+      "license_blob_sha": "caa4070bbb26bbb7ab7d137725697cf690393d5b",
+      "adoption_state": "CANDIDATE_SHARED_TRANSPORT_FOR_WP24_AND_OTHER_JKORF_ADAPTERS",
+      "source_import_allowed": "PREFER_DIRECT_DEPENDENCY_AFTER_EXACT_GRAPH_QUALIFICATION"
+    },
+    {
+      "name": "Alpaca official C# SDK",
+      "repository": "alpacahq/alpaca-trade-api-csharp",
+      "revision": "42043eafdefa4fc2314ff24be8c08d533dffeeb8",
+      "observed_commit_date": "2026-09-15T13:48:39Z",
+      "license": "Apache-2.0",
+      "license_blob_sha": "261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64",
+      "adoption_state": "CANDIDATE_FOR_WP27_STABLE_RELEASE_7_2_2_PREFERRED_FOR_FIRST_QUALIFICATION",
+      "source_import_allowed": "PREFER_DIRECT_DEPENDENCY_AFTER_STABLE_PACKAGE_AND_TRANSITIVE_REVIEW"
+    },
+    {
+      "name": "Autosport first-party source",
+      "repository": "Oleksii-debug/Autosport",
+      "revision": "cb102d85f0c820c7097875191deca73e53ec94f5",
+      "license": "UNRESOLVED_FIRST_PARTY_RIGHTS_RECORD",
+      "root_license_files_checked": [
+        "LICENSE",
+        "LICENSE.md",
+        "LICENSE.txt",
+        "COPYING",
+        "NOTICE"
+      ],
+      "root_license_file_found": false,
+      "adoption_state": "NARROW_NEUTRAL_MIGRATION_IN_PROGRESS",
+      "source_import_allowed": "OWNER_AUTHORIZED_MIGRATION_FOR_PROJECT_DEVELOPMENT; RELEASE_DISTRIBUTION_RIGHTS_CHAIN_STILL_REQUIRES_WP03_RECORD"
+    },
+    {
+      "name": "Nika Core first-party source",
+      "repository": "Oleksii-debug/Nika-Core",
+      "revision": "2f7be3389109d7dd6fb3bae40540fe0cf2eba695",
+      "license": "UNRESOLVED_FIRST_PARTY_RIGHTS_RECORD",
+      "root_license_files_checked": [
+        "LICENSE",
+        "LICENSE.md",
+        "LICENSE.txt",
+        "COPYING",
+        "NOTICE"
+      ],
+      "root_license_file_found": false,
+      "adoption_state": "CONTRACT_SEMANTICS_CHARACTERIZED_NO_RUNTIME_DEPENDENCY",
+      "source_import_allowed": "OWNER_AUTHORIZED_SEMANTIC_ADAPTATION; RELEASE_DISTRIBUTION_RIGHTS_CHAIN_STILL_REQUIRES_WP03_RECORD"
+    }
+  ]
+}

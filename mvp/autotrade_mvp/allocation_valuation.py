@@ -78,11 +78,14 @@ def _instant(value, *, name: str) -> datetime:
 def _sha256(value, *, name: str) -> str:
     text = _text(value, name=name)
     if (
-        len(text) != 64
+        len(text) != 71
+        or not text.startswith("sha256:")
         or text.lower() != text
-        or any(character not in "0123456789abcdef" for character in text)
+        or any(character not in "0123456789abcdef" for character in text[7:])
     ):
-        raise AllocationValuationError(f"{name} must be lowercase sha256 hex")
+        raise AllocationValuationError(
+            f"{name} must be a canonical sha256:<64 lowercase hex> digest"
+        )
     return text
 
 

@@ -422,7 +422,10 @@ def validate_intent_market_rules(
         raise WhiteBitAdapterError("provider market is not trade-enabled")
     if intent.product_family == "SPOT" and rules.market_type != "SPOT":
         raise WhiteBitAdapterError("spot intent requires spot market metadata")
-    if intent.product_family == "FUTURES" and rules.market_type != "FUTURES":
+    if (
+        intent.product_family == "FUTURES"
+        and rules.market_type not in {"FUTURES", "TRADFIFUTURES"}
+    ):
         raise WhiteBitAdapterError("futures intent requires futures market metadata")
     if intent.product_family == "COLLATERAL" and not rules.is_collateral:
         raise WhiteBitAdapterError("collateral intent requires collateral-enabled market")

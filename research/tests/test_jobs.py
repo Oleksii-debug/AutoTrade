@@ -1,3 +1,4 @@
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
@@ -73,12 +74,25 @@ def resolution_proof(
     )
 
 
-def result_artifact(artifact_store, *, data=b"accepted-result"):
+def result_artifact(
+    artifact_store,
+    *,
+    job_id,
+    generation,
+    input_hashes,
+    data=b"accepted-result",
+):
     manifest = artifact_store.publish_bytes(
         artifact_id=str(uuid4()),
         data=data,
         media_type="application/octet-stream",
         rights={"storage": True, "export": False},
+        source_refs=input_hashes,
+        metadata={
+            "artifact_kind": "RESEARCH_JOB_RESULT",
+            "job_id": job_id,
+            "job_generation": generation,
+        },
     )
     return f"artifact:{manifest['artifact_id']}@{manifest['sha256']}"
 
@@ -159,12 +173,20 @@ class ResearchJobStoreTests(unittest.TestCase):
                     output_refs=["artifact:stale"],
                     now=self.now + timedelta(seconds=12),
                 )
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            accepted = result_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=int(second["generation"]),
+                input_hashes=job["input_hashes"],
+            )
             self.assertTrue(
                 store.succeed(
                     job["job_id"],
                     worker_id="worker-b",
                     generation=int(second["generation"]),
-                    output_refs=["artifact:accepted"],
+                    output_refs=[accepted],
+                    artifact_store=artifacts,
                     now=self.now + timedelta(seconds=12),
                 )
             )
@@ -224,7 +246,7 @@ class ResearchJobStoreTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "jobs.sqlite3"
             job_id = str(uuid4())
-            with sqlite3.connect(path) as connection:
+            with closing(sqlite3.connect(path)) as connection:
                 connection.executescript(
                     """
                     CREATE TABLE schema_migrations(
@@ -366,7 +388,14 @@ class ResearchJobStoreTests(unittest.TestCase):
             artifact_store = ArtifactStore(
                 Path(directory) / "external-resolution-artifacts"
             )
-            outputs = [result_artifact(artifact_store)]
+            outputs = [
+                result_artifact(
+                    artifact_store,
+                    job_id=job["job_id"],
+                    generation=generation,
+                    input_hashes=job["input_hashes"],
+                )
+            ]
             artifact_store, evidence = resolution_proof(
                 directory,
                 job_id=job["job_id"],
@@ -628,8 +657,20 @@ class ResearchJobStoreTests(unittest.TestCase):
             artifacts = ArtifactStore(
                 Path(directory) / "external-resolution-artifacts"
             )
-            output_a = result_artifact(artifacts, data=b"output-a")
-            output_b = result_artifact(artifacts, data=b"output-b")
+            output_a = result_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=generation,
+                input_hashes=job["input_hashes"],
+                data=b"output-a",
+            )
+            output_b = result_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=generation,
+                input_hashes=job["input_hashes"],
+                data=b"output-b",
+            )
             artifacts, evidence = resolution_proof(
                 directory,
                 job_id=job["job_id"],
@@ -668,8 +709,20 @@ class ResearchJobStoreTests(unittest.TestCase):
             artifacts = ArtifactStore(
                 Path(directory) / "external-resolution-artifacts"
             )
-            output_a = result_artifact(artifacts, data=b"a")
-            output_b = result_artifact(artifacts, data=b"b")
+            output_a = result_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=generation,
+                input_hashes=job["input_hashes"],
+                data=b"a",
+            )
+            output_b = result_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=generation,
+                input_hashes=job["input_hashes"],
+                data=b"b",
+            )
             artifacts, evidence = resolution_proof(
                 directory,
                 job_id=job["job_id"],
@@ -866,12 +919,28 @@ class ResearchJobStoreTests(unittest.TestCase):
             job, _ = self._enqueue(store)
             claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
             generation = int(claimed["generation"])
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            first_result = result_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=generation,
+                input_hashes=job["input_hashes"],
+                data=b"first",
+            )
+            second_result = result_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=generation,
+                input_hashes=job["input_hashes"],
+                data=b"second",
+            )
             self.assertTrue(
                 store.succeed(
                     job["job_id"],
                     worker_id="worker-a",
                     generation=generation,
-                    output_refs=["artifact:11111111-1111-4111-8111-111111111111@sha256:" + "1" * 64],
+                    output_refs=[first_result],
+                    artifact_store=artifacts,
                     now=self.now + timedelta(seconds=1),
                 )
             )
@@ -880,7 +949,8 @@ class ResearchJobStoreTests(unittest.TestCase):
                     job["job_id"],
                     worker_id="worker-a",
                     generation=generation,
-                    output_refs=["artifact:11111111-1111-4111-8111-111111111111@sha256:" + "1" * 64],
+                    output_refs=[first_result],
+                    artifact_store=artifacts,
                     now=self.now + timedelta(seconds=2),
                 )
             )
@@ -889,7 +959,8 @@ class ResearchJobStoreTests(unittest.TestCase):
                     job["job_id"],
                     worker_id="worker-a",
                     generation=generation,
-                    output_refs=["artifact:22222222-2222-4222-8222-222222222222@sha256:" + "2" * 64],
+                    output_refs=[second_result],
+                    artifact_store=artifacts,
                     now=self.now + timedelta(seconds=3),
                 )
 
@@ -927,30 +998,40 @@ class ResearchJobStoreTests(unittest.TestCase):
             job, _ = self._enqueue(store, "canonical-direct-order")
             claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
             generation = int(claimed["generation"])
-            first = (
-                "artifact:44444444-4444-4444-8444-444444444444@sha256:"
-                + "4" * 64
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            first = result_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=generation,
+                input_hashes=job["input_hashes"],
+                data=b"first",
             )
-            second = (
-                "artifact:55555555-5555-4555-8555-555555555555@sha256:"
-                + "5" * 64
+            second = result_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=generation,
+                input_hashes=job["input_hashes"],
+                data=b"second",
             )
+            expected = sorted([first, second])
             self.assertTrue(
                 store.succeed(
                     job["job_id"],
                     worker_id="worker-a",
                     generation=generation,
                     output_refs=[second, first],
+                    artifact_store=artifacts,
                     now=self.now + timedelta(seconds=1),
                 )
             )
-            self.assertEqual(store.get(job["job_id"])["output_refs"], [first, second])
+            self.assertEqual(store.get(job["job_id"])["output_refs"], expected)
             self.assertFalse(
                 store.succeed(
                     job["job_id"],
                     worker_id="worker-a",
                     generation=generation,
-                    output_refs=[first, second],
+                    output_refs=expected,
+                    artifact_store=artifacts,
                     now=self.now + timedelta(seconds=2),
                 )
             )

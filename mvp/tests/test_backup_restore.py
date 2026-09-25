@@ -139,38 +139,26 @@ def _publish_sender_fence_evidence(
     new_owner_epoch: int,
     fenced_at: str,
 ) -> str:
-    payload = (
-        json.dumps(
-            {
-                "schema_version": 1,
-                "kind": "AUTOTRADE_SENDER_FENCE_EVIDENCE",
-                "backup_manifest_sha256": backup_manifest_sha256,
-                "old_owner_id": old_owner_id,
-                "old_owner_epoch": old_owner_epoch,
-                "new_owner_id": new_owner_id,
-                "new_owner_epoch": new_owner_epoch,
-                "fenced_at": fenced_at,
-                "method": "provider-session-revoked-and-host-fenced",
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        )
-        + "\n"
-    ).encode("utf-8")
-    digest = sha256(payload).hexdigest()
-    object_path = (
-        restored
-        / "artifacts"
-        / "objects"
-        / "sha256"
-        / digest[:2]
-        / digest
-    )
-    object_path.parent.mkdir(parents=True, exist_ok=True)
-    object_path.write_bytes(payload)
-    return "sha256:" + digest
+    """Test helper that locates, but cannot mint, the authority-issued fence."""
+
+    del fenced_at
+    store = JournalStore(restored / "state" / "journal.sqlite3")
+    for event in store.load_events("recovery_owner", "default"):
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        fence = payload.get("sender_fence")
+        if (
+            payload.get("previous_owner_id") == old_owner_id
+            and payload.get("previous_owner_epoch") == str(old_owner_epoch)
+            and payload.get("owner_id") == new_owner_id
+            and payload.get("owner_epoch") == str(new_owner_epoch)
+            and isinstance(fence, dict)
+            and fence.get("context_sha256") == backup_manifest_sha256
+            and fence.get("method") == "DURABLE_OWNER_EPOCH_FINAL_SEND_BARRIER"
+        ):
+            return str(event["event_id"])
+    raise AssertionError("authority-issued sender fence event was not found")
 
 
 def _after_restore(marker: dict[str, object], seconds: int) -> str:
@@ -572,7 +560,10 @@ class BackupRestoreTests(unittest.TestCase):
         )
         restored_store = JournalStore(restored / "state" / "journal.sqlite3")
         controller = RecoveryController(owner_store=restored_store)
-        controller.start("restored-owner")
+        controller.start(
+            "restored-owner",
+            fence_context_sha256=marker["backup_manifest_sha256"],
+        )
         checkpoint_id = self._record_durable_ready(
             controller, restored_store, reconciliation_id="restore-readiness"
         )
@@ -698,8 +689,7 @@ class BackupRestoreTests(unittest.TestCase):
             )
             controller.transfer_owner(
                 new_owner_id="replacement-owner",
-                old_sender_fenced=True,
-                reconciled=True,
+                fence_context_sha256=marker["backup_manifest_sha256"],
             )
             checkpoint_id = self._record_durable_ready(
                 controller,
@@ -851,8 +841,7 @@ class BackupRestoreTests(unittest.TestCase):
 
             controller.transfer_owner(
                 new_owner_id="later-owner",
-                old_sender_fenced=True,
-                reconciled=True,
+                fence_context_sha256=marker["backup_manifest_sha256"],
             )
             self.assertTrue(restore_requires_reconciliation(restored))
 

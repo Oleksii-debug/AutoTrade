@@ -25,6 +25,10 @@ from mvp.autotrade_mvp.securities_borrow import (
     borrow_resource_key,
     incremental_short_borrow_quantity,
 )
+from mvp.tests.securities_borrow_evidence_helpers import (
+    artifact_store_for,
+    bind_provider_evidence,
+)
 
 
 INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
@@ -63,8 +67,11 @@ def _borrow_evidence(capacity="100"):
     )
 
 
-def _resource_evidence(*, capacity="100", cash="10000"):
-    borrow = _borrow_evidence(capacity)
+def _resource_evidence(store, *, capacity="100", cash="10000"):
+    borrow = bind_provider_evidence(
+        artifact_store_for(store),
+        _borrow_evidence(capacity),
+    )
     key = borrow.resource_key
     return ResourceAvailabilityEvidence(
         provider_id=PROVIDER_ID,
@@ -98,7 +105,7 @@ def _snapshot():
     )
 
 
-def _result(*, local_borrow="40", provider_borrow="40", recalled=False):
+def _result(store, *, local_borrow="40", provider_borrow="40", recalled=False):
     key = _borrow_key()
     return reconcile_account(
         provider_id=PROVIDER_ID,
@@ -114,7 +121,7 @@ def _result(*, local_borrow="40", provider_borrow="40", recalled=False):
         coverage_start="2026-09-25T05:00:00Z",
         coverage_end="2026-09-25T05:01:00Z",
         pagination_complete=True,
-        resource_availability=_resource_evidence(),
+        resource_availability=_resource_evidence(store),
         local_borrowed_resources={key: local_borrow},
         provider_borrowed_resources={key: provider_borrow},
         active_borrow_recall_resources=((key,) if recalled else ()),
@@ -173,6 +180,7 @@ def _risk_context(*, reserved="-30", borrow_available=True):
 
 def _checkpoint(store, *, recalled=False, local_borrow="40", provider_borrow="40"):
     result = _result(
+        store,
         recalled=recalled,
         local_borrow=local_borrow,
         provider_borrow=provider_borrow,
@@ -187,11 +195,15 @@ def _checkpoint(store, *, recalled=False, local_borrow="40", provider_borrow="40
         observed_at="2026-09-25T05:00:30Z",
         host_id="borrow-test-host",
         owner_epoch="1",
+        evidence_artifact_store=artifact_store_for(store),
     )
 
 
 def _authority(store):
-    service = AuthorityService(store)
+    service = AuthorityService(
+        store,
+        evidence_artifact_store=artifact_store_for(store),
+    )
     service.register_policy(_policy())
     return service
 
@@ -450,7 +462,11 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
     def test_provider_local_borrow_mismatch_is_durable_scoped_blocker(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            result = _result(local_borrow="40", provider_borrow="39")
+            result = _result(
+                store,
+                local_borrow="40",
+                provider_borrow="39",
+            )
             key = _borrow_key()
             self.assertEqual(
                 result.borrow_differences[key],
@@ -466,6 +482,7 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 observed_at="2026-09-25T05:00:30Z",
                 host_id="borrow-test-host",
                 owner_epoch="1",
+                evidence_artifact_store=artifact_store_for(store),
             )
             self.assertEqual(
                 checkpoint["payload"]["borrow_differences"],
@@ -481,6 +498,7 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                     resources=(key,),
                     now=NOW,
                     max_age_seconds="60",
+                    evidence_artifact_store=artifact_store_for(store),
                 )
 
     def test_borrow_detail_scope_and_capacity_are_revalidated_before_checkpoint(self):

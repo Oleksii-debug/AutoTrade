@@ -25,7 +25,7 @@ class ReleaseCandidateError(ValueError):
     """Raised when release-candidate evidence is malformed."""
 
 
-_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_GIT_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _REQUIRED_ROLES = frozenset(
     {
@@ -58,29 +58,40 @@ def _text(value: str, *, name: str) -> str:
 
 
 def _git_sha(value: str, *, name: str) -> str:
-    text = _text(value, name=name)
-    if text != text.lower() or _GIT_SHA.fullmatch(text) is None:
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or value != value.lower()
+        or _GIT_SHA.fullmatch(value) is None
+    ):
         raise ReleaseCandidateError(
-            f"{name} must be a 40-character lowercase git SHA"
+            f"{name} must be a canonical lowercase 40- or 64-character Git object id"
         )
-    return text
+    return value
 
 
 def _artifact_id(value: str, *, name: str) -> str:
-    text = _text(value, name=name)
+    if not isinstance(value, str) or value != value.strip():
+        raise ReleaseCandidateError(f"{name} must be a canonical UUID")
     try:
-        return str(UUID(text))
+        canonical = str(UUID(value))
     except (ValueError, AttributeError, TypeError) as error:
-        raise ReleaseCandidateError(f"{name} must be a UUID") from error
+        raise ReleaseCandidateError(f"{name} must be a canonical UUID") from error
+    if canonical != value:
+        raise ReleaseCandidateError(f"{name} must be a canonical UUID")
+    return value
 
 
 def _sha256(value: str, *, name: str) -> str:
-    text = _text(value, name=name)
-    if text != text.lower() or _SHA256.fullmatch(text) is None:
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or _SHA256.fullmatch(value) is None
+    ):
         raise ReleaseCandidateError(
             f"{name} must be canonical sha256:<64 lowercase hex>"
         )
-    return text
+    return value
 
 
 @dataclass(frozen=True)

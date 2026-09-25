@@ -313,6 +313,21 @@ class WhiteBitPreparedRequest:
         object.__setattr__(self, "capability_snapshot_id", capability_snapshot_id)
         object.__setattr__(self, "documentation_refs", refs)
 
+    def to_guarded_dispatch_request(self) -> Mapping[str, object]:
+        """Project provider preparation into the canonical persisted send payload.
+
+        Account/environment/documentation remain dispatcher submission-scope or
+        provenance evidence; only immutable provider bytes plus capability
+        identity enter the request hash consumed by GuardedDispatcher.
+        """
+        return MappingProxyType(
+            {
+                "endpoint": self.endpoint,
+                "body": MappingProxyType(dict(self.body)),
+                "capability_snapshot_id": self.capability_snapshot_id,
+            }
+        )
+
 
 @dataclass(frozen=True)
 class WhiteBitMarketRules:

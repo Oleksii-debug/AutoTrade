@@ -397,7 +397,17 @@ def _load_composition(
         "runtime": normalized_runtime,
         "components": sorted(components, key=lambda item: item["path"]),
     }
-    return normalized, "sha256:" + sha256(raw).hexdigest()
+    canonical = (
+        json.dumps(
+            normalized,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    return normalized, "sha256:" + sha256(canonical).hexdigest()
 
 
 def _write_entry(archive: zipfile.ZipFile, name: str, data: bytes) -> None:

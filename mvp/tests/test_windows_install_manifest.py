@@ -448,6 +448,39 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
                 with self.assertRaisesRegex(InstallerManifestError, pattern):
                     verify_release_bundle(tampered)
 
+    def test_semantically_valid_composition_tamper_breaks_canonical_digest(self):
+        source = self.release_bundle()
+        for case in ("schema-range", "minimum-windows"):
+            with self.subTest(case=case):
+                tampered = self.root / f"composition-{case}-tamper.zip"
+
+                def mutate(entries, case=case):
+                    result = []
+                    for name, payload in entries:
+                        if name != "bundle-manifest.json":
+                            result.append((name, payload))
+                            continue
+                        manifest = json.loads(payload)
+                        if case == "schema-range":
+                            manifest["composition"]["schema_compatibility"]["maximum"] = "2.0.x"
+                        else:
+                            manifest["composition"]["runtime"]["minimum_windows_version"] = "10.0.22000"
+                        # Deliberately leave composition_sha256 unchanged.
+                        result.append(
+                            (
+                                name,
+                                json.dumps(manifest, sort_keys=True).encode("utf-8"),
+                            )
+                        )
+                    return result
+
+                self.rewrite_zip(source, tampered, mutate)
+                with self.assertRaisesRegex(
+                    InstallerManifestError,
+                    "composition_sha256 does not match canonical",
+                ):
+                    verify_release_bundle(tampered)
+
     def test_composition_component_inventory_must_equal_verified_payload(self):
         source = self.release_bundle()
         tampered = self.root / "component-inventory-mismatch.zip"

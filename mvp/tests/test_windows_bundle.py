@@ -283,9 +283,19 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             composition_path=composition,
         )
         manifest = result["manifest"]
+        canonical_composition = (
+            json.dumps(
+                manifest["composition"],
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
         self.assertEqual(
             manifest["composition_sha256"],
-            "sha256:" + sha256(composition.read_bytes()).hexdigest(),
+            "sha256:" + sha256(canonical_composition).hexdigest(),
         )
         self.assertEqual(manifest["composition"]["source_sha"], SOURCE_SHA)
         self.assertEqual(manifest["composition"]["runtime"]["runtime_identifier"], "win-x64")

@@ -440,6 +440,13 @@ def verify_release_bundle(bundle: Path) -> dict[str, object]:
         source_sha=source_sha,
         verified_files=verified_files,
     )
+    observed_composition_sha256 = (
+        "sha256:" + sha256(_canonical_bytes(verified_composition)).hexdigest()
+    )
+    if observed_composition_sha256 != composition_sha256:
+        raise InstallerManifestError(
+            "composition_sha256 does not match canonical stored composition"
+        )
     return {
         "bundle_sha256": bundle_digest,
         "source_sha": source_sha,

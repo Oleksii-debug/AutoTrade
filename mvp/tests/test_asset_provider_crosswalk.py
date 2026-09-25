@@ -211,6 +211,8 @@ class AssetProviderCrosswalkTests(unittest.TestCase):
         )
         event = CorporateEvent.create(
             event_id="split-1",
+            instrument_id="ABC",
+            instrument_version=1,
             kind="SPLIT",
             effective_date=date(2026, 9, 25),
             source_revision="official-v1",

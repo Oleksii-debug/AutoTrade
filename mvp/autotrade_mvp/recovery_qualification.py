@@ -21,11 +21,23 @@ from research.autotrade_research.artifacts.store import (
     ArtifactStore,
 )
 
+from .qualification_attestation import (
+    AcceptedQualificationAttestation,
+    QualificationTrustError,
+    QualificationTrustPolicy,
+    SignedQualificationAttestation,
+    verify_qualification_attestation,
+)
+
 
 _GIT_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _RELEASE_ARTIFACT_MEDIA_TYPE = "application/vnd.autotrade.release-artifact"
 _RECOVERY_EVIDENCE_MEDIA_TYPE = "application/vnd.autotrade.recovery-evidence"
+_QUALIFICATION_DOMAIN = "RECOVERY"
+_QUALIFICATION_GATE = "RELEASE"
+_QUALIFICATION_PACKAGE = "WP-59"
+_QUALIFICATION_REQUIREMENT = "recovery-release-qualification"
 
 
 class RecoveryScenario(StrEnum):
@@ -381,6 +393,10 @@ class RecoveryQualificationDecision:
     evidence_set_sha256: str
     blockers: tuple[str, ...]
     measured_downtime_ms: Mapping[RecoveryScenario, int]
+    qualification_attestation_id: str | None = None
+    qualification_attestation_digest: str | None = None
+    qualification_policy_id: str | None = None
+    qualification_trust_root_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -471,6 +487,10 @@ def qualify_recovery_release(
     policy: RecoveryQualificationPolicy,
     evidence: Sequence[RecoveryScenarioEvidence],
     evidence_store: ArtifactStore | None = None,
+    qualification_receipt: SignedQualificationAttestation | None = None,
+    qualification_policy: QualificationTrustPolicy | None = None,
+    expected_policy_id: str | None = None,
+    expected_policy_version: str | None = None,
 ) -> RecoveryQualificationDecision:
     """Evaluate recovery evidence without performing recovery itself."""
 
@@ -480,6 +500,14 @@ def qualify_recovery_release(
         raise TypeError("evidence must be a sequence")
     if evidence_store is not None and not isinstance(evidence_store, ArtifactStore):
         raise TypeError("evidence_store must be ArtifactStore")
+    if qualification_receipt is not None and not isinstance(
+        qualification_receipt, SignedQualificationAttestation
+    ):
+        raise TypeError("qualification_receipt must be SignedQualificationAttestation")
+    if qualification_policy is not None and not isinstance(
+        qualification_policy, QualificationTrustPolicy
+    ):
+        raise TypeError("qualification_policy must be QualificationTrustPolicy")
 
     by_scenario: dict[RecoveryScenario, RecoveryScenarioEvidence] = {}
     blockers: list[str] = []
@@ -517,12 +545,59 @@ def qualify_recovery_release(
         blockers.append("release_artifact:integrity_unverified")
         inconclusive = True
 
-    # ArtifactStore proves content integrity only. The caller can populate the
-    # store and its metadata, so recovery PASS must remain unavailable until an
-    # authenticated/signed attestation boundary establishes an independent
-    # producer/verifier identity for the delivered release evidence.
-    blockers.append("independent_evidence_trust_unavailable")
-    inconclusive = True
+    accepted: AcceptedQualificationAttestation | None = None
+    trust_inputs = (
+        evidence_store,
+        qualification_receipt,
+        qualification_policy,
+        expected_policy_id,
+        expected_policy_version,
+    )
+    if all(value is None for value in trust_inputs[1:]):
+        blockers.append("independent_evidence_trust_unavailable")
+        inconclusive = True
+    elif any(value is None for value in trust_inputs):
+        blockers.append("independent_evidence_trust_incomplete")
+        inconclusive = True
+    else:
+        try:
+            accepted = verify_qualification_attestation(
+                qualification_receipt,
+                policy=qualification_policy,
+                evidence_store=evidence_store,
+                expected_policy_id=expected_policy_id,
+                expected_policy_version=expected_policy_version,
+                expected_source_sha=policy.source_sha,
+                expected_domain=_QUALIFICATION_DOMAIN,
+                expected_gate=_QUALIFICATION_GATE,
+                expected_package_id=_QUALIFICATION_PACKAGE,
+                expected_protocol_id=policy.protocol_id,
+                expected_protocol_version=policy.evidence_schema_version,
+                expected_requirement_id=_QUALIFICATION_REQUIREMENT,
+                expected_release_artifact_id=policy.release_artifact_id,
+                expected_release_artifact_sha256=policy.release_artifact_sha256,
+            )
+        except (QualificationTrustError, TypeError, ValueError):
+            blockers.append("independent_evidence_trust_invalid")
+            inconclusive = True
+        else:
+            signed_refs = {
+                (item.artifact_id, item.sha256)
+                for item in qualification_receipt.attestation.evidence_refs
+            }
+            expected_refs = {
+                (item.evidence_artifact_id, item.evidence_artifact_sha256)
+                for item in by_scenario.values()
+            }
+            if accepted.result == "FAIL":
+                blockers.append("independent_evidence_attestation_failed")
+                hard_failure = True
+            elif accepted.result != "PASS":
+                blockers.append("independent_evidence_attestation_inconclusive")
+                inconclusive = True
+            elif signed_refs != expected_refs:
+                blockers.append("independent_evidence_set_mismatch")
+                hard_failure = True
 
     for scenario in sorted(by_scenario, key=lambda item: item.value):
         item = by_scenario[scenario]
@@ -643,4 +718,16 @@ def qualify_recovery_release(
         evidence_set_sha256=_recovery_evidence_set_sha256(tuple(by_scenario.values())),
         blockers=tuple(blockers),
         measured_downtime_ms=measured,
+        qualification_attestation_id=(
+            None if accepted is None else accepted.attestation_id
+        ),
+        qualification_attestation_digest=(
+            None if accepted is None else accepted.attestation_digest
+        ),
+        qualification_policy_id=(
+            None if accepted is None else accepted.policy_id
+        ),
+        qualification_trust_root_id=(
+            None if accepted is None else accepted.trust_root_id
+        ),
     )

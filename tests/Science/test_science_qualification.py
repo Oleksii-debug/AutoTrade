@@ -1,14 +1,35 @@
+from hashlib import sha256
+from tempfile import TemporaryDirectory
 import unittest
+from uuid import NAMESPACE_URL, uuid5
 
+from research.autotrade_research.artifacts.store import ArtifactStore
+
+from mvp.autotrade_mvp.qualification_attestation import (
+    EvidenceArtifactRef,
+    SignedQualificationAttestation,
+)
 from mvp.autotrade_mvp.science_qualification import (
     QualificationGate,
     ScientificQualificationInput,
     qualify_scientific_learning,
 )
+from mvp.tests.test_qualification_attestation import (
+    EVIDENCE_SHA,
+    SOURCE,
+    attestation,
+    evidence_ref,
+    policy,
+    publish,
+    root,
+    sign,
+)
 
 
-H = "sha256:" + "a" * 64
-P = "sha256:" + "c" * 64
+H = EVIDENCE_SHA
+_POPULATION_BYTES = b"science population coverage"
+P = "sha256:" + sha256(_POPULATION_BYTES).hexdigest()
+_POPULATION_ID = str(uuid5(NAMESPACE_URL, "science-population-coverage"))
 
 
 def gate(name, status="PASS", reasons=()):
@@ -37,18 +58,81 @@ def evidence(
         holdout_used,
         future_used,
         population_coverage_hash,
+        SOURCE,
     )
 
 
-def _trusted_evidence_verifier(_gate):
-    return True
+def _signed_science_receipt(value):
+    trust_root = root()
+    trust_policy = policy(trust_root)
+    requirement_ids = [
+        "scientific-learning-qualification",
+        f"candidate/{value.candidate_hash}",
+        f"input/{value.input_snapshot_hash}",
+        *(f"gate/{name}" for name in (
+            "protocol",
+            "leakage",
+            "holdout",
+            "retention",
+            "promotion",
+            "ablation",
+            "uncertainty",
+            "forward_evidence",
+        )),
+    ]
+    if value.population_coverage_hash is not None:
+        requirement_ids.append(
+            f"population/{value.population_coverage_hash}"
+        )
+    signed = attestation(
+        trust_root,
+        domain="SCIENCE",
+        gate="ECONOMIC_EDGE",
+        package_id="WP-56",
+        protocol_id=value.frozen_protocol_hash,
+        protocol_version="1.0.0",
+        requirement_ids=tuple(requirement_ids),
+        evidence_refs=(
+            evidence_ref(),
+            EvidenceArtifactRef(
+                artifact_id=_POPULATION_ID,
+                sha256=P,
+                media_type="application/vnd.autotrade.qualification-evidence",
+                evidence_kind="SCIENCE_POPULATION_COVERAGE",
+                source_sha=SOURCE,
+            ),
+        ),
+        result="PASS",
+        release_artifact_id=None,
+        release_artifact_sha256=None,
+    )
+    return (
+        SignedQualificationAttestation(signed, sign(signed)),
+        trust_policy,
+    )
 
 
 def qualify(value):
-    return qualify_scientific_learning(
-        value,
-        evidence_verifier=_trusted_evidence_verifier,
-    )
+    receipt, trust_policy = _signed_science_receipt(value)
+    with TemporaryDirectory() as directory:
+        store = ArtifactStore(directory)
+        publish(store)
+        store.publish_bytes(
+            artifact_id=_POPULATION_ID,
+            data=_POPULATION_BYTES,
+            media_type="application/vnd.autotrade.qualification-evidence",
+            rights={"storage": True, "export": False},
+            source_refs=[f"git:{SOURCE}"],
+            metadata={"evidence_kind": "SCIENCE_POPULATION_COVERAGE"},
+        )
+        return qualify_scientific_learning(
+            value,
+            qualification_receipt=receipt,
+            qualification_policy=trust_policy,
+            evidence_store=store,
+            expected_policy_id=trust_policy.policy_id,
+            expected_policy_version=trust_policy.policy_version,
+        )
 
 
 class ScientificQualificationTests(unittest.TestCase):
@@ -64,10 +148,10 @@ class ScientificQualificationTests(unittest.TestCase):
         )
         self.assertIn("SCIENCE.CLAIM_EXCEEDS_EVIDENCE", result.reason_codes)
 
-    def test_selectively_unverified_forward_claim_is_inconclusive(self):
+    def test_caller_lambda_true_cannot_self_approve_science(self):
         result = qualify_scientific_learning(
             evidence(claim="ECONOMIC_EDGE_QUALIFIED"),
-            evidence_verifier=lambda gate: gate.gate_id != "forward_evidence",
+            evidence_verifier=lambda _gate: True,
         )
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertFalse(result.economic_claim_accepted)
@@ -131,6 +215,47 @@ class ScientificQualificationTests(unittest.TestCase):
             "SCIENCE.POPULATION_COVERAGE_NOT_BOUND_TO_RETENTION",
             result.reason_codes,
         )
+
+    def test_signed_receipt_must_cover_population_and_gate_evidence_digests(self):
+        value = evidence(
+            population_coverage_hash="sha256:" + "f" * 64,
+        )
+        receipt, trust_policy = _signed_science_receipt(value)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            store.publish_bytes(
+                artifact_id=_POPULATION_ID,
+                data=_POPULATION_BYTES,
+                media_type="application/vnd.autotrade.qualification-evidence",
+                rights={"storage": True, "export": False},
+                source_refs=[f"git:{SOURCE}"],
+                metadata={"evidence_kind": "SCIENCE_POPULATION_COVERAGE"},
+            )
+            result = qualify_scientific_learning(
+                value,
+                qualification_receipt=receipt,
+                qualification_policy=trust_policy,
+                evidence_store=store,
+                expected_policy_id=trust_policy.policy_id,
+                expected_policy_version=trust_policy.policy_version,
+            )
+        self.assertEqual(result.status, "FAIL")
+        self.assertFalse(result.economic_claim_accepted)
+        self.assertIn(
+            "SCIENCE.INDEPENDENT_ATTESTATION_EVIDENCE_MISMATCH",
+            result.reason_codes,
+        )
+
+    def test_signed_science_pass_retains_trust_identity(self):
+        result = qualify(evidence(claim="ECONOMIC_EDGE_QUALIFIED"))
+        self.assertEqual(result.status, "PASS")
+        self.assertIsNotNone(result.qualification_attestation_id)
+        self.assertTrue(
+            result.qualification_attestation_digest.startswith("sha256:")
+        )
+        self.assertTrue(result.qualification_policy_id.startswith("sha256:"))
+        self.assertTrue(result.qualification_trust_root_id.startswith("sha256:"))
 
     def test_leakage_sentinel_failure_is_hard_fail_even_if_other_gates_pass(self):
         result = qualify(evidence(complete_gates(leakage="FAIL")))
@@ -202,7 +327,12 @@ class ScientificQualificationTests(unittest.TestCase):
             H,
         )
         revised = qualify(evidence(changed))
-        self.assertEqual(baseline.status, revised.status)
+        self.assertEqual(baseline.status, "PASS")
+        self.assertEqual(revised.status, "FAIL")
+        self.assertIn(
+            "SCIENCE.INDEPENDENT_ATTESTATION_EVIDENCE_MISMATCH",
+            revised.reason_codes,
+        )
         self.assertNotEqual(baseline.qualification_id, revised.qualification_id)
 
     def test_unknown_gate_cannot_be_silently_ignored(self):

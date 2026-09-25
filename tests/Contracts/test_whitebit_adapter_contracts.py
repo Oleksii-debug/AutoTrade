@@ -139,6 +139,22 @@ class WhiteBitAdapterContractTests(unittest.TestCase):
         self.assertNotIn("observed_at", unknown)
         self.validate_submission(unknown)
 
+    def test_transport_ambiguity_flag_must_be_boolean(self):
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "transport_ambiguous must be boolean",
+        ):
+            parse_submission_result(
+                prepared("whitebit-ambiguous-int"),
+                attempt_id=str(uuid4()),
+                account_id="paper-account",
+                environment="PAPER",
+                observed_at=NOW,
+                response_body=None,
+                http_status=None,
+                transport_ambiguous=1,
+            )
+
     def test_canonical_conversion_requires_uuid_attempt_identity(self):
         internal = parse_submission_result(
             prepared("whitebit-invalid-attempt"),

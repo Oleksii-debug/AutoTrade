@@ -66,6 +66,17 @@ class ContractSchemaTests(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(match.group(1), version)
 
+        python_anchor = (ROOT / anchors["python"]).read_text(encoding="utf-8")
+        self.assertIn(f'CONTRACT_VERSION = "{version}"', python_anchor)
+
+        typescript_anchor = (ROOT / anchors["typescript"]).read_text(encoding="utf-8")
+        self.assertIn(f'CONTRACT_VERSION: "{version}"', typescript_anchor)
+
+        typescript_runtime = (
+            ROOT / "contracts" / "bindings" / "typescript" / "commonScalars.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn(f'CONTRACT_VERSION = "{version}"', typescript_runtime)
+
         openapi_path = ROOT / self.contract_manifest["openapi"]["path"]
         openapi = openapi_path.read_text(encoding="utf-8")
         self.assertRegex(openapi, r"(?m)^openapi:\s*3\.1\.0\s*$")
@@ -177,6 +188,28 @@ class ContractSchemaTests(unittest.TestCase):
         fixture["financial_completion"] = True
         schema = self.schemas["ui.schema.json"]
         validator = Draft202012Validator({"$ref": f"{schema['$id']}#/$defs/UiCommand"}, registry=self.registry)
+        self.assertFalse(validator.is_valid(fixture))
+
+    def test_ui_command_requires_account_and_environment_scope(self):
+        fixture = json.loads((FIXTURES / "ui-command.valid.json").read_text())
+        schema = self.schemas["ui.schema.json"]
+        validator = Draft202012Validator(
+            {"$ref": f"{schema['$id']}#/$defs/UiCommand"},
+            registry=self.registry,
+        )
+        legacy_unscoped = dict(fixture)
+        legacy_unscoped.pop("account_id")
+        legacy_unscoped.pop("environment")
+        self.assertFalse(validator.is_valid(legacy_unscoped))
+
+    def test_ui_command_rejects_noncanonical_environment(self):
+        fixture = json.loads((FIXTURES / "ui-command.valid.json").read_text())
+        fixture["environment"] = "PRODUCTION"
+        schema = self.schemas["ui.schema.json"]
+        validator = Draft202012Validator(
+            {"$ref": f"{schema['$id']}#/$defs/UiCommand"},
+            registry=self.registry,
+        )
         self.assertFalse(validator.is_valid(fixture))
 
 

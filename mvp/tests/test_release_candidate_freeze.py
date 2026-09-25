@@ -1,4 +1,9 @@
+from hashlib import sha256
+from tempfile import TemporaryDirectory
 import unittest
+from uuid import NAMESPACE_URL, uuid5
+
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 from mvp.autotrade_mvp.release_candidate import (
     ReleaseArtifactEvidence,
@@ -12,6 +17,10 @@ SOURCE = "3cae63fac37820611cddd38128a91185cb271fff"
 OTHER_SOURCE = "1" * 40
 BASELINE = "sha256:" + "a" * 64
 CONTRACTS = "sha256:" + "b" * 64
+TEST_ARTIFACT_ID = "11111111-1111-4111-8111-111111111111"
+RELEASE_MEDIA_TYPE = "application/vnd.autotrade.release-artifact"
+RELEASE_EVIDENCE_KIND = "AUTOTRADE_RELEASE_EVIDENCE_V1"
+_ARTIFACT_BYTES = {}
 
 REQUIRED_ROLES = (
     "HOST",
@@ -42,17 +51,52 @@ def artifact(
             if role in {"HOST", "WEB", "DESKTOP", "WINDOWS_PACKAGE"}
             else "NOT_APPLICABLE"
         )
+    identity = "|".join(
+        (role, source_sha, signature_status, evidence_status, digest_char)
+    )
+    artifact_id = str(uuid5(NAMESPACE_URL, "release-test:" + identity))
+    data = ("release-artifact:" + identity).encode("utf-8")
+    _ARTIFACT_BYTES[artifact_id] = data
     return ReleaseArtifactEvidence.create(
         role=role,
-        artifact_sha256="sha256:" + digest_char * 64,
+        artifact_id=artifact_id,
+        artifact_sha256="sha256:" + sha256(data).hexdigest(),
         source_sha=source_sha,
         signature_status=signature_status,
         evidence_status=evidence_status,
     )
 
 
-def freeze_verified(candidate, verifier=lambda artifact: True):
-    return freeze_release_candidate(candidate, verify_evidence=verifier)
+def freeze_verified(candidate, *, omit_roles=(), corrupt_role=None):
+    with TemporaryDirectory() as directory:
+        store = ArtifactStore(directory)
+        for item in candidate.artifacts:
+            if item.role in omit_roles:
+                continue
+            data = _ARTIFACT_BYTES[item.artifact_id]
+            store.publish_bytes(
+                artifact_id=item.artifact_id,
+                data=data,
+                media_type=RELEASE_MEDIA_TYPE,
+                rights={"storage": True, "export": False},
+                source_refs=[f"git:{item.source_sha}"],
+                metadata={
+                    "evidence_kind": RELEASE_EVIDENCE_KIND,
+                    "role": item.role,
+                    "source_sha": item.source_sha,
+                    "signature_status": item.signature_status,
+                    "evidence_status": item.evidence_status,
+                },
+            )
+        if corrupt_role is not None:
+            item = next(
+                artifact for artifact in candidate.artifacts
+                if artifact.role == corrupt_role
+            )
+            digest = item.artifact_sha256.removeprefix("sha256:")
+            object_path = store.objects / digest[:2] / digest
+            object_path.write_bytes(b"corrupt")
+        return freeze_release_candidate(candidate, evidence_store=store)
 
 class ReleaseCandidateFreezeTests(unittest.TestCase):
     def candidate(self, **overrides):
@@ -221,6 +265,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         with self.assertRaisesRegex(ReleaseCandidateError, "canonical sha256"):
             ReleaseArtifactEvidence(
                 role="HOST",
+                artifact_id=TEST_ARTIFACT_ID,
                 artifact_sha256="not-a-digest",
                 source_sha=SOURCE,
                 signature_status="VERIFIED",
@@ -244,6 +289,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         with self.assertRaisesRegex(ReleaseCandidateError, "lowercase hex"):
             ReleaseArtifactEvidence.create(
                 role="SBOM",
+                artifact_id=TEST_ARTIFACT_ID,
                 artifact_sha256=("sha256:" + "A" * 64),
                 source_sha=SOURCE,
                 signature_status="NOT_APPLICABLE",
@@ -287,19 +333,19 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
 
 
 
-    def test_freeze_requires_independent_evidence_verifier(self):
+    def test_freeze_requires_trusted_evidence_store(self):
         decision = freeze_release_candidate(self.candidate())
         self.assertEqual(decision.status, "BLOCKED")
         self.assertIn(
-            "independent_evidence_verifier_missing",
+            "trusted_evidence_store_missing",
             decision.reasons,
         )
         self.assertIsNone(decision.manifest_json)
 
-    def test_false_independent_verification_blocks_exact_artifact(self):
+    def test_missing_exact_artifact_blocks_independent_verification(self):
         decision = freeze_verified(
             self.candidate(),
-            verifier=lambda item: item.role != "SBOM",
+            omit_roles={"SBOM"},
         )
         self.assertEqual(decision.status, "BLOCKED")
         self.assertIn(
@@ -307,20 +353,23 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
             decision.reasons,
         )
 
-    def test_verifier_exception_fails_closed(self):
-        def broken_verifier(_artifact):
-            raise RuntimeError("resolver unavailable")
-
-        decision = freeze_verified(self.candidate(), verifier=broken_verifier)
+    def test_corrupt_artifact_object_fails_closed(self):
+        decision = freeze_verified(
+            self.candidate(),
+            corrupt_role="HOST",
+        )
         self.assertEqual(decision.status, "BLOCKED")
         self.assertIn(
             "evidence_not_independently_verified:HOST",
             decision.reasons,
         )
 
-    def test_verifier_must_be_callable_when_supplied(self):
-        with self.assertRaisesRegex(TypeError, "verify_evidence must be callable"):
-            freeze_release_candidate(self.candidate(), verify_evidence=True)
+    def test_arbitrary_callback_cannot_be_installed_as_release_authority(self):
+        with self.assertRaisesRegex(TypeError, "evidence_store must be ArtifactStore"):
+            freeze_release_candidate(
+                self.candidate(),
+                evidence_store=lambda _artifact: True,
+            )
 
 if __name__ == "__main__":
     unittest.main()

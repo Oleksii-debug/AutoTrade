@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from hashlib import sha256
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -51,6 +50,37 @@ class ProducerFixture:
         self.artifacts = ArtifactStore(self.root / "artifacts")
         self.jobs = ResearchJobStore(self.root / "jobs.sqlite3")
         self._episode_counter = 0
+        self._physical_evidence_refs = {}
+
+    def publish_physical_evidence(self, identity):
+        key = str(identity)
+        existing = self._physical_evidence_refs.get(key)
+        if existing is not None:
+            return existing
+        artifact_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                "https://evidence.autotrade.local/physical/" + key,
+            )
+        )
+        payload = canonical_bytes(
+            {
+                "schema_version": "1.0.0",
+                "artifact_kind": "PHYSICAL_OBSERVATION_EVIDENCE",
+                "identity": key,
+            }
+        )
+        manifest = self.artifacts.publish_bytes(
+            artifact_id=artifact_id,
+            data=payload,
+            media_type="application/json",
+            rights={"storage": True, "export": False},
+            source_refs=[],
+            metadata={"artifact_kind": "PHYSICAL_OBSERVATION_EVIDENCE"},
+        )
+        reference = "artifact:" + artifact_id + "@" + manifest["sha256"]
+        self._physical_evidence_refs[key] = reference
+        return reference
 
     def append_learning(
         self,
@@ -73,9 +103,8 @@ class ProducerFixture:
         )
         horizon = outcome_horizon_at or label_available_at
         reconciled = execution_reconciled_at or label_available_at
-        physical_evidence = evidence_ref or (
-            "evidence:sha256:"
-            + sha256(observation_id.encode("utf-8")).hexdigest()
+        physical_evidence = evidence_ref or self.publish_physical_evidence(
+            observation_id
         )
         payload = {
             "evidence_refs": [physical_evidence],
@@ -660,7 +689,7 @@ class UpdateProducerTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             fixture = ProducerFixture(directory)
             fixture.seed_calibration(values=("0", "1", "2"))
-            shared = "evidence:sha256:" + "9" * 64
+            shared = fixture.publish_physical_evidence("shared-cross-population")
             physical_time = DECISION + timedelta(minutes=50)
             fixture.append_learning(
                 task="calibration",
@@ -681,7 +710,7 @@ class UpdateProducerTests(unittest.TestCase):
                 label_available_at=datetime(
                     2026, 10, 8, tzinfo=timezone.utc
                 ),
-                decision_time=physical_time,
+                decision_time=physical_time + timedelta(minutes=7),
                 evidence_ref=shared,
             )
             checkpoint = fixture.publish_checkpoint()
@@ -705,6 +734,47 @@ class UpdateProducerTests(unittest.TestCase):
             ]
             self.assertEqual(len(overlap), 1)
             self.assertTrue(overlap[0].startswith("sha256:"))
+
+    def test_unregistered_physical_evidence_cannot_define_learning_population(self):
+        with TemporaryDirectory() as directory:
+            fixture = ProducerFixture(directory)
+            fixture.seed_calibration(values=("0", "1", "2"))
+            valid = fixture.publish_physical_evidence("registered-update")
+            prefix, digest = valid.rsplit("sha256:", 1)
+            forged = prefix + "sha256:" + ("0" if digest[0] != "0" else "1") + digest[1:]
+            fixture.append_learning(
+                task="update",
+                feature="4",
+                target="1",
+                observation_id="forged-physical-ref",
+                label_available_at=datetime(
+                    2026, 10, 8, tzinfo=timezone.utc
+                ),
+                evidence_ref=forged,
+            )
+            checkpoint = fixture.publish_checkpoint()
+            test_ref = fixture.publish_test_evidence()
+            calibration = fixture.publish_calibration_evidence()
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=fixture.envelope(checkpoint),
+                config=fixture.config(test_ref),
+            )
+            self.assertEqual(produced.status, "NO_UPDATE")
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIn(
+                "LEARNING.INSUFFICIENT_UPDATE_EVIDENCE",
+                artifact["reasons"],
+            )
+            self.assertIn(
+                "LEARNING_SCHEMA_INVALID",
+                {
+                    reason
+                    for _episode, reason
+                    in artifact["population"]["update_excluded"]
+                },
+            )
 
     def test_insufficient_evidence_is_first_class_no_update(self):
         with TemporaryDirectory() as directory:

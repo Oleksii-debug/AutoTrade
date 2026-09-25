@@ -339,6 +339,32 @@ class FillAccountingTests(unittest.TestCase):
             book.transactions[1].reverses_transaction_id,
             book.transactions[0].transaction_id,
         )
+
+        before_transactions = book.transactions
+        before_digest = book.audit_digest()
+        conflicting_revision = ProjectedFillEvidence.create(
+            fill_id="fill-1-r2",
+            provider_execution_id="exec-1",
+            intent_id="intent-1",
+            client_order_id="client-1",
+            side="BUY",
+            quantity="2",
+            price="101",
+            provider_revision="r3",
+            correction_of="fill-1",
+        )
+        conflicting_args = {
+            **args,
+            "corrected_projected_fill": conflicting_revision,
+        }
+        with self.assertRaisesRegex(
+            AccountingConflict,
+            "immutable correction evidence",
+        ):
+            book_provider_fill_correction(**conflicting_args)
+        self.assertEqual(book.transactions, before_transactions)
+        self.assertEqual(book.audit_digest(), before_digest)
+
         self.assertFalse(book_provider_fill_correction(**args))
         self.assertEqual(len(book.transactions), 3)
         self.assertEqual(book.cash("USD"), Decimal("-203"))

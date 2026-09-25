@@ -415,6 +415,8 @@ class DurableReservationBook:
         reservation_id: str,
         usage: Mapping[str, object],
         committed_at: str,
+        expected_snapshot_digest: str | None = None,
+        evidence_binding: Mapping[str, object] | None = None,
     ) -> PreparedReservationMutation:
         """Prepare one reservation consumption for a shared durable commit.
 
@@ -423,7 +425,11 @@ class DurableReservationBook:
         same JournalStore transaction as canonical economic events. Exact
         replay after acknowledgement loss reports already_committed only when
         the same idempotency key, request and resulting snapshot are already
-        present in durable reservation history.
+        present in durable reservation history. When
+        expected_snapshot_digest is supplied, the plan is fenced to the exact
+        reservation cut from which provider-fill resource usage was derived.
+        evidence_binding is persisted inside the immutable reservation request
+        but never changes ReservationBook resource semantics.
         """
 
         key = _text(idempotency_key, name="idempotency_key")
@@ -431,8 +437,39 @@ class DurableReservationBook:
             "reservation_id": _text(reservation_id, name="reservation_id"),
             "usage": _amount_map(usage, allow_zero=False),
         }
+        if evidence_binding is not None:
+            if not isinstance(evidence_binding, Mapping):
+                raise TypeError("evidence_binding must be a mapping or None")
+            try:
+                normalized_binding = strict_json_loads(
+                    canonical_json(dict(evidence_binding))
+                )
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "evidence_binding must be canonical JSON-compatible evidence"
+                ) from error
+            if type(normalized_binding) is not dict or not normalized_binding:
+                raise ValueError(
+                    "evidence_binding must be a non-empty JSON object"
+                )
+            request["evidence_binding"] = normalized_binding
+        expected_cut = (
+            None
+            if expected_snapshot_digest is None
+            else _text(
+                expected_snapshot_digest,
+                name="expected_snapshot_digest",
+            )
+        )
         events = self._events()
         candidate, idempotency = self._replay(events)
+        if expected_cut is not None:
+            current_snapshot = candidate.get(request["reservation_id"])
+            current_cut = payload_digest(_snapshot_payload(current_snapshot))
+            if current_cut != expected_cut:
+                raise ReservationConflict(
+                    "reservation snapshot changed after provider fill plan derivation"
+                )
         existing = idempotency.get(key)
         if existing is not None:
             if existing[0] != payload_digest(request):

@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from hashlib import sha256
+import json
 from typing import Literal, Sequence
 
 from .capabilities import CapabilitySnapshot
@@ -61,6 +63,61 @@ def _instant(value: str, *, name: str) -> datetime:
     except ValueError as error:
         raise PerpetualMarginError(f"{name} must be an ISO-8601 instant") from error
     return parsed.astimezone(timezone.utc)
+
+
+def _decimal_text(value: Decimal) -> str:
+    normalized = value.normalize()
+    if normalized == 0:
+        return "0"
+    return format(normalized, "f")
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _verify_immutable_artifact(
+    store: object,
+    *,
+    artifact_id: str,
+    expected_payload: object,
+    expected_metadata: dict[str, object],
+) -> None:
+    try:
+        load_manifest = getattr(store, "load_manifest")
+        read_bytes = getattr(store, "read_bytes")
+        manifest = load_manifest(artifact_id)
+        payload = read_bytes(artifact_id)
+    except Exception as error:
+        raise PerpetualMarginError(
+            "immutable margin evidence artifact is missing or corrupt"
+        ) from error
+    if type(manifest) is not dict or not isinstance(payload, bytes):
+        raise PerpetualMarginError(
+            "immutable margin evidence artifact has unsupported representation"
+        )
+    if manifest.get("artifact_id") != artifact_id:
+        raise PerpetualMarginError("margin evidence artifact identity mismatch")
+    actual_digest = "sha256:" + sha256(payload).hexdigest()
+    if manifest.get("sha256") != actual_digest:
+        raise PerpetualMarginError("margin evidence artifact digest mismatch")
+    if manifest.get("media_type") != "application/json":
+        raise PerpetualMarginError("margin evidence artifact media type mismatch")
+    metadata = manifest.get("metadata")
+    if type(metadata) is not dict or any(
+        metadata.get(key) != value for key, value in expected_metadata.items()
+    ):
+        raise PerpetualMarginError("margin evidence artifact scope metadata mismatch")
+    if payload != _canonical_json_bytes(expected_payload):
+        raise PerpetualMarginError(
+            "margin evidence artifact content does not match supplied economics"
+        )
 
 
 @dataclass(frozen=True, slots=True)

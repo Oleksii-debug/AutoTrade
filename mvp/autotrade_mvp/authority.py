@@ -1527,6 +1527,15 @@ class AuthorityService:
                 else:
                     used_confirmation = confirmation.confirmation_id
 
+        if (
+            outcome == "ADMITTED"
+            and self.store is not None
+            and env in {"PAPER", "LIVE"}
+        ):
+            raise AuthorityConflict(
+                "unverified PAPER/LIVE admission cannot create durable dispatch authority"
+            )
+
         record = AdmissionRecord(
             admission_id=aid,
             policy_id=pid,
@@ -2711,6 +2720,12 @@ class AuthorityService:
                 confirmation.expires_at, name="confirmation.expires_at"
             ):
                 return False, "confirmation_expired"
+
+        if (
+            record.environment in {"PAPER", "LIVE"}
+            and record.risk_decision_id is None
+        ):
+            return False, "financial_evidence_missing"
 
         if record.risk_decision_id is not None:
             if record.policy_version != policy.version:

@@ -732,6 +732,45 @@ class JournalStore:
         with self._connect() as connection:
             return self._journal_sequence_value(connection)
 
+    def load_events_after_journal_sequence(
+        self,
+        after_sequence: int,
+        *,
+        limit: int = 10000,
+    ) -> list[dict[str, Any]]:
+        """Load integrity-checked journal events strictly after a durable global cut."""
+
+        if (
+            type(after_sequence) is not int
+            or after_sequence < 0
+        ):
+            raise ValueError("after_sequence must be a non-negative integer")
+        if type(limit) is not int or limit < 1 or limit > 100000:
+            raise ValueError("limit must be between 1 and 100000")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT event_id, event_type, aggregate_type, aggregate_id,
+                       aggregate_version, payload_json, payload_hash, committed_at,
+                       envelope_json, envelope_hash, journal_sequence
+                FROM events
+                WHERE journal_sequence > ?
+                ORDER BY journal_sequence
+                LIMIT ?
+                """,
+                (after_sequence, limit),
+            ).fetchall()
+        decoded = [self._decode_event_row(row) for row in rows]
+        expected = after_sequence + 1
+        for event in decoded:
+            sequence = event.get("journal_sequence")
+            if sequence != expected:
+                raise ValueError(
+                    "journal events after cut are not contiguous; qualification cannot infer conservation"
+                )
+            expected += 1
+        return decoded
+
     def append_event(self, envelope: dict[str, Any], *, outbox_topic: str | None = None) -> AppendResult:
         event_id = self._require_text(envelope.get("event_id"), "event_id")
         event_type = self._require_text(envelope.get("event_type"), "event_type")

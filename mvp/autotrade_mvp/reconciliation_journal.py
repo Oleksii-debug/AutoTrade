@@ -11,10 +11,15 @@ from decimal import Decimal
 from typing import Any, Iterable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
+from research.autotrade_research.artifacts.store import ArtifactStore
+
 from .dispatch import submission_attempt_aggregate_id
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reconciliation import ReconciliationResult, UnknownSubmission
-from .securities_borrow import BorrowAvailabilityEvidence
+from .securities_borrow import (
+    BorrowAvailabilityEvidence,
+    verify_provider_borrow_evidence,
+)
 
 
 def _text(value: str, *, name: str) -> str:
@@ -213,6 +218,29 @@ def reconciliation_payload(
     }
 
 
+def _verify_borrow_checkpoint_evidence(
+    result: ReconciliationResult,
+    artifact_store: ArtifactStore | None,
+) -> None:
+    availability = result.resource_availability
+    if availability is None:
+        return
+    borrow_details = [
+        detail
+        for resource, detail in availability.resource_details.items()
+        if resource.startswith("BORROW:")
+    ]
+    if not borrow_details:
+        return
+    if not isinstance(artifact_store, ArtifactStore):
+        raise ValueError(
+            "securities-borrow checkpoint requires trusted ArtifactStore"
+        )
+    for detail in borrow_details:
+        evidence = BorrowAvailabilityEvidence.from_resource_detail(detail)
+        verify_provider_borrow_evidence(evidence, artifact_store)
+
+
 def record_reconciliation_checkpoint(
     store: JournalStore,
     *,
@@ -221,11 +249,13 @@ def record_reconciliation_checkpoint(
     observed_at: str,
     host_id: str,
     owner_epoch: str,
+    evidence_artifact_store: ArtifactStore | None = None,
 ) -> dict[str, Any]:
     """Persist one exact reconciliation outcome, idempotently for retries."""
 
     if not isinstance(store, JournalStore):
         raise TypeError("store must be JournalStore")
+    _verify_borrow_checkpoint_evidence(result, evidence_artifact_store)
     rid = _text(reconciliation_id, name="reconciliation_id")
     host = _text(host_id, name="host_id")
     epoch = _text(owner_epoch, name="owner_epoch")
@@ -488,6 +518,7 @@ def load_account_resource_availability_evidence(
     resources: Iterable[str],
     now: str,
     max_age_seconds: Decimal | str | int,
+    evidence_artifact_store: ArtifactStore | None = None,
 ) -> dict[str, Any]:
     """Return exact reservable availability from a fresh provider snapshot.
 
@@ -681,6 +712,14 @@ def load_account_resource_availability_evidence(
                 "BORROW resource lacks typed securities-borrow evidence"
             )
         borrow = BorrowAvailabilityEvidence.from_resource_detail(detail)
+        if not isinstance(evidence_artifact_store, ArtifactStore):
+            raise ValueError(
+                "BORROW availability requires trusted ArtifactStore"
+            )
+        verify_provider_borrow_evidence(
+            borrow,
+            evidence_artifact_store,
+        )
         if (
             borrow.resource_key != resource
             or borrow.provider_id != provider

@@ -192,6 +192,43 @@ def _utc_text(value: object, *, name: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _recovery_owner_scopes_from_journal(
+    journal_path: Path,
+) -> tuple[str, ...]:
+    """Discover durable recovery-owner scopes without guessing account authority."""
+
+    try:
+        connection = sqlite3.connect(str(journal_path), timeout=5)
+        rows = connection.execute(
+            """
+            SELECT DISTINCT aggregate_id
+            FROM events
+            WHERE aggregate_type = ?
+            ORDER BY aggregate_id
+            """,
+            ("recovery_owner",),
+        ).fetchall()
+    except (sqlite3.Error, OSError) as error:
+        raise BackupIntegrityError(
+            "Recovery owner scope evidence is unreadable"
+        ) from error
+    finally:
+        try:
+            connection.close()
+        except (UnboundLocalError, sqlite3.Error):
+            pass
+
+    scopes: list[str] = []
+    for row in rows:
+        scope = _nonempty_text(row[0], name="recovery owner scope")
+        if scope in scopes:
+            raise BackupIntegrityError(
+                "Recovery owner scope evidence is duplicated"
+            )
+        scopes.append(scope)
+    return tuple(scopes)
+
+
 def _recovery_owner_chain_from_journal(
     journal_path: Path,
     *,
@@ -1261,9 +1298,16 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
             if _sha256_file(target) != item["sha256"].removeprefix("sha256:"):
                 raise BackupIntegrityError("Restored payload digest mismatch")
 
-        owner_scope = "default"
+        journal_path = stage / "state" / "journal.sqlite3"
+        owner_scopes = _recovery_owner_scopes_from_journal(journal_path)
+        if len(owner_scopes) > 1:
+            raise BackupIntegrityError(
+                "Restore journal has multiple recovery owner scopes; "
+                "explicit scoped restore is required"
+            )
+        owner_scope = owner_scopes[0] if owner_scopes else "default"
         owner_chain = _recovery_owner_chain_from_journal(
-            stage / "state" / "journal.sqlite3",
+            journal_path,
             owner_scope=owner_scope,
         )
         source_owner = owner_chain[-1] if owner_chain else None

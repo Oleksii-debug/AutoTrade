@@ -9,7 +9,7 @@ the rest of a financial admission.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
@@ -410,6 +410,146 @@ class BorrowLifecycleState:
     @property
     def blocks_new_short(self) -> bool:
         return self.active_recall_quantity > 0
+
+
+@dataclass(frozen=True)
+class BorrowReconciliationEvidence:
+    """One immutable WP-20 view of provider borrow truth vs local exposure."""
+
+    resource: BorrowResourceIdentity
+    symbol: str
+    aggregate_id: str
+    aggregate_version: int
+    observed_at: str
+    local_short_quantity: Decimal
+    reserved_short_quantity: Decimal
+    provider_borrowed_quantity: Decimal
+    locate_available_quantity: Decimal
+    active_recall_quantity: Decimal
+    loan_difference: Decimal
+    evidence_refs: tuple[str, ...]
+    blocking_reasons: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.resource, BorrowResourceIdentity):
+            raise TypeError("resource must be BorrowResourceIdentity")
+        object.__setattr__(self, "symbol", _text(self.symbol, name="symbol"))
+        object.__setattr__(
+            self,
+            "aggregate_id",
+            _text(self.aggregate_id, name="aggregate_id"),
+        )
+        if (
+            not isinstance(self.aggregate_version, int)
+            or isinstance(self.aggregate_version, bool)
+            or self.aggregate_version < 0
+        ):
+            raise ValueError("aggregate_version must be a non-negative integer")
+        object.__setattr__(
+            self,
+            "observed_at",
+            _instant(self.observed_at, name="observed_at"),
+        )
+        for field_name in (
+            "local_short_quantity",
+            "reserved_short_quantity",
+            "provider_borrowed_quantity",
+            "locate_available_quantity",
+            "active_recall_quantity",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _decimal(getattr(self, field_name), name=field_name),
+            )
+        difference = self.loan_difference
+        if isinstance(difference, bool) or isinstance(difference, float):
+            raise TypeError(
+                "loan_difference must use Decimal, string or integer input"
+            )
+        try:
+            difference = (
+                difference
+                if isinstance(difference, Decimal)
+                else Decimal(difference)
+            )
+        except (InvalidOperation, ValueError, TypeError) as error:
+            raise ValueError("loan_difference must be a finite decimal") from error
+        if not difference.is_finite():
+            raise ValueError("loan_difference must be a finite decimal")
+        object.__setattr__(self, "loan_difference", difference)
+
+        refs: list[str] = []
+        for value in self.evidence_refs:
+            ref = _text(value, name="evidence_ref")
+            if ref in refs:
+                raise ValueError("evidence_refs must be unique")
+            refs.append(ref)
+        object.__setattr__(self, "evidence_refs", tuple(refs))
+
+        reasons: list[str] = []
+        for value in self.blocking_reasons:
+            reason = _text(value, name="blocking_reason")
+            if reason in reasons:
+                raise ValueError("blocking_reasons must be unique")
+            reasons.append(reason)
+        object.__setattr__(self, "blocking_reasons", tuple(reasons))
+
+    @property
+    def resource_key(self) -> str:
+        return self.resource.resource_key
+
+    @property
+    def blocks_new_risk(self) -> bool:
+        return bool(self.blocking_reasons)
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "resource": self.resource.payload(),
+            "symbol": self.symbol,
+            "aggregate_id": self.aggregate_id,
+            "aggregate_version": self.aggregate_version,
+            "observed_at": self.observed_at,
+            "local_short_quantity": _decimal_text(
+                self.local_short_quantity
+            ),
+            "reserved_short_quantity": _decimal_text(
+                self.reserved_short_quantity
+            ),
+            "provider_borrowed_quantity": _decimal_text(
+                self.provider_borrowed_quantity
+            ),
+            "locate_available_quantity": _decimal_text(
+                self.locate_available_quantity
+            ),
+            "active_recall_quantity": _decimal_text(
+                self.active_recall_quantity
+            ),
+            "loan_difference": _decimal_text_signed(self.loan_difference),
+            "evidence_refs": list(self.evidence_refs),
+            "blocking_reasons": list(self.blocking_reasons),
+        }
+
+
+def _decimal_text_signed(value: Decimal) -> str:
+    if value == 0:
+        return "0"
+    rendered = format(value, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered
+
+
+def _reserved_short_quantity(
+    context: RiskContext,
+    *,
+    symbol: str,
+) -> Decimal:
+    current = context.positions.get(symbol, Decimal("0"))
+    reserved = context.reserved_position_delta.get(symbol, Decimal("0"))
+    filled_short = max(-current, Decimal("0"))
+    projected_short = max(-(current + reserved), Decimal("0"))
+    return max(projected_short - filled_short, Decimal("0"))
 
 
 def incremental_short_borrow_quantity(

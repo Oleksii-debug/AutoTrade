@@ -323,6 +323,35 @@ class FuturesLifecycleTests(unittest.TestCase):
                 exit_price=101,
             )
 
+    def test_physical_delivery_authority_is_strict_boolean(self):
+        contract = self._linear_contract(settlement_method="PHYSICAL")
+        for unsafe in (1, "yes", object()):
+            with self.subTest(unsafe=unsafe):
+                with self.assertRaisesRegex(
+                    FuturesError, "physical_delivery_authorized must be boolean"
+                ):
+                    lifecycle_gate(
+                        contract,
+                        utc(29, 12),
+                        physical_delivery_authorized=unsafe,
+                    )
+
+    def test_physical_delivery_cutoff_cannot_follow_last_trade(self):
+        with self.assertRaisesRegex(
+            FuturesError, "delivery_cutoff cannot be after last_trade_at"
+        ):
+            FuturesContract(
+                instrument="physical-bad-cutoff",
+                payoff="LINEAR",
+                multiplier=Decimal("1"),
+                quote_currency="USD",
+                settlement_currency="USD",
+                last_trade_at=utc(29, 12),
+                delivery_cutoff=utc(30, 12),
+                expiry=utc(30, 21),
+                settlement_method="PHYSICAL",
+            )
+
     def test_invalid_contract_time_order_is_rejected(self):
         with self.assertRaises(FuturesError):
             FuturesContract(

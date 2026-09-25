@@ -89,6 +89,13 @@ class FuturesContract:
             raise FuturesError("delivery_cutoff cannot be after expiry")
         if self.settlement_method not in {"CASH", "PHYSICAL"}:
             raise FuturesError("settlement_method must be CASH or PHYSICAL")
+        if (
+            self.settlement_method == "PHYSICAL"
+            and self.delivery_cutoff > self.last_trade_at
+        ):
+            raise FuturesError(
+                "physical delivery_cutoff cannot be after last_trade_at"
+            )
         if self.price_base_currency is not None:
             object.__setattr__(
                 self,
@@ -364,6 +371,8 @@ def lifecycle_gate(
     """Return a conservative lifecycle state for holding/trading the contract."""
 
     point = _utc(at, "at")
+    if type(physical_delivery_authorized) is not bool:
+        raise FuturesError("physical_delivery_authorized must be boolean")
     if point >= contract.expiry:
         return "EXPIRED"
     if point >= contract.last_trade_at:

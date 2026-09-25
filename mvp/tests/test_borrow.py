@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 from tempfile import TemporaryDirectory
 import unittest
@@ -430,6 +431,129 @@ class BorrowLifecycleJournalTests(unittest.TestCase):
                 journal.record_locate(
                     locate(scope, available_quantity="99")
                 )
+
+
+class BorrowEvidenceBindingTests(unittest.TestCase):
+    def make_journal(self, directory):
+        store = JournalStore(f"{directory}/journal.sqlite3")
+        artifacts = artifact_store_for(store)
+        journal = BorrowLifecycleJournal(
+            store,
+            resource(),
+            evidence_artifact_store=artifacts,
+        )
+        return store, artifacts, journal
+
+    def assert_no_borrow_events(self, store):
+        probe = EvidencedBorrowJournal(store, resource())
+        self.assertEqual(probe._events(), [])
+
+    def test_unresolvable_artifact_fails_before_journal_mutation(self):
+        with TemporaryDirectory() as directory:
+            store, _, journal = self.make_journal(directory)
+            forged = replace(
+                locate(),
+                evidence_refs=(
+                    "artifact:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa@sha256:"
+                    + "0" * 64,
+                ),
+            )
+            with self.assertRaisesRegex(ValueError, "verification failed"):
+                journal.record_locate(forged)
+            self.assert_no_borrow_events(store)
+
+    def test_same_artifact_cannot_authorize_altered_economics(self):
+        cases = (
+            (
+                "locate",
+                lambda: locate(available_quantity="10"),
+                lambda item: replace(item, available_quantity=Decimal("11")),
+                "record_locate",
+            ),
+            (
+                "loan",
+                lambda: loan(borrowed_quantity="10"),
+                lambda item: replace(item, borrowed_quantity=Decimal("11")),
+                "record_loan",
+            ),
+            (
+                "recall",
+                lambda: BorrowRecallEvidence(
+                    resource=resource(),
+                    recall_id="recall-proof",
+                    provider_revision="recall-proof-r1",
+                    recalled_quantity="4",
+                    observed_at="2026-09-24T18:01:00Z",
+                    effective_at="2026-09-24T18:00:30Z",
+                    evidence_refs=("provider:recall-proof-r1",),
+                ),
+                lambda item: replace(item, recalled_quantity=Decimal("5")),
+                "record_recall",
+            ),
+            (
+                "resolution",
+                lambda: BorrowRecallResolutionEvidence(
+                    resource=resource(),
+                    recall_id="recall-proof",
+                    provider_revision="resolve-proof-r1",
+                    resolved_quantity="2",
+                    observed_at="2026-09-24T18:02:00Z",
+                    evidence_refs=("provider:resolve-proof-r1",),
+                ),
+                lambda item: replace(item, resolved_quantity=Decimal("3")),
+                "record_recall_resolution",
+            ),
+        )
+        for name, factory, alter, method_name in cases:
+            with self.subTest(name=name), TemporaryDirectory() as directory:
+                store, artifacts, journal = self.make_journal(directory)
+                bound = bind_provider_evidence(artifacts, factory())
+                forged = alter(bound)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "does not match supplied economics",
+                ):
+                    getattr(journal, method_name)(forged)
+                self.assert_no_borrow_events(store)
+
+    def test_cross_scope_artifact_cannot_authorize_expected_account(self):
+        with TemporaryDirectory() as directory:
+            store, artifacts, journal = self.make_journal(directory)
+            other = resource(account_id="other-account")
+            bound = bind_provider_evidence(
+                artifacts,
+                locate(other, available_quantity="20"),
+            )
+            forged = replace(bound, resource=resource())
+            with self.assertRaisesRegex(ValueError, "verification failed"):
+                journal.record_locate(forged)
+            self.assert_no_borrow_events(store)
+
+    def test_corrupt_artifact_fails_on_record_and_restart_replay(self):
+        with TemporaryDirectory() as directory:
+            store, artifacts, journal = self.make_journal(directory)
+            bound = bind_provider_evidence(
+                artifacts,
+                locate(available_quantity="20"),
+            )
+            journal.record_locate(bound)
+            self.assertEqual(len(journal._events()), 1)
+
+            reference = bound.evidence_refs[0]
+            artifact_id = reference[len("artifact:"):].split("@sha256:", 1)[0]
+            manifest = artifacts.load_manifest(artifact_id)
+            digest = manifest["sha256"].removeprefix("sha256:")
+            object_path = artifacts.objects / digest[:2] / digest
+            object_path.write_bytes(b"corrupt-provider-evidence")
+
+            restarted = BorrowLifecycleJournal(
+                JournalStore(store.path),
+                resource(),
+                evidence_artifact_store=artifact_store_for(store),
+            )
+            with self.assertRaisesRegex(ValueError, "verification failed"):
+                restarted.state()
+
 
 
 if __name__ == "__main__":

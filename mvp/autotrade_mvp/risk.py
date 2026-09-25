@@ -1021,7 +1021,7 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
 
         if not base_stress_symbols:
             base_expected_shortfall = Decimal("0")
-        elif base_tail_comparison_complete:
+        elif base_tail_comparison_complete and context.tail_scenarios:
             base_losses: list[Decimal] = []
             for scenario in context.tail_scenarios:
                 base_pnl = sum(

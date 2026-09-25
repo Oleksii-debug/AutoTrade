@@ -366,6 +366,32 @@ def prepare_order_request(
     )
 
 
+def guarded_order_projection(
+    prepared_request: AlpacaPreparedRequest,
+) -> Mapping[str, object]:
+    """Project one canonical prepared order into the shared guarded transport seam.
+
+    The projection preserves the exact account/environment/capability/instrument
+    binding and canonical body digest so the network layer cannot silently
+    retarget or rewrite an adapter decision before the final send guard.
+    """
+
+    if not isinstance(prepared_request, AlpacaPreparedRequest):
+        raise TypeError("prepared_request must be AlpacaPreparedRequest")
+    return MappingProxyType(
+        {
+            "endpoint": prepared_request.endpoint,
+            "body": dict(prepared_request.body),
+            "account_id": prepared_request.account_id,
+            "environment": prepared_request.environment,
+            "capability_snapshot_id": prepared_request.capability_snapshot_id,
+            "capability_snapshot_ids": list(prepared_request.capability_snapshot_ids),
+            "instrument_versions": list(prepared_request.instrument_versions),
+            "body_sha256": prepared_request.body_sha256,
+        }
+    )
+
+
 @dataclass(frozen=True)
 class AlpacaOrderObservation:
     provider_order_id: str

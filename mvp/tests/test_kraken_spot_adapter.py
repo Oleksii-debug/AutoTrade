@@ -145,14 +145,14 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             }
         )
         self.assertEqual(result["outcome"], "ACKNOWLEDGED")
-        self.assertEqual(result["provider_order_ids"], ("OABC-D123-E456",))
+        self.assertEqual(result["provider_order_id"], "OABC-D123-E456")
         self.assertEqual(result["retry_disposition"], "NEVER")
         self.assertNotIn("fill", repr(result).lower())
         self.assertEqual(
             result["evidence"][0]["source_uri"],
             "https://api.kraken.com/0/private/AddOrder",
         )
-        self.assertEqual(result["evidence"][0]["provider_environment"], "LIVE")
+        self.assertNotIn("provider_environment", result["evidence"][0])
 
     def test_provider_error_is_canonical_rejection_not_exception_or_success(self):
         result = self._parse_submission(
@@ -169,8 +169,9 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "UNKNOWN")
         self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
         self.assertEqual(result["evidence"], [])
-        self.assertIsNone(result["provider_received_at"])
-        self.assertEqual(result["observed_at"], "2026-09-24T20:00:00Z")
+        self.assertNotIn("provider_received_at", result)
+        self.assertNotIn("observed_at", result)
+        self.assertNotIn("provider_environment", result)
 
         with self.assertRaisesRegex(KrakenSpotAdapterError, "must not fabricate"):
             self._parse_submission(
@@ -188,6 +189,12 @@ class KrakenSpotAdapterTests(unittest.TestCase):
     def test_empty_txid_fails_closed(self):
         with self.assertRaisesRegex(KrakenSpotAdapterError, "transaction ids"):
             self._parse_submission({"error": [], "result": {"txid": []}})
+
+    def test_multiple_provider_order_ids_fail_closed_until_contract_supports_them(self):
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "exactly one"):
+            self._parse_submission(
+                {"error": [], "result": {"txid": ["OABC-D123-E456", "OABC-D123-E457"]}}
+            )
 
     def test_incomplete_search_never_proves_absence(self):
         evidence = KrakenSpotAbsenceEvidence(

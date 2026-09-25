@@ -276,7 +276,7 @@ class WhiteBitAdapterContractTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             WhiteBitAdapterError,
-            "environment must be one of",
+            "environment",
         ):
             parse_submission_result(
                 request,

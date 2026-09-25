@@ -259,6 +259,12 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                     "economic journal aggregate versions are not contiguous"
                 )
             expected_version += 1
+            event_type = event.get("event_type")
+            if event_type not in {self._SINGLE_EVENT, self._BATCH_EVENT}:
+                raise AccountingConflict(
+                    "economic_book contains an unsupported durable event type"
+                )
+
             payload = event.get("payload")
             if not isinstance(payload, Mapping):
                 raise AccountingConflict(
@@ -273,18 +279,12 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                     "economic durable event scope does not match provider book"
                 )
 
-            event_type = event.get("event_type")
             if event_type == self._SINGLE_EVENT:
                 transactions = (
                     _transaction_from_payload(payload.get("transaction")),
                 )
                 candidate.append_batch(transactions)
                 continue
-            if event_type != self._BATCH_EVENT:
-                raise AccountingConflict(
-                    "economic_book contains an unsupported durable event type"
-                )
-
             raw_transactions = payload.get("transactions")
             if not isinstance(raw_transactions, list) or not raw_transactions:
                 raise AccountingConflict(

@@ -10,8 +10,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Mapping
-from uuid import NAMESPACE_URL, uuid5
+from typing import Mapping, Sequence
+from uuid import NAMESPACE_URL, UUID, uuid5
+
+from research.autotrade_research.artifacts.store import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+)
 
 from .dispatch import submission_attempt_aggregate_id
 from .order_projection import (
@@ -25,6 +30,15 @@ from .persistence import JournalStore, canonical_json, payload_digest
 _AGGREGATE_TYPE = "order_projection_book"
 _EVENT_TYPE = "OrderProjectionMutationCommitted"
 _OUTBOX_TOPIC = "autotrade.order-projection.events"
+_PROVIDER_EVIDENCE_OPERATIONS = frozenset(
+    {
+        "RECORD_FILL",
+        "CORRECT_FILL",
+        "BUST_FILL",
+        "CONFIRM_CANCEL",
+        "CONFIRM_EXPIRED",
+    }
+)
 
 
 def _text(value: str, *, name: str) -> str:
@@ -75,6 +89,53 @@ def _decimal_text(value, *, name: str) -> str:
 
 def _optional_text(value: str | None, *, name: str) -> str | None:
     return None if value is None else _text(value, name=name)
+
+
+def _canonical_evidence_refs(
+    value: Sequence[Mapping[str, object]] | None,
+) -> tuple[dict[str, str], ...]:
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise TypeError("evidence_refs must be a sequence of EvidenceRef mappings")
+    normalized: list[dict[str, str]] = []
+    identities: set[str] = set()
+    allowed = {"artifact_id", "sha256", "source_uri", "observed_at", "rights_id"}
+    for index, raw in enumerate(value):
+        if not isinstance(raw, Mapping):
+            raise TypeError(f"evidence_refs[{index}] must be a mapping")
+        unknown = set(raw) - allowed
+        if unknown:
+            raise ValueError(
+                "evidence ref contains unsupported fields: "
+                + ", ".join(sorted(str(item) for item in unknown))
+            )
+        artifact_id = _text(raw.get("artifact_id"), name="artifact_id")
+        try:
+            artifact_id = str(UUID(artifact_id))
+        except ValueError as error:
+            raise ValueError("artifact_id must be a UUID") from error
+        digest = _text(raw.get("sha256"), name="sha256")
+        if (
+            len(digest) != 71
+            or not digest.startswith("sha256:")
+            or any(ch not in "0123456789abcdef" for ch in digest[7:])
+        ):
+            raise ValueError("sha256 must be canonical lowercase SHA-256")
+        ref: dict[str, str] = {
+            "artifact_id": artifact_id,
+            "sha256": digest,
+            "observed_at": _instant(raw.get("observed_at"), name="observed_at"),
+        }
+        for optional in ("source_uri", "rights_id"):
+            if raw.get(optional) is not None:
+                ref[optional] = _text(raw.get(optional), name=optional)
+        identity = canonical_json(ref)
+        if identity in identities:
+            raise ValueError("evidence_refs must be unique")
+        identities.add(identity)
+        normalized.append(ref)
+    return tuple(normalized)
 
 
 def _snapshot_payload(snapshot: OrderSnapshot) -> dict[str, object]:
@@ -152,6 +213,7 @@ class DurableOrderBookProjection:
         environment: str,
         host_id: str,
         owner_epoch: str,
+        evidence_artifact_store: ArtifactStore | None = None,
     ):
         if not isinstance(store, JournalStore):
             raise TypeError("store must be JournalStore")
@@ -161,6 +223,11 @@ class DurableOrderBookProjection:
         self.environment = _environment(environment)
         self.host_id = _text(host_id, name="host_id")
         self.owner_epoch = _text(owner_epoch, name="owner_epoch")
+        if evidence_artifact_store is not None and not isinstance(
+            evidence_artifact_store, ArtifactStore
+        ):
+            raise TypeError("evidence_artifact_store must be ArtifactStore")
+        self.evidence_artifact_store = evidence_artifact_store
         self.aggregate_id = _scope_id(
             self.provider_id,
             self.account_id,
@@ -182,6 +249,104 @@ class DurableOrderBookProjection:
 
     def _events(self) -> list[dict[str, object]]:
         return self.store.load_events(_AGGREGATE_TYPE, self.aggregate_id)
+
+    @staticmethod
+    def _requires_provider_evidence(
+        operation: object,
+        request: Mapping[str, object],
+    ) -> bool:
+        if operation == "ACKNOWLEDGE":
+            status = str(request.get("status", "")).upper()
+            return status in {"ACKNOWLEDGED", "ACCEPTED", "REJECTED"}
+        return operation in _PROVIDER_EVIDENCE_OPERATIONS
+
+    def _verify_provider_evidence(
+        self,
+        *,
+        operation: object,
+        request: Mapping[str, object],
+        evidence_refs: Sequence[Mapping[str, object]] | None,
+        committed_at: str,
+    ) -> tuple[dict[str, str], ...]:
+        refs = _canonical_evidence_refs(evidence_refs)
+        requires = self._requires_provider_evidence(operation, request)
+        if self.environment in {"PAPER", "LIVE"} and requires and not refs:
+            raise OrderProjectionConflict(
+                "provider-observed lifecycle mutation requires immutable evidence"
+            )
+        if not refs:
+            return ()
+        if not requires:
+            raise OrderProjectionConflict(
+                "local lifecycle mutation must not claim provider-result evidence"
+            )
+        if self.evidence_artifact_store is None:
+            if self.environment in {"PAPER", "LIVE"}:
+                raise OrderProjectionConflict(
+                    "provider evidence requires the trusted ArtifactStore boundary"
+                )
+            # REPLAY/SIMULATION are deterministic synthetic environments. They
+            # may carry canonical evidence identity without claiming that a
+            # real provider artifact has been qualified by the trusted store.
+            return refs
+
+        committed = _instant(committed_at, name="committed_at")
+        committed_dt = datetime.fromisoformat(
+            committed.replace("Z", "+00:00")
+        )
+        request_hash = payload_digest(dict(request))
+        for ref in refs:
+            observed_dt = datetime.fromisoformat(
+                ref["observed_at"].replace("Z", "+00:00")
+            )
+            if observed_dt > committed_dt:
+                raise OrderProjectionConflict(
+                    "provider evidence observation cannot be later than commit time"
+                )
+            try:
+                manifest = self.evidence_artifact_store.load_manifest(
+                    ref["artifact_id"]
+                )
+                self.evidence_artifact_store.read_bytes(ref["artifact_id"])
+            except (FileNotFoundError, ArtifactIntegrityError, ValueError) as error:
+                raise OrderProjectionConflict(
+                    "provider evidence artifact is not resolvable and intact"
+                ) from error
+            if manifest.get("sha256") != ref["sha256"]:
+                raise OrderProjectionConflict(
+                    "provider evidence digest differs from immutable artifact"
+                )
+            metadata = manifest.get("metadata")
+            if not isinstance(metadata, dict):
+                raise OrderProjectionConflict(
+                    "provider evidence artifact requires scoped metadata"
+                )
+            expected_scope = {
+                "provider_id": self.provider_id,
+                "account_id": self.account_id,
+                "environment": self.environment,
+                "order_operation": str(operation),
+                "request_hash": request_hash,
+                "observed_at": ref["observed_at"],
+            }
+            for key, expected in expected_scope.items():
+                if metadata.get(key) != expected:
+                    raise OrderProjectionConflict(
+                        f"provider evidence metadata mismatch: {key}"
+                    )
+            source_uri = ref.get("source_uri")
+            if source_uri is not None and source_uri not in manifest.get(
+                "source_refs", []
+            ):
+                raise OrderProjectionConflict(
+                    "provider evidence source_uri is not bound by artifact manifest"
+                )
+            rights_id = ref.get("rights_id")
+            if rights_id is not None and metadata.get("rights_id") != rights_id:
+                raise OrderProjectionConflict(
+                    "provider evidence rights_id is not bound by artifact metadata"
+                )
+        return refs
 
     def _scope_payload(self) -> dict[str, str]:
         return {
@@ -306,6 +471,18 @@ class DurableOrderBookProjection:
                 raise OrderProjectionConflict(
                     "order projection journal request hash mismatch"
                 )
+            evidence_refs = self._verify_provider_evidence(
+                operation=operation,
+                request=request,
+                evidence_refs=event.get("evidence_refs"),
+                committed_at=event.get("committed_at"),
+            )
+            mutation_hash = payload_digest(
+                {
+                    "request_hash": request_hash,
+                    "evidence_refs": list(evidence_refs),
+                }
+            )
             if not isinstance(expected_snapshot, dict):
                 raise OrderProjectionConflict(
                     "order projection journal snapshot must be an object"
@@ -326,7 +503,7 @@ class DurableOrderBookProjection:
                     "order projection journal snapshot differs from replay"
                 )
             idempotency[event_key] = (
-                request_hash,
+                mutation_hash,
                 snapshot,
                 str(event["event_id"]),
             )
@@ -343,15 +520,28 @@ class DurableOrderBookProjection:
         operation: str,
         request: dict[str, object],
         committed_at: str,
+        evidence_refs: Sequence[Mapping[str, object]] | None = None,
     ) -> DurableOrderMutationResult:
         key = _text(event_key, name="event_key")
         timestamp = _instant(committed_at, name="committed_at")
         request_hash = payload_digest(request)
+        verified_evidence = self._verify_provider_evidence(
+            operation=operation,
+            request=request,
+            evidence_refs=evidence_refs,
+            committed_at=timestamp,
+        )
+        mutation_hash = payload_digest(
+            {
+                "request_hash": request_hash,
+                "evidence_refs": list(verified_evidence),
+            }
+        )
 
         self._reload()
         prior = self._idempotency.get(key)
         if prior is not None:
-            if prior[0] != request_hash:
+            if prior[0] != mutation_hash:
                 raise OrderProjectionConflict(
                     "event_key was already used for a different order request"
                 )
@@ -382,7 +572,7 @@ class DurableOrderBookProjection:
                 NAMESPACE_URL,
                 "https://events.autotrade.local/order-projection/"
                 + canonical_json(
-                    [self.aggregate_id, key, request_hash]
+                    [self.aggregate_id, key, mutation_hash]
                 ),
             )
         )
@@ -403,7 +593,7 @@ class DurableOrderBookProjection:
             "causation_id": None,
             "payload": payload,
             "payload_hash": payload_digest(payload),
-            "evidence_refs": [],
+            "evidence_refs": [dict(ref) for ref in verified_evidence],
         }
         try:
             append_result = self.store.append_event(
@@ -500,6 +690,7 @@ class DurableOrderBookProjection:
         committed_at: str,
         status: str = "ACCEPTED",
         attempt_id: str | None = None,
+        evidence_refs: Sequence[Mapping[str, object]] | None = None,
     ) -> DurableOrderMutationResult:
         request = {
             "client_order_id": _text(client_order_id, name="client_order_id"),
@@ -515,6 +706,7 @@ class DurableOrderBookProjection:
             operation="ACKNOWLEDGE",
             request=request,
             committed_at=committed_at,
+            evidence_refs=evidence_refs,
         )
 
     def sync_submission_attempt(
@@ -642,6 +834,7 @@ class DurableOrderBookProjection:
                         provider_order_id=response.get("provider_order_id"),
                         status=response.get("outcome"),
                         committed_at=committed_at,
+                        evidence_refs=response.get("evidence"),
                     )
                 )
                 continue
@@ -685,6 +878,7 @@ class DurableOrderBookProjection:
         price,
         committed_at: str,
         provider_revision: str | None = None,
+        evidence_refs: Sequence[Mapping[str, object]] | None = None,
     ) -> DurableOrderMutationResult:
         request = {
             "client_order_id": _text(client_order_id, name="client_order_id"),
@@ -705,6 +899,7 @@ class DurableOrderBookProjection:
             operation="RECORD_FILL",
             request=request,
             committed_at=committed_at,
+            evidence_refs=evidence_refs,
         )
 
     def correct_fill(
@@ -718,6 +913,7 @@ class DurableOrderBookProjection:
         provider_revision: str,
         committed_at: str,
         correction_fill_id: str | None = None,
+        evidence_refs: Sequence[Mapping[str, object]] | None = None,
     ) -> DurableOrderMutationResult:
         request = {
             "client_order_id": _text(client_order_id, name="client_order_id"),
@@ -738,6 +934,7 @@ class DurableOrderBookProjection:
             operation="CORRECT_FILL",
             request=request,
             committed_at=committed_at,
+            evidence_refs=evidence_refs,
         )
 
     def bust_fill(
@@ -749,6 +946,7 @@ class DurableOrderBookProjection:
         provider_revision: str,
         committed_at: str,
         correction_fill_id: str | None = None,
+        evidence_refs: Sequence[Mapping[str, object]] | None = None,
     ) -> DurableOrderMutationResult:
         request = {
             "client_order_id": _text(client_order_id, name="client_order_id"),
@@ -767,6 +965,7 @@ class DurableOrderBookProjection:
             operation="BUST_FILL",
             request=request,
             committed_at=committed_at,
+            evidence_refs=evidence_refs,
         )
 
     def _simple(
@@ -776,6 +975,7 @@ class DurableOrderBookProjection:
         operation: str,
         client_order_id: str,
         committed_at: str,
+        evidence_refs: Sequence[Mapping[str, object]] | None = None,
     ) -> DurableOrderMutationResult:
         return self._commit(
             event_key=event_key,
@@ -787,6 +987,7 @@ class DurableOrderBookProjection:
                 )
             },
             committed_at=committed_at,
+            evidence_refs=evidence_refs,
         )
 
     def request_cancel(

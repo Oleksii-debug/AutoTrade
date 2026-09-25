@@ -156,6 +156,8 @@ class ReconciliationJournalTests(unittest.TestCase):
             recovered = unknown_submissions_from_dispatch(
                 reopened,
                 attempt_ids=["attempt-1"],
+                environment="PAPER",
+                account_id="acct-1",
             )
             self.assertEqual(len(recovered), 1)
             self.assertEqual(recovered[0].attempt_id, "attempt-1")

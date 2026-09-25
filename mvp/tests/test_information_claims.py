@@ -426,10 +426,12 @@ class InformationClaimTests(unittest.TestCase):
                 **claim.__dict__,
                 "published_at": datetime(2026, 1, 1, 2, tzinfo=offset),
                 "available_at": datetime(2026, 1, 1, 3, tzinfo=offset),
+                "ingested_at": datetime(2026, 1, 1, 3, tzinfo=offset),
             }
         )
         self.assertEqual(normalized.published_at, BASE)
         self.assertEqual(normalized.available_at, BASE + timedelta(hours=1))
+        self.assertEqual(normalized.ingested_at, BASE + timedelta(hours=1))
 
     def test_future_revision_cannot_change_earlier_snapshot_digest(self):
         store = ClaimStore()

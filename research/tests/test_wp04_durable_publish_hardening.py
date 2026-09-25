@@ -81,6 +81,79 @@ class DurablePublishHardeningTests(unittest.TestCase):
                 {"stable": True},
             )
 
+    def test_final_destination_symlink_is_rejected_without_touching_target(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("symlinks unavailable on this platform")
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            external_target = root / "external.json"
+            external_target.write_text('{"external":true}\n', encoding="utf-8")
+            destination = root / "artifact.json"
+            try:
+                os.symlink(external_target, destination)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink creation unavailable on this platform: {exc}")
+
+            with self.assertRaisesRegex(
+                DurablePublishLockError,
+                "regular non-symlink",
+            ):
+                atomic_write_json(destination, {"replacement": True})
+
+            self.assertEqual(
+                json.loads(external_target.read_text(encoding="utf-8")),
+                {"external": True},
+            )
+            self.assertTrue(destination.is_symlink())
+
+    def test_final_destination_hardlink_is_rejected_without_touching_alias(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            external_target = root / "external.json"
+            external_target.write_text('{"external":true}\n', encoding="utf-8")
+            destination = root / "artifact.json"
+            try:
+                os.link(external_target, destination)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"hard links unavailable on this platform: {exc}")
+
+            with self.assertRaisesRegex(
+                DurablePublishLockError,
+                "hard-link aliases",
+            ):
+                atomic_write_json(destination, {"replacement": True})
+
+            self.assertEqual(
+                json.loads(external_target.read_text(encoding="utf-8")),
+                {"external": True},
+            )
+            self.assertEqual(
+                json.loads(destination.read_text(encoding="utf-8")),
+                {"external": True},
+            )
+
+    def test_parent_directory_alias_uses_same_canonical_sidecar_identity(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("symlinks unavailable on this platform")
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            real_parent = root / "real"
+            real_parent.mkdir()
+            alias_parent = root / "alias"
+            try:
+                os.symlink(real_parent, alias_parent, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"directory symlink unavailable on this platform: {exc}")
+
+            real_destination = real_parent / "artifact.json"
+            alias_destination = alias_parent / "artifact.json"
+            with durable_path_lock(real_destination):
+                with durable_path_lock(alias_destination):
+                    self.assertFalse(real_destination.exists())
+
+            self.assertTrue((real_parent / ".artifact.json.lock").exists())
+            self.assertFalse((root / ".artifact.json.lock").exists())
+
     def test_nested_same_thread_lock_is_reentrant(self):
         with TemporaryDirectory() as directory:
             destination = Path(directory) / "artifact.json"

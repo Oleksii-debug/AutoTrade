@@ -17,16 +17,19 @@ from pathlib import Path, PurePosixPath
 import shutil
 import sqlite3
 import tempfile
-from typing import Any
+from typing import Any, Sequence
 
 from .diagnostics import build_diagnostic_snapshot
-from .persistence import JournalStore
+from .persistence import JournalStore, payload_digest
+from .reconciliation import ReconciliationResult
+from .recovery import HostState, OwnerFence, RecoveryController
 
 
 BACKUP_SCHEMA_VERSION = 1
 MANIFEST_NAME = "backup-manifest.json"
 MANIFEST_DIGEST_NAME = "backup-manifest.sha256"
 RESTORE_MARKER_NAME = "RESTORE_RECONCILIATION_REQUIRED.json"
+RESTORE_COMPLETION_PROOF_NAME = "RESTORE_RECONCILIATION_COMPLETE.json"
 _SHA256_HEX = frozenset("0123456789abcdef")
 
 
@@ -94,6 +97,445 @@ def _inside(path: Path, root: Path) -> bool:
     except ValueError:
         return False
 
+
+
+def _canonical_sha256_ref(value: object, *, name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 71
+        or not value.startswith("sha256:")
+        or any(character not in _SHA256_HEX for character in value[7:])
+    ):
+        raise BackupIntegrityError(f"{name} must be a canonical SHA-256 reference")
+    return value
+
+
+def _nonempty_text(value: object, *, name: str) -> str:
+    if not isinstance(value, str) or not value.strip() or value != value.strip():
+        raise BackupIntegrityError(f"{name} must be canonical non-empty text")
+    return value
+
+
+def _utc_text(value: object, *, name: str) -> datetime:
+    text = _nonempty_text(value, name=name)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise BackupIntegrityError(f"{name} must be an ISO timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise BackupIntegrityError(f"{name} must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _recovery_owner_chain_from_journal(
+    journal_path: Path,
+    *,
+    owner_scope: str,
+) -> tuple[OwnerFence, ...]:
+    """Read sender-fence history without mutating the restored SQLite journal."""
+
+    scope = _nonempty_text(owner_scope, name="owner_scope")
+    try:
+        connection = sqlite3.connect(str(journal_path), timeout=5)
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT event_type, aggregate_version, payload_json, payload_hash
+            FROM events
+            WHERE aggregate_type = ? AND aggregate_id = ?
+            ORDER BY aggregate_version
+            """,
+            ("recovery_owner", scope),
+        ).fetchall()
+    except (sqlite3.Error, OSError) as error:
+        raise BackupIntegrityError(
+            "Recovery owner journal evidence is unreadable"
+        ) from error
+    finally:
+        try:
+            connection.close()
+        except (UnboundLocalError, sqlite3.Error):
+            pass
+
+    chain: list[OwnerFence] = []
+    for expected_epoch, row in enumerate(rows, start=1):
+        if row["event_type"] != "RecoveryOwnerChanged":
+            raise BackupIntegrityError(
+                "Recovery owner journal contains unsupported event type"
+            )
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, json.JSONDecodeError) as error:
+            raise BackupIntegrityError(
+                "Recovery owner journal payload is invalid"
+            ) from error
+        if not isinstance(payload, dict):
+            raise BackupIntegrityError(
+                "Recovery owner journal payload must be an object"
+            )
+        if payload_digest(payload) != row["payload_hash"]:
+            raise BackupIntegrityError(
+                "Recovery owner journal payload hash mismatch"
+            )
+        owner_id = payload.get("owner_id")
+        epoch_raw = payload.get("owner_epoch")
+        if not isinstance(owner_id, str) or not owner_id.strip():
+            raise BackupIntegrityError(
+                "Recovery owner journal owner identity is invalid"
+            )
+        if (
+            not isinstance(epoch_raw, str)
+            or not epoch_raw.isdigit()
+            or epoch_raw == "0"
+            or (len(epoch_raw) > 1 and epoch_raw.startswith("0"))
+        ):
+            raise BackupIntegrityError(
+                "Recovery owner journal epoch is invalid"
+            )
+        epoch = int(epoch_raw)
+        if int(row["aggregate_version"]) != expected_epoch or epoch != expected_epoch:
+            raise BackupIntegrityError(
+                "Recovery owner journal epoch/version chain is invalid"
+            )
+        chain.append(OwnerFence(owner_id=owner_id.strip(), epoch=epoch))
+    return tuple(chain)
+
+
+def _read_restore_marker(root: Path) -> dict[str, Any]:
+    marker_path = root / RESTORE_MARKER_NAME
+    if not marker_path.is_file() or marker_path.is_symlink():
+        raise BackupIntegrityError("Restore reconciliation marker is missing")
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise BackupIntegrityError(
+            "Restore reconciliation marker is unreadable"
+        ) from error
+    if not isinstance(marker, dict):
+        raise BackupIntegrityError("Restore reconciliation marker is invalid")
+    if (
+        marker.get("schema_version") != 2
+        or marker.get("reason")
+        != "RECONCILIATION_AND_OWNERSHIP_FENCING_REQUIRED"
+        or marker.get("status")
+        not in {"RECONCILIATION_REQUIRED", "RECONCILIATION_COMPLETE"}
+    ):
+        raise BackupIntegrityError("Restore reconciliation marker is invalid")
+    _utc_text(marker.get("restored_at"), name="restored_at")
+    _canonical_sha256_ref(
+        marker.get("backup_manifest_sha256"),
+        name="backup_manifest_sha256",
+    )
+    _nonempty_text(marker.get("source_owner_scope"), name="source_owner_scope")
+    owner_id = marker.get("source_owner_id")
+    owner_epoch = marker.get("source_owner_epoch")
+    if owner_id is None or owner_epoch is None:
+        if owner_id is not None or owner_epoch is not None:
+            raise BackupIntegrityError(
+                "Restore source owner identity is partially bound"
+            )
+    else:
+        _nonempty_text(owner_id, name="source_owner_id")
+        if (
+            isinstance(owner_epoch, bool)
+            or not isinstance(owner_epoch, int)
+            or owner_epoch < 1
+        ):
+            raise BackupIntegrityError("source_owner_epoch is invalid")
+    return marker
+
+
+def _load_sender_fence_evidence(
+    root: Path,
+    digest_ref: str,
+    *,
+    marker: dict[str, Any],
+    restored_at: datetime,
+    completed_at: datetime,
+) -> dict[str, Any]:
+    canonical = _canonical_sha256_ref(
+        digest_ref,
+        name="sender fencing evidence",
+    )
+    digest = canonical.removeprefix("sha256:")
+    object_path = (
+        root
+        / "artifacts"
+        / "objects"
+        / "sha256"
+        / digest[:2]
+        / digest
+    )
+    if (
+        object_path.is_symlink()
+        or not object_path.is_file()
+        or _sha256_file(object_path) != digest
+    ):
+        raise BackupIntegrityError(
+            "Sender fencing evidence object is missing or corrupt"
+        )
+    try:
+        payload = json.loads(object_path.read_bytes())
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise BackupIntegrityError(
+            "Sender fencing evidence is not valid JSON"
+        ) from error
+    required = {
+        "schema_version",
+        "kind",
+        "backup_manifest_sha256",
+        "old_owner_id",
+        "old_owner_epoch",
+        "new_owner_id",
+        "new_owner_epoch",
+        "fenced_at",
+        "method",
+    }
+    if not isinstance(payload, dict) or set(payload) != required:
+        raise BackupIntegrityError(
+            "Sender fencing evidence structure is invalid"
+        )
+    if (
+        payload["schema_version"] != 1
+        or payload["kind"] != "AUTOTRADE_SENDER_FENCE_EVIDENCE"
+        or payload["backup_manifest_sha256"]
+        != marker["backup_manifest_sha256"]
+    ):
+        raise BackupIntegrityError(
+            "Sender fencing evidence is not bound to this restore"
+        )
+    old_owner_id = _nonempty_text(
+        payload["old_owner_id"], name="old_owner_id"
+    )
+    new_owner_id = _nonempty_text(
+        payload["new_owner_id"], name="new_owner_id"
+    )
+    old_epoch = payload["old_owner_epoch"]
+    new_epoch = payload["new_owner_epoch"]
+    if (
+        isinstance(old_epoch, bool)
+        or not isinstance(old_epoch, int)
+        or old_epoch < 1
+        or isinstance(new_epoch, bool)
+        or not isinstance(new_epoch, int)
+        or new_epoch != old_epoch + 1
+        or new_owner_id == old_owner_id
+    ):
+        raise BackupIntegrityError(
+            "Sender fencing evidence owner transition is invalid"
+        )
+    fenced_at = _utc_text(payload["fenced_at"], name="fenced_at")
+    if fenced_at < restored_at or fenced_at > completed_at:
+        raise BackupIntegrityError(
+            "Sender fencing evidence timestamp is outside restore completion window"
+        )
+    _nonempty_text(payload["method"], name="fencing method")
+    return {"sha256": canonical, **payload}
+
+
+def _validate_stored_reconciliation_payload(payload: object) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise BackupIntegrityError("Reconciliation completion proof is invalid")
+    required = {
+        "provider_id",
+        "account_id",
+        "environment",
+        "complete",
+        "snapshot_consistent",
+        "snapshot_mode",
+        "snapshot_query_started_at",
+        "snapshot_query_completed_at",
+        "activity_coverage_complete",
+        "matched_execution_ids",
+        "matched_working_client_order_ids",
+        "matched_provider_activity_ids",
+        "submission_resolutions",
+        "blocking_resources",
+    }
+    if set(payload) != required:
+        raise BackupIntegrityError(
+            "Reconciliation completion proof structure is invalid"
+        )
+    for field in ("provider_id", "account_id", "environment"):
+        _nonempty_text(payload[field], name=field)
+    if (
+        payload["complete"] is not True
+        or payload["snapshot_consistent"] is not True
+        or payload["activity_coverage_complete"] is not True
+        or payload["blocking_resources"] != []
+    ):
+        raise BackupIntegrityError(
+            "Reconciliation completion proof is not fully non-blocking"
+        )
+    if payload["snapshot_mode"] is not None:
+        _nonempty_text(payload["snapshot_mode"], name="snapshot_mode")
+    for field in ("snapshot_query_started_at", "snapshot_query_completed_at"):
+        if payload[field] is not None:
+            _utc_text(payload[field], name=field)
+
+    identity_fields = (
+        "matched_execution_ids",
+        "matched_working_client_order_ids",
+        "matched_provider_activity_ids",
+    )
+    normalized_ids: dict[str, list[str]] = {}
+    for field in identity_fields:
+        values = payload[field]
+        if not isinstance(values, list):
+            raise BackupIntegrityError(f"{field} must be a list")
+        normalized: list[str] = []
+        for value in values:
+            normalized.append(_nonempty_text(value, name=field))
+        if len(normalized) != len(set(normalized)):
+            raise BackupIntegrityError(f"{field} must be unique")
+        normalized_ids[field] = normalized
+
+    resolutions = payload["submission_resolutions"]
+    if not isinstance(resolutions, list):
+        raise BackupIntegrityError(
+            "submission_resolutions must be a list"
+        )
+    seen_attempts: set[str] = set()
+    seen_clients: set[str] = set()
+    seen_executions: set[str] = set()
+    seen_orders: set[str] = set()
+    matched_executions = set(normalized_ids["matched_execution_ids"])
+    allowed = {
+        "PROVEN_ABSENT",
+        "OBSERVED_EXECUTION",
+        "OBSERVED_WORKING_ORDER",
+    }
+    resolution_keys = {
+        "attempt_id",
+        "intent_id",
+        "client_order_id",
+        "outcome",
+        "evidence_reason",
+        "provider_order_ids",
+        "provider_execution_ids",
+    }
+    for item in resolutions:
+        if not isinstance(item, dict) or set(item) != resolution_keys:
+            raise BackupIntegrityError(
+                "submission resolution proof structure is invalid"
+            )
+        attempt = _nonempty_text(item["attempt_id"], name="attempt_id")
+        _nonempty_text(item["intent_id"], name="intent_id")
+        client = _nonempty_text(
+            item["client_order_id"], name="client_order_id"
+        )
+        _nonempty_text(item["evidence_reason"], name="evidence_reason")
+        if attempt in seen_attempts or client in seen_clients:
+            raise BackupIntegrityError(
+                "submission resolution identities must be unique"
+            )
+        seen_attempts.add(attempt)
+        seen_clients.add(client)
+        outcome = item["outcome"]
+        if outcome not in allowed:
+            raise BackupIntegrityError(
+                "submission resolution outcome is not terminal"
+            )
+        for field, seen in (
+            ("provider_order_ids", seen_orders),
+            ("provider_execution_ids", seen_executions),
+        ):
+            values = item[field]
+            if not isinstance(values, list):
+                raise BackupIntegrityError(
+                    f"{field} must be a list"
+                )
+            local: set[str] = set()
+            for raw in values:
+                identity = _nonempty_text(raw, name=field)
+                if identity in local or identity in seen:
+                    raise BackupIntegrityError(
+                        f"{field} identities must be globally unique"
+                    )
+                local.add(identity)
+                seen.add(identity)
+        order_ids = item["provider_order_ids"]
+        execution_ids = item["provider_execution_ids"]
+        if outcome == "PROVEN_ABSENT" and (order_ids or execution_ids):
+            raise BackupIntegrityError(
+                "PROVEN_ABSENT cannot carry provider identities"
+            )
+        if outcome == "OBSERVED_EXECUTION":
+            if (
+                not execution_ids
+                or order_ids
+                or any(value not in matched_executions for value in execution_ids)
+            ):
+                raise BackupIntegrityError(
+                    "OBSERVED_EXECUTION proof does not match reconciled executions"
+                )
+        if outcome == "OBSERVED_WORKING_ORDER" and (
+            not order_ids or execution_ids
+        ):
+            raise BackupIntegrityError(
+                "OBSERVED_WORKING_ORDER proof is invalid"
+            )
+    return payload
+
+
+def _reconciliation_completion_payload(
+    reconciliation: ReconciliationResult,
+) -> dict[str, Any]:
+    if not isinstance(reconciliation, ReconciliationResult):
+        raise TypeError("reconciliation must be ReconciliationResult")
+    if (
+        not reconciliation.complete
+        or reconciliation.blocks_new_risk
+        or not reconciliation.snapshot_consistent
+        or not reconciliation.activity_coverage_complete
+        or reconciliation.unexpected_execution_ids
+        or reconciliation.missing_local_execution_ids
+        or reconciliation.unexpected_working_provider_order_ids
+        or reconciliation.missing_local_working_client_order_ids
+        or reconciliation.unexpected_provider_activity_ids
+        or reconciliation.missing_local_provider_activity_ids
+        or reconciliation.manual_or_external_activity_ids
+        or reconciliation.cash_differences
+        or reconciliation.position_differences
+        or reconciliation.borrow_differences
+    ):
+        raise BackupError(
+            "Restore completion requires a complete non-blocking reconciliation"
+        )
+    payload = {
+        "provider_id": reconciliation.provider_id,
+        "account_id": reconciliation.account_id,
+        "environment": reconciliation.environment,
+        "complete": True,
+        "snapshot_consistent": True,
+        "snapshot_mode": reconciliation.snapshot_mode,
+        "snapshot_query_started_at": reconciliation.snapshot_query_started_at,
+        "snapshot_query_completed_at": reconciliation.snapshot_query_completed_at,
+        "activity_coverage_complete": True,
+        "matched_execution_ids": list(reconciliation.matched_execution_ids),
+        "matched_working_client_order_ids": list(
+            reconciliation.matched_working_client_order_ids
+        ),
+        "matched_provider_activity_ids": list(
+            reconciliation.matched_provider_activity_ids
+        ),
+        "submission_resolutions": [
+            {
+                "attempt_id": item.attempt_id,
+                "intent_id": item.intent_id,
+                "client_order_id": item.client_order_id,
+                "outcome": item.outcome,
+                "evidence_reason": item.evidence_reason,
+                "provider_order_ids": list(item.provider_order_ids),
+                "provider_execution_ids": list(
+                    item.provider_execution_ids
+                ),
+            }
+            for item in reconciliation.submission_resolutions
+        ],
+        "blocking_resources": list(reconciliation.blocking_resources),
+    }
+    return _validate_stored_reconciliation_payload(payload)
 
 def _safe_relative_path(raw: str) -> Path:
     if not isinstance(raw, str) or not raw:
@@ -636,13 +1078,27 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
             if _sha256_file(target) != item["sha256"].removeprefix("sha256:"):
                 raise BackupIntegrityError("Restored payload digest mismatch")
 
+        owner_scope = "default"
+        owner_chain = _recovery_owner_chain_from_journal(
+            stage / "state" / "journal.sqlite3",
+            owner_scope=owner_scope,
+        )
+        source_owner = owner_chain[-1] if owner_chain else None
         marker = {
-            "schema_version": 1,
+            "schema_version": 2,
+            "status": "RECONCILIATION_REQUIRED",
             "restored_at": _utc_now(),
             "reason": "RECONCILIATION_AND_OWNERSHIP_FENCING_REQUIRED",
             "backup_manifest_sha256": (backup / MANIFEST_DIGEST_NAME)
             .read_text(encoding="ascii")
             .strip(),
+            "source_owner_scope": owner_scope,
+            "source_owner_id": (
+                source_owner.owner_id if source_owner is not None else None
+            ),
+            "source_owner_epoch": (
+                source_owner.epoch if source_owner is not None else None
+            ),
         }
         _write_bytes_durable(stage / RESTORE_MARKER_NAME, _canonical_json(marker))
         os.replace(stage, destination)
@@ -652,21 +1108,287 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
         raise
 
 
-def restore_requires_reconciliation(destination_root: str | Path) -> bool:
-    """Fail closed until a future qualified reconciliation flow is implemented.
 
-    Missing, unreadable or merely present restore metadata can never grant
-    execution authority. The current recovery foundation has no gate-clearing
-    operation, so every restored or uncertain state requires reconciliation.
+def complete_restore_reconciliation(
+    destination_root: str | Path,
+    *,
+    controller: RecoveryController,
+    reconciliation: ReconciliationResult,
+    fencing_evidence: Sequence[str],
+    completed_at: str,
+) -> dict[str, Any]:
+    """Durably clear a restore gate only from reconciliation and fence evidence.
+
+    This function does not make the controller READY and does not transfer
+    ownership.  Those actions must already have occurred through the canonical
+    journal-backed RecoveryController.  Completion only records proof that the
+    restored runtime reached a safe, reconciled, externally fenced state.
     """
 
-    marker = Path(destination_root) / RESTORE_MARKER_NAME
-    if not marker.is_file():
-        return True
+    root = Path(destination_root)
+    marker = _read_restore_marker(root)
+    if marker["status"] == "RECONCILIATION_COMPLETE":
+        if restore_requires_reconciliation(root):
+            raise BackupIntegrityError(
+                "Existing restore completion proof is invalid"
+            )
+        proof_path = root / RESTORE_COMPLETION_PROOF_NAME
+        return json.loads(proof_path.read_text(encoding="utf-8"))
+
+    if not isinstance(controller, RecoveryController):
+        raise TypeError("controller must be RecoveryController")
+    completed = _utc_text(completed_at, name="completed_at")
+    restored = _utc_text(marker["restored_at"], name="restored_at")
+    if completed < restored:
+        raise BackupError("Restore completion cannot precede restore")
+
+    source_owner_id = marker.get("source_owner_id")
+    source_owner_epoch = marker.get("source_owner_epoch")
+    if source_owner_id is None or source_owner_epoch is None:
+        raise BackupError(
+            "Restore completion requires a durable source owner fence"
+        )
+    expected_journal = (root / "state" / "journal.sqlite3").resolve(
+        strict=False
+    )
+    durable_path = controller.durable_owner_store_path
+    if (
+        durable_path is None
+        or durable_path.resolve(strict=False) != expected_journal
+        or controller.owner_scope != marker["source_owner_scope"]
+    ):
+        raise BackupError(
+            "Recovery controller is not bound to the restored journal and owner scope"
+        )
+
+    chain = controller.durable_owner_chain()
+    if (
+        not chain
+        or controller.owner is None
+        or controller.owner != chain[-1]
+        or source_owner_epoch > len(chain)
+        or chain[source_owner_epoch - 1]
+        != OwnerFence(source_owner_id, source_owner_epoch)
+    ):
+        raise BackupError(
+            "Recovery controller owner chain does not descend from restored owner"
+        )
+    current_owner = chain[-1]
+    if current_owner.epoch <= source_owner_epoch:
+        raise BackupError(
+            "Restore completion requires a new durably fenced sender owner"
+        )
+    if (
+        controller.state is not HostState.READY
+        or not controller.provider_reconciled
+        or controller.unresolved_attempts
+        or not controller.storage_writable
+        or not controller.clock_trusted
+    ):
+        raise BackupError(
+            "Recovery controller is not READY with reconciled durable state"
+        )
+
+    if isinstance(fencing_evidence, (str, bytes)) or not isinstance(
+        fencing_evidence, Sequence
+    ):
+        raise TypeError("fencing_evidence must be a sequence")
+    refs = tuple(fencing_evidence)
+    transition_chain = chain[source_owner_epoch - 1 :]
+    if len(refs) != len(transition_chain) - 1 or not refs:
+        raise BackupError(
+            "Fencing evidence must cover every post-restore owner transition"
+        )
+    if len(set(refs)) != len(refs):
+        raise BackupError("Fencing evidence references must be unique")
+
+    evidence: list[dict[str, Any]] = []
+    for index, ref in enumerate(refs):
+        item = _load_sender_fence_evidence(
+            root,
+            ref,
+            marker=marker,
+            restored_at=restored,
+            completed_at=completed,
+        )
+        old_owner = transition_chain[index]
+        new_owner = transition_chain[index + 1]
+        if (
+            item["old_owner_id"] != old_owner.owner_id
+            or item["old_owner_epoch"] != old_owner.epoch
+            or item["new_owner_id"] != new_owner.owner_id
+            or item["new_owner_epoch"] != new_owner.epoch
+        ):
+            raise BackupError(
+                "Fencing evidence does not match durable owner transition"
+            )
+        evidence.append(item)
+
+    reconciliation_payload = _reconciliation_completion_payload(
+        reconciliation
+    )
+    proof = {
+        "schema_version": 1,
+        "backup_manifest_sha256": marker["backup_manifest_sha256"],
+        "restored_at": marker["restored_at"],
+        "completed_at": completed.isoformat().replace("+00:00", "Z"),
+        "owner_scope": marker["source_owner_scope"],
+        "source_owner_id": source_owner_id,
+        "source_owner_epoch": source_owner_epoch,
+        "current_owner_id": current_owner.owner_id,
+        "current_owner_epoch": current_owner.epoch,
+        "fencing_evidence": evidence,
+        "reconciliation": reconciliation_payload,
+    }
+    proof_bytes = _canonical_json(proof)
+    proof_hash = "sha256:" + _sha256_bytes(proof_bytes)
+    _write_bytes_durable(
+        root / RESTORE_COMPLETION_PROOF_NAME,
+        proof_bytes,
+    )
+    completed_marker = {
+        **marker,
+        "status": "RECONCILIATION_COMPLETE",
+        "completed_at": proof["completed_at"],
+        "completion_proof_sha256": proof_hash,
+        "current_owner_id": current_owner.owner_id,
+        "current_owner_epoch": current_owner.epoch,
+    }
+    _write_bytes_durable(
+        root / RESTORE_MARKER_NAME,
+        _canonical_json(completed_marker),
+    )
+    return proof
+
+
+def restore_requires_reconciliation(destination_root: str | Path) -> bool:
+    """Return False only while the durable completion proof still verifies."""
+
+    root = Path(destination_root)
     try:
-        payload = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        marker = _read_restore_marker(root)
+    except BackupIntegrityError:
         return True
-    if not isinstance(payload, dict) or payload.get("reason") != "RECONCILIATION_AND_OWNERSHIP_FENCING_REQUIRED":
+    if marker["status"] != "RECONCILIATION_COMPLETE":
         return True
-    return True
+
+    try:
+        expected_proof = _canonical_sha256_ref(
+            marker.get("completion_proof_sha256"),
+            name="completion_proof_sha256",
+        )
+        current_owner_id = _nonempty_text(
+            marker.get("current_owner_id"),
+            name="current_owner_id",
+        )
+        current_owner_epoch = marker.get("current_owner_epoch")
+        if (
+            isinstance(current_owner_epoch, bool)
+            or not isinstance(current_owner_epoch, int)
+            or current_owner_epoch < 1
+        ):
+            return True
+        proof_path = root / RESTORE_COMPLETION_PROOF_NAME
+        if proof_path.is_symlink() or not proof_path.is_file():
+            return True
+        proof_bytes = proof_path.read_bytes()
+        if expected_proof != "sha256:" + _sha256_bytes(proof_bytes):
+            return True
+        proof = json.loads(proof_bytes)
+        expected_keys = {
+            "schema_version",
+            "backup_manifest_sha256",
+            "restored_at",
+            "completed_at",
+            "owner_scope",
+            "source_owner_id",
+            "source_owner_epoch",
+            "current_owner_id",
+            "current_owner_epoch",
+            "fencing_evidence",
+            "reconciliation",
+        }
+        if not isinstance(proof, dict) or set(proof) != expected_keys:
+            return True
+        if (
+            proof["schema_version"] != 1
+            or proof["backup_manifest_sha256"]
+            != marker["backup_manifest_sha256"]
+            or proof["restored_at"] != marker["restored_at"]
+            or proof["completed_at"] != marker.get("completed_at")
+            or proof["owner_scope"] != marker["source_owner_scope"]
+            or proof["source_owner_id"] != marker["source_owner_id"]
+            or proof["source_owner_epoch"] != marker["source_owner_epoch"]
+            or proof["current_owner_id"] != current_owner_id
+            or proof["current_owner_epoch"] != current_owner_epoch
+        ):
+            return True
+        completed = _utc_text(proof["completed_at"], name="completed_at")
+        restored = _utc_text(proof["restored_at"], name="restored_at")
+        if completed < restored:
+            return True
+        _validate_stored_reconciliation_payload(proof["reconciliation"])
+
+        chain = _recovery_owner_chain_from_journal(
+            root / "state" / "journal.sqlite3",
+            owner_scope=proof["owner_scope"],
+        )
+        source_epoch = proof["source_owner_epoch"]
+        if (
+            not chain
+            or source_epoch > len(chain)
+            or chain[source_epoch - 1]
+            != OwnerFence(proof["source_owner_id"], source_epoch)
+            or chain[-1]
+            != OwnerFence(current_owner_id, current_owner_epoch)
+        ):
+            return True
+        transition_chain = chain[source_epoch - 1 :]
+        stored_evidence = proof["fencing_evidence"]
+        if (
+            not isinstance(stored_evidence, list)
+            or len(stored_evidence) != len(transition_chain) - 1
+            or not stored_evidence
+        ):
+            return True
+        seen_refs: set[str] = set()
+        for index, stored in enumerate(stored_evidence):
+            if not isinstance(stored, dict):
+                return True
+            ref = stored.get("sha256")
+            canonical = _canonical_sha256_ref(
+                ref,
+                name="sender fencing evidence",
+            )
+            if canonical in seen_refs:
+                return True
+            seen_refs.add(canonical)
+            loaded = _load_sender_fence_evidence(
+                root,
+                canonical,
+                marker=marker,
+                restored_at=restored,
+                completed_at=completed,
+            )
+            if loaded != stored:
+                return True
+            old_owner = transition_chain[index]
+            new_owner = transition_chain[index + 1]
+            if (
+                loaded["old_owner_id"] != old_owner.owner_id
+                or loaded["old_owner_epoch"] != old_owner.epoch
+                or loaded["new_owner_id"] != new_owner.owner_id
+                or loaded["new_owner_epoch"] != new_owner.epoch
+            ):
+                return True
+    except (
+        BackupError,
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        ValueError,
+        TypeError,
+        sqlite3.Error,
+    ):
+        return True
+    return False

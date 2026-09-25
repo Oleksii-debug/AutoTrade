@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import json
 import unittest
 from uuid import uuid4
 
@@ -19,6 +20,11 @@ from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
     EvidenceVerification,
     derive_capability_snapshot,
+)
+from mvp.autotrade_mvp.provider_core import (
+    Surface,
+    observe_authenticated_json_response,
+    prepare_authenticated_read_query,
 )
 
 
@@ -46,7 +52,7 @@ def capability(
             expires_at=NOW + timedelta(hours=1),
             supported_order_types=frozenset(order_types),
             time_in_force=frozenset(tif),
-            permission_scopes=frozenset({"ORDER_WRITE"}),
+            permission_scopes=frozenset({"ORDER_WRITE", "ORDER.READ"}),
             position_mode="NET",
             native_protection=frozenset({"STOP"}),
             rate_limit_policy_id="alpaca-paper-test",
@@ -65,6 +71,38 @@ def capability(
         claims=claims,
         observed_at=NOW,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    )
+
+
+def bound_activity_response(
+    activities,
+    *,
+    account_id="paper-1",
+    environment="PAPER",
+):
+    query = prepare_authenticated_read_query(
+        capability=capability(
+            account_id=account_id,
+            environment=environment,
+            instrument_version="AAPL:v1",
+        ),
+        surface=Surface.ACTIVITIES,
+        endpoint="/v2/account/activities/FILL",
+        query={"activity_types": "FILL"},
+        at=NOW,
+        permission_scope="ORDER.READ",
+    )
+    raw = json.dumps(
+        activities,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return observe_authenticated_json_response(
+        query_binding=query,
+        response_bytes=raw,
+        observed_at=NOW,
     )
 
 
@@ -484,25 +522,44 @@ class AlpacaAdapterTests(unittest.TestCase):
             "price": "220.10",
             "transaction_time": "2026-09-24T20:01:00Z",
         }
+        observation = bound_activity_response([row])
         with self.assertRaisesRegex(AlpacaAdapterError, "fee evidence"):
             parse_trade_activities(
-                [row],
+                observation,
                 instrument_versions={"AAPL": "AAPL:v1"},
                 client_ids_by_order_id={order_id: "at-ack-1"},
                 fees_by_activity_id={},
-            
-                account_id="paper-1",
-                environment="PAPER",)
+            )
         fills = parse_trade_activities(
-            [row, row],
+            bound_activity_response([row, row]),
             instrument_versions={"AAPL": "AAPL:v1"},
             client_ids_by_order_id={order_id: "at-ack-1"},
             fees_by_activity_id={row["id"]: ("0.01", "USD")},
-        
-            account_id="paper-1",
-            environment="PAPER",)
+        )
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].fee_amount, Decimal("0.01"))
+        self.assertEqual((fills[0].account_id, fills[0].environment), ("paper-1", "PAPER"))
+
+    def test_trade_activity_scope_cannot_be_relabelled_after_provider_read(self):
+        order_id = str(uuid4())
+        row = {
+            "activity_type": "FILL",
+            "id": "activity-scope-1",
+            "order_id": order_id,
+            "symbol": "AAPL",
+            "qty": "1",
+            "price": "220.10",
+            "transaction_time": "2026-09-24T20:01:00Z",
+        }
+        observation = bound_activity_response([row], account_id="account-a")
+        fills = parse_trade_activities(
+            observation,
+            instrument_versions={"AAPL": "AAPL:v1"},
+            client_ids_by_order_id={order_id: "at-scope-1"},
+            fees_by_activity_id={row["id"]: ("0.01", "USD")},
+        )
+        self.assertEqual((fills[0].account_id, fills[0].environment), ("account-a", "PAPER"))
+        self.assertEqual(observation.query_binding.account_id, "account-a")
 
     def test_canonical_coverage_defaults_to_unproven_absence(self):
         evidence = coverage_evidence(

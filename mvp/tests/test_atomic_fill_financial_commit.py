@@ -963,7 +963,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                     event["payload"]["request"]["derived_usage"]["CASH:USD"]
                     for event in bindings
                 },
-                {"40.0", "60.0"},
+                {"40", "60"},
             )
             self.assertEqual(
                 len({event["aggregate_id"] for event in bindings}),

@@ -793,6 +793,64 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(versions, [1, 2, 3, 4])
             self.assertNotIn("result_hash", columns)
 
+    def test_v4_upgrade_rejects_unverifiable_extra_hashless_outbox_fields(self):
+        class V4JournalStore(JournalStore):
+            SCHEMA_VERSION = 4
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            legacy = V4JournalStore(path)
+            legacy.append_event(event(), outbox_topic="events")
+
+            connection = sqlite3.connect(path)
+            try:
+                payload = json.loads(
+                    connection.execute(
+                        "SELECT payload_json FROM outbox WHERE event_id = ?",
+                        ("evt-1",),
+                    ).fetchone()[0]
+                )
+                # The legacy journal row does not contain this field. With no
+                # pre-existing envelope_hash there is no authority from which
+                # migration can prove its historical value.
+                payload["host_id"] = "possibly-tampered-host"
+                connection.execute(
+                    "UPDATE outbox SET payload_json = ?, envelope_hash = NULL "
+                    "WHERE event_id = ?",
+                    (
+                        json.dumps(
+                            payload,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        ),
+                        "evt-1",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "not exactly reconstructable"):
+                JournalStore(path)
+
+            connection = sqlite3.connect(path)
+            try:
+                versions = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT version FROM schema_migrations ORDER BY version"
+                    )
+                ]
+                envelope_hash = connection.execute(
+                    "SELECT envelope_hash FROM outbox WHERE event_id = ?",
+                    ("evt-1",),
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(versions, [1, 2, 3, 4])
+            self.assertIsNone(envelope_hash)
+
     def test_v4_upgrade_rejects_mismatched_hashless_outbox_before_backfill(self):
         class V4JournalStore(JournalStore):
             SCHEMA_VERSION = 4
@@ -830,7 +888,7 @@ class JournalStoreTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ValueError,
-                "legacy outbox payload does not match authoritative journal event",
+                "legacy outbox payload is not exactly reconstructable from authoritative journal event",
             ):
                 JournalStore(path)
 

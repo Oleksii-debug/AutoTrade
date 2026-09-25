@@ -502,6 +502,37 @@ class CausalFoldTests(unittest.TestCase):
                 max_age_seconds=60,
             )
 
+    def test_cross_market_provenance_binds_economic_event_time(self):
+        first_source = SourceValue.create(
+            observation_id="same-id",
+            symbol="AAA",
+            event_time=BASE,
+            available_at=BASE + timedelta(seconds=2),
+            value="100",
+            source_revision="r1",
+        )
+        second_source = SourceValue.create(
+            observation_id="same-id",
+            symbol="AAA",
+            event_time=BASE + timedelta(seconds=1),
+            available_at=BASE + timedelta(seconds=2),
+            value="100",
+            source_revision="r1",
+        )
+        first = causal_cross_market_point(
+            [first_source],
+            required_symbols=["AAA"],
+            decision_time=BASE + timedelta(seconds=2),
+            max_age_seconds=10,
+        )
+        second = causal_cross_market_point(
+            [second_source],
+            required_symbols=["AAA"],
+            decision_time=BASE + timedelta(seconds=2),
+            max_age_seconds=10,
+        )
+        self.assertNotEqual(first.provenance_hash, second.provenance_hash)
+
     def test_cross_market_provenance_changes_with_revision(self):
         first = causal_cross_market_point(
             [

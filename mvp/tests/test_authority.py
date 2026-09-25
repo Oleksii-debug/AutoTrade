@@ -1233,7 +1233,7 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             seed = AuthorityService(store)
-            seed.register_policy(policy(autonomous=True))
+            seed.register_policy(\n                policy(autonomous=True, environments={"SIMULATION"})\n            )
 
             stale = AuthorityService(store)
             revoker = AuthorityService(store)
@@ -1252,7 +1252,7 @@ class AuthorityTests(unittest.TestCase):
                     policy_id="p1",
                     intent_hash="h-stale",
                     account_id="paper-1",
-                    environment="PAPER",
+                    environment="SIMULATION",
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
                     action="ORDER.SUBMIT",

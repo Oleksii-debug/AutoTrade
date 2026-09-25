@@ -151,7 +151,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
             "if (!state.snapshotReady || state.sessionIdentity === null)",
             js,
         )
-        self.assertIn('<button type="submit" disabled>Submit command</button>', html)
+        self.assertIn('id="submit-command" type="submit" disabled', html)
 
     def test_snapshot_uses_only_canonical_ui_snapshot_fields(self):
         js = APP.read_text(encoding="utf-8")
@@ -192,11 +192,11 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js,
         )
         self.assertIn(
-            'startedAt: utcInstant(result.started_at, "started_at")',
+            'const startedAt = utcInstant(result.started_at, "started_at")',
             js,
         )
         self.assertIn(
-            'updatedAt: utcInstant(result.updated_at, "updated_at")',
+            'const updatedAt = utcInstant(result.updated_at, "updated_at")',
             js,
         )
 
@@ -330,7 +330,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn('element.textContent = "";', js)
         self.assertIn("window.setTimeout(() => {", js)
         self.assertIn("element.textContent = message;", js)
-        self.assertIn('announceLiveText("urgent-status", message)', js)
+        self.assertIn('announceLiveText("urgent-status", pending.join(" "))', js)
         self.assertIn(
             'announceLiveText("polite-status", pending.join(" "))',
             js,

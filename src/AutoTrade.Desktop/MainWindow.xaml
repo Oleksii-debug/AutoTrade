@@ -116,6 +116,7 @@
                        TextWrapping="Wrap"
                        Focusable="False"
                        Text="Host status has not been refreshed."
+                       TextChanged="LiveRegion_TextChanged"
                        AutomationProperties.Name="Host status announcement"
                        AutomationProperties.LiveSetting="Polite" />
           </StackPanel>
@@ -148,6 +149,7 @@
                        TextWrapping="Wrap"
                        Focusable="True"
                        Text="No emergency command has been requested."
+                       TextChanged="LiveRegion_TextChanged"
                        AutomationProperties.Name="Emergency command result"
                        AutomationProperties.LiveSetting="Assertive" />
           </StackPanel>

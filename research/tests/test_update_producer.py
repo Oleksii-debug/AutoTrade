@@ -57,6 +57,7 @@ class ProducerFixture:
         self.jobs = ResearchJobStore(self.root / "jobs.sqlite3")
         self.science = ScientificRegistry(self.root / "science.sqlite3")
         self.protocol_registration = None
+        self.reconciliation_evidence = {}
         self._episode_counter = 0
         self._physical_evidence_refs = {}
 
@@ -89,6 +90,40 @@ class ProducerFixture:
         reference = "artifact:" + artifact_id + "@" + manifest["sha256"]
         self._physical_evidence_refs[key] = reference
         return reference
+
+    def resolve_reconciliation_evidence(self, episode_id):
+        return self.reconciliation_evidence[episode_id]
+
+    def bind_reconciliation_evidence(
+        self,
+        episode_id,
+        *,
+        observed_at,
+        outcome="OBSERVED_EXECUTION",
+    ):
+        execution_ids = (
+            [f"execution-{episode_id}"]
+            if outcome == "OBSERVED_EXECUTION"
+            else []
+        )
+        self.reconciliation_evidence[episode_id] = {
+            "checkpoint_event_id": f"checkpoint-{episode_id}",
+            "checkpoint_payload_hash": "sha256:" + "9" * 64,
+            "checkpoint_aggregate_id": f"account-reconciliation:{episode_id}",
+            "checkpoint_aggregate_version": 1,
+            "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+            "provider_id": "TEST",
+            "account_id": "paper-account",
+            "environment": "PAPER",
+            "attempt_id": f"attempt-{episode_id}",
+            "intent_id": f"intent-{episode_id}",
+            "client_order_id": f"client-{episode_id}",
+            "outcome": outcome,
+            "evidence_reason": "authority-backed unit-test reconciliation",
+            "provider_order_ids": [],
+            "provider_execution_ids": execution_ids,
+            "current_scope": True,
+        }
 
     def append_learning(
         self,
@@ -409,6 +444,7 @@ class ProducerFixture:
             permission_classes=["research"],
             included_episode_ids=included,
             exclusions=exclusions,
+            reconciliation_evidence_resolver=self.resolve_reconciliation_evidence,
             task=task,
             instrument_family="equity",
         )
@@ -459,6 +495,7 @@ class ProducerFixture:
             update_population_manifest=update_population_manifest,
             calibration_population_manifest=calibration_population_manifest,
             scientific_registry=self.science,
+            reconciliation_evidence_resolver=self.resolve_reconciliation_evidence,
         )
 
 
@@ -773,6 +810,104 @@ class UpdateProducerTests(unittest.TestCase):
                 "LEARNING.UPDATE_OUTCOME_EVIDENCE_INCOMPLETE",
                 artifact["reasons"],
             )
+
+    def test_forged_reconciled_trade_without_authority_proof_is_no_update(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            forged = fixture.append_learning(
+                task="update",
+                feature="2",
+                target="1",
+                observation_id="forged-reconciled-trade",
+                label_available_at=datetime(
+                    2026, 10, 8, 3, tzinfo=timezone.utc
+                ),
+                outcome_class="POSITIVE",
+                canonical_label_mature=True,
+                canonical_reconciliation_state="RECONCILED",
+                intended_side="BUY",
+            )
+            exact_manifest = fixture.population_manifest(
+                checkpoint_ref=checkpoint,
+                task="update",
+                cutoff=UPDATE_CUTOFF,
+                extra_exclusions={
+                    forged: "RECONCILIATION_EVIDENCE_UNVERIFIED",
+                },
+            )
+            self.assertFalse(exact_manifest.complete)
+
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref),
+                update_population_manifest=exact_manifest,
+            )
+
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIsNone(produced.proposed_parameters)
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIn(
+                "LEARNING.UPDATE_POPULATION_COVERAGE_INCOMPLETE",
+                artifact["reasons"],
+            )
+            self.assertIn(
+                [forged, "RECONCILIATION_EVIDENCE_UNVERIFIED"],
+                artifact["population"]["update_exclusions"],
+            )
+
+    def test_authority_reconciliation_proof_is_bound_into_learning_row(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            episode_id = fixture.append_learning(
+                task="update",
+                feature="2",
+                target="1",
+                observation_id="authority-backed-trade",
+                label_available_at=datetime(
+                    2026, 10, 8, 4, tzinfo=timezone.utc
+                ),
+                outcome_class="POSITIVE",
+                intended_side="BUY",
+            )
+            fixture.bind_reconciliation_evidence(
+                episode_id,
+                observed_at=datetime(
+                    2026, 10, 8, 3, 59, tzinfo=timezone.utc
+                ),
+            )
+
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref),
+            )
+
+            self.assertEqual(produced.status, "UPDATE_PROPOSED")
+            artifact = json.loads(produced.artifact_bytes)
+            row = next(
+                item
+                for item in artifact["population"]["update_included"]
+                if item["episode_id"] == episode_id
+            )
+            proof = row["reconciliation_evidence"]
+            self.assertEqual(proof["status"], "VERIFIED")
+            self.assertEqual(
+                proof["checkpoint_event_id"],
+                f"checkpoint-{episode_id}",
+            )
+            self.assertEqual(proof["checkpoint_aggregate_version"], 1)
+            self.assertEqual(
+                proof["observed_at"],
+                "2026-10-08T03:59:00+00:00",
+            )
+            self.assertTrue(proof["current_scope"])
 
     def test_population_protocol_identity_must_match_across_update_and_calibration(self):
         with TemporaryDirectory() as directory:

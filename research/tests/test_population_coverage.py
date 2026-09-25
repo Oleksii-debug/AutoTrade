@@ -31,6 +31,27 @@ def correction_evidence_time(evidence_ref):
     return evidence_times[evidence_ref]
 
 
+def reconciliation_evidence(episode_id):
+    return {
+        "checkpoint_event_id": f"checkpoint-{episode_id}",
+        "checkpoint_payload_hash": H3,
+        "checkpoint_aggregate_id": f"account-reconciliation:{episode_id}",
+        "checkpoint_aggregate_version": 1,
+        "observed_at": "2029-01-01T00:00:00Z",
+        "provider_id": "TEST",
+        "account_id": "paper-account",
+        "environment": "PAPER",
+        "attempt_id": f"attempt-{episode_id}",
+        "intent_id": f"intent-{episode_id}",
+        "client_order_id": f"client-{episode_id}",
+        "outcome": "OBSERVED_EXECUTION",
+        "evidence_reason": "authority-backed unit-test reconciliation",
+        "provider_order_ids": [],
+        "provider_execution_ids": [f"execution-{episode_id}"],
+        "current_scope": True,
+    }
+
+
 def episode_payload(outcome_class, *, side="BUY", label_mature=True, label="observed"):
     return {
         "evidence_refs": ["artifact:evidence"],
@@ -88,7 +109,13 @@ class PopulationCoverageTests(unittest.TestCase):
         )
         return store, negative, no_trade
 
-    def _manifest(self, store, included, exclusions=None):
+    def _manifest(
+        self,
+        store,
+        included,
+        exclusions=None,
+        reconciliation_evidence_resolver=reconciliation_evidence,
+    ):
         population = store.coverage_population_snapshot(
             causal_cutoff=CUTOFF,
             granted_permissions={"research"},
@@ -104,6 +131,7 @@ class PopulationCoverageTests(unittest.TestCase):
             permission_classes=["research"],
             included_episode_ids=included,
             exclusions=exclusions or {},
+            reconciliation_evidence_resolver=reconciliation_evidence_resolver,
             task="research",
             instrument_family="equity",
         )
@@ -481,16 +509,16 @@ class PopulationCoverageTests(unittest.TestCase):
             self.assertFalse(result.promotable)
 
 
-    def test_mature_but_unreconciled_label_is_not_complete(self):
+    def test_mature_trade_without_authority_reconciliation_is_not_complete(self):
         with TemporaryDirectory() as directory:
             store = ExperienceMemory(Path(directory) / "memory.sqlite3")
             payload = episode_payload(
                 "POSITIVE",
                 side="BUY",
                 label_mature=True,
-                label="mature-but-unreconciled",
+                label="mature-without-authority-proof",
             )
-            payload["outcome"]["reconciliation_state"] = "PENDING"
+            payload["outcome"]["reconciliation_state"] = "RECONCILED"
             episode_id, _ = store.append_episode(
                 episode_id="88888888-8888-4888-8888-888888888888",
                 decision_time=DECISION,
@@ -501,7 +529,11 @@ class PopulationCoverageTests(unittest.TestCase):
                 permission_class="research",
                 payload=payload,
             )
-            manifest = self._manifest(store, [episode_id])
+            manifest = self._manifest(
+                store,
+                [episode_id],
+                reconciliation_evidence_resolver=None,
+            )
             self.assertFalse(
                 dict(manifest.included_labels_complete_by_regime)["calm"]
             )

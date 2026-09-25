@@ -307,6 +307,23 @@ class SecurityBoundaryTests(unittest.TestCase):
                 credential_vault=self.vault,
             )
 
+    def test_diagnostic_redaction_masks_sensitive_labeled_strings(self):
+        redacted = self.boundary.redact(
+            {
+                "message": "Authorization: Bearer should-never-log",
+                "rows": [
+                    "safe status",
+                    "api_key=should-never-log",
+                    {"detail": "refresh_token: should-never-log"},
+                ],
+            }
+        )
+        self.assertEqual(redacted["message"], "[REDACTED]")
+        self.assertEqual(redacted["rows"][0], "safe status")
+        self.assertEqual(redacted["rows"][1], "[REDACTED]")
+        self.assertEqual(redacted["rows"][2]["detail"], "[REDACTED]")
+        self.assertNotIn("should-never-log", repr(redacted))
+
     def test_diagnostic_redaction_covers_mapping_proxy_and_sets(self):
         self._credential()
         redacted = self.boundary.redact_for_diagnostics(

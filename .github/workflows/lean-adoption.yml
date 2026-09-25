@@ -160,6 +160,32 @@ jobs:
             throw "Second probe did not emit exactly one PASS verdict. Output: $($secondLines -join ' | ')"
           }
 
+          $restartState = Join-Path $env:RUNNER_TEMP "autotrade-lean-callback-state.json"
+          if (Test-Path $restartState) {
+            Remove-Item $restartState -Force
+          }
+
+          $checkpoint = @(& dotnet run --project $project --configuration Release --no-build "-p:LeanRoot=$env:LEAN_ROOT" -- --write-restart-state $restartState)
+          if ($LASTEXITCODE -ne 0) {
+            throw "LEAN restart checkpoint process failed."
+          }
+          $checkpointLines = @($checkpoint | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+          $checkpointVerdicts = @($checkpointLines | Where-Object { $_ -eq "WP02_LEAN_RESTART_CHECKPOINT_WRITTEN" })
+          if ($checkpointVerdicts.Count -ne 1 -or !(Test-Path $restartState)) {
+            throw "LEAN restart checkpoint evidence was not created exactly once. Output: $($checkpointLines -join ' | ')"
+          }
+
+          $resume = @(& dotnet run --project $project --configuration Release --no-build "-p:LeanRoot=$env:LEAN_ROOT" -- --resume-restart-state $restartState)
+          if ($LASTEXITCODE -ne 0) {
+            throw "LEAN restart resume process failed."
+          }
+          $resumeLines = @($resume | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+          $resumeVerdicts = @($resumeLines | Where-Object { $_ -eq "WP02_LEAN_RESTART_RESUME_PASS" })
+          if ($resumeVerdicts.Count -ne 1) {
+            throw "LEAN restart resume probe did not emit exactly one PASS verdict. Output: $($resumeLines -join ' | ')"
+          }
+          Remove-Item $restartState -Force
+
           $autoTradeTrackedChanges = @(git status --porcelain --untracked-files=no)
           if ($autoTradeTrackedChanges.Count -ne 0) {
             throw "LEAN adoption probe mutated tracked AutoTrade source."
@@ -222,6 +248,7 @@ jobs:
             runner_os = $env:RUNNER_OS
             dotnet_version = (dotnet --version).Trim()
             probe_result = "PASS"
+            restart_callback_identity_probe = "PASS"
             lean_composition_id = $composition.composition_id
             lean_composition_sha256 = $composition.composition_sha256
             dependency_asset_manifest_sha256 = "sha256:$assetManifestHash"

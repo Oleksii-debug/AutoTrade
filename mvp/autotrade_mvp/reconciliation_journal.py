@@ -802,6 +802,7 @@ def load_account_resource_availability_evidence(
     #   2. its provider resource query must have started after the settlement
     #      fact became available. Merely wrapping an old provider snapshot in a
     #      newer reconciliation event must never restore reservation authority.
+    # This fence can only invalidate evidence; it never synthesizes availability.
     if any(resource.startswith("CASH:") for resource in requested):
         checkpoint_sequence = checkpoint.get("journal_sequence")
         if type(checkpoint_sequence) is not int or checkpoint_sequence <= 0:

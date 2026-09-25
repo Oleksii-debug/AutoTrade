@@ -1,5 +1,3 @@
-from dataclasses import replace
-from decimal import Decimal
 import unittest
 
 from mvp.autotrade_mvp.allocation import (
@@ -64,6 +62,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             payload={
                 "symbol": "AAA",
                 "candidate_id": "candidate:aaa:v1",
+                "proposal_id": "proposal:aaa:v11",
                 "strategy_version": "strategy:v7",
                 "protocol_digest": "1" * 64,
                 "input_snapshot_digest": "2" * 64,
@@ -84,6 +83,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 "provider_id": "SIMULATED",
                 "account_id": "acct:paper:1",
                 "capability_snapshot_id": "capability:1",
+                "source_as_of": "2026-09-25T18:15:00Z",
                 "price": "10",
                 "lot_size": "1",
                 "cost_rate": "0.001",
@@ -100,8 +100,10 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             payload={
                 "account_id": "acct:paper:1",
                 "account_snapshot_id": "snapshot:acct:1:v5",
+                "reconciliation_run_id": "reconciliation:acct:1:v5",
                 "account_state_version": 5,
                 "reservation_state_version": 9,
+                "reservation_state_digest": "3" * 64,
                 "cash_available": capital_cash,
             },
         )
@@ -152,9 +154,13 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 resolved_evidence=bundle[-1],
                 environment="SIMULATION",
                 as_of="2026-09-25T18:40:00Z",
+                current_policy_version="risk-policy:12",
+                current_account_id="acct:paper:1",
                 current_account_snapshot_id="snapshot:acct:1:v5",
+                current_reconciliation_run_id="reconciliation:acct:1:v5",
                 current_account_state_version=5,
                 current_reservation_state_version=9,
+                current_reservation_state_digest="3" * 64,
             )
         )
         repeated = self.allocate(bundle=bundle)
@@ -255,9 +261,13 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 resolved_evidence=bundle[-1],
                 environment="SIMULATION",
                 as_of="2026-09-25T18:40:00Z",
+                current_policy_version="risk-policy:12",
+                current_account_id="acct:paper:1",
                 current_account_snapshot_id="snapshot:acct:1:v5",
+                current_reconciliation_run_id="reconciliation:acct:1:v5",
                 current_account_state_version=6,
                 current_reservation_state_version=9,
+                current_reservation_state_digest="3" * 64,
             )
         with self.assertRaisesRegex(ValueError, "reservation state version advanced"):
             revalidate_evidence_bound_allocation(
@@ -265,9 +275,48 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 resolved_evidence=bundle[-1],
                 environment="SIMULATION",
                 as_of="2026-09-25T18:40:00Z",
+                current_policy_version="risk-policy:12",
+                current_account_id="acct:paper:1",
                 current_account_snapshot_id="snapshot:acct:1:v5",
+                current_reconciliation_run_id="reconciliation:acct:1:v5",
                 current_account_state_version=5,
                 current_reservation_state_version=10,
+                current_reservation_state_digest="3" * 64,
+            )
+
+    def test_policy_reconciliation_and_reservation_digest_changes_invalidate(self):
+        bundle = self.bundle()
+        result = self.allocate(bundle=bundle)
+        common = {
+            "result": result,
+            "resolved_evidence": bundle[-1],
+            "environment": "SIMULATION",
+            "as_of": "2026-09-25T18:40:00Z",
+            "current_account_id": "acct:paper:1",
+            "current_account_snapshot_id": "snapshot:acct:1:v5",
+            "current_account_state_version": 5,
+            "current_reservation_state_version": 9,
+        }
+        with self.assertRaisesRegex(ValueError, "policy version changed"):
+            revalidate_evidence_bound_allocation(
+                **common,
+                current_policy_version="risk-policy:13",
+                current_reconciliation_run_id="reconciliation:acct:1:v5",
+                current_reservation_state_digest="3" * 64,
+            )
+        with self.assertRaisesRegex(ValueError, "reconciliation identity advanced"):
+            revalidate_evidence_bound_allocation(
+                **common,
+                current_policy_version="risk-policy:12",
+                current_reconciliation_run_id="reconciliation:acct:1:v6",
+                current_reservation_state_digest="3" * 64,
+            )
+        with self.assertRaisesRegex(ValueError, "reservation state digest changed"):
+            revalidate_evidence_bound_allocation(
+                **common,
+                current_policy_version="risk-policy:12",
+                current_reconciliation_run_id="reconciliation:acct:1:v5",
+                current_reservation_state_digest="4" * 64,
             )
 
     def test_evidence_expiry_before_admission_invalidates_proposal(self):
@@ -282,6 +331,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 current_account_snapshot_id="snapshot:acct:1:v5",
                 current_account_state_version=5,
                 current_reservation_state_version=9,
+                current_reservation_state_digest="3" * 64,
             )
 
 

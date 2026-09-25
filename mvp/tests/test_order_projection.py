@@ -524,6 +524,49 @@ class OrderProjectionTests(unittest.TestCase):
         self.assertEqual(len(book.effective_fills()), 2)
         self.assertEqual(book.oco_breaches()["g1"], ("stop", "take"))
 
+    def test_order_book_snapshots_surface_observed_oco_breach(self):
+        book = OrderBookProjection()
+        first = book.create(
+            client_order_id="oco-a",
+            instrument="ABC",
+            side="SELL",
+            requested_quantity="1",
+            oco_group_id="g-snapshot",
+        )
+        second = book.create(
+            client_order_id="oco-b",
+            instrument="ABC",
+            side="SELL",
+            requested_quantity="1",
+            oco_group_id="g-snapshot",
+        )
+        first.record_fill(
+            fill_id="fill-a",
+            provider_execution_id="exec-a-snapshot",
+            quantity="1",
+            price="110",
+        )
+        second.record_fill(
+            fill_id="fill-b",
+            provider_execution_id="exec-b-snapshot",
+            quantity="1",
+            price="90",
+        )
+
+        snapshots = {
+            snapshot.client_order_id: snapshot
+            for snapshot in book.snapshots()
+        }
+
+        self.assertEqual(snapshots["oco-a"].state, "OCO_VIOLATION")
+        self.assertEqual(snapshots["oco-b"].state, "OCO_VIOLATION")
+        self.assertTrue(snapshots["oco-a"].oco_violation)
+        self.assertTrue(snapshots["oco-b"].oco_violation)
+        self.assertEqual(
+            book.oco_breaches()["g-snapshot"],
+            ("oco-a", "oco-b"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

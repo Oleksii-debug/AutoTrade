@@ -284,6 +284,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 result=reconciliation(
                     snapshot_consistency=fresh_snapshot,
                     resource_availability=fresh_availability,
+                    coverage_end="2026-09-24T19:00:20Z",
                 ),
                 observed_at="2026-09-24T19:00:20Z",
                 host_id="test-host",

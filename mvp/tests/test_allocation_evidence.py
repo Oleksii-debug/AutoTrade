@@ -188,6 +188,134 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             policy_version="risk-policy:12",
         )
 
+
+    def cross_currency_bundle(self, *, omit_desired_currency=False):
+        objective, market, capital, stress, resolved = self.bundle()
+        objective_payload = dict(objective.payload)
+        objective_payload.update({
+            "desired_notional": "100",
+            "desired_notional_currency": "EUR",
+        })
+        if omit_desired_currency:
+            objective_payload.pop("desired_notional_currency")
+        objective = self.evidence(
+            evidence_id=objective.evidence_id,
+            kind="OBJECTIVE",
+            payload=objective_payload,
+        )
+
+        market_payload = dict(market.payload)
+        market_payload.update({
+            "quote_currency": "EUR",
+            "settlement_currency": "EUR",
+            "price": "10",
+            "min_notional": "10",
+            "fee_floor": "2",
+            "max_executable_notional": "100",
+            "monetary_constraint_currency": "EUR",
+        })
+        market = self.evidence(
+            evidence_id=market.evidence_id,
+            kind="MARKET_CONSTRAINT",
+            payload=market_payload,
+        )
+
+        valuation = resolved["valuation:aaa:v1"]
+        valuation_payload = dict(valuation.payload)
+        valuation_payload.update({
+            "quote_currency": "EUR",
+            "settlement_currency": "EUR",
+            "source_price": "10",
+            "portfolio_base_currency": "USD",
+            "fx_rate": "1.20",
+            "fx_source_id": "fx:eurusd:allocation:v1",
+            "fx_quote": {
+                "base_currency": "EUR",
+                "quote_currency": "USD",
+                "bid": "1.20",
+                "ask": "1.20",
+                "available_at": "2026-09-25T18:29:30Z",
+                "source_id": "fx:eurusd:allocation:v1",
+                "evidence_sha256": "sha256:" + "a" * 64,
+                "max_age_seconds": 60,
+                "haircut": "0",
+            },
+            "fx_evidence_sha256": "sha256:" + "a" * 64,
+            "unit_base_notional": "12.0",
+            "source_monetary_currency": "EUR",
+            "desired_notional_currency": "EUR",
+            "desired_notional_base": "120",
+            "min_notional_base": "12",
+            "fee_floor_base": "2.4",
+            "max_executable_notional_base": "120",
+            "cost_evidence_refs": {
+                "execution": "execution-cost:aaa:v1",
+                "financing": "financing:none:aaa:v1",
+                "funding": "funding:none:aaa:v1",
+                "borrow": "borrow:none:aaa:v1",
+                "fx": "fx:eurusd:allocation:v1",
+            },
+        })
+        valuation = self.evidence(
+            evidence_id=valuation.evidence_id,
+            kind="VALUATION",
+            payload=valuation_payload,
+        )
+        resolved = {
+            objective.evidence_id: objective,
+            market.evidence_id: market,
+            valuation.evidence_id: valuation,
+            capital.evidence_id: capital,
+            stress.evidence_id: stress,
+        }
+        return objective, market, capital, stress, resolved
+
+    def test_cross_currency_normalizes_desired_min_fee_and_executable_cap(self):
+        candidate = ObjectiveCandidate.create(
+            symbol="AAA",
+            desired_notional="100",
+            price="10",
+            lot_size="1",
+            expected_return_rate="0.10",
+            risk_penalty_rate="0.01",
+            cost_rate="0.001",
+            capital_requirement_rate="1",
+            min_notional="10",
+            fee_floor="2",
+            max_executable_notional="100",
+        )
+        result = self.allocate(
+            candidate=candidate,
+            bundle=self.cross_currency_bundle(),
+        )
+        target = result.objective.allocation.targets[0]
+        self.assertEqual(target.quantity, 10)
+        self.assertEqual(target.notional, 120)
+        self.assertEqual(target.estimated_cost, 2.4)
+        self.assertEqual(result.objective.allocation.cash_required, 122.4)
+
+    def test_cross_currency_rejects_unbound_desired_notional_currency(self):
+        candidate = ObjectiveCandidate.create(
+            symbol="AAA",
+            desired_notional="100",
+            price="10",
+            lot_size="1",
+            expected_return_rate="0.10",
+            risk_penalty_rate="0.01",
+            cost_rate="0.001",
+            capital_requirement_rate="1",
+            min_notional="10",
+            fee_floor="2",
+            max_executable_notional="100",
+        )
+        with self.assertRaisesRegex(ValueError, "desired_notional_currency"):
+            self.allocate(
+                candidate=candidate,
+                bundle=self.cross_currency_bundle(
+                    omit_desired_currency=True,
+                ),
+            )
+
     def test_bound_allocation_is_deterministic_and_revalidates(self):
         bundle = self.bundle()
         result = self.allocate(bundle=bundle)

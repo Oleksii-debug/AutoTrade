@@ -35,28 +35,40 @@ class _FrozenDict(dict):
     update = _blocked
 
 
-def _freeze_proposal(value: object, *, depth: int = 0) -> object:
+def _freeze_proposal(
+    value: object,
+    *,
+    depth: int = 0,
+    label: str = "model proposal",
+) -> object:
     if depth > 32:
-        raise ResearchBoundaryError("model proposal exceeds maximum nesting depth")
+        raise ResearchBoundaryError(f"{label} exceeds maximum nesting depth")
     if isinstance(value, Mapping):
         frozen = _FrozenDict()
         for key, nested in value.items():
             if not isinstance(key, str):
-                raise ResearchBoundaryError("model proposal object keys must be strings")
-            dict.__setitem__(frozen, key, _freeze_proposal(nested, depth=depth + 1))
+                raise ResearchBoundaryError(f"{label} object keys must be strings")
+            dict.__setitem__(
+                frozen,
+                key,
+                _freeze_proposal(nested, depth=depth + 1, label=label),
+            )
         return frozen
     if isinstance(value, (list, tuple)):
-        return tuple(_freeze_proposal(item, depth=depth + 1) for item in value)
+        return tuple(
+            _freeze_proposal(item, depth=depth + 1, label=label)
+            for item in value
+        )
     if value is None or isinstance(value, (str, bool, int)):
         return value
     if isinstance(value, float):
         if not isfinite(value):
             raise ResearchBoundaryError(
-                "model proposal numbers must be finite JSON values"
+                f"{label} numbers must be finite JSON values"
             )
         return value
     raise ResearchBoundaryError(
-        "model proposal values must be JSON-compatible scalars, objects, or arrays"
+        f"{label} values must be JSON-compatible scalars, objects, or arrays"
     )
 
 
@@ -138,7 +150,11 @@ class ResearchToolRequest:
         object.__setattr__(self, "requested_capabilities", capabilities)
         if not isinstance(self.arguments, Mapping):
             raise ResearchBoundaryError("arguments must be an object")
-        object.__setattr__(self, "arguments", dict(self.arguments))
+        object.__setattr__(
+            self,
+            "arguments",
+            _freeze_proposal(self.arguments, label="research tool arguments"),
+        )
         refs = tuple(_text(item, name="evidence_ref") for item in self.evidence_refs)
         object.__setattr__(self, "evidence_refs", refs)
 
@@ -195,7 +211,7 @@ class ResearchToolBoundary:
             request_id=request.request_id,
             tool_name=request.tool_name,
             capabilities=tuple(requested),
-            arguments=dict(request.arguments),
+            arguments=request.arguments,
             evidence_refs=request.evidence_refs,
         )
 

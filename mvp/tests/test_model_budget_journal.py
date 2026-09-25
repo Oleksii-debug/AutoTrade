@@ -99,26 +99,91 @@ class DurableModelBudgetTests(unittest.TestCase):
             self.assertEqual(actor, "autotrade-model-budget")
             self.assertEqual(environment, "PAPER")
 
-    def test_exact_retry_cannot_change_command_environment(self):
+    def test_budget_aggregate_cannot_change_environment_on_reopen(self):
         with TemporaryDirectory() as directory:
-            _, simulation = open_budget(directory, environment="SIMULATION")
+            journal, simulation = open_budget(
+                directory,
+                environment="SIMULATION",
+            )
             self.assertTrue(simulation.reserve("req-scope", "0.4"))
-            _, paper = open_budget(directory, environment="PAPER")
+            before = journal.load_events("model_budget", "policy-1")
+
             with self.assertRaisesRegex(
                 ValueError,
-                "command_id already exists",
+                "budget environment conflicts",
             ):
-                paper.reserve("req-scope", "0.4")
-            self.assertEqual(paper.snapshot().reserved, Decimal("0.4"))
+                open_budget(directory, environment="PAPER")
 
-    def test_changed_economics_cannot_escape_through_different_environment(self):
+            after = journal.load_events("model_budget", "policy-1")
+            self.assertEqual(after, before)
+            self.assertEqual(
+                before[0]["payload"]["environment"],
+                "SIMULATION",
+            )
+
+    def test_new_idempotency_identity_cannot_cross_budget_environment(self):
         with TemporaryDirectory() as directory:
-            _, first = open_budget(directory, environment="SIMULATION")
-            self.assertTrue(first.reserve("req-1", "0.4"))
-            _, paper = open_budget(directory, environment="PAPER")
-            with self.assertRaisesRegex(ValueError, "idempotency identity conflicts"):
-                paper.reserve("req-1", "0.5")
-            self.assertEqual(paper.snapshot().reserved, Decimal("0.4"))
+            journal, simulation = open_budget(
+                directory,
+                environment="SIMULATION",
+            )
+            self.assertTrue(simulation.reserve("req-a", "0.4"))
+            before = journal.load_events("model_budget", "policy-1")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "budget environment conflicts",
+            ):
+                DurableModelBudget(
+                    journal=journal,
+                    budget_id="policy-1",
+                    ceiling="1",
+                    environment="LIVE",
+                    clock=lambda: NOW,
+                )
+
+            self.assertEqual(
+                journal.load_events("model_budget", "policy-1"),
+                before,
+            )
+
+    def test_legacy_unscoped_budget_cannot_be_relabelled_by_first_reopen(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.db"
+            journal = JournalStore(path)
+            payload = {"ceiling": "1"}
+            journal.append_event(
+                {
+                    "event_id": "legacy-model-budget-init",
+                    "event_type": "ModelBudgetInitialized",
+                    "aggregate_type": "model_budget",
+                    "aggregate_id": "legacy-policy",
+                    "aggregate_version": 1,
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": NOW,
+                }
+            )
+            before = journal.load_events("model_budget", "legacy-policy")
+
+            for environment in ("LIVE", "PAPER", "SIMULATION"):
+                with self.subTest(environment=environment):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "legacy model budget lacks durable environment binding",
+                    ):
+                        DurableModelBudget(
+                            journal=journal,
+                            budget_id="legacy-policy",
+                            ceiling="1",
+                            environment=environment,
+                            clock=lambda: NOW,
+                        )
+
+            self.assertEqual(
+                journal.load_events("model_budget", "legacy-policy"),
+                before,
+            )
 
     def test_reservation_survives_restart(self):
         with TemporaryDirectory() as directory:

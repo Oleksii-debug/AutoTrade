@@ -1,3 +1,4 @@
+from functools import partial
 from datetime import datetime, timezone
 from decimal import Decimal
 import unittest
@@ -13,6 +14,11 @@ from mvp.autotrade_mvp.bybit_v5 import (
 )
 from mvp.autotrade_mvp.provider_core import ProviderCoreError
 
+
+
+# Bind only test fixtures; production APIs require explicit account/environment scope.
+parse_executions = partial(parse_executions, account_id="acct-bybit", environment="PAPER")
+coverage_evidence = partial(coverage_evidence, account_id="acct-bybit", environment="PAPER")
 
 class BybitV5AdapterTests(unittest.TestCase):
     def test_spot_market_quantity_is_explicitly_base_coin(self):

@@ -7,6 +7,7 @@ import unittest
 from uuid import NAMESPACE_URL, uuid5
 
 from mvp.autotrade_mvp.accounting import (
+    AccountingConflict,
     book_equity_fill,
     book_external_cash_flow,
     reverse_transaction,
@@ -690,7 +691,7 @@ class DurableSettlementBookTests(unittest.TestCase):
                 settlements.project(economic)
 
             with self.assertRaisesRegex(
-                Exception,
+                AccountingConflict,
                 "partially committed",
             ):
                 commit_economic_correction_with_settlement_replacement(

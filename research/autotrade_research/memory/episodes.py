@@ -520,6 +520,14 @@ class ExperienceMemory:
         cutoff = _time(information_cutoff, name="information_cutoff")
         if not isinstance(granted_permissions, set):
             raise TypeError("granted_permissions must be a set")
+        if type(include_tombstoned) is not bool:
+            raise TypeError("include_tombstoned must be boolean")
+        normalized_permissions: set[str] = set()
+        for permission in granted_permissions:
+            normalized = _text(permission, name="granted_permission")
+            if normalized != permission:
+                raise ValueError("granted_permissions must contain canonical text")
+            normalized_permissions.add(normalized)
         normalized_task = None if task is None else _text(task, name="task")
         normalized_regime = None if regime is None else _text(regime, name="regime")
         normalized_family = (
@@ -548,7 +556,7 @@ class ExperienceMemory:
                     continue
                 if not self._permission_allowed(
                     verified["permission_class"],
-                    granted_permissions,
+                    normalized_permissions,
                 ):
                     continue
 

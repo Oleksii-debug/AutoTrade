@@ -2100,6 +2100,7 @@ class BybitV5AuthenticatedReadTransport:
             http_status=wire_response.http_status,
             response_bytes=wire_response.body,
             observed_at=self.clock_utc(),
+            provider_environment=self.provider_environment,
         )
 
 
@@ -2708,4 +2709,5 @@ class BinanceSpotAuthenticatedReadTransport:
             http_status=wire_response.http_status,
             response_bytes=wire_response.body,
             observed_at=observed_at,
+            provider_environment=self.policy.environment,
         )

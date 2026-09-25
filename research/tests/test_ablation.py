@@ -5,6 +5,7 @@ import unittest
 from autotrade_research.evaluation.ablation import (
     AblationOutcome,
     AblationPair,
+    CausalInputEvidence,
     evaluate_incremental_value,
     summarize_ablation,
 )
@@ -13,6 +14,9 @@ from autotrade_research.evaluation.ablation import (
 CUT = datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc)
 FINGERPRINT_A = "sha256:" + ("a" * 64)
 FINGERPRINT_B = "sha256:" + ("b" * 64)
+FINGERPRINT_C = "sha256:" + ("c" * 64)
+FINGERPRINT_D = "sha256:" + ("d" * 64)
+_DEFAULT_INPUT_EVIDENCE = object()
 
 
 class _NoOffsetTZ(tzinfo):
@@ -21,6 +25,23 @@ class _NoOffsetTZ(tzinfo):
 
     def dst(self, dt):
         return None
+
+
+def causal_evidence(
+    *,
+    evidence_id="base-input",
+    digest=FINGERPRINT_B,
+    component="base",
+    available=CUT,
+    syndication_group=None,
+):
+    return CausalInputEvidence(
+        evidence_id=evidence_id,
+        content_digest=digest,
+        component_id=component,
+        available_utc=available,
+        syndication_group=syndication_group,
+    )
 
 
 def outcome(
@@ -35,7 +56,14 @@ def outcome(
     decision=None,
     cutoff=CUT,
     outcome_available=None,
+    population_unit=None,
+    input_evidence=_DEFAULT_INPUT_EVIDENCE,
 ):
+    evidence_items = (
+        (causal_evidence(available=cutoff),)
+        if input_evidence is _DEFAULT_INPUT_EVIDENCE
+        else input_evidence
+    )
     return AblationOutcome(
         case_id=case_id,
         input_fingerprint=fingerprint,
@@ -52,10 +80,20 @@ def outcome(
             if outcome_available is None
             else outcome_available
         ),
+        population_unit_id=population_unit,
+        input_evidence=evidence_items,
     )
 
 
-def pair(case_id, full_utility, ablated_utility="0", *, full_cost="0", ablated_cost="0"):
+def pair(
+    case_id,
+    full_utility,
+    ablated_utility="0",
+    *,
+    full_cost="0",
+    ablated_cost="0",
+    population_unit=None,
+):
     return AblationPair(
         "agent",
         outcome(
@@ -65,6 +103,7 @@ def pair(case_id, full_utility, ablated_utility="0", *, full_cost="0", ablated_c
             cost=full_cost,
             elapsed=50,
             components=("base", "agent"),
+            population_unit=population_unit,
         ),
         outcome(
             case_id=case_id,
@@ -73,6 +112,7 @@ def pair(case_id, full_utility, ablated_utility="0", *, full_cost="0", ablated_c
             cost=ablated_cost,
             elapsed=50,
             components=("base",),
+            population_unit=population_unit,
         ),
     )
 
@@ -156,6 +196,149 @@ class AblationTests(unittest.TestCase):
                 elapsed=10,
                 components=("wire-story-group-7", "wire-story-group-7"),
             )
+
+    def test_causal_input_after_cutoff_is_rejected(self):
+        late = causal_evidence(
+            evidence_id="late-story",
+            digest=FINGERPRINT_C,
+            component="news-source",
+            available=CUT + timedelta(microseconds=1),
+        )
+        with self.assertRaisesRegex(ValueError, "after the causal cutoff"):
+            outcome(
+                variant="FULL",
+                utility=1,
+                cost=0,
+                elapsed=10,
+                components=("base", "news-source"),
+                input_evidence=(late,),
+            )
+
+    def test_source_ablation_may_remove_only_target_owned_input_evidence(self):
+        base = causal_evidence()
+        story = causal_evidence(
+            evidence_id="wire-story-7",
+            digest=FINGERPRINT_C,
+            component="news-source",
+            syndication_group="wire-story-group-7",
+        )
+        matched = AblationPair(
+            "news-source",
+            outcome(
+                variant="FULL",
+                utility="0.8",
+                cost="0.1",
+                elapsed=40,
+                components=("base", "news-source"),
+                input_evidence=(base, story),
+            ),
+            outcome(
+                variant="ABLATED",
+                utility="0.4",
+                cost="0",
+                elapsed=35,
+                components=("base",),
+                input_evidence=(base,),
+            ),
+        )
+        self.assertEqual(
+            tuple(item.evidence_id for item in matched.full.input_evidence),
+            ("base-input", "wire-story-7"),
+        )
+
+    def test_pair_rejects_removal_of_non_target_input_evidence(self):
+        base = causal_evidence()
+        unrelated = causal_evidence(
+            evidence_id="macro-release",
+            digest=FINGERPRINT_C,
+            component="macro-source",
+        )
+        with self.assertRaisesRegex(ValueError, "target-component evidence"):
+            AblationPair(
+                "agent",
+                outcome(
+                    variant="FULL",
+                    utility=1,
+                    cost=0,
+                    elapsed=10,
+                    components=("base", "agent"),
+                    input_evidence=(base, unrelated),
+                ),
+                outcome(
+                    variant="ABLATED",
+                    utility=0,
+                    cost=0,
+                    elapsed=10,
+                    components=("base",),
+                    input_evidence=(base,),
+                ),
+            )
+
+    def test_syndicated_input_groups_are_deduplicated_within_case(self):
+        first = causal_evidence(
+            evidence_id="wire-a",
+            digest=FINGERPRINT_C,
+            component="news-source",
+            syndication_group="wire-story-group-7",
+        )
+        second = causal_evidence(
+            evidence_id="wire-b",
+            digest=FINGERPRINT_D,
+            component="news-source",
+            syndication_group="wire-story-group-7",
+        )
+        with self.assertRaisesRegex(ValueError, "syndicated input groups"):
+            outcome(
+                variant="FULL",
+                utility=1,
+                cost=0,
+                elapsed=10,
+                components=("base", "news-source"),
+                input_evidence=(first, second),
+            )
+
+    def test_syndicated_cases_cannot_be_double_counted_as_independent_samples(self):
+        first = pair(
+            "case-wire-a",
+            "1",
+            population_unit="canonical-wire-story-7",
+        )
+        second = pair(
+            "case-wire-b",
+            "1",
+            population_unit="canonical-wire-story-7",
+        )
+        with self.assertRaisesRegex(ValueError, "independent population unit"):
+            summarize_ablation("agent", [first, second])
+
+    def test_inferential_value_requires_causal_input_evidence(self):
+        unbound = AblationPair(
+            "agent",
+            outcome(
+                variant="FULL",
+                utility=1,
+                cost=0,
+                elapsed=10,
+                components=("base", "agent"),
+                input_evidence=(),
+            ),
+            outcome(
+                variant="ABLATED",
+                utility=0,
+                cost=0,
+                elapsed=10,
+                components=("base",),
+                input_evidence=(),
+            ),
+        )
+        result = evaluate_incremental_value(
+            "agent",
+            [unbound],
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertEqual(result.reason, "missing_causal_input_evidence")
 
     def test_component_identity_whitespace_cannot_bypass_deduplication(self):
         with self.assertRaisesRegex(ValueError, "deduplicated canonical identities"):

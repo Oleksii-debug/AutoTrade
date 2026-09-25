@@ -27,7 +27,12 @@ from mvp.tests.test_provider_transport import (
 )
 
 
-def read_handle(*, environment="PAPER", account_id="paper-1"):
+def read_handle(
+    *,
+    environment="PAPER",
+    provider_environment="TESTNET",
+    account_id="paper-1",
+):
     return PersistentCredentialHandle(
         handle_id="cred-bybit-read",
         account_id=account_id,
@@ -35,10 +40,16 @@ def read_handle(*, environment="PAPER", account_id="paper-1"):
         environment=environment,
         purpose="READ",
         generation=1,
+        provider_environment=provider_environment,
     )
 
 
-def trade_handle(*, environment="PAPER", account_id="bybit-account"):
+def trade_handle(
+    *,
+    environment="PAPER",
+    provider_environment="TESTNET",
+    account_id="bybit-account",
+):
     return PersistentCredentialHandle(
         handle_id="cred-bybit-trade",
         account_id=account_id,
@@ -46,6 +57,7 @@ def trade_handle(*, environment="PAPER", account_id="bybit-account"):
         environment=environment,
         purpose="TRADE",
         generation=1,
+        provider_environment=provider_environment,
     )
 
 
@@ -395,6 +407,62 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                 provider_environment="TESTNET",
                 policy=BYBIT_V5_ENDPOINT_POLICIES["DEMO"],
             )
+
+    def test_provider_environment_credential_cannot_cross_testnet_and_demo(self):
+        capability, _request = prepared()
+        events = []
+        registry = RecordingCapabilityRegistry(events)
+        registry.add(capability)
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "provider/environment/purpose mismatch",
+        ):
+            BybitV5HttpTransport(
+                policy=BYBIT_V5_ENDPOINT_POLICIES["DEMO"],
+                provider_environment="DEMO",
+                account_id="bybit-account",
+                capability_snapshot_id=capability.snapshot_id,
+                capability_registry=registry,
+                secret_resolver=FakeSecretResolver(events),
+                credential_handle=trade_handle(provider_environment="TESTNET"),
+                session_token="session-token",
+                origin="https://localhost",
+                execution_identity="host-owner",
+                clock_millis=lambda: 1700000000000,
+                clock_utc=lambda: READ_AT,
+                wire_client=BybitWriteRecordingWire(events),
+            )
+        self.assertEqual(events, [])
+
+    def test_read_provider_environment_credential_cannot_cross_testnet_and_demo(self):
+        capability = read_capability(
+            family="SPOT",
+            account_id="paper-1",
+            environment="PAPER",
+        )
+        events = []
+        registry = RecordingCapabilityRegistry(events)
+        registry.add(capability)
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "provider/environment/purpose mismatch",
+        ):
+            BybitV5AuthenticatedReadTransport(
+                policy=BYBIT_V5_ENDPOINT_POLICIES["DEMO"],
+                provider_environment="DEMO",
+                account_id="paper-1",
+                capability_snapshot_id=capability.snapshot_id,
+                capability_registry=registry,
+                secret_resolver=FakeSecretResolver(events),
+                credential_handle=read_handle(provider_environment="TESTNET"),
+                session_token="session-read",
+                origin="https://localhost",
+                execution_identity="host-owner",
+                clock_millis=lambda: 1700000000000,
+                clock_utc=lambda: READ_AT,
+                wire_client=RecordingWire(events),
+            )
+        self.assertEqual(events, [])
 
     def test_scope_digest_and_provider_environment_fail_before_secret_or_wire(self):
         capability, request = prepared()

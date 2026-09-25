@@ -11,7 +11,7 @@ from decimal import Decimal
 from typing import Any, Iterable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
-from .persistence import JournalStore, payload_digest
+from .persistence import JournalStore, canonical_json, payload_digest
 from .reconciliation import ReconciliationResult, UnknownSubmission
 
 
@@ -62,11 +62,12 @@ def _reconciliation_aggregate_id(
         account_id=account_id,
         environment=environment,
     )
+    scoped_identity = canonical_json([provider, account, scope, rid])
     return "account-reconciliation:" + str(
         uuid5(
             NAMESPACE_URL,
             "https://events.autotrade.local/reconciliation-scope/"
-            f"{provider}/{account}/{scope}/{rid}",
+            + scoped_identity,
         )
     )
 

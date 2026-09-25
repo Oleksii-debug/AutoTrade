@@ -51,6 +51,7 @@ class SecurityBoundaryTests(unittest.TestCase):
             owner_identity="windows-user-1",
             account_id="paper-1",
             provider="SIMULATED",
+            environment="PAPER",
             purpose="TRADE",
             secret_value="top-secret",
         )
@@ -66,6 +67,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 "owner_identity": "windows-user-1",
                 "account_id": "paper-1",
                 "provider": "SIMULATED",
+                "environment": "PAPER",
                 "purpose": "TRADE",
             }
             values.update(overrides)
@@ -92,6 +94,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 execution_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             )
 
@@ -105,6 +108,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 execution_identity="windows-user-2",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             )
         with self.assertRaises(PermissionError):
@@ -115,6 +119,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 execution_identity="windows-user-1",
                 account_id="other",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             )
 
@@ -129,6 +134,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 execution_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             )
 
@@ -142,6 +148,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 execution_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             )
 
@@ -163,6 +170,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 execution_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             )
         resolved = self.boundary.resolve_for_execution(
@@ -172,6 +180,7 @@ class SecurityBoundaryTests(unittest.TestCase):
             execution_identity="windows-user-1",
             account_id="paper-1",
             provider="SIMULATED",
+            environment="PAPER",
             purpose="TRADE",
         )
         self.assertEqual(resolved, "rotated-secret")
@@ -184,6 +193,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 owner_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="WITHDRAWAL",
                 secret_value="should-never-exist",
             )
@@ -464,6 +474,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 owner_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="ARBITRARY_TOOL",
                 secret_value="must-not-exist",
             )
@@ -526,6 +537,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 execution_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             ),
             "top-secret",

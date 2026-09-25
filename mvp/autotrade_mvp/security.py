@@ -217,6 +217,7 @@ class SecurityBoundary:
         owner_identity: str,
         account_id: str,
         provider: str,
+        environment: str,
         purpose: str,
         secret_value: str,
     ) -> CredentialHandle:
@@ -228,6 +229,7 @@ class SecurityBoundary:
             owner_identity=_required_text(owner_identity, name="owner_identity"),
             account_id=_required_text(account_id, name="account_id"),
             provider=_required_text(provider, name="provider"),
+            environment=_required_text(environment, name="environment").upper(),
             purpose=normalized_purpose,
             secret_value=secret_value,
         )
@@ -240,6 +242,7 @@ class SecurityBoundary:
             handle_id=str(metadata["handle_id"]),
             account_id=str(metadata["account_id"]),
             provider=str(metadata["provider"]),
+            environment=str(metadata["environment"]),
             purpose=str(metadata["purpose"]),
             generation=int(metadata["generation"]),
         )
@@ -285,6 +288,7 @@ class SecurityBoundary:
         execution_identity: str,
         account_id: str,
         provider: str,
+        environment: str,
         purpose: str,
     ) -> str:
         self.validate_session(token, required_roles=self._EXECUTION_ROLES, origin=origin)
@@ -297,6 +301,7 @@ class SecurityBoundary:
             ),
             account_id=_required_text(account_id, name="account_id"),
             provider=_required_text(provider, name="provider"),
+            environment=_required_text(environment, name="environment").upper(),
             purpose=_required_text(purpose, name="purpose").upper(),
         )
 

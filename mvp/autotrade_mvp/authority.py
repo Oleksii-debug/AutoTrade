@@ -535,6 +535,369 @@ class AllocationAuthoritySnapshot:
         )
 
 
+
+def _risk_snapshot_value(value):
+    if isinstance(value, Decimal):
+        return _canonical_decimal_text(value)
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("authoritative risk snapshot datetime must include timezone")
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    if hasattr(value, "__dataclass_fields__"):
+        return _risk_snapshot_value(vars(value))
+    if isinstance(value, Mapping):
+        return {
+            str(key): _risk_snapshot_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (tuple, list)):
+        return [_risk_snapshot_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        normalized = [_risk_snapshot_value(item) for item in value]
+        return sorted(
+            normalized,
+            key=lambda item: json.dumps(
+                item,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ),
+        )
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    raise TypeError(
+        "unsupported authoritative risk snapshot value: "
+        + type(value).__name__
+    )
+
+
+def _risk_object_fingerprint(value) -> str:
+    payload = _risk_snapshot_value(value)
+    return sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _risk_context_fingerprint(context: RiskContext) -> str:
+    if not isinstance(context, RiskContext):
+        raise TypeError("risk context must be RiskContext")
+    normalized = RiskContext.create(**vars(context))
+    return _risk_object_fingerprint(normalized)
+
+
+def _risk_policy_fingerprint(policy: RiskPolicy) -> str:
+    if not isinstance(policy, RiskPolicy):
+        raise TypeError("risk policy must be RiskPolicy")
+    return _risk_object_fingerprint(policy)
+
+
+@dataclass(frozen=True)
+class RiskAuthorityRequest:
+    """Scope presented to the service-owned authoritative risk resolver.
+
+    Caller-supplied financial state and risk policy are deliberately absent.
+    The resolver receives only the requested intent and immutable authority cut.
+    """
+
+    risk_intent: RiskIntent
+    account_id: str
+    environment: str
+    provider_id: str
+    instrument_version: InstrumentVersionIdentity
+    capability_snapshot_id: str
+    reconciliation_checkpoint_event_id: str
+    journal_sequence_cut: int
+    reservation_version: int
+    reservation_state_digest: str
+    authority_policy_id: str
+    authority_policy_version: int
+    evaluated_at: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.risk_intent, RiskIntent):
+            raise TypeError("risk_intent must be RiskIntent")
+        account = _text(self.account_id, name="risk authority account_id")
+        environment = _text(
+            self.environment, name="risk authority environment"
+        ).upper()
+        if environment not in {"SIMULATION", "PAPER", "LIVE"}:
+            raise ValueError("risk authority environment is unsupported")
+        provider = _text(
+            self.provider_id, name="risk authority provider_id"
+        ).upper()
+        if type(self.journal_sequence_cut) is not int or self.journal_sequence_cut < 0:
+            raise ValueError("journal_sequence_cut must be a non-negative integer")
+        if type(self.reservation_version) is not int or self.reservation_version < 0:
+            raise ValueError("reservation_version must be a non-negative integer")
+        if (
+            type(self.authority_policy_version) is not int
+            or self.authority_policy_version < 1
+        ):
+            raise ValueError("authority_policy_version must be positive")
+        evaluated = _text(self.evaluated_at, name="risk authority evaluated_at")
+        _instant(evaluated, name="risk authority evaluated_at")
+        object.__setattr__(self, "account_id", account)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "provider_id", provider)
+        object.__setattr__(
+            self,
+            "instrument_version",
+            _instrument_identity(
+                self.instrument_version,
+                name="risk authority instrument_version",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "capability_snapshot_id",
+            _text(
+                self.capability_snapshot_id,
+                name="risk authority capability_snapshot_id",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "reconciliation_checkpoint_event_id",
+            _text(
+                self.reconciliation_checkpoint_event_id,
+                name="risk authority reconciliation_checkpoint_event_id",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "reservation_state_digest",
+            _text(
+                self.reservation_state_digest,
+                name="risk authority reservation_state_digest",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "authority_policy_id",
+            _text(
+                self.authority_policy_id,
+                name="risk authority policy_id",
+            ),
+        )
+        object.__setattr__(self, "evaluated_at", evaluated)
+
+
+@dataclass(frozen=True)
+class AuthoritativeRiskSnapshot:
+    """Immutable risk state assembled by the financial writer's resolver."""
+
+    context: RiskContext
+    risk_policy: RiskPolicy
+    account_id: str
+    environment: str
+    provider_id: str
+    instrument_version: InstrumentVersionIdentity
+    capability_snapshot_id: str
+    reconciliation_checkpoint_event_id: str
+    journal_sequence_cut: int
+    reservation_version: int
+    reservation_state_digest: str
+    authority_policy_id: str
+    authority_policy_version: int
+    evaluated_at: str
+    valid_until: str
+    evidence_refs: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.context, RiskContext):
+            raise TypeError("authoritative context must be RiskContext")
+        if not isinstance(self.risk_policy, RiskPolicy):
+            raise TypeError("authoritative risk_policy must be RiskPolicy")
+        normalized_context = RiskContext.create(**vars(self.context))
+        account = _text(self.account_id, name="authoritative risk account_id")
+        environment = _text(
+            self.environment, name="authoritative risk environment"
+        ).upper()
+        if environment not in {"SIMULATION", "PAPER", "LIVE"}:
+            raise ValueError("authoritative risk environment is unsupported")
+        provider = _text(
+            self.provider_id, name="authoritative risk provider_id"
+        ).upper()
+        if type(self.journal_sequence_cut) is not int or self.journal_sequence_cut < 0:
+            raise ValueError("journal_sequence_cut must be a non-negative integer")
+        if type(self.reservation_version) is not int or self.reservation_version < 0:
+            raise ValueError("reservation_version must be a non-negative integer")
+        if (
+            type(self.authority_policy_version) is not int
+            or self.authority_policy_version < 1
+        ):
+            raise ValueError("authority_policy_version must be positive")
+        evaluated = _text(
+            self.evaluated_at, name="authoritative risk evaluated_at"
+        )
+        evaluated_instant = _instant(
+            evaluated, name="authoritative risk evaluated_at"
+        )
+        valid_until = _text(
+            self.valid_until, name="authoritative risk valid_until"
+        )
+        valid_until_instant = _instant(
+            valid_until, name="authoritative risk valid_until"
+        )
+        if valid_until_instant <= evaluated_instant:
+            raise ValueError(
+                "authoritative risk valid_until must be after evaluated_at"
+            )
+        if not isinstance(self.evidence_refs, Mapping):
+            raise TypeError("authoritative risk evidence_refs must be a mapping")
+        refs: dict[str, str] = {}
+        for raw_dimension, raw_ref in self.evidence_refs.items():
+            dimension = _text(
+                raw_dimension, name="risk evidence dimension"
+            ).upper()
+            if dimension in refs:
+                raise ValueError("risk evidence dimensions must be unique")
+            refs[dimension] = _text(
+                raw_ref,
+                name=f"risk evidence ref {dimension}",
+            )
+        required = {
+            "PORTFOLIO",
+            "MARKET",
+            "MARGIN",
+            "POLICY",
+            "RECONCILIATION",
+            "CAPABILITY",
+        }
+        if normalized_context.fx_required:
+            required.add("FX")
+        if normalized_context.borrow_available is not None:
+            required.add("BORROW")
+        if normalized_context.stress_scenarios:
+            required.add("STRESS")
+        if normalized_context.factor_loadings:
+            required.add("FACTORS")
+        if (
+            normalized_context.liquidity_capacity
+            or normalized_context.spread_fraction
+            or normalized_context.slippage_fraction
+        ):
+            required.add("LIQUIDITY")
+        if normalized_context.liquidation_headroom_evidence is not None:
+            required.add("LIQUIDATION")
+        if normalized_context.settlement_allowed is not None:
+            required.add("SETTLEMENT")
+        if (
+            normalized_context.option_deliverable_verified is not None
+            or normalized_context.option_exercise_cash_required is not None
+            or normalized_context.option_exercise_cash_available is not None
+        ):
+            required.add("OPTION_LIFECYCLE")
+        if normalized_context.futures_delivery_headroom_seconds:
+            required.add("FUTURES_LIFECYCLE")
+        missing = sorted(required - set(refs))
+        if missing:
+            raise ValueError(
+                "authoritative risk snapshot is missing evidence dimensions: "
+                + ", ".join(missing)
+            )
+        object.__setattr__(self, "context", normalized_context)
+        object.__setattr__(self, "account_id", account)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "provider_id", provider)
+        object.__setattr__(
+            self,
+            "instrument_version",
+            _instrument_identity(
+                self.instrument_version,
+                name="authoritative risk instrument_version",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "capability_snapshot_id",
+            _text(
+                self.capability_snapshot_id,
+                name="authoritative risk capability_snapshot_id",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "reconciliation_checkpoint_event_id",
+            _text(
+                self.reconciliation_checkpoint_event_id,
+                name="authoritative risk reconciliation_checkpoint_event_id",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "reservation_state_digest",
+            _text(
+                self.reservation_state_digest,
+                name="authoritative risk reservation_state_digest",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "authority_policy_id",
+            _text(
+                self.authority_policy_id,
+                name="authoritative risk policy_id",
+            ),
+        )
+        object.__setattr__(self, "evaluated_at", evaluated)
+        object.__setattr__(self, "valid_until", valid_until)
+        object.__setattr__(
+            self,
+            "evidence_refs",
+            MappingProxyType(dict(sorted(refs.items()))),
+        )
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "context_fingerprint": _risk_context_fingerprint(self.context),
+            "context_state_version": self.context.state_version,
+            "risk_policy_fingerprint": _risk_policy_fingerprint(self.risk_policy),
+            "account_id": self.account_id,
+            "environment": self.environment,
+            "provider_id": self.provider_id,
+            "instrument": {
+                "instrument_id": self.instrument_version.instrument_id,
+                "version": self.instrument_version.version,
+            },
+            "capability_snapshot_id": self.capability_snapshot_id,
+            "reconciliation_checkpoint_event_id": (
+                self.reconciliation_checkpoint_event_id
+            ),
+            "journal_sequence_cut": self.journal_sequence_cut,
+            "reservation_version": self.reservation_version,
+            "reservation_state_digest": self.reservation_state_digest,
+            "authority_policy_id": self.authority_policy_id,
+            "authority_policy_version": self.authority_policy_version,
+            "evaluated_at": self.evaluated_at,
+            "valid_until": self.valid_until,
+            "evidence_refs": dict(self.evidence_refs),
+        }
+
+    @property
+    def snapshot_id(self) -> str:
+        digest = sha256(
+            json.dumps(
+                self._identity_payload(),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        return "risk-snapshot:sha256:" + digest
+
+    def evidence_payload(self) -> dict[str, Any]:
+        return {
+            "snapshot_id": self.snapshot_id,
+            **self._identity_payload(),
+        }
+
+
 def _authority_event_id(event_type: str, key: str) -> str:
     return str(uuid5(NAMESPACE_URL, f"https://events.autotrade.local/authority/{event_type}/{key}"))
 
@@ -548,6 +911,11 @@ class AuthorityService:
         allocation_authority_resolver: Callable[
             [EvidenceBoundObjectiveAllocationResult],
             AllocationAuthoritySnapshot,
+        ]
+        | None = None,
+        risk_authority_resolver: Callable[
+            [RiskAuthorityRequest],
+            AuthoritativeRiskSnapshot,
         ]
         | None = None,
     ):
@@ -564,6 +932,11 @@ class AuthorityService:
         ):
             raise TypeError("allocation_authority_resolver must be callable")
         self.allocation_authority_resolver = allocation_authority_resolver
+        if risk_authority_resolver is not None and not callable(
+            risk_authority_resolver
+        ):
+            raise TypeError("risk_authority_resolver must be callable")
+        self.risk_authority_resolver = risk_authority_resolver
         self._policies: dict[str, AuthorityPolicy] = {}
         self._revocations: dict[str, tuple[str, str]] = {}
         self._confirmations: dict[str, Confirmation] = {}
@@ -577,6 +950,55 @@ class AuthorityService:
         self._journal_version = 0
         if self.store is not None:
             self._restore_journal()
+
+    def _resolve_authoritative_risk_snapshot(
+        self,
+        request: RiskAuthorityRequest,
+    ) -> AuthoritativeRiskSnapshot:
+        if not isinstance(request, RiskAuthorityRequest):
+            raise TypeError("request must be RiskAuthorityRequest")
+        if self.risk_authority_resolver is None:
+            raise AuthorityConflict(
+                "financial admission requires a service-owned authoritative risk resolver"
+            )
+        snapshot = self.risk_authority_resolver(request)
+        if not isinstance(snapshot, AuthoritativeRiskSnapshot):
+            raise AuthorityConflict(
+                "risk authority resolver must return AuthoritativeRiskSnapshot"
+            )
+        expected = (
+            request.account_id,
+            request.environment,
+            request.provider_id,
+            request.instrument_version,
+            request.capability_snapshot_id,
+            request.reconciliation_checkpoint_event_id,
+            request.journal_sequence_cut,
+            request.reservation_version,
+            request.reservation_state_digest,
+            request.authority_policy_id,
+            request.authority_policy_version,
+            request.evaluated_at,
+        )
+        actual = (
+            snapshot.account_id,
+            snapshot.environment,
+            snapshot.provider_id,
+            snapshot.instrument_version,
+            snapshot.capability_snapshot_id,
+            snapshot.reconciliation_checkpoint_event_id,
+            snapshot.journal_sequence_cut,
+            snapshot.reservation_version,
+            snapshot.reservation_state_digest,
+            snapshot.authority_policy_id,
+            snapshot.authority_policy_version,
+            snapshot.evaluated_at,
+        )
+        if actual != expected:
+            raise AuthorityConflict(
+                "authoritative risk snapshot does not match the financial writer cut"
+            )
+        return snapshot
 
     @staticmethod
     def _instrument_payload(value: InstrumentVersionIdentity) -> dict[str, Any]:
@@ -955,6 +1377,57 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "durable risk decision is not after its transaction journal cut"
                 )
+        authoritative_snapshot = risk_payload.get(
+            "authoritative_risk_snapshot"
+        )
+        if authoritative_snapshot is not None:
+            if not isinstance(authoritative_snapshot, Mapping):
+                raise AuthorityConflict(
+                    "durable authoritative risk snapshot is malformed"
+                )
+            snapshot_id = _text(
+                authoritative_snapshot.get("snapshot_id"),
+                name="authoritative risk snapshot_id",
+            )
+            identity = dict(authoritative_snapshot)
+            identity.pop("snapshot_id", None)
+            expected_snapshot_id = "risk-snapshot:sha256:" + sha256(
+                json.dumps(
+                    identity,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("utf-8")
+            ).hexdigest()
+            if snapshot_id != expected_snapshot_id:
+                raise AuthorityConflict(
+                    "durable authoritative risk snapshot digest is invalid"
+                )
+            instrument = authoritative_snapshot.get("instrument")
+            if (
+                authoritative_snapshot.get("account_id") != record.account_id
+                or authoritative_snapshot.get("environment")
+                != record.environment
+                or authoritative_snapshot.get("capability_snapshot_id")
+                != record.capability_snapshot_id
+                or authoritative_snapshot.get("authority_policy_id")
+                != record.policy_id
+                or authoritative_snapshot.get("authority_policy_version")
+                != record.policy_version
+                or authoritative_snapshot.get("context_state_version")
+                != record.state_version
+                or authoritative_snapshot.get("valid_until")
+                != record.risk_valid_until
+                or not isinstance(instrument, Mapping)
+                or instrument.get("instrument_id")
+                != record.instrument_version.instrument_id
+                or instrument.get("version")
+                != record.instrument_version.version
+            ):
+                raise AuthorityConflict(
+                    "durable authoritative risk snapshot scope is inconsistent"
+                )
+
         risk_digest = record.risk_decision_id.removeprefix("risk:sha256:")
         if (
             risk_payload.get("decision_id") != record.risk_decision_id
@@ -1301,6 +1774,8 @@ class AuthorityService:
             "confirmation_id": record.confirmation_id,
             "risk_reducing": record.risk_reducing,
         }
+        if authoritative_snapshot is not None:
+            request["authoritative_risk_snapshot"] = dict(authoritative_snapshot)
         if journal_sequence_cut is not None:
             request["journal_sequence_cut"] = journal_sequence_cut
         if "allocation_evidence" in risk_payload:
@@ -1862,12 +2337,69 @@ class AuthorityService:
         if policy is None:
             raise KeyError(pid)
 
+        snapshot_provider_id = _text(
+            reservation_provider_id,
+            name="reservation_provider_id",
+        ).upper()
+        snapshot_checkpoint_event_id = _text(
+            reservation_checkpoint_event_id,
+            name="reservation_checkpoint_event_id",
+        )
+        snapshot_instrument = InstrumentVersionIdentity(
+            instrument_id,
+            instrument_version,
+        )
+
         existing = self._admissions.get(aid)
         if existing is None:
             journal_sequence_cut = self.store.current_journal_sequence()
             reservation_version = reservation_book.version
             evaluated_at = _text(now, name="now")
-            valid_until = _text(risk_valid_until, name="risk_valid_until")
+            caller_valid_until = _text(
+                risk_valid_until, name="risk_valid_until"
+            )
+            risk_authority_request = RiskAuthorityRequest(
+                risk_intent=risk_intent,
+                account_id=account_id,
+                environment=environment,
+                provider_id=snapshot_provider_id,
+                instrument_version=snapshot_instrument,
+                capability_snapshot_id=capability,
+                reconciliation_checkpoint_event_id=(
+                    snapshot_checkpoint_event_id
+                ),
+                journal_sequence_cut=journal_sequence_cut,
+                reservation_version=reservation_version,
+                reservation_state_digest=reservation_book.state_digest,
+                authority_policy_id=policy.policy_id,
+                authority_policy_version=policy.version,
+                evaluated_at=evaluated_at,
+            )
+            risk_snapshot = self._resolve_authoritative_risk_snapshot(
+                risk_authority_request
+            )
+            if risk_context != risk_snapshot.context:
+                raise AuthorityConflict(
+                    "caller risk_context does not match authoritative risk snapshot"
+                )
+            if risk_policy != risk_snapshot.risk_policy:
+                raise AuthorityConflict(
+                    "caller risk_policy does not match authoritative risk snapshot"
+                )
+            if _instant(
+                caller_valid_until, name="risk_valid_until"
+            ) != _instant(
+                risk_snapshot.valid_until,
+                name="authoritative risk valid_until",
+            ):
+                raise AuthorityConflict(
+                    "caller risk_valid_until does not match authoritative risk snapshot"
+                )
+            valid_until = risk_snapshot.valid_until
+            effective_risk_context = risk_snapshot.context
+            effective_risk_policy = risk_snapshot.risk_policy
+            risk_snapshot_payload = risk_snapshot.evidence_payload()
+            risk_snapshot_id = risk_snapshot.snapshot_id
         else:
             if existing.risk_decision_id is None:
                 raise AuthorityConflict(
@@ -1917,11 +2449,62 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "risk_valid_until changed for an existing financial command"
                 )
+            durable_snapshot = payload.get("authoritative_risk_snapshot")
+            if not isinstance(durable_snapshot, Mapping):
+                raise AuthorityConflict(
+                    "existing admission lacks authoritative risk snapshot binding"
+                )
+            durable_instrument = durable_snapshot.get("instrument")
+            if (
+                not isinstance(durable_instrument, Mapping)
+                or durable_snapshot.get("provider_id") != snapshot_provider_id
+                or durable_snapshot.get("account_id")
+                != _text(account_id, name="account_id")
+                or durable_snapshot.get("environment")
+                != _text(environment, name="environment").upper()
+                or durable_snapshot.get("capability_snapshot_id") != capability
+                or durable_snapshot.get("reconciliation_checkpoint_event_id")
+                != snapshot_checkpoint_event_id
+                or durable_snapshot.get("journal_sequence_cut")
+                != journal_sequence_cut
+                or durable_snapshot.get("reservation_version")
+                != reservation_version
+                or durable_snapshot.get("authority_policy_id") != policy.policy_id
+                or durable_snapshot.get("authority_policy_version") != policy.version
+                or durable_snapshot.get("evaluated_at") != evaluated_at
+                or durable_snapshot.get("valid_until") != valid_until
+                or durable_instrument.get("instrument_id")
+                != snapshot_instrument.instrument_id
+                or durable_instrument.get("version")
+                != snapshot_instrument.version
+            ):
+                raise AuthorityConflict(
+                    "authoritative risk snapshot scope changed for an existing financial command"
+                )
+            if durable_snapshot.get(
+                "context_fingerprint"
+            ) != _risk_context_fingerprint(risk_context):
+                raise AuthorityConflict(
+                    "caller risk_context changed for an existing financial command"
+                )
+            if durable_snapshot.get(
+                "risk_policy_fingerprint"
+            ) != _risk_policy_fingerprint(risk_policy):
+                raise AuthorityConflict(
+                    "caller risk_policy changed for an existing financial command"
+                )
+            risk_snapshot_id = _text(
+                durable_snapshot.get("snapshot_id"),
+                name="authoritative risk snapshot_id",
+            )
+            effective_risk_context = risk_context
+            effective_risk_policy = risk_policy
+            risk_snapshot_payload = dict(durable_snapshot)
 
         decision = evaluate_bound_risk(
             risk_intent,
-            risk_context,
-            risk_policy,
+            effective_risk_context,
+            effective_risk_policy,
             intent_hash=_text(intent_hash, name="intent_hash"),
             policy_version=policy.version,
             reservation_version=reservation_version,
@@ -1929,6 +2512,7 @@ class AuthorityService:
             capability_snapshot_id=capability,
             evaluated_at=evaluated_at,
             valid_until=valid_until,
+            authoritative_risk_snapshot_id=risk_snapshot_id,
         )
 
         normalized_requirements = normalize_reservation_requirements(
@@ -1945,11 +2529,11 @@ class AuthorityService:
         current_borrowed_quantity = Decimal("0")
         if decision.admitted:
             if risk_intent.instrument_type == "EQUITY":
-                current_position = risk_context.positions.get(
+                current_position = effective_risk_context.positions.get(
                     risk_intent.symbol,
                     Decimal("0"),
                 )
-                reserved_delta = risk_context.reserved_position_delta.get(
+                reserved_delta = effective_risk_context.reserved_position_delta.get(
                     risk_intent.symbol,
                     Decimal("0"),
                 )
@@ -2242,7 +2826,7 @@ class AuthorityService:
                 allocation_result=allocation_result,
                 existing=existing,
                 risk_intent=risk_intent,
-                risk_context=risk_context,
+                risk_context=effective_risk_context,
                 reservation_book=reservation_book,
                 reservation_provider_id=reservation_provider_id,
                 account_id=account_id,
@@ -2252,6 +2836,37 @@ class AuthorityService:
                 instrument_version=instrument_version,
                 now=now,
             )
+
+        if existing is None:
+            reservation_book.refresh()
+            current_risk_authority_request = RiskAuthorityRequest(
+                risk_intent=risk_intent,
+                account_id=account_id,
+                environment=environment,
+                provider_id=snapshot_provider_id,
+                instrument_version=snapshot_instrument,
+                capability_snapshot_id=capability,
+                reconciliation_checkpoint_event_id=(
+                    snapshot_checkpoint_event_id
+                ),
+                journal_sequence_cut=self.store.current_journal_sequence(),
+                reservation_version=reservation_book.version,
+                reservation_state_digest=reservation_book.state_digest,
+                authority_policy_id=policy.policy_id,
+                authority_policy_version=policy.version,
+                evaluated_at=evaluated_at,
+            )
+            current_risk_snapshot = self._resolve_authoritative_risk_snapshot(
+                current_risk_authority_request
+            )
+            if (
+                current_risk_snapshot.snapshot_id != risk_snapshot_id
+                or current_risk_snapshot.evidence_payload()
+                != risk_snapshot_payload
+            ):
+                raise AuthorityConflict(
+                    "authoritative risk snapshot changed before financial commit"
+                )
 
         return self._admit_bound_risk(
             command_id=command_id,
@@ -2266,7 +2881,7 @@ class AuthorityService:
             instrument_version=instrument_version,
             action=action,
             notional=notional,
-            current_state_version=risk_context.state_version,
+            current_state_version=effective_risk_context.state_version,
             capability_snapshot_id=capability,
             risk_decision=decision,
             reservation_book=reservation_book,
@@ -2276,6 +2891,7 @@ class AuthorityService:
             now=now,
             reservation_availability_evidence=availability_evidence,
             allocation_binding=allocation_binding,
+            authoritative_risk_snapshot=risk_snapshot_payload,
             journal_sequence_cut=journal_sequence_cut,
             confirmation_id=confirmation_id,
             risk_reducing=risk_reducing,
@@ -2306,6 +2922,7 @@ class AuthorityService:
         now: str,
         reservation_availability_evidence: Mapping[str, Any] | None = None,
         allocation_binding: Mapping[str, Any] | None = None,
+        authoritative_risk_snapshot: Mapping[str, Any] | None = None,
         journal_sequence_cut: int | None = None,
         confirmation_id: str | None = None,
         risk_reducing: bool = False,
@@ -2341,6 +2958,28 @@ class AuthorityService:
             capability_snapshot_id, name="capability_snapshot_id"
         )
         rid = _text(reservation_id, name="reservation_id")
+        risk_snapshot_binding: dict[str, Any] | None = None
+        if authoritative_risk_snapshot is not None:
+            if not isinstance(authoritative_risk_snapshot, Mapping):
+                raise TypeError(
+                    "authoritative_risk_snapshot must be a mapping or None"
+                )
+            risk_snapshot_binding = dict(authoritative_risk_snapshot)
+            bound_snapshot_id = _text(
+                risk_snapshot_binding.get("snapshot_id"),
+                name="authoritative risk snapshot_id",
+            )
+            if (
+                risk_decision.authoritative_risk_snapshot_id
+                != bound_snapshot_id
+            ):
+                raise AuthorityConflict(
+                    "risk decision does not match authoritative risk snapshot"
+                )
+        elif risk_decision.authoritative_risk_snapshot_id is not None:
+            raise AuthorityConflict(
+                "risk decision authoritative snapshot evidence is missing"
+            )
         try:
             expected_risk_id = (
                 "risk:sha256:" + risk_decision_fingerprint(risk_decision)
@@ -2460,6 +3099,12 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "allocation evidence changed for an existing financial command"
                 )
+            if durable_risk_payload.get("authoritative_risk_snapshot") != (
+                risk_snapshot_binding
+            ):
+                raise AuthorityConflict(
+                    "authoritative risk snapshot changed for an existing financial command"
+                )
             return existing
 
         validate_bound_risk_decision(risk_decision, now=now)
@@ -2535,6 +3180,7 @@ class AuthorityService:
                 reservation_plan.request if reservation_plan is not None else None
             ),
             "reservation_availability_evidence": reservation_availability_evidence,
+            "authoritative_risk_snapshot": risk_snapshot_binding,
             "confirmation_id": candidate.confirmation_id,
             "risk_reducing": risk_reducing,
         }
@@ -2570,6 +3216,7 @@ class AuthorityService:
             "reservation_availability_evidence": reservation_availability_evidence,
             "journal_sequence_cut": journal_sequence_cut,
             "capability_snapshot_id": risk_decision.capability_snapshot_id,
+            "authoritative_risk_snapshot": risk_snapshot_binding,
             "evaluated_at": risk_decision.evaluated_at,
             "valid_until": risk_decision.valid_until,
             "verdict": "ALLOW" if risk_decision.admitted else "REJECT",

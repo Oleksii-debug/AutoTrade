@@ -147,6 +147,7 @@ class ProducerFixture:
             else []
         )
         self.reconciliation_evidence[episode_id] = {
+            "episode_id": episode_id,
             "checkpoint_event_id": f"checkpoint-{episode_id}",
             "checkpoint_payload_hash": "sha256:" + "9" * 64,
             "checkpoint_aggregate_id": f"account-reconciliation:{episode_id}",

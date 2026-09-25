@@ -72,6 +72,28 @@ def _text(value: Any, name: str) -> str:
     return value.strip()
 
 
+def _immutable_artifact_ref(value: Any, name: str) -> str:
+    reference = _text(value, name)
+    prefix = "artifact:"
+    marker = "@sha256:"
+    if not reference.startswith(prefix) or marker not in reference:
+        raise ValueError(
+            f"{name} must bind an immutable artifact and SHA-256 digest"
+        )
+    artifact_id, digest = reference[len(prefix):].split(marker, 1)
+    try:
+        canonical_id = str(UUID(artifact_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise ValueError(f"{name} artifact id must be a UUID") from error
+    if artifact_id != canonical_id:
+        raise ValueError(f"{name} artifact id must use canonical UUID text")
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        raise ValueError(
+            f"{name} must use a canonical lowercase SHA-256 digest"
+        )
+    return reference
+
+
 @dataclass(frozen=True)
 class ProtocolRegistration:
     protocol_id: str
@@ -264,6 +286,16 @@ class ScientificRegistry:
         holdout = _text(holdout_id, "holdout_id")
         if not isinstance(result, dict) or not result:
             raise ProtocolViolation("evaluation result must be a non-empty object")
+        if result.get("stopping_rule_triggered") is True:
+            try:
+                _immutable_artifact_ref(
+                    result.get("stopping_evidence_ref"),
+                    "stopping_evidence_ref",
+                )
+            except ValueError as error:
+                raise ProtocolViolation(
+                    "triggered stopping rule requires immutable artifact evidence"
+                ) from error
         identifier = _id(evaluation_id)
         canonical = _canonical(result)
         result_hash = _hash(result)
@@ -437,7 +469,10 @@ class ScientificRegistry:
                     "early-stop evidence is not bound to the registered stopping rules"
                 )
             try:
-                _text(result.get("stopping_evidence_ref"), "stopping_evidence_ref")
+                _immutable_artifact_ref(
+                    result.get("stopping_evidence_ref"),
+                    "stopping_evidence_ref",
+                )
             except ValueError as error:
                 raise ProtocolViolation(
                     "early-stop promotion requires immutable stopping evidence"

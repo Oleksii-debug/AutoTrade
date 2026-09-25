@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Literal, Sequence
 
+from .capabilities import CapabilitySnapshot
+
 
 class PerpetualMarginError(ValueError):
     pass
@@ -106,7 +108,19 @@ class MarginTier:
 
 @dataclass(frozen=True, slots=True)
 class PerpetualMarginEvidence:
+    provider_id: str
+    account_id: str
+    entity_id: str
+    environment: str
     instrument_version: str
+    capability_snapshot_id: str
+    position_mode: str
+    margin_mode: str
+    collateral_currency: str
+    settlement_currency: str
+    risk_tier_revision: str
+    evidence_bundle_ref: str
+    tier_table_evidence_ref: str
     mark_price: Decimal
     index_price: Decimal
     collateral_fx_to_settlement: Decimal
@@ -115,13 +129,55 @@ class PerpetualMarginEvidence:
     collateral_fx_observed_at: str
     margin_tiers_observed_at: str
     margin_tiers: tuple[MarginTier, ...]
-    evidence_ref: str
 
     def __post_init__(self) -> None:
+        for name in (
+            "provider_id",
+            "account_id",
+            "entity_id",
+            "instrument_version",
+            "capability_snapshot_id",
+            "position_mode",
+            "collateral_currency",
+            "settlement_currency",
+            "risk_tier_revision",
+            "evidence_bundle_ref",
+            "tier_table_evidence_ref",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _text(getattr(self, name), name=name),
+            )
         object.__setattr__(
             self,
-            "instrument_version",
-            _text(self.instrument_version, name="instrument_version"),
+            "provider_id",
+            self.provider_id.upper(),
+        )
+        object.__setattr__(
+            self,
+            "environment",
+            _text(self.environment, name="environment").upper(),
+        )
+        object.__setattr__(
+            self,
+            "margin_mode",
+            _text(self.margin_mode, name="margin_mode").upper(),
+        )
+        object.__setattr__(
+            self,
+            "position_mode",
+            self.position_mode.upper(),
+        )
+        object.__setattr__(
+            self,
+            "collateral_currency",
+            self.collateral_currency.upper(),
+        )
+        object.__setattr__(
+            self,
+            "settlement_currency",
+            self.settlement_currency.upper(),
         )
         object.__setattr__(self, "mark_price", _positive(self.mark_price, name="mark_price"))
         object.__setattr__(self, "index_price", _positive(self.index_price, name="index_price"))
@@ -153,7 +209,24 @@ class PerpetualMarginEvidence:
                 )
             prior = tier.notional_upper_bound
         object.__setattr__(self, "margin_tiers", tiers)
-        object.__setattr__(self, "evidence_ref", _text(self.evidence_ref, name="evidence_ref"))
+
+    @property
+    def capability_identity(self) -> tuple[str, str, str, str, str]:
+        return (
+            self.provider_id,
+            self.account_id,
+            self.entity_id,
+            self.environment,
+            self.instrument_version,
+        )
+
+    @property
+    def tier_identity(self) -> tuple[str, str, str]:
+        return (
+            self.capability_snapshot_id,
+            self.risk_tier_revision,
+            self.tier_table_evidence_ref,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,7 +297,12 @@ def _select_tier(notional: Decimal, tiers: Sequence[MarginTier]) -> MarginTier:
 
 def evaluate_perpetual_margin(
     *,
+    capability: CapabilitySnapshot,
     instrument_version: str,
+    margin_mode: str,
+    collateral_currency: str,
+    settlement_currency: str,
+    risk_tier_revision: str,
     signed_notional_settlement,
     collateral_amount,
     unrealized_pnl_settlement,
@@ -242,13 +320,50 @@ def evaluate_perpetual_margin(
     silently converts an inverse contract as though it were linear.
     """
 
+    if not isinstance(capability, CapabilitySnapshot):
+        raise TypeError("capability must be CapabilitySnapshot")
     if not isinstance(evidence, PerpetualMarginEvidence):
         raise TypeError("evidence must be PerpetualMarginEvidence")
     if not isinstance(stress, PerpetualStress):
         raise TypeError("stress must be PerpetualStress")
+
+    # Scope compatibility is an authority boundary and must be checked before
+    # tier selection or any financial arithmetic.
     instrument = _text(instrument_version, name="instrument_version")
+    requested_margin_mode = _text(margin_mode, name="margin_mode").upper()
+    requested_collateral = _text(
+        collateral_currency, name="collateral_currency"
+    ).upper()
+    requested_settlement = _text(
+        settlement_currency, name="settlement_currency"
+    ).upper()
+    requested_revision = _text(
+        risk_tier_revision, name="risk_tier_revision"
+    )
     if instrument != evidence.instrument_version:
         raise PerpetualMarginError("instrument_version must match margin evidence")
+    if capability.identity != evidence.capability_identity:
+        raise PerpetualMarginError(
+            "provider/account/entity/environment/instrument capability scope mismatch"
+        )
+    if capability.snapshot_id != evidence.capability_snapshot_id:
+        raise PerpetualMarginError("capability snapshot does not match margin evidence")
+    if capability.position_mode.upper() != evidence.position_mode:
+        raise PerpetualMarginError("position mode does not match margin evidence")
+    if requested_margin_mode != evidence.margin_mode:
+        raise PerpetualMarginError("margin mode does not match margin evidence")
+    if requested_collateral != evidence.collateral_currency:
+        raise PerpetualMarginError("collateral currency does not match margin evidence")
+    if requested_settlement != evidence.settlement_currency:
+        raise PerpetualMarginError("settlement currency does not match margin evidence")
+    if requested_revision != evidence.risk_tier_revision:
+        raise PerpetualMarginError("risk tier revision does not match margin evidence")
+    if capability.status != "VERIFIED":
+        raise PerpetualMarginError("verified capability snapshot is required")
+
+    now = _instant(evaluated_at, name="evaluated_at")
+    if not (capability.observed_at <= now < capability.expires_at):
+        raise PerpetualMarginError("capability snapshot is stale at evaluation time")
     if (
         isinstance(maximum_evidence_age_seconds, bool)
         or not isinstance(maximum_evidence_age_seconds, int)
@@ -287,7 +402,6 @@ def evaluate_perpetual_margin(
     stressed_tier = _select_tier(stressed_notional, evidence.margin_tiers)
     stressed_maintenance = stressed_tier.maintenance_requirement(stressed_notional)
 
-    now = _instant(evaluated_at, name="evaluated_at")
     max_age = timedelta(seconds=maximum_evidence_age_seconds)
     reasons: list[str] = []
     for field in (

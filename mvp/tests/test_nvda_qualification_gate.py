@@ -205,6 +205,25 @@ class NvdaQualificationGateTests(unittest.TestCase):
             ):
                 validate_evidence(evidence, REQUIREMENTS)
 
+
+    def test_release_evidence_identities_must_be_canonical_lowercase(self):
+        cases = (
+            ("source_sha", "A" * 40, "40-character"),
+            ("artifact_sha256", "sha256:" + "B" * 64, "lowercase"),
+        )
+        for field, value, message in cases:
+            evidence = complete_evidence()
+            evidence[field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(
+                NvdaQualificationError,
+                message,
+            ):
+                validate_evidence(evidence, REQUIREMENTS)
+
+        evidence = complete_evidence()
+        evidence["workflows"][0]["evidence_ref"] = "sha256:" + "C" * 64
+        with self.assertRaisesRegex(NvdaQualificationError, "immutable sha256"):
+            validate_evidence(evidence, REQUIREMENTS)
     def test_qualified_status_cannot_escape_nvda_evidence_directory(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -336,6 +355,28 @@ class NvdaQualificationGateTests(unittest.TestCase):
             ):
                 validate_release_artifact_binding(evidence, release)
 
+
+    def test_release_bundle_source_identity_is_not_case_normalized(self):
+        with TemporaryDirectory() as directory:
+            release = Path(directory) / "AutoTrade-release.zip"
+            write_release_bundle(release, source_sha="A" * 40)
+            evidence = complete_evidence()
+            evidence["artifact_sha256"] = (
+                "sha256:" + sha256(release.read_bytes()).hexdigest()
+            )
+            with self.assertRaisesRegex(NvdaQualificationError, "lowercase Git SHA"):
+                validate_release_artifact_binding(evidence, release)
+
+    def test_binding_helper_rejects_uppercase_evidence_digest_directly(self):
+        with TemporaryDirectory() as directory:
+            release = Path(directory) / "AutoTrade-release.zip"
+            write_release_bundle(release)
+            evidence = complete_evidence()
+            evidence["artifact_sha256"] = (
+                "sha256:" + sha256(release.read_bytes()).hexdigest().upper()
+            )
+            with self.assertRaisesRegex(NvdaQualificationError, "lowercase hex"):
+                validate_release_artifact_binding(evidence, release)
     def test_diagnostics_or_ineligible_bundle_cannot_be_nvda_release_evidence(self):
         for mode, eligible, message in (
             ("diagnostics", False, "release-mode"),

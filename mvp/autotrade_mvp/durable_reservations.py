@@ -357,6 +357,11 @@ class DurableReservationBook:
             "requirements": _amount_map(requirements, allow_zero=False),
             "available": _amount_map(available, allow_zero=True),
         }
+        expected_cut = (
+            None
+            if expected_snapshot_digest is None
+            else _text(expected_snapshot_digest, name="expected_snapshot_digest")
+        )
         events = self._events()
         candidate, idempotency = self._replay(events)
         existing = idempotency.get(key)
@@ -415,6 +420,7 @@ class DurableReservationBook:
         reservation_id: str,
         usage: Mapping[str, object],
         committed_at: str,
+        expected_snapshot_digest: str | None = None,
     ) -> PreparedReservationMutation:
         """Prepare one reservation consumption for a shared durable commit.
 
@@ -423,7 +429,10 @@ class DurableReservationBook:
         same JournalStore transaction as canonical economic events. Exact
         replay after acknowledgement loss reports already_committed only when
         the same idempotency key, request and resulting snapshot are already
-        present in durable reservation history.
+        present in durable reservation history. Fresh evidence-derived fills may
+        additionally fence consumption to the exact pre-consumption reservation
+        snapshot digest; exact committed retry remains authoritative even though
+        the live snapshot has advanced.
         """
 
         key = _text(idempotency_key, name="idempotency_key")
@@ -458,6 +467,13 @@ class DurableReservationBook:
                 ),
                 already_committed=True,
             )
+
+        if expected_cut is not None:
+            current_snapshot = candidate.get(request["reservation_id"])
+            if payload_digest(_snapshot_payload(current_snapshot)) != expected_cut:
+                raise ReservationConflict(
+                    "reservation snapshot changed after provider fill plan derivation"
+                )
 
         snapshot = self._apply(candidate, "CONSUME", request)
         snapshot_value = _snapshot_payload(snapshot)

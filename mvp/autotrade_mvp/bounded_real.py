@@ -10,8 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 import hashlib
+import json
+from pathlib import Path
 import re
-from typing import Callable, FrozenSet, Iterable
+from typing import FrozenSet, Iterable
 from uuid import UUID
 
 
@@ -100,6 +102,53 @@ def _actions(values: Iterable[str]) -> FrozenSet[str]:
     return result
 
 
+_BOUNDED_REAL_ENVELOPE_SCHEMA_VERSION = 1
+
+
+def _canonical_decimal_text(value: Decimal) -> str:
+    """Canonical exact numeric identity for bounded-real risk limits."""
+
+    normalized = value.normalize()
+    rendered = format(normalized, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered or "0"
+
+
+def _bounded_real_envelope_digest(
+    *,
+    envelope_id: str,
+    source_sha: str,
+    provider_id: str,
+    account_id: str,
+    policy_id: str,
+    allowed_actions: FrozenSet[str],
+    max_capital: Decimal,
+    max_single_notional: Decimal,
+    max_gross_leverage: Decimal,
+) -> str:
+    payload = {
+        "schema_version": _BOUNDED_REAL_ENVELOPE_SCHEMA_VERSION,
+        "envelope_id": envelope_id,
+        "source_sha": source_sha,
+        "provider_id": provider_id,
+        "account_id": account_id,
+        "policy_id": policy_id,
+        "allowed_actions": sorted(allowed_actions),
+        "max_capital": _canonical_decimal_text(max_capital),
+        "max_single_notional": _canonical_decimal_text(max_single_notional),
+        "max_gross_leverage": _canonical_decimal_text(max_gross_leverage),
+    }
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
 @dataclass(frozen=True)
 class BoundedRealEnvelope:
     envelope_id: str
@@ -142,6 +191,22 @@ class BoundedRealEnvelope:
             "max_gross_leverage",
             _decimal(self.max_gross_leverage, name="max_gross_leverage"),
         )
+        if self.max_single_notional > self.max_capital:
+            raise ValueError("max_single_notional cannot exceed max_capital")
+
+    @property
+    def envelope_digest(self) -> str:
+        return _bounded_real_envelope_digest(
+            envelope_id=self.envelope_id,
+            source_sha=self.source_sha,
+            provider_id=self.provider_id,
+            account_id=self.account_id,
+            policy_id=self.policy_id,
+            allowed_actions=self.allowed_actions,
+            max_capital=self.max_capital,
+            max_single_notional=self.max_single_notional,
+            max_gross_leverage=self.max_gross_leverage,
+        )
 
     @classmethod
     def create(cls, **values) -> "BoundedRealEnvelope":
@@ -155,6 +220,7 @@ class ImmutableEvidenceRef:
     evidence_kind: str
     source_sha: str
     envelope_id: str
+    envelope_digest: str
     provider_id: str
     account_id: str
 
@@ -172,6 +238,7 @@ class ImmutableEvidenceRef:
         object.__setattr__(
             self, "envelope_id", _text(self.envelope_id, name="envelope_id")
         )
+        object.__setattr__(self, "envelope_digest", _digest(self.envelope_digest))
         object.__setattr__(
             self, "provider_id", _text(self.provider_id, name="provider_id")
         )
@@ -193,25 +260,73 @@ class EvidenceVerification:
             raise ValueError("evidence cannot be both valid and conflicted")
 
 
-def artifact_store_evidence_verifier(
-    store: object,
-) -> Callable[[ImmutableEvidenceRef], EvidenceVerification]:
-    """Resolve bounded-real evidence through the canonical immutable store."""
+class ArtifactStoreEvidenceVerifier:
+    """Trusted terminal verifier backed by the canonical ArtifactStore type.
 
-    def verify(ref: ImmutableEvidenceRef) -> EvidenceVerification:
+    The verifier identity includes a digest of the configured store root so the
+    qualification decision records which host-managed store was consulted.
+    This object verifies evidence only; it never grants trading authority.
+    """
+
+    VERIFIER_ID = "AUTOTRADE_ARTIFACT_STORE_BOUNDED_REAL_V1"
+
+    def __init__(self, store: object):
+        from autotrade_research.artifacts.store import ArtifactStore
+
+        if type(store) is not ArtifactStore:
+            raise TypeError("bounded-real terminal verification requires canonical ArtifactStore")
+        self._store = store
+        root = str(Path(store.root).resolve())
+        self._store_identity = "sha256:" + hashlib.sha256(root.encode("utf-8")).hexdigest()
+
+    @property
+    def identity(self) -> str:
+        return f"{self.VERIFIER_ID}:{self._store_identity}"
+
+    @staticmethod
+    def _manifest_hash(manifest: dict) -> str:
+        payload = {
+            key: value for key, value in manifest.items() if key != "manifest_hash"
+        }
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+    def verify(self, ref: ImmutableEvidenceRef) -> EvidenceVerification:
         try:
-            manifest = getattr(store, "load_manifest")(ref.artifact_id)
-            payload = getattr(store, "read_bytes")(ref.artifact_id)
+            manifest = self._store.load_manifest(ref.artifact_id)
+            payload = self._store.read_bytes(ref.artifact_id)
+        except FileNotFoundError:
+            return EvidenceVerification(
+                valid=False,
+                reason="immutable evidence artifact is missing",
+            )
         except Exception:
             return EvidenceVerification(
                 valid=False,
-                reason="immutable evidence artifact is missing or unreadable",
+                conflicted=True,
+                reason="immutable evidence artifact is unreadable or corrupt",
             )
         if type(manifest) is not dict or not isinstance(payload, bytes):
             return EvidenceVerification(
                 valid=False,
                 conflicted=True,
                 reason="immutable evidence artifact representation is invalid",
+            )
+        manifest_hash = manifest.get("manifest_hash")
+        if (
+            not isinstance(manifest_hash, str)
+            or manifest_hash != self._manifest_hash(manifest)
+        ):
+            return EvidenceVerification(
+                valid=False,
+                conflicted=True,
+                reason="immutable evidence manifest integrity binding is missing or invalid",
             )
         actual_digest = "sha256:" + hashlib.sha256(payload).hexdigest()
         if (
@@ -237,6 +352,7 @@ def artifact_store_evidence_verifier(
             "evidence_kind": ref.evidence_kind,
             "source_sha": ref.source_sha,
             "envelope_id": ref.envelope_id,
+            "envelope_digest": ref.envelope_digest,
             "provider_id": ref.provider_id,
             "account_id": ref.account_id,
             "outcome": "PASS",
@@ -260,7 +376,11 @@ def artifact_store_evidence_verifier(
             )
         return EvidenceVerification(valid=True)
 
-    return verify
+
+def artifact_store_evidence_verifier(store: object) -> ArtifactStoreEvidenceVerifier:
+    """Create the only verifier accepted for terminal bounded-real completion."""
+
+    return ArtifactStoreEvidenceVerifier(store)
 
 
 @dataclass(frozen=True)
@@ -269,6 +389,7 @@ class QualificationEvidence:
     evidence_kind: str
     source_sha: str
     envelope_id: str
+    envelope_digest: str
     passed: bool
     evidence_ref: ImmutableEvidenceRef
     unresolved_blockers: tuple[str, ...] = ()
@@ -284,6 +405,7 @@ class QualificationEvidence:
         evidence_kind = _text(self.evidence_kind, name="evidence_kind").upper()
         source_sha = _sha(self.source_sha, name="source_sha")
         envelope_id = _text(self.envelope_id, name="envelope_id")
+        envelope_digest = _digest(self.envelope_digest)
         if not isinstance(self.evidence_ref, ImmutableEvidenceRef):
             raise TypeError("evidence_ref must be ImmutableEvidenceRef")
         if self.evidence_ref.evidence_kind != f"PREREQUISITE:{evidence_kind}":
@@ -291,12 +413,14 @@ class QualificationEvidence:
         if (
             self.evidence_ref.source_sha != source_sha
             or self.evidence_ref.envelope_id != envelope_id
+            or self.evidence_ref.envelope_digest != envelope_digest
         ):
             raise ValueError("prerequisite evidence_ref scope does not match evidence")
         object.__setattr__(self, "evidence_id", evidence_id)
         object.__setattr__(self, "evidence_kind", evidence_kind)
         object.__setattr__(self, "source_sha", source_sha)
         object.__setattr__(self, "envelope_id", envelope_id)
+        object.__setattr__(self, "envelope_digest", envelope_digest)
         object.__setattr__(self, "passed", _bool(self.passed, name="passed"))
         object.__setattr__(self, "unresolved_blockers", blockers)
 
@@ -309,6 +433,7 @@ class QualificationEvidence:
 class BoundedRealObservations:
     source_sha: str
     envelope_id: str
+    envelope_digest: str
     provider_id: str
     account_id: str
     observed_fill_count: int
@@ -324,6 +449,7 @@ class BoundedRealObservations:
     def __post_init__(self) -> None:
         source_sha = _sha(self.source_sha, name="source_sha")
         envelope_id = _text(self.envelope_id, name="envelope_id")
+        envelope_digest = _digest(self.envelope_digest)
         provider_id = _text(self.provider_id, name="provider_id")
         account_id = _text(self.account_id, name="account_id")
         for value, name in (
@@ -351,6 +477,7 @@ class BoundedRealObservations:
             if (
                 ref.source_sha != source_sha
                 or ref.envelope_id != envelope_id
+                or ref.envelope_digest != envelope_digest
                 or ref.provider_id != provider_id
                 or ref.account_id != account_id
             ):
@@ -364,6 +491,7 @@ class BoundedRealObservations:
             kinds.add(ref.evidence_kind)
         object.__setattr__(self, "source_sha", source_sha)
         object.__setattr__(self, "envelope_id", envelope_id)
+        object.__setattr__(self, "envelope_digest", envelope_digest)
         object.__setattr__(self, "provider_id", provider_id)
         object.__setattr__(self, "account_id", account_id)
         object.__setattr__(self, "evidence_refs", refs)
@@ -379,6 +507,8 @@ class BoundedRealQualificationResult:
     reason_codes: tuple[str, ...]
     exact_source_sha: str
     envelope_id: str
+    envelope_digest: str
+    evidence_verifier_identity: str | None
 
     @property
     def authorizes_trading(self) -> bool:
@@ -415,7 +545,7 @@ def assess_bounded_real_qualification(
     envelope: BoundedRealEnvelope,
     prerequisite_evidence: Iterable[QualificationEvidence],
     observations: BoundedRealObservations,
-    evidence_verifier: Callable[[ImmutableEvidenceRef], EvidenceVerification] | None = None,
+    evidence_verifier: ArtifactStoreEvidenceVerifier | None = None,
 ) -> BoundedRealQualificationResult:
     """Validate a bounded-real evidence bundle without granting authority."""
 
@@ -428,6 +558,7 @@ def assess_bounded_real_qualification(
     scope_matches = (
         observations.source_sha == envelope.source_sha
         and observations.envelope_id == envelope.envelope_id
+        and observations.envelope_digest == envelope.envelope_digest
         and observations.provider_id == envelope.provider_id
         and observations.account_id == envelope.account_id
     )
@@ -474,6 +605,7 @@ def assess_bounded_real_qualification(
         if (
             ref.source_sha != envelope.source_sha
             or ref.envelope_id != envelope.envelope_id
+            or ref.envelope_digest != envelope.envelope_digest
             or ref.provider_id != envelope.provider_id
             or ref.account_id != envelope.account_id
         ):
@@ -496,6 +628,8 @@ def assess_bounded_real_qualification(
             reasons.append(f"source_sha_mismatch:{kind}")
         if evidence.envelope_id != envelope.envelope_id:
             reasons.append(f"envelope_mismatch:{kind}")
+        if evidence.envelope_digest != envelope.envelope_digest:
+            reasons.append(f"envelope_digest_mismatch:{kind}")
         if (
             evidence.evidence_ref.provider_id != envelope.provider_id
             or evidence.evidence_ref.account_id != envelope.account_id
@@ -506,20 +640,25 @@ def assess_bounded_real_qualification(
         if evidence.unresolved_blockers:
             reasons.append(f"unresolved_blockers:{kind}")
 
+    verifier_identity: str | None = None
     if evidence_verifier is None:
-        reasons.append("immutable_evidence_verifier_required")
+        reasons.append("trusted_immutable_evidence_verifier_required")
+    elif not isinstance(evidence_verifier, ArtifactStoreEvidenceVerifier):
+        reasons.append("untrusted_immutable_evidence_verifier")
     else:
+        verifier_identity = evidence_verifier.identity
         for label, ref in all_refs:
             try:
-                verification = evidence_verifier(ref)
+                verification = evidence_verifier.verify(ref)
             except Exception:
                 verification = EvidenceVerification(
                     valid=False,
-                    reason="immutable evidence verifier raised",
+                    conflicted=True,
+                    reason="trusted immutable evidence verifier raised",
                 )
             if not isinstance(verification, EvidenceVerification):
                 raise TypeError(
-                    "evidence_verifier must return EvidenceVerification"
+                    "trusted evidence verifier must return EvidenceVerification"
                 )
             if not verification.valid:
                 suffix = "conflicted" if verification.conflicted else "unverified"
@@ -547,4 +686,6 @@ def assess_bounded_real_qualification(
         reason_codes=tuple(reasons),
         exact_source_sha=envelope.source_sha,
         envelope_id=envelope.envelope_id,
+        envelope_digest=envelope.envelope_digest,
+        evidence_verifier_identity=verifier_identity,
     )

@@ -1,3 +1,4 @@
+from functools import partial
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import unittest
@@ -45,6 +46,11 @@ def capability(*, order_types=("LIMIT", "MARKET"), tif=("GTC", "IOC", "FOK", "NO
         sources=frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}),
     )
 
+
+
+# Bind only test fixtures; production APIs require explicit account/environment scope.
+parse_account_trades = partial(parse_account_trades, account_id="acct-binance-spot", environment="PAPER")
+coverage_evidence = partial(coverage_evidence, account_id="acct-binance-spot", environment="PAPER")
 
 class BinanceSpotFoundationTests(unittest.TestCase):
     def test_limit_request_preserves_exact_strings_and_requests_ack_only(self):

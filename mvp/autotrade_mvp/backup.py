@@ -492,13 +492,13 @@ def create_backup(
         raise
 
 
-def verify_backup(
+def _verify_backup_with_digest(
     backup_root: str | Path,
     *,
     expected_source_sha: str | None = None,
     expected_build_identity_sha256: str | None = None,
-) -> dict[str, Any]:
-    """Verify the backup manifest, every payload byte and compatibility gates."""
+) -> tuple[dict[str, Any], str]:
+    """Verify one backup and return the manifest plus its exact verified digest."""
 
     root = Path(backup_root)
     manifest_path = root / MANIFEST_NAME
@@ -674,7 +674,25 @@ def verify_backup(
         if object_relative not in expected_paths:
             raise BackupIntegrityError("Backed-up artifact manifest has no matching object")
 
+    return manifest, actual_manifest_digest
+
+
+def verify_backup(
+    backup_root: str | Path,
+    *,
+    expected_source_sha: str | None = None,
+    expected_build_identity_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Verify the backup manifest, every payload byte and compatibility gates."""
+
+    manifest, _ = _verify_backup_with_digest(
+        backup_root,
+        expected_source_sha=expected_source_sha,
+        expected_build_identity_sha256=expected_build_identity_sha256,
+    )
     return manifest
+
+
 
 
 def restore_backup(
@@ -687,7 +705,7 @@ def restore_backup(
     """Restore through staging and leave a mandatory reconciliation marker."""
 
     backup = Path(backup_root)
-    manifest = verify_backup(
+    manifest, verified_manifest_digest = _verify_backup_with_digest(
         backup,
         expected_source_sha=expected_source_sha,
         expected_build_identity_sha256=expected_build_identity_sha256,
@@ -714,9 +732,7 @@ def restore_backup(
             "status": "RECONCILIATION_REQUIRED",
             "restored_at": _utc_now(),
             "reason": "RECONCILIATION_AND_OWNERSHIP_FENCING_REQUIRED",
-            "backup_manifest_sha256": (backup / MANIFEST_DIGEST_NAME)
-            .read_text(encoding="ascii")
-            .strip(),
+            "backup_manifest_sha256": verified_manifest_digest,
             "source_sha": manifest["source_sha"],
             "build_identity_sha256": manifest["build_identity_sha256"],
             "source_owner_id": manifest["source_owner_id"],

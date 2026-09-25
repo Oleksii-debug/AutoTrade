@@ -91,7 +91,11 @@ class EquityState:
             "unsettled_cash",
             _decimal(self.unsettled_cash, name="unsettled_cash"),
         )
-        object.__setattr__(self, "currency", _text(self.currency, name="currency"))
+        object.__setattr__(
+            self,
+            "currency",
+            _text(self.currency, name="currency").upper(),
+        )
         object.__setattr__(self, "borrowed_quantity", borrowed)
         object.__setattr__(
             self,
@@ -128,7 +132,7 @@ class EquityState:
             total_basis=_positive(total_basis, name="total_basis", allow_zero=True),
             settled_cash=_decimal(settled_cash, name="settled_cash"),
             unsettled_cash=_decimal(unsettled_cash, name="unsettled_cash"),
-            currency=_text(currency, name="currency"),
+            currency=_text(currency, name="currency").upper(),
             borrowed_quantity=borrowed,
             accrued_financing=_positive(accrued_financing, name="accrued_financing", allow_zero=True),
             recalled_quantity=recalled,
@@ -285,6 +289,14 @@ class CorporateActionBook:
             raise ValueError(
                 "equity state symbol does not match bound instrument version"
             )
+        settlement_currency = _text(
+            instrument_version.settlement_currency,
+            name="instrument settlement_currency",
+        ).upper()
+        if state.currency != settlement_currency:
+            raise ValueError(
+                "equity state currency does not match bound instrument settlement currency"
+            )
         self.state = state
         self.instrument_version = instrument_version
         self.registry = registry
@@ -312,6 +324,35 @@ class CorporateActionBook:
     @property
     def applied_event_ids(self) -> tuple[str, ...]:
         return tuple(self._events)
+
+    @property
+    def events(self) -> tuple[CorporateEvent, ...]:
+        """Immutable accepted corporate-event history for durable handoff."""
+
+        return tuple(event for event, _transition in self._events.values())
+
+    def _cash_event_amount(
+        self,
+        event: CorporateEvent,
+        *,
+        amount_key: str,
+    ) -> Decimal:
+        expected_keys = {amount_key, "currency"}
+        if set(event.payload) != expected_keys:
+            raise ValueError(
+                f"{event.kind} requires exactly {amount_key} and currency"
+            )
+        currency = _text(event.payload.get("currency"), name="currency").upper()
+        expected_currency = self.instrument_version.settlement_currency.upper()
+        if currency != expected_currency or currency != self.state.currency:
+            raise ValueError(
+                "corporate-action cash currency does not match bound settlement currency"
+            )
+        return _positive(
+            event.payload.get(amount_key),
+            name=amount_key,
+            allow_zero=True,
+        )
 
     def apply(self, event: CorporateEvent) -> Transition:
         if not isinstance(event, CorporateEvent):
@@ -377,7 +418,7 @@ class CorporateActionBook:
         )
 
     def _cash_dividend(self, event: CorporateEvent) -> Transition:
-        per_share = _positive(event.payload.get("per_share"), name="per_share", allow_zero=True)
+        per_share = self._cash_event_amount(event, amount_key="per_share")
         before = self.state
         entitlement = before.quantity * per_share
         after = replace(before, unsettled_cash=before.unsettled_cash + entitlement)
@@ -390,7 +431,10 @@ class CorporateActionBook:
         )
 
     def _merger_cash(self, event: CorporateEvent) -> Transition:
-        cash_per_share = _positive(event.payload.get("cash_per_share"), name="cash_per_share", allow_zero=True)
+        cash_per_share = self._cash_event_amount(
+            event,
+            amount_key="cash_per_share",
+        )
         before = self.state
         if before.borrowed_quantity != 0:
             raise ValueError("cash merger with unresolved borrowed quantity requires explicit provider handling")
@@ -421,7 +465,10 @@ class CorporateActionBook:
                 kind="MERGER_CASH",
                 effective_date=event.effective_date,
                 source_revision=event.source_revision,
-                payload={"cash_per_share": event.payload["cash_per_share"]},
+                payload={
+                    "cash_per_share": event.payload["cash_per_share"],
+                    "currency": event.payload.get("currency", ""),
+                },
             )
         )
 

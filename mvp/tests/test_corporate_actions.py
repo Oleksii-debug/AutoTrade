@@ -127,7 +127,7 @@ class CorporateSettlementTests(unittest.TestCase):
             kind="CASH_DIVIDEND",
             effective_date=date(2026, 1, 2),
             source_revision="r1",
-            payload={"per_share": "1.50"},
+            payload={"per_share": "1.50", "currency": "USD"},
         )
         result = book.apply(event)
         self.assertEqual(result.after.unsettled_cash, Decimal("15.00"))
@@ -148,7 +148,7 @@ class CorporateSettlementTests(unittest.TestCase):
             kind="CASH_DIVIDEND",
             effective_date=date(2026, 1, 2),
             source_revision="r1",
-            payload={"per_share": "1.50"},
+            payload={"per_share": "1.50", "currency": "USD"},
         )
         result = book.apply(event)
         self.assertEqual(result.after.unsettled_cash, Decimal("-15.00"))
@@ -177,7 +177,7 @@ class CorporateSettlementTests(unittest.TestCase):
             kind="MERGER_CASH",
             effective_date=date(2026, 1, 2),
             source_revision="r1",
-            payload={"cash_per_share": "110"},
+            payload={"cash_per_share": "110", "currency": "USD"},
         )
         result = book.apply(event)
         self.assertEqual(result.after.quantity, Decimal("0"))
@@ -260,6 +260,63 @@ class CorporateSettlementTests(unittest.TestCase):
         recalled = record_recall(short, "1")
         with self.assertRaises(ValueError):
             cover_recalled_short(recalled, quantity="1", buy_price="90")
+
+    def test_equity_currency_is_canonical_and_bound_to_instrument_settlement(self):
+        canonical = state(currency=" usd ")
+        self.assertEqual(canonical.currency, "USD")
+
+        with self.assertRaisesRegex(ValueError, "state currency"):
+            bound_book(state(currency="EUR"))
+
+    def test_cash_corporate_actions_require_explicit_matching_currency(self):
+        book = bound_book(state())
+        original = book.state
+
+        missing = corporate_event(
+            event_id="div-missing-currency",
+            kind="CASH_DIVIDEND",
+            effective_date=date(2026, 1, 2),
+            source_revision="r1",
+            payload={"per_share": "1"},
+        )
+        with self.assertRaisesRegex(ValueError, "exactly per_share and currency"):
+            book.apply(missing)
+        self.assertEqual(book.state, original)
+        self.assertEqual(book.applied_event_ids, ())
+
+        mismatched = corporate_event(
+            event_id="div-wrong-currency",
+            kind="CASH_DIVIDEND",
+            effective_date=date(2026, 1, 2),
+            source_revision="r1",
+            payload={"per_share": "1", "currency": "EUR"},
+        )
+        with self.assertRaisesRegex(ValueError, "cash currency"):
+            book.apply(mismatched)
+        self.assertEqual(book.state, original)
+        self.assertEqual(book.applied_event_ids, ())
+
+    def test_accepted_event_history_is_immutable_and_complete(self):
+        book = bound_book(state())
+        split = corporate_event(
+            event_id="history-split",
+            kind="SPLIT",
+            effective_date=date(2026, 1, 2),
+            source_revision="r1",
+            payload={"numerator": 2, "denominator": 1},
+        )
+        dividend = corporate_event(
+            event_id="history-dividend",
+            kind="CASH_DIVIDEND",
+            effective_date=date(2026, 1, 3),
+            source_revision="r2",
+            payload={"per_share": "1", "currency": "USD"},
+        )
+        book.apply(split)
+        book.apply(dividend)
+        history = book.events
+        self.assertEqual(history, (split, dividend))
+        self.assertIsInstance(history, tuple)
 
     def test_corporate_event_rejects_duplicate_normalized_payload_keys(self):
         with self.assertRaisesRegex(ValueError, "unique after normalization"):
@@ -364,7 +421,7 @@ class CorporateSettlementTests(unittest.TestCase):
                 kind="CASH_DIVIDEND",
                 effective_date=date(2026, 1, 2),
                 source_revision="r1",
-                payload={"per_share": "1"},
+                payload={"per_share": "1", "currency": "USD"},
             ),
         ):
             with self.subTest(event=event.event_id):
@@ -460,7 +517,7 @@ class CorporateSettlementTests(unittest.TestCase):
             kind="CASH_DIVIDEND",
             effective_date=date(2026, 3, 1),
             source_revision="r2",
-            payload={"per_share": "1"},
+            payload={"per_share": "1", "currency": "USD"},
         )
         earlier = corporate_event(
             event_id="earlier-split",

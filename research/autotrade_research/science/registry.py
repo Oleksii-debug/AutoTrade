@@ -335,10 +335,13 @@ class ScientificRegistry:
                 if existing["protocol_id"] != protocol or existing["holdout_id"] != holdout or existing["result_hash"] != result_hash:
                     raise ProtocolConflict("evaluation identity was reused inconsistently")
                 return dict(existing)
+            # A locked holdout is a data/evidence segment, not a protocol-local
+            # resource. Access by any registered protocol contaminates that same
+            # holdout for later candidate protocols as well.
             prior_access = int(
                 con.execute(
-                    "SELECT COUNT(*) FROM holdout_access WHERE protocol_id=? AND holdout_id=?",
-                    (protocol, holdout),
+                    "SELECT COUNT(*) FROM holdout_access WHERE holdout_id=?",
+                    (holdout,),
                 ).fetchone()[0]
             )
             untouched = 1 if prior_access == 0 else 0

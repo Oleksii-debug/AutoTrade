@@ -372,6 +372,42 @@ class CapabilityFoundationTests(unittest.TestCase):
         self.assertEqual(len(payload["evidence"]), 4)
 
 
+    def test_snapshot_constructor_fail_closed_on_invalid_identity_and_time(self):
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(),
+            observed_at=NOW,
+        )
+        with self.assertRaisesRegex(CapabilityError, "provider_id is required"):
+            replace(snapshot, provider_id="   ")
+        with self.assertRaisesRegex(CapabilityError, "environment is unsupported"):
+            replace(snapshot, environment="SANDBOX")
+        with self.assertRaisesRegex(CapabilityError, "timezone-aware"):
+            replace(snapshot, observed_at=NOW.replace(tzinfo=None))
+        with self.assertRaisesRegex(CapabilityError, "cannot be before"):
+            replace(snapshot, expires_at=NOW - timedelta(seconds=1))
+
+    def test_snapshot_constructor_normalizes_collections_and_rejects_bad_sources(self):
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(),
+            observed_at=NOW,
+        )
+        rebuilt = replace(
+            snapshot,
+            supported_order_types=[" LIMIT ", "MARKET"],
+            sources={" documented ", "api", "ACCOUNT", "instrument"},
+        )
+        self.assertEqual(rebuilt.supported_order_types, frozenset({"LIMIT", "MARKET"}))
+        self.assertEqual(
+            rebuilt.sources,
+            frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}),
+        )
+        with self.assertRaisesRegex(CapabilityError, "unsupported source"):
+            replace(snapshot, sources={"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT", "MODEL"})
+        with self.assertRaisesRegex(CapabilityError, "must be a collection"):
+            replace(snapshot, permission_scopes="ORDER.WRITE")
+
     def test_old_evidence_cannot_be_relabelled_as_fresh_claim(self):
         original = claim(
             "ACCOUNT",

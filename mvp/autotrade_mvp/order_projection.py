@@ -484,20 +484,34 @@ class OrderBookProjection:
             fills.extend(order.active_fills)
         return tuple(fills)
 
-    def snapshots(self) -> tuple[OrderSnapshot, ...]:
-        return tuple(order.snapshot() for order in self._orders.values())
-
-    def oco_breaches(self) -> Mapping[str, tuple[str, ...]]:
-        groups: dict[str, list[str]] = {}
+    def _observe_oco_breaches(self) -> dict[str, tuple[str, ...]]:
+        groups: dict[str, list[OrderProjection]] = {}
         for order in self._orders.values():
             if order.oco_group_id is None or order.filled_quantity <= 0:
                 continue
-            groups.setdefault(order.oco_group_id, []).append(order.client_order_id)
-        return {
-            group: tuple(sorted(order_ids))
-            for group, order_ids in groups.items()
-            if len(order_ids) > 1
-        }
+            groups.setdefault(order.oco_group_id, []).append(order)
+
+        breaches: dict[str, tuple[str, ...]] = {}
+        for group, orders in groups.items():
+            if len(orders) <= 1:
+                continue
+            for order in orders:
+                order.mark_oco_peer_filled()
+            breaches[group] = tuple(
+                sorted(order.client_order_id for order in orders)
+            )
+        return breaches
+
+    def snapshots(self) -> tuple[OrderSnapshot, ...]:
+        # The aggregate is the canonical multi-order view. If it can observe
+        # that more than one OCO peer executed, its snapshots must surface the
+        # same breach without requiring callers to maintain a second group
+        # projection in lock-step.
+        self._observe_oco_breaches()
+        return tuple(order.snapshot() for order in self._orders.values())
+
+    def oco_breaches(self) -> Mapping[str, tuple[str, ...]]:
+        return self._observe_oco_breaches()
 
 
 class OcoGroupProjection:

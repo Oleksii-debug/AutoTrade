@@ -118,6 +118,41 @@ class SupplyChainQualificationTests(unittest.TestCase):
         self.assertEqual(blocked.status, "FAIL")
         self.assertEqual(unknown.status, "INCONCLUSIVE")
 
+    def test_allowlisted_advisory_requires_immutable_exception_evidence(self):
+        with self.assertRaisesRegex(ValueError, "advisory_exception_id"):
+            component(advisory_status="ALLOWLISTED")
+        with self.assertRaisesRegex(ValueError, "advisory_exception_hash"):
+            component(
+                advisory_status="ALLOWLISTED",
+                advisory_exception_id="risk-acceptance-17",
+            )
+
+        allowlisted = component(
+            advisory_status="ALLOWLISTED",
+            advisory_exception_id="risk-acceptance-17",
+            advisory_exception_hash=H2,
+        )
+        result = qualify(evidence(comp=allowlisted))
+        self.assertEqual(result.status, "PASS")
+
+        changed = component(
+            advisory_status="ALLOWLISTED",
+            advisory_exception_id="risk-acceptance-18",
+            advisory_exception_hash=H2,
+        )
+        self.assertNotEqual(
+            result.qualification_id,
+            qualify(evidence(comp=changed)).qualification_id,
+        )
+
+    def test_non_allowlisted_advisory_rejects_stale_exception_fields(self):
+        with self.assertRaisesRegex(ValueError, "only for ALLOWLISTED"):
+            component(
+                advisory_status="CLEAR",
+                advisory_exception_id="stale-exception",
+                advisory_exception_hash=H2,
+            )
+
     def test_architecture_time_review_cannot_approve_another_release(self):
         result = qualify(evidence(component(reviewed_for_release_sha="2" * 40)))
         self.assertEqual(result.status, "FAIL")

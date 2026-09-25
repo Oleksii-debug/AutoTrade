@@ -73,7 +73,9 @@ ExpectFailure<ArgumentException>(
         DateTime.SpecifyKind(instant, DateTimeKind.Unspecified)),
     "ambiguous wall-clock time must be rejected");
 
-var symbol = Symbol.Create("SPY", SecurityType.Equity, Market.USA);
+var symbol = new Symbol(
+    SecurityIdentifier.GenerateEquity("SPY", Market.USA, mapSymbol: false),
+    "SPY");
 var callbacks = new LeanCallbackCharacterizer();
 
 var submitted = callbacks.Observe(new OrderEvent

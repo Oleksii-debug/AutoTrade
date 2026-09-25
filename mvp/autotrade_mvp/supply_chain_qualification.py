@@ -47,11 +47,11 @@ class ComponentEvidence:
     license_status: str
     distribution_rights: str
     advisory_status: str
+    notice_required: bool
+    notice_present: bool
+    reviewed_for_release_sha: str
     advisory_exception_id: str | None = None
     advisory_exception_hash: str | None = None
-    notice_required: bool = False
-    notice_present: bool = False
-    reviewed_for_release_sha: str = ""
 
     def __post_init__(self) -> None:
         for value, name in (

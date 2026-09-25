@@ -40,6 +40,7 @@ class AlpacaAdapterContractTests(unittest.TestCase):
             observed_at="2026-09-24T20:00:00Z",
             environment="PAPER",
         )
+        self.assertNotIn("provider_received_at", value)
         Draft202012Validator(
             {"$ref": f"{schema['$id']}#/$defs/SubmissionResult"},
             registry=self.registry,

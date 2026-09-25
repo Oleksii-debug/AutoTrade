@@ -109,6 +109,7 @@ class WhiteBitAdapterContractTests(unittest.TestCase):
         )
         self.validate_submission(rejected)
         self.assertEqual(rejected["retry_disposition"], "NEVER")
+        self.assertNotIn("provider_received_at", rejected)
 
         unknown = canonical_submission_result(
             self._result(
@@ -123,6 +124,8 @@ class WhiteBitAdapterContractTests(unittest.TestCase):
         self.validate_submission(unknown)
         self.assertEqual(unknown["retry_disposition"], "RECONCILE_FIRST")
         self.assertNotIn("provider_received_at", unknown)
+        self.assertNotIn("observed_at", unknown)
+        self.assertNotIn("environment", unknown)
         self.assertEqual(unknown["evidence"], [])
 
     def test_non_uuid_attempt_fails_closed_at_canonical_boundary(self):

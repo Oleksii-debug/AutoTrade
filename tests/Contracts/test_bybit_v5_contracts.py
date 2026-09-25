@@ -50,8 +50,17 @@ class BybitV5ContractTests(unittest.TestCase):
                 "retExtInfo": {},
                 "time": 1790280000123,
             },
+            observed_at="2026-09-24T21:00:00Z",
         )
         self.validate_submission(accepted)
+        self.assertEqual(
+            accepted["provider_received_at"],
+            "2026-09-24T20:00:00.123Z",
+        )
+        self.assertEqual(
+            accepted["evidence"][0]["observed_at"],
+            "2026-09-24T21:00:00Z",
+        )
 
         unknown = parse_submission_response(
             attempt_id=str(uuid4()),
@@ -64,8 +73,17 @@ class BybitV5ContractTests(unittest.TestCase):
                 "retExtInfo": {},
                 "time": 1790280000123,
             },
+            observed_at="2026-09-24T21:00:01Z",
         )
         self.validate_submission(unknown)
+        self.assertEqual(
+            unknown["provider_received_at"],
+            "2026-09-24T20:00:00.123Z",
+        )
+        self.assertEqual(
+            unknown["evidence"][0]["observed_at"],
+            "2026-09-24T21:00:01Z",
+        )
 
         transport_unknown = parse_submission_response(
             attempt_id=str(uuid4()),

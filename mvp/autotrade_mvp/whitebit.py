@@ -506,8 +506,14 @@ class WhiteBitSubmissionResult:
     rejection_message: str | None = None
 
     def __post_init__(self) -> None:
-        for name in ("attempt_id", "account_id", "environment"):
+        for name in ("attempt_id", "account_id"):
             object.__setattr__(self, name, _text(getattr(self, name), name=name))
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+            raise WhiteBitAdapterError(
+                "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
+            )
+        object.__setattr__(self, "environment", environment)
         object.__setattr__(
             self,
             "client_order_id",

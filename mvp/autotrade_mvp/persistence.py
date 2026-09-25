@@ -443,10 +443,32 @@ class JournalStore:
                     and existing["aggregate_version"] == aggregate_version
                     and existing["payload_json"] == payload_json
                     and existing["payload_hash"] == supplied_hash
+                    and existing["committed_at"] == committed_at
                 )
-                if not exact:
+                existing_outbox = connection.execute(
+                    "SELECT topic, payload_json FROM outbox WHERE event_id = ?",
+                    (event_id,),
+                ).fetchone()
+                expected_outbox_payload = (
+                    canonical_json(envelope) if outbox_topic is not None else None
+                )
+                outbox_exact = (
+                    (
+                        outbox_topic is None
+                        and existing_outbox is None
+                    )
+                    or (
+                        outbox_topic is not None
+                        and existing_outbox is not None
+                        and existing_outbox["topic"] == outbox_topic
+                        and existing_outbox["payload_json"] == expected_outbox_payload
+                    )
+                )
+                if not exact or not outbox_exact:
                     connection.rollback()
-                    raise ValueError("event_id conflicts with an existing event")
+                    raise ValueError(
+                        "event_id conflicts with an existing event or publication intent"
+                    )
                 connection.commit()
                 return AppendResult(event_id, aggregate_version, False)
 

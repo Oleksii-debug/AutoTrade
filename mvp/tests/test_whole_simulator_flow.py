@@ -19,7 +19,8 @@ from mvp.autotrade_mvp.simulated_provider import SimulatedProvider
 
 NOW = "2026-09-24T18:00:00Z"
 LATER = "2026-09-24T18:01:00Z"
-INSTRUMENT = "ABC@1"\nAUTH_INSTRUMENT_ID = "ABC"
+INSTRUMENT = "ABC@1"
+AUTH_INSTRUMENT_ID = "ABC"
 
 
 def risk_policy() -> RiskPolicy:
@@ -140,7 +141,9 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             attempt_id = str(uuid4())
             dispatcher = GuardedDispatcher(
                 JournalStore(f"{directory}/journal.sqlite3"),
-                environment="SIMULATION",\n                account_id="sim-account",\n                owner_token="sim-owner",
+                environment="SIMULATION",
+                account_id="sim-account",
+                owner_token="sim-owner",
             )
             dispatched = dispatcher.dispatch(
                 attempt_id=attempt_id,
@@ -237,7 +240,9 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             attempt_id = str(uuid4())
             dispatcher = GuardedDispatcher(
                 JournalStore(f"{directory}/journal.sqlite3"),
-                environment="SIMULATION",\n                account_id="sim-account",\n                owner_token="sim-owner",
+                environment="SIMULATION",
+                account_id="sim-account",
+                owner_token="sim-owner",
             )
             dispatched = dispatcher.dispatch(
                 attempt_id=attempt_id,
@@ -354,7 +359,9 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             attempt_id = str(uuid4())
             dispatcher = GuardedDispatcher(
                 JournalStore(f"{directory}/journal.sqlite3"),
-                environment="SIMULATION",\n                account_id="sim-account",\n                owner_token="sim-owner",
+                environment="SIMULATION",
+                account_id="sim-account",
+                owner_token="sim-owner",
             )
 
             def timeout_after_send(client_order_id, request, final_guard):
@@ -441,7 +448,9 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             }
             first_process = GuardedDispatcher(
                 JournalStore(journal_path),
-                environment="SIMULATION",\n                account_id="sim-account",\n                owner_token="process-one",
+                environment="SIMULATION",
+                account_id="sim-account",
+                owner_token="process-one",
             )
 
             def crash_after_provider_accepts(client_order_id, outbound, final_guard):
@@ -476,7 +485,9 @@ class WholeSimulatorFlowTests(unittest.TestCase):
 
             restarted = GuardedDispatcher(
                 JournalStore(journal_path),
-                environment="SIMULATION",\n                account_id="sim-account",\n                owner_token="process-two",
+                environment="SIMULATION",
+                account_id="sim-account",
+                owner_token="process-two",
             )
 
             def forbidden_retry(*_args, **_kwargs):

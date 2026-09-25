@@ -225,7 +225,7 @@ class ChampionRegistryTests(unittest.TestCase):
                     existing_position_policy=None,
                 )
 
-    def test_locked_evaluation_trial_log_hash_detects_post_evaluation_trial_change(self):
+    def test_locked_evaluation_trial_log_hash_detects_trial_log_tampering(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
             value = protocol()
@@ -240,6 +240,13 @@ class ChampionRegistryTests(unittest.TestCase):
                     "candidate_id": candidate,
                     "artifact_hash": artifact,
                 },
+                trial_id="00000000-0000-0000-0000-000000000021",
+            )
+            science.record_trial(
+                registered.protocol_id,
+                status="FAILED",
+                payload={"reason": "fit-failed"},
+                trial_id="00000000-0000-0000-0000-000000000022",
             )
             trial_state = science.completeness(registered.protocol_id)
             valid_until = BASE + timedelta(days=1)
@@ -258,20 +265,22 @@ class ChampionRegistryTests(unittest.TestCase):
                 "recorded_trial_count": trial_state["recorded_trials"],
                 "trial_budget": trial_state["trial_budget"],
                 "trial_log_hash": trial_state["trial_log_hash"],
-                "stopping_rule_triggered": True,
-                "stopping_rules_hash": trial_state["stopping_rules_hash"],
-                "stopping_evidence_ref": "artifact:stop-proof",
             }
             locked = science.register_evaluation(
                 registered.protocol_id,
                 holdout_id="holdout-log-bound",
                 result=result,
             )
-            science.record_trial(
-                registered.protocol_id,
-                status="FAILED",
-                payload={"reason": "late-recorded-attempt"},
-            )
+            # Simulate storage corruption/tampering that keeps trial count and
+            # statuses unchanged. Promotion must still detect the changed log.
+            with science._connect() as con:
+                con.execute(
+                    "UPDATE trials SET payload_hash=? WHERE trial_id=?",
+                    (
+                        digest("tampered-trial-payload"),
+                        "00000000-0000-0000-0000-000000000022",
+                    ),
+                )
             approval_value = CandidateApproval.create(
                 candidate_id=candidate,
                 artifact_hash=artifact,

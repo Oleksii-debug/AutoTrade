@@ -808,7 +808,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
                 verification_status="PASS",
                 reconciliation_required_after_restore=True,
             )
-        with self.assertRaisesRegex(WindowsUpdateError, "lowercase Git SHA"):
+        with self.assertRaisesRegex(WindowsUpdateError, "lowercase Git object id"):
             MigrationEvidence(
                 from_schema_version=1,
                 to_schema_version=2,

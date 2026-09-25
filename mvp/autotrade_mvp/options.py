@@ -369,11 +369,10 @@ class OptionScenarioResult:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "scenario_id", _text(self.scenario_id, "scenario_id"))
-        object.__setattr__(
-            self,
-            "underlying_price",
-            _decimal(self.underlying_price, "underlying_price", positive=True),
-        )
+        underlying_price = _decimal(self.underlying_price, "underlying_price")
+        if underlying_price < 0:
+            raise OptionError("underlying_price cannot be negative")
+        object.__setattr__(self, "underlying_price", underlying_price)
         volatility = _decimal(self.implied_volatility, "implied_volatility")
         if volatility < 0:
             raise OptionError("implied_volatility cannot be negative")

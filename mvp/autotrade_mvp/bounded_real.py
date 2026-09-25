@@ -137,6 +137,7 @@ def _bounded_real_envelope_digest(
     source_sha: str,
     provider_id: str,
     account_id: str,
+    environment: str,
     policy_id: str,
     allowed_actions: FrozenSet[str],
     max_capital: Decimal,
@@ -149,6 +150,7 @@ def _bounded_real_envelope_digest(
         "source_sha": source_sha,
         "provider_id": provider_id,
         "account_id": account_id,
+        "environment": environment,
         "policy_id": policy_id,
         "allowed_actions": sorted(allowed_actions),
         "max_capital": _canonical_decimal_text(max_capital),
@@ -171,6 +173,7 @@ class BoundedRealEnvelope:
     source_sha: str
     account_id: str
     provider_id: str
+    environment: str
     policy_id: str
     allowed_actions: FrozenSet[str]
     max_capital: Decimal
@@ -190,6 +193,10 @@ class BoundedRealEnvelope:
         object.__setattr__(
             self, "provider_id", _text(self.provider_id, name="provider_id")
         )
+        environment = _text(self.environment, name="environment").upper()
+        if environment != "LIVE":
+            raise ValueError("bounded-real qualification environment must be LIVE")
+        object.__setattr__(self, "environment", environment)
         object.__setattr__(
             self, "policy_id", _text(self.policy_id, name="policy_id")
         )
@@ -217,6 +224,7 @@ class BoundedRealEnvelope:
             source_sha=self.source_sha,
             provider_id=self.provider_id,
             account_id=self.account_id,
+            environment=self.environment,
             policy_id=self.policy_id,
             allowed_actions=self.allowed_actions,
             max_capital=self.max_capital,
@@ -239,6 +247,7 @@ class ImmutableEvidenceRef:
     envelope_digest: str
     provider_id: str
     account_id: str
+    environment: str
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "artifact_id", _artifact_id(self.artifact_id))
@@ -373,6 +382,7 @@ class ArtifactStoreEvidenceVerifier:
             "envelope_digest": ref.envelope_digest,
             "provider_id": ref.provider_id,
             "account_id": ref.account_id,
+            "environment": ref.environment,
             "outcome": "PASS",
         }
         if any(metadata.get(key) != value for key, value in expected.items()):
@@ -454,6 +464,7 @@ class BoundedRealObservations:
     envelope_digest: str
     provider_id: str
     account_id: str
+    environment: str
     observed_fill_count: int
     observed_partial_fill: bool
     all_fills_reconciled: bool
@@ -470,6 +481,9 @@ class BoundedRealObservations:
         envelope_digest = _digest(self.envelope_digest)
         provider_id = _text(self.provider_id, name="provider_id")
         account_id = _text(self.account_id, name="account_id")
+        environment = _text(self.environment, name="environment").upper()
+        if environment != "LIVE":
+            raise ValueError("bounded-real observations environment must be LIVE")
         for value, name in (
             (self.observed_fill_count, "observed_fill_count"),
             (self.unauthorized_action_count, "unauthorized_action_count"),
@@ -498,6 +512,7 @@ class BoundedRealObservations:
                 or ref.envelope_digest != envelope_digest
                 or ref.provider_id != provider_id
                 or ref.account_id != account_id
+                or ref.environment != environment
             ):
                 raise ValueError("observation evidence_ref scope does not match observations")
             if ref.artifact_id in artifact_ids or ref.sha256 in digests:
@@ -512,6 +527,7 @@ class BoundedRealObservations:
         object.__setattr__(self, "envelope_digest", envelope_digest)
         object.__setattr__(self, "provider_id", provider_id)
         object.__setattr__(self, "account_id", account_id)
+        object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "evidence_refs", refs)
 
     @classmethod
@@ -526,6 +542,7 @@ class BoundedRealQualificationResult:
     exact_source_sha: str
     envelope_id: str
     envelope_digest: str
+    environment: str
     evidence_verifier_identity: str | None
     qualification_attestation_id: str | None = None
     qualification_attestation_digest: str | None = None
@@ -587,6 +604,7 @@ def assess_bounded_real_qualification(
         and observations.envelope_digest == envelope.envelope_digest
         and observations.provider_id == envelope.provider_id
         and observations.account_id == envelope.account_id
+        and observations.environment == envelope.environment
     )
     if not scope_matches:
         reasons.append("observation_scope_mismatch")
@@ -634,6 +652,7 @@ def assess_bounded_real_qualification(
             or ref.envelope_digest != envelope.envelope_digest
             or ref.provider_id != envelope.provider_id
             or ref.account_id != envelope.account_id
+            or ref.environment != envelope.environment
         ):
             reasons.append(f"immutable_evidence_scope_mismatch:{label}")
 
@@ -659,6 +678,7 @@ def assess_bounded_real_qualification(
         if (
             evidence.evidence_ref.provider_id != envelope.provider_id
             or evidence.evidence_ref.account_id != envelope.account_id
+            or evidence.evidence_ref.environment != envelope.environment
         ):
             reasons.append(f"provider_account_mismatch:{kind}")
         if not evidence.passed:
@@ -766,6 +786,7 @@ def assess_bounded_real_qualification(
         exact_source_sha=envelope.source_sha,
         envelope_id=envelope.envelope_id,
         envelope_digest=envelope.envelope_digest,
+        environment=envelope.environment,
         evidence_verifier_identity=verifier_identity,
         qualification_attestation_id=(
             None if accepted is None else accepted.attestation_id

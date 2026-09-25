@@ -64,7 +64,53 @@ def route_model_descriptor(*, cost="0.6", revision="r1"):
     )
 
 
-class DurableModelBudgetTests(unittest.TestCase):
+class RecordingJournalStore(JournalStore):
+    def __init__(self, path):
+        self.last_appended_envelope = None
+        super().__init__(path)
+
+    def append_event(self, envelope, *, outbox_topic=None):
+        self.last_appended_envelope = dict(envelope)
+        return super().append_event(envelope, outbox_topic=outbox_topic)
+
+
+class RejectingInitializationJournal(JournalStore):
+    def append_event(self, envelope, *, outbox_topic=None):
+        raise ValueError("synthetic malformed initialization")
+
+
+class DurableModelBudgetTests(unittest.TestCase):\n    def test_initialization_uses_canonical_sequence_text(self):
+        with TemporaryDirectory() as directory:
+            journal = RecordingJournalStore(Path(directory) / "journal.db")
+            budget = DurableModelBudget(
+                journal=journal,
+                budget_id="policy-sequence",
+                ceiling="1",
+                environment="SIMULATION",
+                clock=lambda: NOW,
+            )
+            self.assertEqual(
+                journal.last_appended_envelope["aggregate_version"],
+                "1",
+            )
+            self.assertEqual(budget.snapshot().ceiling, Decimal("1"))
+
+    def test_initialization_contract_error_is_not_swallowed_as_race(self):
+        with TemporaryDirectory() as directory:
+            journal = RejectingInitializationJournal(Path(directory) / "journal.db")
+            with self.assertRaisesRegex(
+                ValueError,
+                "synthetic malformed initialization",
+            ):
+                DurableModelBudget(
+                    journal=journal,
+                    budget_id="policy-reject",
+                    ceiling="1",
+                    environment="SIMULATION",
+                    clock=lambda: NOW,
+                )
+
+
     def test_durable_route_ignores_inflated_caller_budget(self):
         with TemporaryDirectory() as directory:
             _, budget = open_budget(directory, ceiling="0")

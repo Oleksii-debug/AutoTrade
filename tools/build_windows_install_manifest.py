@@ -94,6 +94,167 @@ def _canonical_bytes(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def _verify_composition(
+    value: object,
+    *,
+    source_sha: str,
+    verified_files: list[dict[str, object]],
+) -> dict[str, object]:
+    """Independently bind installer inputs to the exact release composition."""
+
+    required = {
+        "schema_version",
+        "product",
+        "source_sha",
+        "dependency_lock_sha256",
+        "sbom_sha256",
+        "schema_compatibility",
+        "runtime",
+        "components",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise InstallerManifestError(
+            "release bundle composition structure is not canonical"
+        )
+    if value.get("schema_version") != "1.0.0":
+        raise InstallerManifestError(
+            "unsupported release bundle composition schema"
+        )
+    if value.get("product") != "AutoTrade" or value.get("source_sha") != source_sha:
+        raise InstallerManifestError(
+            "release bundle composition identity does not match bundle"
+        )
+
+    dependency_lock = _digest(
+        value.get("dependency_lock_sha256"),
+        name="composition dependency_lock_sha256",
+    )
+    sbom = _digest(
+        value.get("sbom_sha256"),
+        name="composition sbom_sha256",
+    )
+    schema = value.get("schema_compatibility")
+    if not isinstance(schema, dict) or set(schema) != {"minimum", "maximum"}:
+        raise InstallerManifestError(
+            "composition schema_compatibility must contain minimum and maximum"
+        )
+    normalized_schema = {
+        "minimum": _text(schema["minimum"], name="schema minimum"),
+        "maximum": _text(schema["maximum"], name="schema maximum"),
+    }
+
+    runtime = value.get("runtime")
+    if not isinstance(runtime, dict) or set(runtime) != {
+        "architecture",
+        "runtime_identifier",
+        "minimum_windows_version",
+    }:
+        raise InstallerManifestError("composition runtime structure is invalid")
+    architecture = _text(runtime["architecture"], name="runtime architecture")
+    expected_rid = {"x64": "win-x64", "arm64": "win-arm64"}.get(architecture)
+    if expected_rid is None:
+        raise InstallerManifestError(
+            "composition runtime architecture must be x64 or arm64"
+        )
+    runtime_identifier = _text(
+        runtime["runtime_identifier"], name="runtime identifier"
+    )
+    if runtime_identifier != expected_rid:
+        raise InstallerManifestError(
+            "composition runtime_identifier does not match architecture"
+        )
+    minimum_windows = _text(
+        runtime["minimum_windows_version"],
+        name="minimum Windows version",
+    )
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", minimum_windows) is None:
+        raise InstallerManifestError(
+            "minimum Windows version must use major.minor.build"
+        )
+    normalized_runtime = {
+        "architecture": architecture,
+        "runtime_identifier": runtime_identifier,
+        "minimum_windows_version": minimum_windows,
+    }
+
+    raw_components = value.get("components")
+    if not isinstance(raw_components, list) or not raw_components:
+        raise InstallerManifestError("composition components must be non-empty")
+    components: list[dict[str, str]] = []
+    ids: set[str] = set()
+    paths: set[str] = set()
+    windows_paths: set[str] = set()
+    for index, raw in enumerate(raw_components):
+        if not isinstance(raw, dict) or set(raw) != {
+            "component_id",
+            "kind",
+            "path",
+            "version",
+            "sha256",
+        }:
+            raise InstallerManifestError(
+                f"composition components[{index}] structure is invalid"
+            )
+        component_id = _text(raw["component_id"], name="component_id")
+        kind = _text(raw["kind"], name="component kind")
+        relative = _safe_relative(raw["path"])
+        version = _text(raw["version"], name="component version")
+        digest = _digest(raw["sha256"], name="component sha256")
+        windows_key = _windows_path_key(relative)
+        if component_id in ids:
+            raise InstallerManifestError("duplicate composition component_id")
+        if relative in paths or windows_key in windows_paths:
+            raise InstallerManifestError(
+                "duplicate or Windows-colliding composition component path"
+            )
+        ids.add(component_id)
+        paths.add(relative)
+        windows_paths.add(windows_key)
+        components.append(
+            {
+                "component_id": component_id,
+                "kind": kind,
+                "path": relative,
+                "version": version,
+                "sha256": digest,
+            }
+        )
+
+    file_digests = {
+        str(item["target_relative_path"]): str(item["sha256"])
+        for item in verified_files
+    }
+    component_digests = {item["path"]: item["sha256"] for item in components}
+    if component_digests != file_digests:
+        raise InstallerManifestError(
+            "composition component inventory does not match verified bundle payload"
+        )
+
+    by_kind: dict[str, list[dict[str, str]]] = {}
+    for item in components:
+        by_kind.setdefault(item["kind"], []).append(item)
+    for kind, expected in (
+        ("dependency-lock", dependency_lock),
+        ("sbom", sbom),
+    ):
+        matches = by_kind.get(kind, [])
+        if len(matches) != 1 or matches[0]["sha256"] != expected:
+            raise InstallerManifestError(
+                f"composition {kind} identity does not match component inventory"
+            )
+
+    return {
+        "schema_version": "1.0.0",
+        "product": "AutoTrade",
+        "source_sha": source_sha,
+        "dependency_lock_sha256": dependency_lock,
+        "sbom_sha256": sbom,
+        "schema_compatibility": normalized_schema,
+        "runtime": normalized_runtime,
+        "components": sorted(components, key=lambda item: item["path"]),
+    }
+
+
 def _zip_member_is_regular(info: zipfile.ZipInfo) -> bool:
     if info.is_dir():
         return False
@@ -270,15 +431,30 @@ def verify_release_bundle(bundle: Path) -> dict[str, object]:
     except zipfile.BadZipFile as error:
         raise InstallerManifestError("release bundle is not a valid ZIP") from error
 
+    verified_files = sorted(
+        verified_files,
+        key=lambda item: str(item["target_relative_path"]),
+    )
+    verified_composition = _verify_composition(
+        composition,
+        source_sha=source_sha,
+        verified_files=verified_files,
+    )
+    observed_composition_sha256 = (
+        "sha256:" + sha256(_canonical_bytes(verified_composition)).hexdigest()
+    )
+    if observed_composition_sha256 != composition_sha256:
+        raise InstallerManifestError(
+            "composition_sha256 does not match canonical stored composition"
+        )
     return {
         "bundle_sha256": bundle_digest,
         "source_sha": source_sha,
         "version": version,
         "provenance_sha256": provenance_sha256,
-        "files": sorted(
-            verified_files,
-            key=lambda item: str(item["target_relative_path"]),
-        ),
+        "composition_sha256": composition_sha256,
+        "composition": verified_composition,
+        "files": verified_files,
     }
 
 
@@ -315,6 +491,12 @@ def build_installer_input_manifest(
         "version": verified["version"],
         "bundle_sha256": verified["bundle_sha256"],
         "release_provenance_sha256": verified["provenance_sha256"],
+        "composition_sha256": verified["composition_sha256"],
+        "dependency_lock_sha256": verified["composition"]["dependency_lock_sha256"],
+        "sbom_sha256": verified["composition"]["sbom_sha256"],
+        "schema_compatibility": verified["composition"]["schema_compatibility"],
+        "platform": verified["composition"]["runtime"],
+        "components": verified["composition"]["components"],
         "target_framework": framework,
         "runtime": {
             "mode": mode,

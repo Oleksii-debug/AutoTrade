@@ -72,7 +72,7 @@ class AlpacaOptionAccountEvidence:
         return (
             not self.trading_blocked
             and not self.account_blocked
-            and self.observed_at <= point <= self.expires_at
+            and self.observed_at <= point < self.expires_at
             and self.options_trading_level >= required_level
         )
 

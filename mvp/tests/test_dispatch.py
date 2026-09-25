@@ -1145,7 +1145,7 @@ class DispatchTests(unittest.TestCase):
                 owner_scope="PAPER:acct",
             )
             owner = recovery.start("host-a")
-            recovery.record_reconciliation(consistent=True)
+            self.durable_ready(recovery, store, reconciliation_id="paper-send-ready")
             dispatcher = GuardedDispatcher(
                 store,
                 environment="PAPER",

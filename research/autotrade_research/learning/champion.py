@@ -77,6 +77,39 @@ class CandidateApproval:
     evaluation_id: str
     evaluation_result_hash: str
 
+    def __post_init__(self) -> None:
+        status = _text(self.evaluation_status, name="evaluation_status").upper()
+        if status not in {"PASS", "FAIL", "INCONCLUSIVE"}:
+            raise ValueError("invalid evaluation_status")
+        if type(self.retention_passed) is not bool or type(self.risk_passed) is not bool:
+            raise TypeError("retention_passed and risk_passed must be boolean")
+        object.__setattr__(self, "candidate_id", _text(self.candidate_id, name="candidate_id"))
+        object.__setattr__(self, "artifact_hash", _digest(self.artifact_hash, name="artifact_hash"))
+        object.__setattr__(self, "evidence_id", _text(self.evidence_id, name="evidence_id"))
+        object.__setattr__(
+            self,
+            "evidence_valid_until",
+            _time(self.evidence_valid_until, name="evidence_valid_until"),
+        )
+        object.__setattr__(self, "evaluation_status", status)
+        object.__setattr__(
+            self,
+            "authority_scope_id",
+            _text(self.authority_scope_id, name="authority_scope_id"),
+        )
+        object.__setattr__(self, "protocol_id", _text(self.protocol_id, name="protocol_id"))
+        object.__setattr__(self, "protocol_hash", _digest(self.protocol_hash, name="protocol_hash"))
+        object.__setattr__(
+            self,
+            "evaluation_id",
+            _text(self.evaluation_id, name="evaluation_id"),
+        )
+        object.__setattr__(
+            self,
+            "evaluation_result_hash",
+            _digest(self.evaluation_result_hash, name="evaluation_result_hash"),
+        )
+
     @classmethod
     def create(cls, *, candidate_id: str, artifact_hash: str, evidence_id: str,
                evidence_valid_until: datetime, evaluation_status: str,
@@ -112,6 +145,16 @@ class ParameterBound:
     minimum: Decimal
     maximum: Decimal
 
+    def __post_init__(self) -> None:
+        name = _text(self.name, name="parameter name")
+        lower = _decimal(self.minimum, name="minimum")
+        upper = _decimal(self.maximum, name="maximum")
+        if lower > upper:
+            raise ValueError("parameter minimum cannot exceed maximum")
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "minimum", lower)
+        object.__setattr__(self, "maximum", upper)
+
     @classmethod
     def create(cls, *, name: str, minimum, maximum) -> "ParameterBound":
         lower = _decimal(minimum, name="minimum")
@@ -135,6 +178,91 @@ class OnlineEnvelope:
     maximum_update_cost: Decimal
     eligible_label_refs: tuple[str, ...]
     envelope_hash: str
+
+    def __post_init__(self) -> None:
+        envelope_id = _text(self.envelope_id, name="envelope_id")
+        artifact_hash = _digest(
+            self.champion_artifact_hash,
+            name="champion_artifact_hash",
+        )
+        authority_scope = _text(
+            self.authority_scope_id,
+            name="authority_scope_id",
+        )
+        if (
+            type(self.minimum_update_interval_seconds) is not int
+            or self.minimum_update_interval_seconds < 0
+        ):
+            raise ValueError(
+                "minimum_update_interval_seconds must be a non-negative integer"
+            )
+        if isinstance(self.parameter_bounds, (str, bytes)):
+            raise TypeError("parameter_bounds must be a collection")
+        raw_bounds = tuple(self.parameter_bounds)
+        if not raw_bounds:
+            raise ValueError("online envelope requires parameter bounds")
+        if any(not isinstance(bound, ParameterBound) for bound in raw_bounds):
+            raise TypeError("parameter_bounds must contain ParameterBound")
+        bounds = tuple(
+            sorted(
+                (
+                    ParameterBound.create(
+                        name=bound.name,
+                        minimum=bound.minimum,
+                        maximum=bound.maximum,
+                    )
+                    for bound in raw_bounds
+                ),
+                key=lambda item: item.name,
+            )
+        )
+        names = tuple(bound.name for bound in bounds)
+        if len(set(names)) != len(names):
+            raise ValueError("online envelope parameter names must be unique")
+        if isinstance(self.eligible_label_refs, (str, bytes)):
+            raise TypeError("eligible_label_refs must be a collection")
+        labels = tuple(
+            sorted(
+                _text(item, name="eligible label reference")
+                for item in self.eligible_label_refs
+            )
+        )
+        if not labels:
+            raise ValueError("online envelope requires eligible labels")
+        if len(set(labels)) != len(labels):
+            raise ValueError("eligible label references must be unique")
+        cost = _decimal(
+            self.maximum_update_cost,
+            name="maximum_update_cost",
+            non_negative=True,
+        )
+        body = {
+            "envelope_id": envelope_id,
+            "champion_artifact_hash": artifact_hash,
+            "authority_scope_id": authority_scope,
+            "parameter_bounds": [
+                {
+                    "name": bound.name,
+                    "minimum": str(bound.minimum),
+                    "maximum": str(bound.maximum),
+                }
+                for bound in bounds
+            ],
+            "minimum_update_interval_seconds": self.minimum_update_interval_seconds,
+            "maximum_update_cost": str(cost),
+            "eligible_label_refs": list(labels),
+        }
+        expected_hash = _request_fingerprint(body)
+        provided_hash = _digest(self.envelope_hash, name="envelope_hash")
+        if provided_hash != expected_hash:
+            raise ValueError("envelope_hash does not match canonical envelope content")
+        object.__setattr__(self, "envelope_id", envelope_id)
+        object.__setattr__(self, "champion_artifact_hash", artifact_hash)
+        object.__setattr__(self, "authority_scope_id", authority_scope)
+        object.__setattr__(self, "parameter_bounds", bounds)
+        object.__setattr__(self, "maximum_update_cost", cost)
+        object.__setattr__(self, "eligible_label_refs", labels)
+        object.__setattr__(self, "envelope_hash", provided_hash)
 
     @classmethod
     def create(

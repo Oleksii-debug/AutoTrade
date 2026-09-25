@@ -167,6 +167,7 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
     def test_emergency_control_is_named_keyboard_reachable_and_truthful(self):
         text = XAML.read_text(encoding="utf-8")
         code = CODE.read_text(encoding="utf-8")
+        client = CLIENT.read_text(encoding="utf-8")
         self.assertIn('Content="_Block new exposure"', text)
         self.assertIn('AutomationProperties.Name="Block new exposure"', text)
         self.assertIn('AutomationProperties.LiveSetting="Assertive"', text)

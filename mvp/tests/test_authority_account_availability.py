@@ -10,6 +10,7 @@ from mvp.autotrade_mvp.authority import (
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reconciliation import (
+    ResourceAvailabilityEvidence,
     SnapshotConsistencyEvidence,
     reconcile_account,
 )
@@ -74,7 +75,16 @@ def _risk_policy():
     )
 
 
-def _checkpoint(store, *, cash="1000"):
+def _checkpoint(
+    store,
+    *,
+    cash="1000",
+    available=None,
+    valid_until="2026-09-24T18:05:00Z",
+    host_id="availability-test-host",
+    owner_epoch="1",
+):
+    capacity = cash if available is None else available
     result = reconcile_account(
         provider_id=PROVIDER_ID,
         account_id=ACCOUNT_ID,
@@ -98,14 +108,25 @@ def _checkpoint(store, *, cash="1000"):
         pagination_complete=True,
         provider_activity_provider_id=PROVIDER_ID,
         provider_activity_account_id=ACCOUNT_ID,
+        resource_availability=ResourceAvailabilityEvidence(
+            provider_id=PROVIDER_ID,
+            account_id=ACCOUNT_ID,
+            environment=ENVIRONMENT,
+            snapshot_id="availability-capacity-1",
+            query_started_at="2026-09-24T18:00:00Z",
+            query_completed_at="2026-09-24T18:00:30Z",
+            valid_until=valid_until,
+            available_resources={"CASH:USD": capacity},
+            evidence_refs=("provider:availability-capacity-1",),
+        ),
     )
     return record_reconciliation_checkpoint(
         store,
         reconciliation_id="availability-authority",
         result=result,
         observed_at="2026-09-24T18:00:30Z",
-        host_id="availability-test-host",
-        owner_epoch="1",
+        host_id=host_id,
+        owner_epoch=owner_epoch,
     )
 
 
@@ -140,6 +161,8 @@ def _admit(authority, reservations, checkpoint, **overrides):
         reservation_available={"CASH:USD": "1000"},
         reservation_checkpoint_event_id=checkpoint["event_id"],
         reservation_provider_id=PROVIDER_ID,
+        reservation_host_id="availability-test-host",
+        reservation_owner_epoch="1",
         reservation_max_age_seconds="60",
         now=NOW,
     )
@@ -220,7 +243,10 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = AuthorityService(store)
             authority.register_policy(_policy())
-            checkpoint = _checkpoint(store, cash="100")
+            # Provider cash can be larger than the capacity the provider says is
+            # actually available for new risk. Financial admission must use the
+            # explicit capacity evidence, never gross provider cash.
+            checkpoint = _checkpoint(store, cash="1000", available="100")
             reservations = DurableReservationBook(
                 store,
                 environment=ENVIRONMENT,
@@ -269,6 +295,42 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                     checkpoint,
                     account_id="other-account",
                 )
+            self.assertEqual(reservations.version, 0)
+
+    def test_expired_capacity_or_stale_owner_epoch_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            authority.register_policy(_policy())
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+
+            expired = _checkpoint(
+                store,
+                valid_until="2026-09-24T18:00:59Z",
+            )
+            with self.assertRaisesRegex(ValueError, "expired"):
+                _admit(authority, reservations, expired)
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            authority.register_policy(_policy())
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            foreign_owner = _checkpoint(
+                store,
+                host_id="replacement-host",
+                owner_epoch="2",
+            )
+            with self.assertRaisesRegex(ValueError, "owner mismatch"):
+                _admit(authority, reservations, foreign_owner)
             self.assertEqual(reservations.version, 0)
 
 

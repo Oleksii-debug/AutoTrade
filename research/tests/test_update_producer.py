@@ -720,7 +720,7 @@ class UpdateProducerTests(unittest.TestCase):
                 )
             )
 
-    def test_compute_limit_is_no_update_and_records_actual_usage(self):
+    def test_compute_limit_is_no_update_and_records_estimated_usage(self):
         with TemporaryDirectory() as directory:
             fixture, checkpoint, test_ref, calibration, envelope = (
                 self.ready_fixture(directory)
@@ -737,7 +737,7 @@ class UpdateProducerTests(unittest.TestCase):
             self.assertEqual(produced.status, "NO_UPDATE")
             artifact = json.loads(produced.artifact_bytes)
             self.assertEqual(
-                artifact["compute"]["actual_compute_units"],
+                artifact["compute"]["estimated_compute_units"],
                 "5",
             )
             self.assertIn(

@@ -1008,7 +1008,7 @@ def produce_bounded_online_update(
             "drift_score": None if drift is None else str(drift),
         },
         "compute": {
-            "actual_compute_units": str(compute_units),
+            "estimated_compute_units": str(compute_units),
             "max_compute_units": str(config.max_compute_units),
         },
         "proposal": (

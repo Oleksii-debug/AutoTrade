@@ -908,7 +908,14 @@ def reconcile_account(
         account_id=account_scope,
         environment=environment_scope,
     )
-    resolutions: list[SubmissionResolution] = []
+    # UNKNOWN submission identity is financial truth: one durable attempt may
+    # appear at most once, and one provider-scoped client order id may belong
+    # to only one attempt.  Resolve malformed/corrupted local history before
+    # consulting provider observations so one provider fact can never resolve
+    # multiple incompatible local submissions.
+    normalized_unknown_submissions: list[UnknownSubmission] = []
+    unknown_by_attempt: dict[str, UnknownSubmission] = {}
+    unknown_by_client_order_id: dict[str, UnknownSubmission] = {}
     for submission in unknown_submissions:
         if not isinstance(submission, UnknownSubmission):
             raise TypeError("unknown_submissions must contain UnknownSubmission")
@@ -918,6 +925,30 @@ def reconcile_account(
             or submission.environment != environment_scope
         ):
             raise ValueError("unknown submission scope mismatch")
+
+        existing_attempt = unknown_by_attempt.get(submission.attempt_id)
+        if existing_attempt is not None:
+            if existing_attempt != submission:
+                raise ValueError(
+                    "unknown submission attempt_id has conflicting observations"
+                )
+            # Exact replay of the same immutable attempt is idempotent.
+            continue
+
+        existing_client = unknown_by_client_order_id.get(
+            submission.client_order_id
+        )
+        if existing_client is not None:
+            raise ValueError(
+                "unknown submission client_order_id is reused across attempts"
+            )
+
+        unknown_by_attempt[submission.attempt_id] = submission
+        unknown_by_client_order_id[submission.client_order_id] = submission
+        normalized_unknown_submissions.append(submission)
+
+    resolutions: list[SubmissionResolution] = []
+    for submission in normalized_unknown_submissions:
         submission_time = _instant(
             submission.started_at, name="unknown_submission.started_at"
         )

@@ -644,6 +644,7 @@ def causal_cross_market_point(
         "observations": [
             {
                 "observation_id": item.observation_id,
+                "event_time": item.event_time.isoformat(),
                 "available_at": item.available_at.isoformat(),
                 "source_revision": item.source_revision,
                 "value": str(item.value),

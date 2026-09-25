@@ -844,9 +844,7 @@ def commit_provider_fill_with_reservation_consumption(
         economic_book,
         reservation_book,
         command_id=command_id,
-        idempotency_key=(
-            f"{caller_idempotency}:financial-plan:{plan.plan_digest}"
-        ),
+        idempotency_key=f"{caller_idempotency}:provider-fill",
         reservation_id=rid,
         usage=plan.usage,
         transactions=(plan.transaction,),

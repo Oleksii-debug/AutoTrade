@@ -10,12 +10,33 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
-from typing import Callable
+from uuid import UUID
+
+from research.autotrade_research.artifacts.store import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+)
 
 
 _PASS = "PASS"
 _FAIL = "FAIL"
 _INCONCLUSIVE = "INCONCLUSIVE"
+
+_SBOM_MEDIA_TYPE = "application/vnd.autotrade.sbom"
+_PROVENANCE_MEDIA_TYPE = "application/vnd.autotrade.provenance"
+_DEPENDENCY_LOCK_MEDIA_TYPE = "application/vnd.autotrade.dependency-lock"
+_COMPONENT_MEDIA_TYPE = "application/vnd.autotrade.distributed-component"
+_RIGHTS_MEDIA_TYPE = "application/vnd.autotrade.rights-evidence"
+_ADVISORY_EXCEPTION_MEDIA_TYPE = "application/vnd.autotrade.advisory-exception"
+
+
+def _artifact_id(value: str, name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a UUID")
+    try:
+        return str(UUID(value))
+    except (ValueError, AttributeError, TypeError) as error:
+        raise ValueError(f"{name} must be a UUID") from error
 
 
 def _sha256(value: str, name: str) -> str:
@@ -40,6 +61,7 @@ def _git_sha(value: str, name: str) -> str:
 @dataclass(frozen=True)
 class ComponentEvidence:
     component_id: str
+    artifact_id: str
     version: str
     declared_artifact_hash: str
     observed_artifact_hash: str
@@ -63,6 +85,7 @@ class ComponentEvidence:
                 raise ValueError(f"{name} is required")
         if type(self.notice_required) is not bool or type(self.notice_present) is not bool:
             raise TypeError("notice flags must be boolean")
+        _artifact_id(self.artifact_id, "artifact_id")
         _sha256(self.declared_artifact_hash, "declared_artifact_hash")
         _sha256(self.observed_artifact_hash, "observed_artifact_hash")
         if self.license_status not in {"APPROVED", "BLOCKED", "UNKNOWN"}:
@@ -72,12 +95,9 @@ class ComponentEvidence:
         if self.advisory_status not in {"CLEAR", "ALLOWLISTED", "BLOCKED", "UNKNOWN"}:
             raise ValueError("advisory_status must be explicit")
         if self.advisory_status == "ALLOWLISTED":
-            if not isinstance(self.advisory_exception_id, str) or not self.advisory_exception_id.strip():
+            if self.advisory_exception_id is None:
                 raise ValueError("ALLOWLISTED advisory status requires advisory_exception_id")
-            if self.advisory_exception_id != self.advisory_exception_id.strip():
-                raise ValueError(
-                    "advisory_exception_id must not contain surrounding whitespace"
-                )
+            _artifact_id(self.advisory_exception_id, "advisory_exception_id")
             if self.advisory_exception_hash is None:
                 raise ValueError("ALLOWLISTED advisory status requires advisory_exception_hash")
             _sha256(self.advisory_exception_hash, "advisory_exception_hash")
@@ -95,8 +115,7 @@ class ModelDataRightsEvidence:
     reviewed_for_release_sha: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.artifact_id, str) or not self.artifact_id.strip():
-            raise ValueError("artifact_id is required")
+        _artifact_id(self.artifact_id, "artifact_id")
         if not isinstance(self.use_scope, str) or not self.use_scope.strip():
             raise ValueError("use_scope is required")
         _sha256(self.artifact_hash, "artifact_hash")
@@ -109,8 +128,11 @@ class ModelDataRightsEvidence:
 class SupplyChainEvidence:
     release_commit_sha: str
     built_from_commit_sha: str
+    sbom_artifact_id: str
     sbom_hash: str
+    provenance_artifact_id: str
     provenance_hash: str
+    dependency_lock_artifact_id: str
     dependency_lock_hash: str
     sbom_reviewed_for_release_sha: str
     provenance_reviewed_for_release_sha: str
@@ -123,6 +145,9 @@ class SupplyChainEvidence:
     def __post_init__(self) -> None:
         _git_sha(self.release_commit_sha, "release_commit_sha")
         _git_sha(self.built_from_commit_sha, "built_from_commit_sha")
+        _artifact_id(self.sbom_artifact_id, "sbom_artifact_id")
+        _artifact_id(self.provenance_artifact_id, "provenance_artifact_id")
+        _artifact_id(self.dependency_lock_artifact_id, "dependency_lock_artifact_id")
         _sha256(self.sbom_hash, "sbom_hash")
         _sha256(self.provenance_hash, "provenance_hash")
         _sha256(self.dependency_lock_hash, "dependency_lock_hash")
@@ -160,9 +185,6 @@ class SupplyChainEvidence:
             raise ValueError("model/data rights evidence contains duplicate ids")
 
 
-SupplyChainEvidenceVerifier = Callable[[SupplyChainEvidence], bool]
-
-
 @dataclass(frozen=True)
 class SupplyChainQualification:
     qualification_id: str
@@ -172,13 +194,50 @@ class SupplyChainQualification:
     release_authority: bool = False
 
 
+def _store_artifact_matches(
+    store: ArtifactStore,
+    *,
+    artifact_id: str,
+    artifact_hash: str,
+    media_type: str,
+    release_sha: str,
+    metadata: dict[str, object],
+) -> bool:
+    """Verify one exact immutable supply-chain artifact through ArtifactStore."""
+
+    try:
+        manifest = store.load_manifest(artifact_id)
+        if not isinstance(manifest.get("manifest_hash"), str):
+            return False
+        if manifest.get("sha256") != artifact_hash:
+            return False
+        if manifest.get("media_type") != media_type:
+            return False
+        if manifest.get("source_refs") != [f"git:{release_sha}"]:
+            return False
+        if manifest.get("metadata") != metadata:
+            return False
+        store.read_bytes(artifact_id)
+    except (
+        ArtifactIntegrityError,
+        FileNotFoundError,
+        OSError,
+        TypeError,
+        ValueError,
+    ):
+        return False
+    return True
+
+
 def qualify_supply_chain(
     evidence: SupplyChainEvidence,
     *,
-    evidence_verifier: SupplyChainEvidenceVerifier | None = None,
+    evidence_store: ArtifactStore | None = None,
 ) -> SupplyChainQualification:
     if not isinstance(evidence, SupplyChainEvidence):
         raise TypeError("evidence must be SupplyChainEvidence")
+    if evidence_store is not None and not isinstance(evidence_store, ArtifactStore):
+        raise TypeError("evidence_store must be ArtifactStore")
     checks: list[tuple[str, str]] = []
     reasons: list[str] = []
 
@@ -187,18 +246,131 @@ def qualify_supply_chain(
         if reason and status != _PASS:
             reasons.append(reason)
 
-    externally_verified = False
-    if evidence_verifier is not None:
-        try:
-            verification = evidence_verifier(evidence)
-        except Exception:
-            verification = False
-        externally_verified = isinstance(verification, bool) and verification
-    record(
-        "immutable_evidence_bundle",
-        _PASS if externally_verified else _INCONCLUSIVE,
-        "SUPPLY_CHAIN.EVIDENCE_UNVERIFIED",
-    )
+    immutable_checks: list[tuple[str, bool]] = []
+    if evidence_store is not None:
+        immutable_checks.extend(
+            (
+                (
+                    "sbom",
+                    _store_artifact_matches(
+                        evidence_store,
+                        artifact_id=evidence.sbom_artifact_id,
+                        artifact_hash=evidence.sbom_hash,
+                        media_type=_SBOM_MEDIA_TYPE,
+                        release_sha=evidence.release_commit_sha,
+                        metadata={
+                            "evidence_kind": "SBOM",
+                            "release_sha": evidence.release_commit_sha,
+                        },
+                    ),
+                ),
+                (
+                    "provenance",
+                    _store_artifact_matches(
+                        evidence_store,
+                        artifact_id=evidence.provenance_artifact_id,
+                        artifact_hash=evidence.provenance_hash,
+                        media_type=_PROVENANCE_MEDIA_TYPE,
+                        release_sha=evidence.release_commit_sha,
+                        metadata={
+                            "evidence_kind": "PROVENANCE",
+                            "release_sha": evidence.release_commit_sha,
+                        },
+                    ),
+                ),
+                (
+                    "dependency_lock",
+                    _store_artifact_matches(
+                        evidence_store,
+                        artifact_id=evidence.dependency_lock_artifact_id,
+                        artifact_hash=evidence.dependency_lock_hash,
+                        media_type=_DEPENDENCY_LOCK_MEDIA_TYPE,
+                        release_sha=evidence.release_commit_sha,
+                        metadata={
+                            "evidence_kind": "DEPENDENCY_LOCK",
+                            "release_sha": evidence.release_commit_sha,
+                        },
+                    ),
+                ),
+            )
+        )
+        for item in evidence.components:
+            immutable_checks.append(
+                (
+                    "component:" + item.component_id,
+                    _store_artifact_matches(
+                        evidence_store,
+                        artifact_id=item.artifact_id,
+                        artifact_hash=item.observed_artifact_hash,
+                        media_type=_COMPONENT_MEDIA_TYPE,
+                        release_sha=evidence.release_commit_sha,
+                        metadata={
+                            "evidence_kind": "DISTRIBUTED_COMPONENT",
+                            "component_id": item.component_id,
+                            "version": item.version,
+                            "release_sha": evidence.release_commit_sha,
+                        },
+                    ),
+                )
+            )
+            if item.advisory_status == "ALLOWLISTED":
+                assert item.advisory_exception_id is not None
+                assert item.advisory_exception_hash is not None
+                immutable_checks.append(
+                    (
+                        "advisory_exception:" + item.component_id,
+                        _store_artifact_matches(
+                            evidence_store,
+                            artifact_id=item.advisory_exception_id,
+                            artifact_hash=item.advisory_exception_hash,
+                            media_type=_ADVISORY_EXCEPTION_MEDIA_TYPE,
+                            release_sha=evidence.release_commit_sha,
+                            metadata={
+                                "evidence_kind": "ADVISORY_EXCEPTION",
+                                "component_id": item.component_id,
+                                "release_sha": evidence.release_commit_sha,
+                            },
+                        ),
+                    )
+                )
+        for item in evidence.model_data_rights:
+            immutable_checks.append(
+                (
+                    "rights:" + item.artifact_id,
+                    _store_artifact_matches(
+                        evidence_store,
+                        artifact_id=item.artifact_id,
+                        artifact_hash=item.artifact_hash,
+                        media_type=_RIGHTS_MEDIA_TYPE,
+                        release_sha=evidence.release_commit_sha,
+                        metadata={
+                            "evidence_kind": "MODEL_DATA_RIGHTS",
+                            "use_scope": item.use_scope,
+                            "release_sha": evidence.release_commit_sha,
+                        },
+                    ),
+                )
+            )
+
+    if evidence_store is None:
+        record(
+            "immutable_evidence_bundle",
+            _INCONCLUSIVE,
+            "SUPPLY_CHAIN.EVIDENCE_STORE_MISSING",
+        )
+    else:
+        for label, verified in immutable_checks:
+            record(
+                "immutable:" + label,
+                _PASS if verified else _INCONCLUSIVE,
+                "SUPPLY_CHAIN.IMMUTABLE_ARTIFACT_UNVERIFIED:" + label,
+            )
+        record(
+            "immutable_evidence_bundle",
+            _PASS if immutable_checks and all(value for _, value in immutable_checks)
+            else _INCONCLUSIVE,
+            "SUPPLY_CHAIN.EVIDENCE_UNVERIFIED",
+        )
 
     exact_head = evidence.release_commit_sha == evidence.built_from_commit_sha
     record("exact_release_head", _PASS if exact_head else _FAIL, "SUPPLY_CHAIN.BUILD_SHA_MISMATCH")
@@ -267,8 +439,11 @@ def qualify_supply_chain(
         {
             "release": evidence.release_commit_sha,
             "built_from": evidence.built_from_commit_sha,
+            "sbom_artifact_id": evidence.sbom_artifact_id,
             "sbom": evidence.sbom_hash,
+            "provenance_artifact_id": evidence.provenance_artifact_id,
             "provenance": evidence.provenance_hash,
+            "dependency_lock_artifact_id": evidence.dependency_lock_artifact_id,
             "lock": evidence.dependency_lock_hash,
             "sbom_reviewed_for_release_sha": evidence.sbom_reviewed_for_release_sha,
             "provenance_reviewed_for_release_sha": evidence.provenance_reviewed_for_release_sha,
@@ -278,6 +453,7 @@ def qualify_supply_chain(
             "components": [
                 {
                     "component_id": item.component_id,
+                    "artifact_id": item.artifact_id,
                     "version": item.version,
                     "declared_artifact_hash": item.declared_artifact_hash,
                     "observed_artifact_hash": item.observed_artifact_hash,

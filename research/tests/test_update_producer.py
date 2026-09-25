@@ -773,7 +773,7 @@ class UpdateProducerTests(unittest.TestCase):
                 {
                     reason
                     for _episode, reason
-                    in artifact["population"]["update_excluded"]
+                    in artifact["population"]["update_exclusions"]
                 },
             )
 

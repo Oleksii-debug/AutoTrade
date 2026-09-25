@@ -11,7 +11,13 @@ from mvp.autotrade_mvp.authority import (
     InstrumentVersionIdentity,
 )
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
+from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.risk import (
+    RiskDecision,
+    RiskRuleResult,
+    bind_risk_decision,
+)
 
 
 INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
@@ -38,6 +44,45 @@ def policy(**overrides):
     values.update(overrides)
     return AuthorityPolicy.create(**values)
 
+
+
+def bound_risk_decision(
+    *,
+    admitted=True,
+    intent_hash="sha256:" + "a" * 64,
+    state_version=7,
+    policy_version=1,
+    reservation_version=0,
+    capability_snapshot_id="cap-snapshot-1",
+    evaluated_at="2026-09-24T18:00:00Z",
+    valid_until="2026-09-24T18:30:00Z",
+):
+    raw = RiskDecision(
+        admitted=admitted,
+        resulting_position=Decimal("1"),
+        gross_leverage=Decimal("0.10"),
+        net_leverage=Decimal("0.10"),
+        worst_stress_loss=Decimal("10"),
+        rules=(
+            RiskRuleResult(
+                rule="test-boundary",
+                passed=admitted,
+                observed="bounded",
+                limit="bounded",
+                reason="fixture",
+            ),
+        ),
+    )
+    return bind_risk_decision(
+        raw,
+        intent_hash=intent_hash,
+        state_version=state_version,
+        policy_version=policy_version,
+        reservation_version=reservation_version,
+        capability_snapshot_id=capability_snapshot_id,
+        evaluated_at=evaluated_at,
+        valid_until=valid_until,
+    )
 
 class AuthorityTests(unittest.TestCase):
     def test_registration_rejects_unvalidated_policy_objects(self):
@@ -1080,6 +1125,144 @@ class AuthorityTests(unittest.TestCase):
                 restarted.epoch,
                 2,
             )
+
+
+    def test_public_financial_admission_is_atomic_and_restart_idempotent(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            item = policy(autonomous=True)
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+            )
+            decision = bound_risk_decision(
+                policy_version=item.version,
+                reservation_version=reservations.version,
+            )
+
+            kwargs = dict(
+                command_id="cmd-public-admit",
+                idempotency_key="idem-public-admit",
+                admission_id="admission-public",
+                policy_id=item.policy_id,
+                intent_id="intent-public",
+                intent_hash=decision.intent_hash,
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                current_state_version=7,
+                capability_snapshot_id=decision.capability_snapshot_id,
+                risk_decision=decision,
+                reservation_id="reservation-public",
+                reservation_requirements={"CASH:USD": "100"},
+                reservation_available={"CASH:USD": "1000"},
+                now="2026-09-24T18:01:00Z",
+            )
+            first = authority.admit(
+                reservation_book=reservations,
+                **kwargs,
+            )
+            self.assertEqual(first.outcome, "ADMITTED")
+            self.assertEqual(first.risk_decision_id, decision.decision_id)
+            self.assertEqual(first.reservation_id, "reservation-public")
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("100"),
+            )
+            self.assertEqual(len(store.pending_outbox()), 1)
+
+            # A lost response followed by process restart must replay the exact
+            # prior admission even though the reservation aggregate advanced
+            # from version 0 to 1. It must not reserve or publish twice.
+            restarted_authority = AuthorityService(store)
+            restarted_reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+            )
+            replayed = restarted_authority.admit(
+                reservation_book=restarted_reservations,
+                **kwargs,
+            )
+            self.assertEqual(replayed, first)
+            self.assertEqual(restarted_reservations.version, 1)
+            self.assertEqual(
+                restarted_reservations.total_reserved("CASH:USD"),
+                Decimal("100"),
+            )
+            self.assertEqual(len(store.pending_outbox()), 1)
+            self.assertEqual(
+                len(store.load_events("risk_decision", decision.decision_id)),
+                1,
+            )
+            self.assertEqual(
+                len(store.load_events("authority_state", "canonical")),
+                2,
+            )
+
+    def test_public_financial_admission_replay_rejects_changed_scope(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            item = policy(autonomous=True)
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+            )
+            decision = bound_risk_decision(
+                policy_version=item.version,
+                reservation_version=reservations.version,
+            )
+            kwargs = dict(
+                command_id="cmd-replay-scope",
+                idempotency_key="idem-replay-scope",
+                admission_id="admission-replay-scope",
+                policy_id=item.policy_id,
+                intent_id="intent-replay-scope",
+                intent_hash=decision.intent_hash,
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                current_state_version=7,
+                capability_snapshot_id=decision.capability_snapshot_id,
+                risk_decision=decision,
+                reservation_id="reservation-replay-scope",
+                reservation_requirements={"CASH:USD": "100"},
+                reservation_available={"CASH:USD": "1000"},
+                now="2026-09-24T18:01:00Z",
+            )
+            authority.admit(reservation_book=reservations, **kwargs)
+            restarted = AuthorityService(store)
+            restarted_book = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "another financial command",
+            ):
+                restarted.admit(
+                    reservation_book=restarted_book,
+                    **{**kwargs, "notional": "101"},
+                )
+            self.assertEqual(
+                restarted_book.total_reserved("CASH:USD"),
+                Decimal("100"),
+            )
+            self.assertEqual(len(store.pending_outbox()), 1)
+
 
 
 if __name__ == "__main__":

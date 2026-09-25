@@ -1,14 +1,17 @@
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 from hashlib import sha256
 import json
 from tempfile import TemporaryDirectory
 
 from mvp.autotrade_mvp.authority import (
+    AuthoritativeRiskSnapshot,
     AuthorityConflict,
     AuthorityPolicy,
     AuthorityService,
     InstrumentVersionIdentity,
+    RiskAuthorityRequest,
 )
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
@@ -219,6 +222,83 @@ def public_financial_kwargs(store, **overrides):
     )
     values.update(overrides)
     return values
+
+
+def public_authoritative_risk_snapshot(
+    request: RiskAuthorityRequest,
+    *,
+    risk_context: RiskContext | None = None,
+    risk_policy: RiskPolicy | None = None,
+    valid_until: str = PUBLIC_RISK_VALID_UNTIL,
+    evidence_suffix: str = "canonical",
+) -> AuthoritativeRiskSnapshot:
+    if not isinstance(request, RiskAuthorityRequest):
+        raise TypeError("request must be RiskAuthorityRequest")
+    dimensions = (
+        "PORTFOLIO",
+        "MARKET",
+        "MARGIN",
+        "POLICY",
+        "RECONCILIATION",
+        "CAPABILITY",
+        "BORROW",
+        "STRESS",
+        "FX",
+        "FACTORS",
+        "LIQUIDITY",
+        "LIQUIDATION",
+        "SETTLEMENT",
+        "OPTION_LIFECYCLE",
+        "FUTURES_LIFECYCLE",
+    )
+    refs = {
+        dimension: "sha256:" + sha256(
+            f"{dimension}:{evidence_suffix}".encode("utf-8")
+        ).hexdigest()
+        for dimension in dimensions
+    }
+    return AuthoritativeRiskSnapshot(
+        context=public_risk_context() if risk_context is None else risk_context,
+        risk_policy=public_risk_policy() if risk_policy is None else risk_policy,
+        account_id=request.account_id,
+        environment=request.environment,
+        provider_id=request.provider_id,
+        instrument_version=request.instrument_version,
+        capability_snapshot_id=request.capability_snapshot_id,
+        reconciliation_checkpoint_event_id=(
+            request.reconciliation_checkpoint_event_id
+        ),
+        journal_sequence_cut=request.journal_sequence_cut,
+        reservation_version=request.reservation_version,
+        reservation_state_digest=request.reservation_state_digest,
+        authority_policy_id=request.authority_policy_id,
+        authority_policy_version=request.authority_policy_version,
+        evaluated_at=request.evaluated_at,
+        valid_until=valid_until,
+        evidence_refs=refs,
+    )
+
+
+def authority_service(
+    store: JournalStore,
+    *,
+    risk_context: RiskContext | None = None,
+    risk_policy: RiskPolicy | None = None,
+    resolver=None,
+) -> AuthorityService:
+    selected_resolver = resolver
+    if selected_resolver is None:
+        def selected_resolver(request):
+            return public_authoritative_risk_snapshot(
+                request,
+                risk_context=risk_context,
+                risk_policy=risk_policy,
+            )
+    return AuthorityService(
+        store,
+        risk_authority_resolver=selected_resolver,
+    )
+
 
 class AuthorityTests(unittest.TestCase):
     def test_registration_rejects_unvalidated_policy_objects(self):
@@ -716,7 +796,7 @@ class AuthorityTests(unittest.TestCase):
     def test_durable_versioned_admission_and_confirmation_survive_restart(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            service = AuthorityService(store)
+            service = authority_service(store)
             service.register_policy(policy(environments={"SIMULATION"}))
             service.add_confirmation(
                 confirmation_id="c-durable",
@@ -740,7 +820,7 @@ class AuthorityTests(unittest.TestCase):
             )
             self.assertEqual(admitted.outcome, "ADMITTED")
 
-            restarted = AuthorityService(store)
+            restarted = authority_service(store)
             self.assertEqual(
                 restarted.dispatch_allowed(
                     "a-durable", intent_hash="h-durable",
@@ -772,7 +852,7 @@ class AuthorityTests(unittest.TestCase):
     def test_durable_versioned_revocation_survives_restart(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            service = AuthorityService(store)
+            service = authority_service(store)
             service.register_policy(policy(autonomous=True, environments={"SIMULATION"}))
             service._admit_unverified(
                 admission_id="a-revoke", policy_id="p1", intent_hash="h-revoke",
@@ -784,7 +864,7 @@ class AuthorityTests(unittest.TestCase):
             service.revoke_policy(
                 "p1", reason="operator revoke", revoked_at="2026-09-24T18:02:00Z"
             )
-            restarted = AuthorityService(store)
+            restarted = authority_service(store)
             self.assertEqual(
                 restarted.dispatch_allowed(
                     "a-revoke", intent_hash="h-revoke",
@@ -798,11 +878,11 @@ class AuthorityTests(unittest.TestCase):
     def test_durable_retry_does_not_duplicate_versioned_authority_events(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            first = AuthorityService(store)
+            first = authority_service(store)
             item = policy(autonomous=True)
             self.assertTrue(first.register_policy(item))
             self.assertFalse(first.register_policy(item))
-            restarted = AuthorityService(store)
+            restarted = authority_service(store)
             self.assertFalse(restarted.register_policy(item))
             events = store.load_events("authority_state", "canonical")
             self.assertEqual(
@@ -813,7 +893,7 @@ class AuthorityTests(unittest.TestCase):
     def test_dispatch_guard_checks_versioned_scope_after_revoke(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            authority = AuthorityService(store)
+            authority = authority_service(store)
             authority.register_policy(policy(autonomous=True, environments={"SIMULATION"}))
             admitted = authority._admit_unverified(
                 admission_id="a-guard", policy_id="p1", intent_hash="h-guard",
@@ -870,7 +950,7 @@ class AuthorityTests(unittest.TestCase):
     def test_durable_replay_rejects_admitted_scope_outside_policy(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            service = AuthorityService(store)
+            service = authority_service(store)
             service.register_policy(policy(autonomous=True))
 
             request = {
@@ -928,12 +1008,12 @@ class AuthorityTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 Exception, "violates policy scope"
             ):
-                AuthorityService(store)
+                authority_service(store)
 
     def test_durable_replay_rejects_malformed_admission_types(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            service = AuthorityService(store)
+            service = authority_service(store)
             service.register_policy(policy(autonomous=True))
             payload = {
                 "admission_id": "malformed-admission",
@@ -969,12 +1049,12 @@ class AuthorityTests(unittest.TestCase):
                 }
             )
             with self.assertRaisesRegex(TypeError, "risk_reducing"):
-                AuthorityService(store)
+                authority_service(store)
 
     def test_durable_replay_rejects_double_confirmation_consumption(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            service = AuthorityService(store)
+            service = authority_service(store)
             service.register_policy(policy(environments={"SIMULATION"}))
             service.add_confirmation(
                 confirmation_id="single-use",
@@ -1040,13 +1120,13 @@ class AuthorityTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 Exception, "consumed by multiple admissions"
             ):
-                AuthorityService(store)
+                authority_service(store)
 
 
     def test_stale_process_cannot_authorize_after_other_process_revokes(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            process_a = AuthorityService(store)
+            process_a = authority_service(store)
             process_a.register_policy(policy(autonomous=True, environments={"SIMULATION"}))
             process_a._admit_unverified(
                 admission_id="a-stale-read",
@@ -1062,7 +1142,7 @@ class AuthorityTests(unittest.TestCase):
                 risk_admitted=True,
                 now="2026-09-24T18:00:00Z",
             )
-            process_b = AuthorityService(store)
+            process_b = authority_service(store)
             process_b.revoke_policy(
                 "p1",
                 reason="operator revoke",
@@ -1087,7 +1167,7 @@ class AuthorityTests(unittest.TestCase):
     def test_final_dispatch_barrier_blocks_stale_process_after_external_revoke(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            process_a = AuthorityService(store)
+            process_a = authority_service(store)
             process_a.register_policy(policy(autonomous=True, environments={"SIMULATION"}))
             admitted = process_a._admit_unverified(
                 admission_id="a-stale-guard",
@@ -1104,7 +1184,7 @@ class AuthorityTests(unittest.TestCase):
                 now="2026-09-24T18:00:00Z",
             )
             self.assertEqual(admitted.outcome, "ADMITTED")
-            process_b = AuthorityService(store)
+            process_b = authority_service(store)
             guard = process_a.dispatch_guard(
                 "a-stale-guard",
                 account_id="paper-1",
@@ -1152,7 +1232,7 @@ class AuthorityTests(unittest.TestCase):
     def test_stale_authority_process_cannot_double_consume_confirmation(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            seed = AuthorityService(store)
+            seed = authority_service(store)
             seed.register_policy(policy(environments={"SIMULATION"}))
             seed.add_confirmation(
                 confirmation_id="concurrent-single-use",
@@ -1167,8 +1247,8 @@ class AuthorityTests(unittest.TestCase):
                 expires_at="2026-09-24T23:00:00Z",
             )
 
-            first = AuthorityService(store)
-            stale = AuthorityService(store)
+            first = authority_service(store)
+            stale = authority_service(store)
 
             admitted = first._admit_unverified(
                 admission_id="winner",
@@ -1207,7 +1287,7 @@ class AuthorityTests(unittest.TestCase):
                     confirmation_id="concurrent-single-use",
                 )
 
-            restarted = AuthorityService(store)
+            restarted = authority_service(store)
             self.assertEqual(
                 restarted.dispatch_allowed(
                     "winner",
@@ -1232,13 +1312,13 @@ class AuthorityTests(unittest.TestCase):
     def test_stale_authority_process_cannot_append_after_revocation(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            seed = AuthorityService(store)
+            seed = authority_service(store)
             seed.register_policy(
                 policy(autonomous=True, environments={"SIMULATION"})
             )
 
-            stale = AuthorityService(store)
-            revoker = AuthorityService(store)
+            stale = authority_service(store)
+            revoker = authority_service(store)
             revoker.revoke_policy(
                 "p1",
                 reason="operator revoke",
@@ -1264,7 +1344,7 @@ class AuthorityTests(unittest.TestCase):
                     now="2026-09-24T18:00:02Z",
                 )
 
-            restarted = AuthorityService(store)
+            restarted = authority_service(store)
             self.assertEqual(
                 restarted.epoch,
                 2,
@@ -1275,7 +1355,7 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
             store = JournalStore(path)
-            service = AuthorityService(store)
+            service = authority_service(store)
             service.register_policy(policy(autonomous=True))
 
             with self.assertRaisesRegex(
@@ -1367,7 +1447,7 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
             store = FailingFinancialJournalStore(path)
-            authority = AuthorityService(store)
+            authority = authority_service(store)
             item = policy()
             authority.register_policy(item)
             confirmation_id = "confirm-transaction-a-fault"
@@ -1464,7 +1544,7 @@ class AuthorityTests(unittest.TestCase):
             # Restart from durable truth: the failed process must leave no
             # half-admission, and the same persisted confirmation remains usable.
             restarted_store = JournalStore(path)
-            restarted_authority = AuthorityService(restarted_store)
+            restarted_authority = authority_service(restarted_store)
             restarted_reservations = DurableReservationBook(
                 restarted_store,
                 environment="PAPER",
@@ -1516,10 +1596,289 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(command_count, 1)
 
 
-    def test_public_financial_admission_is_atomic_and_restart_idempotent(self):
+    def test_public_financial_admission_requires_service_owned_risk_resolver(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = AuthorityService(store)
+            item = policy(autonomous=True)
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "service-owned authoritative risk resolver",
+            ):
+                authority.admit(
+                    command_id="cmd-no-risk-resolver",
+                    idempotency_key="idem-no-risk-resolver",
+                    admission_id="admission-no-risk-resolver",
+                    policy_id=item.policy_id,
+                    intent_id="intent-no-risk-resolver",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    reservation_book=reservations,
+                    reservation_id="reservation-no-risk-resolver",
+                    **public_financial_kwargs(store),
+                )
+            self.assertEqual(reservations.version, 0)
+            self.assertEqual(store.load_events("risk_decision", "canonical"), [])
+            self.assertEqual(store.pending_outbox(), [])
+
+    def test_public_financial_admission_rejects_caller_risk_context_tampering(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
+            item = policy(autonomous=True)
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+            )
+            tampered = replace(
+                public_risk_context(),
+                equity=Decimal("1000000"),
+                margin_headroom=Decimal("1000000"),
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "caller risk_context does not match authoritative risk snapshot",
+            ):
+                authority.admit(
+                    command_id="cmd-risk-context-tamper",
+                    idempotency_key="idem-risk-context-tamper",
+                    admission_id="admission-risk-context-tamper",
+                    policy_id=item.policy_id,
+                    intent_id="intent-risk-context-tamper",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    reservation_book=reservations,
+                    reservation_id="reservation-risk-context-tamper",
+                    **public_financial_kwargs(
+                        store,
+                        risk_context=tampered,
+                    ),
+                )
+            self.assertEqual(reservations.version, 0)
+            self.assertEqual(store.pending_outbox(), [])
+
+    def test_public_financial_admission_rejects_caller_risk_policy_tampering(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
+            item = policy(autonomous=True)
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "caller risk_policy does not match authoritative risk snapshot",
+            ):
+                authority.admit(
+                    command_id="cmd-risk-policy-tamper",
+                    idempotency_key="idem-risk-policy-tamper",
+                    admission_id="admission-risk-policy-tamper",
+                    policy_id=item.policy_id,
+                    intent_id="intent-risk-policy-tamper",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    reservation_book=reservations,
+                    reservation_id="reservation-risk-policy-tamper",
+                    **public_financial_kwargs(
+                        store,
+                        risk_policy=public_risk_policy(
+                            max_single_notional="999999"
+                        ),
+                    ),
+                )
+            self.assertEqual(reservations.version, 0)
+            self.assertEqual(store.pending_outbox(), [])
+
+    def test_public_financial_admission_rejects_caller_risk_validity_extension(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authoritative_valid_until = "2026-09-24T18:03:00Z"
+
+            def resolver(request):
+                return public_authoritative_risk_snapshot(
+                    request,
+                    valid_until=authoritative_valid_until,
+                )
+
+            authority = authority_service(store, resolver=resolver)
+            item = policy(autonomous=True)
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "caller risk_valid_until does not match authoritative risk snapshot",
+            ):
+                authority.admit(
+                    command_id="cmd-risk-validity-tamper",
+                    idempotency_key="idem-risk-validity-tamper",
+                    admission_id="admission-risk-validity-tamper",
+                    policy_id=item.policy_id,
+                    intent_id="intent-risk-validity-tamper",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    reservation_book=reservations,
+                    reservation_id="reservation-risk-validity-tamper",
+                    **public_financial_kwargs(
+                        store,
+                        risk_valid_until="2026-09-24T18:30:00Z",
+                    ),
+                )
+            self.assertEqual(reservations.version, 0)
+            self.assertEqual(store.pending_outbox(), [])
+
+    def test_authoritative_risk_snapshot_change_before_commit_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            calls = []
+
+            def changing_resolver(request):
+                calls.append(request)
+                return public_authoritative_risk_snapshot(
+                    request,
+                    evidence_suffix=str(len(calls)),
+                )
+
+            authority = authority_service(store, resolver=changing_resolver)
+            item = policy(autonomous=True)
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "authoritative risk snapshot changed before financial commit",
+            ):
+                authority.admit(
+                    command_id="cmd-risk-snapshot-race",
+                    idempotency_key="idem-risk-snapshot-race",
+                    admission_id="admission-risk-snapshot-race",
+                    policy_id=item.policy_id,
+                    intent_id="intent-risk-snapshot-race",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    reservation_book=reservations,
+                    reservation_id="reservation-risk-snapshot-race",
+                    **public_financial_kwargs(store),
+                )
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(reservations.version, 0)
+            self.assertEqual(store.pending_outbox(), [])
+
+    def test_public_financial_admission_persists_authoritative_risk_snapshot(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
+            item = policy(autonomous=True)
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+            )
+            kwargs = dict(
+                command_id="cmd-risk-snapshot-proof",
+                idempotency_key="idem-risk-snapshot-proof",
+                admission_id="admission-risk-snapshot-proof",
+                policy_id=item.policy_id,
+                intent_id="intent-risk-snapshot-proof",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_id="reservation-risk-snapshot-proof",
+                **public_financial_kwargs(store),
+            )
+            admitted = authority.admit(
+                reservation_book=reservations,
+                **kwargs,
+            )
+            risk_event = store.load_events(
+                "risk_decision",
+                admitted.risk_decision_id,
+            )[0]
+            snapshot = risk_event["payload"]["authoritative_risk_snapshot"]
+            self.assertTrue(
+                snapshot["snapshot_id"].startswith("risk-snapshot:sha256:")
+            )
+            self.assertEqual(snapshot["context_state_version"], 7)
+            self.assertEqual(
+                snapshot["capability_snapshot_id"],
+                PUBLIC_CAPABILITY_SNAPSHOT_ID,
+            )
+            self.assertEqual(
+                snapshot["reservation_version"],
+                0,
+            )
+            self.assertEqual(
+                snapshot["evidence_refs"]["PORTFOLIO"][:7],
+                "sha256:",
+            )
+
+            resolver_calls = []
+            restarted = authority_service(
+                store,
+                resolver=lambda request: (
+                    resolver_calls.append(request)
+                    or public_authoritative_risk_snapshot(
+                        request,
+                        evidence_suffix="different-after-commit",
+                    )
+                ),
+            )
+            replayed = restarted.admit(
+                reservation_book=DurableReservationBook(
+                    store,
+                    environment="PAPER",
+                    account_id="paper-1",
+                ),
+                **kwargs,
+            )
+            self.assertEqual(replayed, admitted)
+            self.assertEqual(resolver_calls, [])
+
+    def test_public_financial_admission_is_atomic_and_restart_idempotent(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
             item = policy(autonomous=True)
             authority.register_policy(item)
             reservations = DurableReservationBook(
@@ -1557,7 +1916,7 @@ class AuthorityTests(unittest.TestCase):
 
             # Lost-response replay re-evaluates the typed risk inputs against
             # immutable original evidence; it never reserves or publishes twice.
-            restarted_authority = AuthorityService(store)
+            restarted_authority = authority_service(store)
             restarted_reservations = DurableReservationBook(
                 store,
                 environment="PAPER",
@@ -1598,7 +1957,8 @@ class AuthorityTests(unittest.TestCase):
     def test_public_financial_admission_risk_rejection_does_not_reserve_or_publish(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            authority = AuthorityService(store)
+            rejected_policy = public_risk_policy(max_single_notional="50")
+            authority = authority_service(store, risk_policy=rejected_policy)
             item = policy(autonomous=True)
             authority.register_policy(item)
             reservations = DurableReservationBook(
@@ -1622,7 +1982,7 @@ class AuthorityTests(unittest.TestCase):
                 reservation_id="reservation-risk-reject",
                 **public_financial_kwargs(
                     store,
-                    risk_policy=public_risk_policy(max_single_notional="50")
+                    risk_policy=rejected_policy
                 ),
             )
             self.assertEqual(rejected.outcome, "REJECTED")
@@ -1640,7 +2000,7 @@ class AuthorityTests(unittest.TestCase):
     def test_public_financial_admission_stale_state_fails_closed(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            authority = AuthorityService(store)
+            authority = authority_service(store)
             item = policy(autonomous=True)
             authority.register_policy(item)
             reservations = DurableReservationBook(
@@ -1675,7 +2035,7 @@ class AuthorityTests(unittest.TestCase):
     def test_public_financial_admission_replay_rejects_changed_reservation_delta(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            authority = AuthorityService(store)
+            authority = authority_service(store)
             item = policy(autonomous=True)
             authority.register_policy(item)
             reservations = DurableReservationBook(
@@ -1702,7 +2062,7 @@ class AuthorityTests(unittest.TestCase):
                 reservation_book=reservations,
                 **kwargs,
             )
-            restarted = AuthorityService(store)
+            restarted = authority_service(store)
             restarted_book = DurableReservationBook(
                 store,
                 environment="PAPER",
@@ -1734,7 +2094,7 @@ class AuthorityTests(unittest.TestCase):
     def test_public_financial_admission_replay_rejects_changed_scope(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            authority = AuthorityService(store)
+            authority = authority_service(store)
             item = policy(autonomous=True)
             authority.register_policy(item)
             reservations = DurableReservationBook(
@@ -1758,7 +2118,7 @@ class AuthorityTests(unittest.TestCase):
                 **public_financial_kwargs(store),
             )
             authority.admit(reservation_book=reservations, **kwargs)
-            restarted = AuthorityService(store)
+            restarted = authority_service(store)
             restarted_book = DurableReservationBook(
                 store,
                 environment="PAPER",
@@ -1782,7 +2142,7 @@ class AuthorityTests(unittest.TestCase):
     def test_internal_bound_risk_commit_rejects_stale_reservation_cut(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            authority = AuthorityService(store)
+            authority = authority_service(store)
             item = policy(autonomous=True)
             authority.register_policy(item)
             reservations = DurableReservationBook(
@@ -1831,7 +2191,7 @@ class AuthorityTests(unittest.TestCase):
     def test_public_dispatch_rechecks_capability_and_reservation_state(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            authority = AuthorityService(store)
+            authority = authority_service(store)
             item = policy(autonomous=True)
             authority.register_policy(item)
             reservations = DurableReservationBook(
@@ -1900,7 +2260,7 @@ class AuthorityTests(unittest.TestCase):
     def test_public_dispatch_blocks_after_other_reservation_advances_book(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            authority = AuthorityService(store)
+            authority = authority_service(store)
             item = policy(autonomous=True)
             authority.register_policy(item)
             reservations = DurableReservationBook(

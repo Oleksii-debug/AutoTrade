@@ -1257,5 +1257,55 @@ class ReconciliationTests(unittest.TestCase):
             self.base(environment="PRODUCTION")
 
 
+    def test_matching_settlement_surfaces_are_part_of_account_reconciliation(self):
+        result = self.base(
+            local_settled_cash={"USD": "800"},
+            provider_settled_cash={"USD": "800"},
+            local_unsettled_receivable={"USD": "100"},
+            provider_unsettled_receivable={"USD": "100"},
+            local_unsettled_payable={"USD": "0"},
+            provider_unsettled_payable={"USD": "0"},
+            settlement_activity_complete=True,
+        )
+        self.assertTrue(result.complete)
+        self.assertTrue(result.settlement_activity_complete)
+        self.assertEqual(dict(result.settlement_differences), {})
+
+    def test_incomplete_settlement_activity_keeps_reconciliation_unknown(self):
+        result = self.base(
+            local_settled_cash={"USD": "800"},
+            provider_settled_cash={"USD": "800"},
+            local_unsettled_receivable={"USD": "100"},
+            provider_unsettled_receivable={"USD": "100"},
+            local_unsettled_payable={"USD": "0"},
+            provider_unsettled_payable={"USD": "0"},
+            settlement_activity_complete=False,
+        )
+        self.assertFalse(result.complete)
+        self.assertFalse(result.settlement_activity_complete)
+        self.assertIn("ACCOUNT", result.blocking_resources)
+        self.assertIn(
+            "provider settlement/activity coverage is incomplete",
+            result.reasons,
+        )
+
+    def test_pending_settlement_mismatch_blocks_cash_resource(self):
+        result = self.base(
+            local_settled_cash={"USD": "800"},
+            provider_settled_cash={"USD": "800"},
+            local_unsettled_receivable={"USD": "100"},
+            provider_unsettled_receivable={"USD": "90"},
+            local_unsettled_payable={"USD": "0"},
+            provider_unsettled_payable={"USD": "0"},
+            settlement_activity_complete=True,
+        )
+        self.assertFalse(result.complete)
+        self.assertIn("CASH:USD", result.blocking_resources)
+        self.assertEqual(
+            result.settlement_differences["RECEIVABLE:USD"],
+            Decimal("-10"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -111,6 +111,11 @@ def _stored_time(value: Any, *, name: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _utc_now() -> datetime:
+    """Sample local availability only at the durable writer boundary."""
+    return datetime.now(timezone.utc)
+
+
 def _stored_text(value: Any, *, name: str) -> str:
     try:
         normalized = _text(value, name=name)
@@ -523,14 +528,6 @@ class ExperienceMemory:
             }
         )
         canonical = _canonical(payload)
-        created_at = datetime.now(timezone.utc).isoformat()
-        availability_digest = _hash(
-            {
-                "episode_id": identifier,
-                "episode_hash": digest,
-                "created_at": created_at,
-            }
-        )
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             existing = con.execute("SELECT * FROM episodes WHERE episode_id=?", (identifier,)).fetchone()
@@ -546,6 +543,14 @@ class ExperienceMemory:
             if duplicate is not None:
                 self._verified_episode(duplicate)
                 return str(duplicate["episode_id"]), False
+            created_at = _utc_now().isoformat()
+            availability_digest = _hash(
+                {
+                    "episode_id": identifier,
+                    "episode_hash": digest,
+                    "created_at": created_at,
+                }
+            )
             con.execute(
                 """
                 INSERT INTO episodes(
@@ -727,14 +732,6 @@ class ExperienceMemory:
         episode = _identifier(episode_id)
         why = _text(reason, name="reason")
         identifier = _identifier()
-        created_at = datetime.now(timezone.utc).isoformat()
-        digest = _hash(
-            {
-                "episode_id": episode,
-                "reason": why,
-                "created_at": created_at,
-            }
-        )
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             source = con.execute(
@@ -744,6 +741,14 @@ class ExperienceMemory:
             if source is None:
                 raise KeyError(episode)
             self._verified_episode(source)
+            created_at = _utc_now().isoformat()
+            digest = _hash(
+                {
+                    "episode_id": episode,
+                    "reason": why,
+                    "created_at": created_at,
+                }
+            )
             con.execute(
                 """
                 INSERT INTO tombstones(

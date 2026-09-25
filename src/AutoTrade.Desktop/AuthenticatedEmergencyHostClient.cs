@@ -10,7 +10,7 @@ using System.Text.Json;
 
 namespace AutoTrade.Desktop;
 
-public sealed record EmergencyHostSession(string Actor, string Token)
+public sealed record EmergencyHostSession(string Actor, string Token, Uri Origin)
 {
     public EmergencyHostSession Validated()
     {
@@ -26,7 +26,12 @@ public sealed record EmergencyHostSession(string Actor, string Token)
             throw new InvalidOperationException("Emergency host session token is invalid.");
         }
 
-        return this;
+        Uri canonicalOrigin = AuthenticatedEmergencyHostClient.ValidateBaseUri(Origin);
+        return this with
+        {
+            Actor = Actor.Trim(),
+            Origin = canonicalOrigin,
+        };
     }
 }
 
@@ -43,16 +48,40 @@ public interface IEmergencyHostSessionProvider
 public sealed class WindowsCredentialManagerSessionProvider : IEmergencyHostSessionProvider
 {
     private const uint CredentialTypeGeneric = 1;
+    private const string CredentialTargetPrefix = "AutoTrade.HostSession:";
     private readonly string _targetName;
+    private readonly Uri _expectedOrigin;
 
-    public WindowsCredentialManagerSessionProvider(string targetName)
+    public WindowsCredentialManagerSessionProvider(
+        string targetName,
+        Uri expectedOrigin)
     {
         if (string.IsNullOrWhiteSpace(targetName))
         {
             throw new ArgumentException("Credential target is required.", nameof(targetName));
         }
 
-        _targetName = targetName.Trim();
+        _expectedOrigin = AuthenticatedEmergencyHostClient.ValidateBaseUri(expectedOrigin);
+        string canonicalTarget = CredentialTargetForOrigin(_expectedOrigin);
+        if (!string.Equals(
+                targetName.Trim(),
+                canonicalTarget,
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Credential target is not bound to the configured paired host origin. "
+                + "Re-pair the host instead of reusing a credential across origins.",
+                nameof(targetName));
+        }
+
+        _targetName = canonicalTarget;
+    }
+
+    public static string CredentialTargetForOrigin(Uri origin)
+    {
+        Uri canonical = AuthenticatedEmergencyHostClient.ValidateBaseUri(origin);
+        string authority = canonical.GetLeftPart(UriPartial.Authority);
+        return CredentialTargetPrefix + authority;
     }
 
     public EmergencyHostSession GetSession()
@@ -97,7 +126,10 @@ public sealed class WindowsCredentialManagerSessionProvider : IEmergencyHostSess
                     0,
                     checked((int)credential.CredentialBlobSize));
                 string token = Encoding.Unicode.GetString(tokenBytes).TrimEnd('\0');
-                return new EmergencyHostSession(actor.Trim(), token).Validated();
+                return new EmergencyHostSession(
+                    actor.Trim(),
+                    token,
+                    _expectedOrigin).Validated();
             }
             finally
             {
@@ -191,6 +223,26 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
 
     public Uri BaseUri { get; }
 
+    private EmergencyHostSession GetBoundSession(
+        EmergencyHostSession? knownSession = null)
+    {
+        EmergencyHostSession session =
+            (knownSession ?? _sessionProvider.GetSession()).Validated();
+        if (Uri.Compare(
+                session.Origin,
+                BaseUri,
+                UriComponents.SchemeAndServer,
+                UriFormat.UriEscaped,
+                StringComparison.OrdinalIgnoreCase) != 0)
+        {
+            throw new InvalidOperationException(
+                "The paired host session origin does not match the configured host origin. "
+                + "No authenticated request was created.");
+        }
+
+        return session;
+    }
+
     public async Task<EmergencyHostStatus> GetStatusAsync(
         CancellationToken cancellationToken)
     {
@@ -204,7 +256,9 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         await _commandGate.WaitAsync(cancellationToken);
         try
         {
-            EmergencyHostSession currentSession = _sessionProvider.GetSession().Validated();
+            EmergencyHostSession currentSession = GetBoundSession();
+            string currentSessionReference =
+                PublicSessionReference(currentSession.Token);
             bool recoveringUncertainCommand = _pendingCommand is not null;
             PendingCommand pending;
 
@@ -214,7 +268,9 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                         existing.Actor,
                         currentSession.Actor,
                         StringComparison.Ordinal)
-                    || !FixedTimeEquals(existing.Session, currentSession.Token))
+                    || !FixedTimeEquals(
+                        existing.SessionReference,
+                        currentSessionReference))
                 {
                     throw new EmergencyCommandUncertainException(
                         existing.CommandId,
@@ -233,7 +289,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                     CommandId: Guid.NewGuid().ToString("D"),
                     IdempotencyKey: Guid.NewGuid().ToString("D"),
                     Actor: currentSession.Actor,
-                    Session: currentSession.Token,
+                    SessionReference: currentSessionReference,
                     AccountId: snapshot.Status.AccountId,
                     Environment: snapshot.Status.Environment,
                     ExpectedStateVersion: snapshot.Status.StateVersion);
@@ -243,7 +299,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
             using HttpRequestMessage request = CreateRequest(
                 HttpMethod.Post,
                 "api/v1/commands",
-                new EmergencyHostSession(pending.Actor, pending.Session));
+                currentSession);
             request.Content = new StringContent(
                 JsonSerializer.Serialize(
                     new
@@ -252,7 +308,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                         expected_state_version = pending.ExpectedStateVersion,
                         idempotency_key = pending.IdempotencyKey,
                         actor = pending.Actor,
-                        session = PublicSessionReference(pending.Session),
+                        session = pending.SessionReference,
                         account_id = pending.AccountId,
                         environment = pending.Environment,
                         action = "BLOCK_NEW_EXPOSURE",
@@ -415,20 +471,24 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
 
     private void PersistPendingCommand(PendingCommand pending)
     {
-        string payload = JsonSerializer.Serialize(
+        _pendingCommandStore.Save(SerializePendingCommand(pending));
+        _pendingCommand = pending;
+    }
+
+    private static string SerializePendingCommand(PendingCommand pending)
+    {
+        return JsonSerializer.Serialize(
             new
             {
-                schema_version = "1",
+                schema_version = "2",
                 command_id = pending.CommandId,
                 idempotency_key = pending.IdempotencyKey,
                 actor = pending.Actor,
-                session = pending.Session,
+                session = pending.SessionReference,
                 account_id = pending.AccountId,
                 environment = pending.Environment,
                 expected_state_version = pending.ExpectedStateVersion,
             });
-        _pendingCommandStore.Save(payload);
-        _pendingCommand = pending;
     }
 
     private PendingCommand? LoadPendingCommand()
@@ -482,16 +542,19 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                 "Persisted emergency command has an unexpected schema.");
         }
 
-        if (!string.Equals(
-                RequiredString(value, "schema_version"),
-                "1",
-                StringComparison.Ordinal))
+        string schemaVersion = RequiredString(value, "schema_version");
+        if (schemaVersion is not ("1" or "2"))
         {
             throw new InvalidOperationException(
                 "Persisted emergency command schema version is unsupported.");
         }
 
-        return new PendingCommand(
+        string storedSession = RequiredString(value, "session");
+        string sessionReference = schemaVersion == "1"
+            ? PublicSessionReference(storedSession)
+            : CanonicalSessionReference(storedSession, "session");
+
+        PendingCommand pending = new(
             CommandId: CanonicalGuid(
                 RequiredString(value, "command_id"),
                 "command_id"),
@@ -499,12 +562,21 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                 RequiredString(value, "idempotency_key"),
                 "idempotency_key"),
             Actor: RequiredString(value, "actor"),
-            Session: RequiredString(value, "session"),
+            SessionReference: sessionReference,
             AccountId: RequiredString(value, "account_id"),
             Environment: RequiredString(value, "environment"),
             ExpectedStateVersion: CanonicalSequence(
                 RequiredString(value, "expected_state_version"),
                 "expected_state_version"));
+
+        if (schemaVersion == "1")
+        {
+            // V1 persisted the reusable bearer. Rewrite the same unresolved
+            // command identity immediately to the v2 public-reference record.
+            _pendingCommandStore.Save(SerializePendingCommand(pending));
+        }
+
+        return pending;
     }
 
     private bool TryClearPendingCommand()
@@ -532,7 +604,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         CancellationToken cancellationToken)
     {
         string canonicalId = CanonicalGuid(operationId, nameof(operationId));
-        EmergencyHostSession session = _sessionProvider.GetSession().Validated();
+        EmergencyHostSession session = GetBoundSession();
         using HttpRequestMessage request = CreateRequest(
             HttpMethod.Get,
             "api/v1/operations/" + Uri.EscapeDataString(canonicalId),
@@ -592,8 +664,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         CancellationToken cancellationToken,
         EmergencyHostSession? knownSession = null)
     {
-        EmergencyHostSession session =
-            (knownSession ?? _sessionProvider.GetSession()).Validated();
+        EmergencyHostSession session = GetBoundSession(knownSession);
         using HttpRequestMessage request = CreateRequest(
             HttpMethod.Get,
             "api/v1/state",
@@ -623,15 +694,11 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         }
 
         JsonElement permissions = RequiredObject(value, "permission_summary");
-        if (permissions.TryGetProperty("session", out _))
-        {
-            throw new InvalidOperationException(
-                "Host snapshot permission metadata must not expose a reusable session credential.");
-        }
-
-        string sessionId = RequiredString(permissions, "session_id");
+        string sessionReference = CanonicalSessionReference(
+            RequiredString(permissions, "session"),
+            "permission_summary.session");
         if (!FixedTimeEquals(
-                sessionId,
+                sessionReference,
                 PublicSessionReference(session.Token)))
         {
             throw new InvalidOperationException(
@@ -678,12 +745,13 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         string relativePath,
         EmergencyHostSession session)
     {
+        EmergencyHostSession boundSession = GetBoundSession(session);
         HttpRequestMessage request = new(method, new Uri(BaseUri, relativePath));
         request.Headers.Accept.Add(
             new MediaTypeWithQualityHeaderValue("application/json"));
         request.Headers.Authorization =
-            new AuthenticationHeaderValue("AutoTrade-Session", session.Token);
-        request.Headers.Add("X-AutoTrade-Actor", session.Actor);
+            new AuthenticationHeaderValue("AutoTrade-Session", boundSession.Token);
+        request.Headers.Add("X-AutoTrade-Actor", boundSession.Actor);
         request.Headers.CacheControl = new CacheControlHeaderValue { NoStore = true };
         return request;
     }
@@ -818,6 +886,22 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         return value;
     }
 
+    private static string CanonicalSessionReference(string value, string name)
+    {
+        bool valid = value.Length == 68
+            && value.StartsWith("sid-", StringComparison.Ordinal)
+            && value[4..].All(character =>
+                character is >= '0' and <= '9'
+                or >= 'a' and <= 'f');
+        if (!valid)
+        {
+            throw new InvalidOperationException(
+                $"{name} must be a canonical public session reference.");
+        }
+
+        return value;
+    }
+
     private static string CanonicalSequence(string value, string name)
     {
         bool valid = value == "0";
@@ -879,7 +963,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         }
     }
 
-    private static Uri ValidateBaseUri(Uri value)
+    internal static Uri ValidateBaseUri(Uri value)
     {
         if (value is null || !value.IsAbsoluteUri)
         {
@@ -919,7 +1003,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         string CommandId,
         string IdempotencyKey,
         string Actor,
-        string Session,
+        string SessionReference,
         string AccountId,
         string Environment,
         string ExpectedStateVersion);
@@ -957,7 +1041,8 @@ internal static class DesktopHostClientFactory
                 httpClient,
                 uri,
                 new WindowsCredentialManagerSessionProvider(
-                    canonicalCredentialTarget),
+                    canonicalCredentialTarget,
+                    uri),
                 new WindowsCredentialManagerPendingCommandStore(
                     canonicalCredentialTarget + ":pending-emergency-command-v1"));
         }

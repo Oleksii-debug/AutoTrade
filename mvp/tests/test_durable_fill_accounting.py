@@ -61,6 +61,7 @@ def fill_evidence(
         provider_execution_id=execution_id,
         client_order_id=client_order_id,
         instrument="ABC",
+        side=side,
         quantity=quantity,
         price=price,
         fee_amount="0",

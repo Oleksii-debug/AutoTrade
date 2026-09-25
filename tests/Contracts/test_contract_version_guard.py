@@ -10,19 +10,98 @@ from tools.contract_version_guard import evaluate, evaluate_refs
 def write_tree(root: Path, version="1.0.0", schemas=None, defs=None):
     schemas = ["a.schema.json"] if schemas is None else schemas
     defs = {"A": {"type": "string"}} if defs is None else defs
+    base_uri = f"https://schemas.autotrade.local/{version}/"
     (root / "contracts" / "jsonschema").mkdir(parents=True)
     (root / "contracts" / "manifest.json").write_text(
         json.dumps({
             "contract_version": version,
+            "schema_base_uri": base_uri,
             "schemas": schemas,
         }),
         encoding="utf-8",
     )
     for name in schemas:
         (root / "contracts" / "jsonschema" / name).write_text(
-            json.dumps({"$defs": defs}),
+            json.dumps({"$id": base_uri + name, "$defs": defs}),
             encoding="utf-8",
         )
+
+
+def write_openapi(
+    root: Path,
+    version: str,
+    operations: list[tuple[str, str, str]],
+    *,
+    descriptions=None,
+    default_security=None,
+    security_schemes=None,
+    operation_security=None,
+):
+    descriptions = {} if descriptions is None else descriptions
+    security_schemes = {} if security_schemes is None else security_schemes
+    operation_security = {} if operation_security is None else operation_security
+    manifest_path = root / "contracts" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["openapi"] = {
+        "path": "contracts/openapi/host-api.yaml",
+        "version": version,
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    path = root / "contracts" / "openapi" / "host-api.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "openapi: 3.1.0",
+        "info:",
+        "  title: test",
+        f"  version: {version}",
+    ]
+    if security_schemes:
+        lines.extend([
+            "components:",
+            "  securitySchemes:",
+        ])
+        for scheme, properties in security_schemes.items():
+            lines.append(f"    {scheme}:")
+            for key, value in properties.items():
+                lines.append(f"      {key}: {value}")
+    if default_security is not None:
+        if not default_security:
+            lines.append("security: []")
+        else:
+            lines.append("security:")
+            for requirement in default_security:
+                for index, scheme in enumerate(requirement):
+                    prefix = "  - " if index == 0 else "    "
+                    lines.append(f"{prefix}{scheme}: []")
+    lines.append("paths:")
+    for route, method, schema_ref in operations:
+        lines.extend([
+            f"  {route}:",
+            f"    {method}:",
+            f"      operationId: {method}_{route.replace('/', '_').replace('{', '').replace('}', '')}",
+        ])
+        description = descriptions.get((route, method))
+        if description:
+            lines.append(f"      description: {description}")
+        security = operation_security.get((route, method))
+        if security is not None:
+            if not security:
+                lines.append("      security: []")
+            else:
+                lines.append("      security:")
+                for requirement in security:
+                    for index, scheme in enumerate(requirement):
+                        prefix = "        - " if index == 0 else "          "
+                        lines.append(f"{prefix}{scheme}: []")
+        lines.extend([
+            "      responses:",
+            '        "200":',
+            "          content:",
+            "            application/json:",
+            "              schema:",
+            f"                $ref: {schema_ref}",
+        ])
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 class ContractVersionGuardTests(unittest.TestCase):
@@ -171,6 +250,483 @@ class ContractVersionGuardTests(unittest.TestCase):
             write_tree(Path(left), defs={"A": {}, "B": {}})
             write_tree(Path(right), version="2.0.0", defs={"A": {}})
             self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_existing_definition_change_requires_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left), defs={"A": {"type": "string"}})
+            write_tree(Path(right), version="1.1.0", defs={"A": {"type": "number"}})
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(any("changed existing definitions" in item for item in errors))
+
+    def test_existing_definition_change_allows_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left), defs={"A": {"type": "string"}})
+            write_tree(Path(right), version="2.0.0", defs={"A": {"type": "number"}})
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_additive_definition_allows_minor_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left), defs={"A": {"type": "string"}})
+            write_tree(
+                Path(right),
+                version="1.1.0",
+                defs={"A": {"type": "string"}, "B": {"type": "integer"}},
+            )
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_version_only_local_ref_change_is_not_semantic_break(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(
+                Path(left),
+                defs={
+                    "A": {
+                        "type": "object",
+                        "properties": {
+                            "value": {
+                                "$ref": "https://schemas.autotrade.local/1.0.0/a.schema.json#/$defs/B"
+                            }
+                        },
+                    },
+                    "B": {"type": "string"},
+                },
+            )
+            write_tree(
+                Path(right),
+                version="1.1.0",
+                defs={
+                    "A": {
+                        "type": "object",
+                        "properties": {
+                            "value": {
+                                "$ref": "https://schemas.autotrade.local/1.1.0/a.schema.json#/$defs/B"
+                            }
+                        },
+                    },
+                    "B": {"type": "string"},
+                },
+            )
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_annotation_only_change_allows_patch_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(
+                Path(left),
+                defs={"A": {"type": "string", "description": "old wording"}},
+            )
+            write_tree(
+                Path(right),
+                version="1.0.1",
+                defs={"A": {"type": "string", "description": "new wording"}},
+            )
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_openapi_existing_operation_change_requires_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+            )
+            write_tree(Path(right), version="1.1.0")
+            write_openapi(
+                Path(right),
+                "1.1.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/B")],
+            )
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(any("changed OpenAPI operations" in item for item in errors))
+
+    def test_openapi_removed_operation_requires_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [
+                    ("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A"),
+                    ("/v1/health", "get", "../jsonschema/a.schema.json#/$defs/A"),
+                ],
+            )
+            write_tree(Path(right), version="1.1.0")
+            write_openapi(
+                Path(right),
+                "1.1.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+            )
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(any("removed OpenAPI operations" in item for item in errors))
+
+    def test_openapi_additive_operation_allows_minor_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+            )
+            write_tree(Path(right), version="1.1.0")
+            write_openapi(
+                Path(right),
+                "1.1.0",
+                [
+                    ("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A"),
+                    ("/v1/health", "get", "../jsonschema/a.schema.json#/$defs/A"),
+                ],
+            )
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_openapi_description_only_change_allows_patch_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                descriptions={("/v1/state", "get"): "old wording"},
+            )
+            write_tree(Path(right), version="1.0.1")
+            write_openapi(
+                Path(right),
+                "1.0.1",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                descriptions={("/v1/state", "get"): "new wording"},
+            )
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_openapi_default_security_removal_requires_major_increment(self):
+        schemes = {
+            "AutoTradeSession": {"type": "apiKey", "in": "header", "name": "Authorization"},
+            "AutoTradeActor": {"type": "apiKey", "in": "header", "name": "X-AutoTrade-Actor"},
+        }
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["AutoTradeSession", "AutoTradeActor"]],
+                security_schemes=schemes,
+            )
+            write_tree(Path(right), version="1.1.0")
+            write_openapi(
+                Path(right),
+                "1.1.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[],
+                security_schemes=schemes,
+            )
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(
+                any("changed OpenAPI default security requirements" in item for item in errors)
+            )
+
+    def test_openapi_default_security_and_requirement_cannot_drop_actor_on_minor(self):
+        schemes = {
+            "AutoTradeSession": {"type": "apiKey", "in": "header", "name": "Authorization"},
+            "AutoTradeActor": {"type": "apiKey", "in": "header", "name": "X-AutoTrade-Actor"},
+        }
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["AutoTradeSession", "AutoTradeActor"]],
+                security_schemes=schemes,
+            )
+            write_tree(Path(right), version="1.1.0")
+            write_openapi(
+                Path(right),
+                "1.1.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["AutoTradeSession"]],
+                security_schemes=schemes,
+            )
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(
+                any("changed OpenAPI default security requirements" in item for item in errors)
+            )
+
+    def test_openapi_security_scheme_header_change_requires_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["AutoTradeSession"]],
+                security_schemes={
+                    "AutoTradeSession": {
+                        "type": "apiKey",
+                        "in": "header",
+                        "name": "Authorization",
+                    }
+                },
+            )
+            write_tree(Path(right), version="1.1.0")
+            write_openapi(
+                Path(right),
+                "1.1.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["AutoTradeSession"]],
+                security_schemes={
+                    "AutoTradeSession": {
+                        "type": "apiKey",
+                        "in": "header",
+                        "name": "X-Replacement-Auth",
+                    }
+                },
+            )
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(
+                any("changed OpenAPI security schemes: AutoTradeSession" in item for item in errors)
+            )
+
+    def test_openapi_security_description_only_change_allows_patch_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["AutoTradeSession"]],
+                security_schemes={
+                    "AutoTradeSession": {
+                        "type": "apiKey",
+                        "in": "header",
+                        "name": "Authorization",
+                        "description": "old wording",
+                    }
+                },
+            )
+            write_tree(Path(right), version="1.0.1")
+            write_openapi(
+                Path(right),
+                "1.0.1",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["AutoTradeSession"]],
+                security_schemes={
+                    "AutoTradeSession": {
+                        "type": "apiKey",
+                        "in": "header",
+                        "name": "Authorization",
+                        "description": "new wording",
+                    }
+                },
+            )
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_openapi_unused_additive_security_scheme_allows_minor_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["AutoTradeSession"]],
+                security_schemes={
+                    "AutoTradeSession": {
+                        "type": "apiKey",
+                        "in": "header",
+                        "name": "Authorization",
+                    }
+                },
+            )
+            write_tree(Path(right), version="1.1.0")
+            write_openapi(
+                Path(right),
+                "1.1.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["AutoTradeSession"]],
+                security_schemes={
+                    "AutoTradeSession": {
+                        "type": "apiKey",
+                        "in": "header",
+                        "name": "Authorization",
+                    },
+                    "FutureScheme": {
+                        "type": "apiKey",
+                        "in": "header",
+                        "name": "X-Future",
+                    },
+                },
+            )
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_openapi_default_security_alternative_order_is_semantically_equal(self):
+        schemes = {
+            "Session": {"type": "apiKey", "in": "header", "name": "Authorization"},
+            "Actor": {"type": "apiKey", "in": "header", "name": "X-Actor"},
+        }
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["Session"], ["Actor"]],
+                security_schemes=schemes,
+            )
+            write_tree(Path(right), version="1.0.1")
+            write_openapi(
+                Path(right),
+                "1.0.1",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["Actor"], ["Session"]],
+                security_schemes=schemes,
+            )
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_openapi_default_security_and_member_order_is_semantically_equal(self):
+        schemes = {
+            "Session": {"type": "apiKey", "in": "header", "name": "Authorization"},
+            "Actor": {"type": "apiKey", "in": "header", "name": "X-Actor"},
+        }
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["Session", "Actor"]],
+                security_schemes=schemes,
+            )
+            write_tree(Path(right), version="1.0.1")
+            write_openapi(
+                Path(right),
+                "1.0.1",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["Actor", "Session"]],
+                security_schemes=schemes,
+            )
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_openapi_security_scheme_property_order_is_semantically_equal(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["Session"]],
+                security_schemes={
+                    "Session": {
+                        "type": "apiKey",
+                        "in": "header",
+                        "name": "Authorization",
+                    }
+                },
+            )
+            write_tree(Path(right), version="1.0.1")
+            write_openapi(
+                Path(right),
+                "1.0.1",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["Session"]],
+                security_schemes={
+                    "Session": {
+                        "name": "Authorization",
+                        "type": "apiKey",
+                        "in": "header",
+                    }
+                },
+            )
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_openapi_security_scheme_removal_requires_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["Session"]],
+                security_schemes={
+                    "Session": {
+                        "type": "apiKey",
+                        "in": "header",
+                        "name": "Authorization",
+                    },
+                    "Unused": {
+                        "type": "apiKey",
+                        "in": "header",
+                        "name": "X-Unused",
+                    },
+                },
+            )
+            write_tree(Path(right), version="1.1.0")
+            write_openapi(
+                Path(right),
+                "1.1.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["Session"]],
+                security_schemes={
+                    "Session": {
+                        "type": "apiKey",
+                        "in": "header",
+                        "name": "Authorization",
+                    }
+                },
+            )
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(
+                any("removed OpenAPI security schemes: Unused" in item for item in errors)
+            )
+
+    def test_openapi_block_scope_list_is_multi_item_and_order_insensitive(self):
+        schemes = {
+            "OAuth": {"type": "oauth2", "in": "header", "name": "Authorization"},
+        }
+
+        def write_scoped(root: Path, version: str, scopes: list[str]) -> None:
+            write_tree(root, version=version)
+            write_openapi(
+                root,
+                version,
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["OAuth"]],
+                security_schemes=schemes,
+            )
+            path = root / "contracts" / "openapi" / "host-api.yaml"
+            text = path.read_text(encoding="utf-8")
+            replacement = "  - OAuth:\n" + "\n".join(
+                f"      - {scope}" for scope in scopes
+            )
+            path.write_text(
+                text.replace("  - OAuth: []", replacement),
+                encoding="utf-8",
+            )
+
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_scoped(Path(left), "1.0.0", ["orders:read", "fills:read"])
+            write_scoped(Path(right), "1.0.1", ["fills:read", "orders:read"])
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_openapi_health_security_override_is_operation_semantics(self):
+        schemes = {
+            "AutoTradeSession": {"type": "apiKey", "in": "header", "name": "Authorization"},
+        }
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/health", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["AutoTradeSession"]],
+                security_schemes=schemes,
+                operation_security={("/v1/health", "get"): []},
+            )
+            write_tree(Path(right), version="1.1.0")
+            write_openapi(
+                Path(right),
+                "1.1.0",
+                [("/v1/health", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["AutoTradeSession"]],
+                security_schemes=schemes,
+            )
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(any("changed OpenAPI operations" in item for item in errors))
 
     def test_ref_evaluation_uses_clean_archives_for_both_sides(self):
         with TemporaryDirectory() as base_dir, TemporaryDirectory() as current_dir:

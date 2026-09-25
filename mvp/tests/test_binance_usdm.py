@@ -56,6 +56,7 @@ def execution_observation(
     ).encode("utf-8")
     return observe_authenticated_json_response(
         query_binding=query,
+        http_status=200,
         response_bytes=raw,
         observed_at=NOW,
     )
@@ -359,6 +360,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                             "price": "100",
                             "qty": "0.2",
                             "positionSide": "BOTH",
+                            "side": "BUY",
                             "symbol": "btcusdt",
                             "time": 1790272800123,
                         }
@@ -398,6 +400,35 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
         self.assertEqual(fill.price, Decimal("7819.01"))
         self.assertEqual(fill.fee_amount, Decimal("0.07819010"))
         self.assertEqual(fill.fee_currency, "USDT")
+        self.assertEqual(fill.side, "SELL")
+        self.assertEqual(fill.position_side, "SHORT")
+
+        conflicting = dict(row)
+        conflicting["side"] = "BUY"
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "conflicting economic content"):
+            parse_account_trades(
+                execution_observation([row, conflicting]),
+                instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
+                client_ids_by_order_id={25851813: "at-usdm-fill"},
+            )
+
+    def test_trade_direction_is_required_from_provider_bytes(self):
+        row = {
+            "commission": "0.01",
+            "commissionAsset": "USDT",
+            "id": 8,
+            "orderId": 43,
+            "price": "100",
+            "qty": "0.2",
+            "positionSide": "BOTH",
+            "symbol": "BTCUSDT",
+            "time": 1790272800123,
+        }
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "side"):
+            parse_account_trades(
+                execution_observation([row]),
+                instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
+            )
 
     def test_client_order_identity_map_is_fully_validated_before_fill_mapping(self):
         row = {
@@ -408,6 +439,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             "price": "100",
             "qty": "0.2",
             "positionSide": "BOTH",
+            "side": "BUY",
             "symbol": "BTCUSDT",
             "time": 1790272800123,
         }
@@ -451,6 +483,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             "price": "101",
             "qty": "0.1",
             "positionSide": "BOTH",
+            "side": "BUY",
             "symbol": "BTCUSDT",
             "time": 1790272800123,
         }
@@ -483,6 +516,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             "price": "100",
             "qty": "0.2",
             "positionSide": "BOTH",
+            "side": "BUY",
             "symbol": "BTCUSDT",
             "time": 1790272800123,
         }
@@ -544,6 +578,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                         "price": "100",
                         "qty": "0.1",
                         "positionSide": "INVALID",
+                        "side": "BUY",
                         "symbol": "BTCUSDT",
                         "time": 1790272800123,
                     }

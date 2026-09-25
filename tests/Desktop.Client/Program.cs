@@ -8,6 +8,14 @@ namespace DesktopClientContracts;
 
 internal static class Program
 {
+    static readonly Uri HostOrigin = new("http://127.0.0.1:8765/");
+
+    static EmergencyHostSession PairedSession(
+        string token,
+        string actor = "owner",
+        Uri? origin = null) =>
+        new(actor, token, origin ?? HostOrigin);
+
     static HttpResponseMessage Json(HttpStatusCode status, object value) =>
         new(status)
         {
@@ -34,7 +42,7 @@ internal static class Program
         {
             actor = "owner",
             role = "OWNER",
-            session_id = AuthenticatedEmergencyHostClient.PublicSessionReference(token),
+            session = AuthenticatedEmergencyHostClient.PublicSessionReference(token),
         },
         connection_freshness = new { host = "CURRENT", as_of = NowUtc() },
         portfolio = new { },
@@ -58,11 +66,66 @@ internal static class Program
             "request actor header is missing or changed");
     }
     
+    static void CredentialTargetIsOriginBoundTest()
+    {
+        string target =
+            WindowsCredentialManagerSessionProvider.CredentialTargetForOrigin(
+                HostOrigin);
+        Check.True(
+            target == "AutoTrade.HostSession:http://127.0.0.1:8765",
+            "credential target is not a deterministic canonical origin binding");
+
+        _ = new WindowsCredentialManagerSessionProvider(target, HostOrigin);
+        Check.Throws<ArgumentException>(
+            () => _ = new WindowsCredentialManagerSessionProvider(
+                target,
+                new Uri("http://127.0.0.1:8766/")),
+            "credential target was reusable across a different host origin");
+    }
+
+    static async Task PairedOriginMismatchFailsBeforeTransportTest()
+    {
+        const string token = "origin-bound-session-token";
+        int transportCalls = 0;
+        MutableSessionProvider sessions =
+            new(PairedSession(
+                token,
+                origin: new Uri("http://127.0.0.1:8766/")));
+        MemoryPendingCommandStore pendingStore = new();
+        DelegateHandler handler = new((request, _, _) =>
+        {
+            transportCalls++;
+            Check.True(
+                request.Headers.Authorization?.Parameter != token,
+                "mismatched-origin bearer reached the HTTP transport");
+            throw new InvalidOperationException(
+                "origin mismatch must fail before HTTP transport");
+        });
+        AuthenticatedEmergencyHostClient client = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions,
+            pendingStore);
+
+        await Check.ThrowsAsync<InvalidOperationException>(
+            () => client.GetStatusAsync(CancellationToken.None),
+            "mismatched paired origin did not block authenticated status request");
+        await Check.ThrowsAsync<InvalidOperationException>(
+            () => client.BlockNewExposureAsync(CancellationToken.None),
+            "mismatched paired origin did not block emergency command");
+        Check.True(
+            transportCalls == 0,
+            "mismatched paired origin caused an HTTP call");
+        Check.True(
+            pendingStore.Payload is null,
+            "origin mismatch persisted a command before authority was established");
+    }
+
     static async Task CanonicalStatusAndOperationTest()
     {
         const string token = "session-token-a";
         MutableSessionProvider sessions =
-            new(new EmergencyHostSession("owner", token));
+            new(PairedSession(token));
         DelegateHandler handler = new(async (request, _, cancellationToken) =>
         {
             AssertAuth(request, token);
@@ -122,7 +185,7 @@ internal static class Program
     {
         const string token = "session-token-b";
         MutableSessionProvider sessions =
-            new(new EmergencyHostSession("owner", token));
+            new(PairedSession(token));
         List<string> commandBodies = [];
         int postCount = 0;
         const string operationId = "33333333-3333-3333-3333-333333333333";
@@ -233,7 +296,7 @@ internal static class Program
     {
         const string originalToken = "session-token-c";
         MutableSessionProvider sessions =
-            new(new EmergencyHostSession("owner", originalToken));
+            new(PairedSession(originalToken));
         int posts = 0;
     
         DelegateHandler handler = new(async (request, _, cancellationToken) =>
@@ -259,7 +322,7 @@ internal static class Program
             "first ambiguous send must be uncertain");
         Check.True(posts == 1, "first command was not sent exactly once");
     
-        sessions.Session = new EmergencyHostSession("owner", "different-session-token");
+        sessions.Session = PairedSession("different-session-token");
         await Check.ThrowsAsync<EmergencyCommandUncertainException>(
             () => client.BlockNewExposureAsync(CancellationToken.None),
             "changed session must not retarget unresolved command");
@@ -272,7 +335,7 @@ internal static class Program
     {
         const string token = "session-token-restart";
         MutableSessionProvider sessions =
-            new(new EmergencyHostSession("owner", token));
+            new(PairedSession(token));
         MemoryPendingCommandStore pendingStore = new();
         List<string> commandBodies = [];
         int posts = 0;
@@ -357,6 +420,17 @@ internal static class Program
         Check.True(
             pendingStore.Payload is not null,
             "uncertain command was not persisted before restart");
+        Check.True(
+            !pendingStore.Payload!.Contains(token, StringComparison.Ordinal),
+            "durable recovery record persisted the reusable bearer credential");
+        Check.True(
+            pendingStore.Payload!.Contains(
+                AuthenticatedEmergencyHostClient.PublicSessionReference(token),
+                StringComparison.Ordinal),
+            "durable recovery record did not persist the canonical public session reference");
+        Check.True(
+            pendingStore.Payload!.Contains("\"schema_version\":\"2\"", StringComparison.Ordinal),
+            "durable recovery record was not upgraded to the bearer-free v2 schema");
 
         AuthenticatedEmergencyHostClient restartedProcess = new(
             new HttpClient(handler),
@@ -409,7 +483,7 @@ internal static class Program
     {
         const string originalToken = "session-token-restart-original";
         MutableSessionProvider sessions =
-            new(new EmergencyHostSession("owner", originalToken));
+            new(PairedSession(originalToken));
         MemoryPendingCommandStore pendingStore = new();
         int posts = 0;
 
@@ -436,7 +510,7 @@ internal static class Program
             "first process must retain ambiguous send");
 
         sessions.Session =
-            new EmergencyHostSession("owner", "replacement-session-token");
+            PairedSession("replacement-session-token");
         AuthenticatedEmergencyHostClient restartedProcess = new(
             new HttpClient(handler),
             new Uri("http://127.0.0.1:8765/"),
@@ -450,6 +524,64 @@ internal static class Program
             "restart sent a persisted command under a replacement session");
     }
 
+    static async Task LegacyBearerRecoveryRecordMigratesFailClosedTest()
+    {
+        const string token = "legacy-session-token";
+        const string commandId = "55555555-5555-5555-5555-555555555555";
+        MutableSessionProvider sessions =
+            new(PairedSession(token));
+        MemoryPendingCommandStore pendingStore = new()
+        {
+            Payload = JsonSerializer.Serialize(
+                new
+                {
+                    schema_version = "1",
+                    command_id = commandId,
+                    idempotency_key = "66666666-6666-6666-6666-666666666666",
+                    actor = "owner",
+                    session = token,
+                    account_id = "paper-account-1",
+                    environment = "PAPER",
+                    expected_state_version = "11",
+                }),
+        };
+        int transportCalls = 0;
+        DelegateHandler handler = new((_, _, _) =>
+        {
+            transportCalls++;
+            throw new InvalidOperationException(
+                "mismatched recovered session must fail before transport");
+        });
+
+        AuthenticatedEmergencyHostClient client = new(
+            new HttpClient(handler),
+            new Uri("http://127.0.0.1:8765/"),
+            sessions,
+            pendingStore);
+
+        Check.True(
+            pendingStore.Payload is not null
+                && !pendingStore.Payload.Contains(token, StringComparison.Ordinal),
+            "legacy durable recovery record retained the reusable bearer after migration");
+        Check.True(
+            pendingStore.Payload!.Contains(
+                AuthenticatedEmergencyHostClient.PublicSessionReference(token),
+                StringComparison.Ordinal)
+                && pendingStore.Payload.Contains(
+                    "\"schema_version\":\"2\"",
+                    StringComparison.Ordinal),
+            "legacy recovery record did not migrate to the canonical public-reference schema");
+
+        sessions.Session =
+            PairedSession("replacement-session-token");
+        await Check.ThrowsAsync<EmergencyCommandUncertainException>(
+            () => client.BlockNewExposureAsync(CancellationToken.None),
+            "migrated unresolved command must not retarget to a replacement session");
+        Check.True(
+            transportCalls == 0,
+            "migrated unresolved command reached transport under a replacement session");
+    }
+
     static void CorruptPersistedCommandFailsClosedTest()
     {
         MemoryPendingCommandStore pendingStore = new()
@@ -457,7 +589,7 @@ internal static class Program
             Payload = "{\"schema_version\":\"1\",\"command_id\":\"not-a-uuid\"}",
         };
         MutableSessionProvider sessions =
-            new(new EmergencyHostSession("owner", "session-token-corrupt"));
+            new(PairedSession("session-token-corrupt"));
 
         Check.Throws<InvalidOperationException>(
             () => _ = new AuthenticatedEmergencyHostClient(
@@ -474,7 +606,7 @@ internal static class Program
     {
         const string token = "session-token-secret-must-never-echo";
         MutableSessionProvider sessions =
-            new(new EmergencyHostSession("owner", token));
+            new(PairedSession(token));
         DelegateHandler handler = new((request, _, _) =>
         {
             AssertAuth(request, token);
@@ -517,15 +649,22 @@ internal static class Program
             !safeState.Contains(token, StringComparison.Ordinal),
             "canonical snapshot fixture leaked the bearer credential");
         Check.True(
-            !safeState.Contains("\"session\":", StringComparison.Ordinal),
-            "canonical permission metadata must not expose a session credential field");
+            safeState.Contains(
+                "\"session\":\""
+                    + AuthenticatedEmergencyHostClient.PublicSessionReference(token)
+                    + "\"",
+                StringComparison.Ordinal),
+            "canonical permission metadata must expose only the public session reference");
+        Check.True(
+            !safeState.Contains("session_id", StringComparison.Ordinal),
+            "legacy session_id alias must not survive contract v3");
     }
 
     static async Task ScopeAndCanonicalResponseFailureTest()
     {
         const string token = "session-token-d";
         MutableSessionProvider sessions =
-            new(new EmergencyHostSession("owner", token));
+            new(PairedSession(token));
         DelegateHandler handler = new((request, _, _) =>
         {
             AssertAuth(request, token);
@@ -561,11 +700,14 @@ internal static class Program
 
     public static async Task Main()
     {
+        CredentialTargetIsOriginBoundTest();
+        await PairedOriginMismatchFailsBeforeTransportTest();
         await CanonicalStatusAndOperationTest();
         await AmbiguousPostExactRetryTest();
         await UncertainCommandCannotRetargetSessionTest();
         await UncertainCommandSurvivesDesktopRestartTest();
         await RestartedCommandCannotRetargetSessionTest();
+        await LegacyBearerRecoveryRecordMigratesFailClosedTest();
         CorruptPersistedCommandFailsClosedTest();
         await ScopeAndCanonicalResponseFailureTest();
         await SnapshotBearerEchoFailsClosedTest();

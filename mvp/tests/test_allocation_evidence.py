@@ -23,6 +23,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             max_symbol_notional="1000",
             max_total_cost="50",
             max_stress_loss="500",
+            max_turnover_notional="1000",
             require_adverse_stress_evidence=True,
             require_fresh_stress_evidence=True,
         )
@@ -156,6 +157,8 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 "reservation_state_digest": "3" * 64,
                 "cash_available": capital_cash,
                 "base_currency": "USD",
+                "positions_complete": True,
+                "position_quantities": {"AAA": "0"},
             },
         )
         stress = self.evidence(

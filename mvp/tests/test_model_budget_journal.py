@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import sqlite3
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.model_budget_journal import DurableModelBudget
 from mvp.autotrade_mvp.model_gateway import (
@@ -65,6 +66,30 @@ def route_model_descriptor(*, cost="0.6", revision="r1"):
 
 
 class DurableModelBudgetTests(unittest.TestCase):
+    def test_initialization_does_not_mask_journal_contract_failure(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            with patch.object(
+                journal,
+                "append_event",
+                side_effect=ValueError("synthetic journal contract violation"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "synthetic journal contract violation",
+                ):
+                    DurableModelBudget(
+                        journal=journal,
+                        budget_id="policy-init-failure",
+                        ceiling="1",
+                        environment="SIMULATION",
+                        clock=lambda: NOW,
+                    )
+            self.assertEqual(
+                journal.load_events("model_budget", "policy-init-failure"),
+                [],
+            )
+
     def test_durable_route_ignores_inflated_caller_budget(self):
         with TemporaryDirectory() as directory:
             _, budget = open_budget(directory, ceiling="0")

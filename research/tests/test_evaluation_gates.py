@@ -50,6 +50,50 @@ def evidence(**overrides):
 
 
 class EvaluationGateTests(unittest.TestCase):
+    def test_direct_profile_construction_cannot_bypass_registered_thresholds(self):
+        with self.assertRaisesRegex(ValueError, "minimum_net_advantage"):
+            GateProfile(
+                profile_id="direct-bad",
+                minimum_net_advantage="-0.01",
+                max_drawdown="0.10",
+                max_adverse_cost_loss="0.03",
+                min_power="0.80",
+                primary_baseline_id="champion",
+                baseline_ids=("cash", "champion"),
+                selection_correction="holm-v1",
+                max_trials=20,
+                required_regimes=("normal",),
+                require_complete_trials=True,
+                require_causal_audit=True,
+                require_financial_invariants=True,
+            )
+
+    def test_direct_evidence_construction_enforces_exact_types_and_ranges(self):
+        base = dict(
+            registered_profile_id="gate-v1",
+            profile_unchanged_after_results=True,
+            reproducible=True,
+            causal_audit_passed=True,
+            financial_invariants_passed=True,
+            trial_log_complete=True,
+            dependence_aware_lower_bound="0.02",
+            estimated_power="0.85",
+            net_advantage="0.03",
+            drawdown="0.05",
+            adverse_cost_loss="0.01",
+            retention_passed=True,
+            baseline_advantages={"champion": "0.03"},
+            selection_correction_applied="holm-v1",
+            trials_attempted=1,
+            regime_coverage=frozenset({"normal"}),
+        )
+        with self.assertRaisesRegex(TypeError, "reproducible"):
+            EvaluationEvidence(**{**base, "reproducible": 1})
+        with self.assertRaisesRegex(ValueError, "estimated_power"):
+            EvaluationEvidence(**{**base, "estimated_power": "1.01"})
+        with self.assertRaisesRegex(TypeError, "regime_coverage"):
+            EvaluationEvidence(**{**base, "regime_coverage": frozenset({"normal", 7})})
+
     def test_complete_registered_evidence_can_pass(self):
         self.assertEqual(evaluate_gates(profile(), evidence()).status, "PASS")
 

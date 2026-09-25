@@ -75,7 +75,12 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
 
             spec = runtime_spec()
             current_plan = plan(spec, "fin-1", "fin-2")
-            cut = begin_runtime_campaign(journal=journal, spec=spec, plan=current_plan)
+            cut = begin_runtime_campaign(
+                journal=journal,
+                spec=spec,
+                plan=current_plan,
+                monotonic_ns=lambda: 1_000_000_000,
+            )
 
             journal.append_event(envelope("fin-1"))
             journal.append_event(envelope("research-1", aggregate_type="research"))
@@ -94,6 +99,7 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                     "memory_peak_bytes": 1024,
                     "disk_fsync_p95_us": 200,
                 },
+                "monotonic_ns": lambda: 1_900_000_000,
             }
             first = collect_runtime_campaign_evidence(journal=journal, **kwargs)
             self.assertEqual(first.start_journal_sequence, 1)
@@ -108,6 +114,63 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                 second.recovered_financial_event_bindings,
                 first.recovered_financial_event_bindings,
             )
+
+    def test_campaign_monotonic_duration_enforces_declared_throughput(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(samples=1)
+            current_plan = plan(spec, "fin-1")
+            cut = begin_runtime_campaign(
+                journal=journal,
+                spec=spec,
+                plan=current_plan,
+                monotonic_ns=lambda: 10_000_000_000,
+            )
+            journal.append_event(envelope("fin-1"))
+
+            evidence = collect_runtime_campaign_evidence(
+                journal=journal,
+                spec=spec,
+                plan=current_plan,
+                cut=cut,
+                financial_latency_us=(100,),
+                financial_staleness_us=(80,),
+                research_interference_us=(50,),
+                resource_evidence_hash=RESOURCE,
+                resource_metrics={"cpu_peak_millis": 500},
+                monotonic_ns=lambda: 11_100_000_000,
+            )
+            self.assertEqual(evidence.declared_duration_us, 1_000_000)
+            self.assertEqual(evidence.observed_duration_us, 1_100_000)
+            decision = evaluate_runtime_campaign(spec, evidence)
+            self.assertEqual(decision.status, "FAIL")
+            self.assertIn("declared_throughput_not_met", decision.reasons)
+
+    def test_campaign_rejects_monotonic_clock_regression(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(samples=1)
+            current_plan = plan(spec, "fin-1")
+            cut = begin_runtime_campaign(
+                journal=journal,
+                spec=spec,
+                plan=current_plan,
+                monotonic_ns=lambda: 2_000,
+            )
+            journal.append_event(envelope("fin-1"))
+            with self.assertRaisesRegex(RuntimeBudgetError, "moved backwards"):
+                collect_runtime_campaign_evidence(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                    cut=cut,
+                    financial_latency_us=(100,),
+                    financial_staleness_us=(80,),
+                    research_interference_us=(50,),
+                    resource_evidence_hash=RESOURCE,
+                    resource_metrics={"cpu_peak_millis": 500},
+                    monotonic_ns=lambda: 1_999,
+                )
 
     def test_missing_expected_financial_event_is_a_budget_failure_not_a_caller_count(self):
         with TemporaryDirectory() as directory:
@@ -214,6 +277,8 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                 release_sha=spec.release_sha,
                 configuration_hash=spec.configuration_hash,
                 host_fingerprint=spec.host_fingerprint,
+                declared_duration_us=1_000_000,
+                observed_duration_us=900_000,
                 start_journal_sequence=0,
                 end_journal_sequence=0,
                 expected_financial_event_ids=("fin-1",),

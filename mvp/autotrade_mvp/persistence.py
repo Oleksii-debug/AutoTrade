@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
+import re
 import sqlite3
 from typing import Any
 
@@ -16,6 +17,25 @@ def canonical_json(value: Any) -> str:
 
 def payload_digest(value: Any) -> str:
     return "sha256:" + sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+_SEQUENCE_RE = re.compile(r"^(0|[1-9][0-9]*)$")
+
+
+def _sequence(value: object, *, name: str, positive: bool = False) -> int:
+    """Validate canonical Sequence text before integer persistence/arithmetic."""
+
+    if not isinstance(value, str) or _SEQUENCE_RE.fullmatch(value) is None:
+        qualifier = "positive " if positive else ""
+        raise ValueError(
+            f"{name} must be a {qualifier}canonical integer sequence string"
+        )
+    number = int(value)
+    if positive and number == 0:
+        raise ValueError(
+            f"{name} must be a positive canonical integer sequence string"
+        )
+    return number
 
 
 @dataclass(frozen=True)
@@ -32,7 +52,7 @@ class JournalStore:
     publication intent; a separate qualified dispatcher must perform delivery.
     """
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 3
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -51,58 +71,296 @@ class JournalStore:
         finally:
             connection.close()
 
+    @classmethod
+    def _migration_statements(cls, version: int) -> tuple[str, ...]:
+        if version == 1:
+            return (
+                """
+                CREATE TABLE IF NOT EXISTS events (
+                    event_id TEXT PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    aggregate_type TEXT NOT NULL,
+                    aggregate_id TEXT NOT NULL,
+                    aggregate_version INTEGER NOT NULL CHECK (aggregate_version > 0),
+                    payload_json TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    committed_at TEXT NOT NULL,
+                    UNIQUE (aggregate_type, aggregate_id, aggregate_version)
+                )
+                """,
+                """
+                CREATE INDEX IF NOT EXISTS idx_events_aggregate
+                    ON events(aggregate_type, aggregate_id, aggregate_version)
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS outbox (
+                    outbox_id TEXT PRIMARY KEY,
+                    event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id) ON DELETE RESTRICT,
+                    topic TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    delivered_at TEXT
+                )
+                """,
+                """
+                CREATE INDEX IF NOT EXISTS idx_outbox_pending
+                    ON outbox(delivered_at, created_at, outbox_id)
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS command_dedupe (
+                    command_id TEXT PRIMARY KEY,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    request_hash TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    state_version INTEGER NOT NULL CHECK (state_version >= 0),
+                    created_at TEXT NOT NULL
+                )
+                """,
+            )
+        if version == 2:
+            return (
+                """
+                CREATE TABLE IF NOT EXISTS projection_checkpoints (
+                    projection_name TEXT NOT NULL,
+                    aggregate_type TEXT NOT NULL,
+                    aggregate_id TEXT NOT NULL,
+                    aggregate_version INTEGER NOT NULL CHECK (aggregate_version >= 0),
+                    state_json TEXT NOT NULL,
+                    state_hash TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (projection_name, aggregate_type, aggregate_id)
+                )
+                """,
+                """
+                CREATE INDEX IF NOT EXISTS idx_projection_checkpoint_version
+                    ON projection_checkpoints(
+                        aggregate_type, aggregate_id, aggregate_version
+                    )
+                """,
+            )
+        if version == 3:
+            return (
+                """
+                CREATE TABLE command_dedupe_v3 (
+                    command_id TEXT PRIMARY KEY,
+                    actor TEXT NOT NULL,
+                    environment TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    state_version INTEGER NOT NULL CHECK (state_version >= 0),
+                    created_at TEXT NOT NULL,
+                    UNIQUE (actor, environment, idempotency_key)
+                )
+                """,
+                """
+                INSERT INTO command_dedupe_v3(
+                    command_id, actor, environment, idempotency_key,
+                    request_hash, result_json, state_version, created_at
+                )
+                SELECT
+                    command_id, '__LEGACY_UNSCOPED__', '__LEGACY_UNSCOPED__',
+                    idempotency_key, request_hash, result_json, state_version, created_at
+                FROM command_dedupe
+                """,
+                "DROP TABLE command_dedupe",
+                "ALTER TABLE command_dedupe_v3 RENAME TO command_dedupe",
+            )
+        raise ValueError(f"Unsupported journal migration version: {version}")
+
+    @classmethod
+    def _required_table_columns(cls) -> dict[str, frozenset[str]]:
+        command_columns = {
+            "command_id", "idempotency_key", "request_hash", "result_json",
+            "state_version", "created_at",
+        }
+        if cls.SCHEMA_VERSION >= 3:
+            command_columns.update({"actor", "environment"})
+        required = {
+            "schema_migrations": frozenset({"version", "applied_at"}),
+            "events": frozenset({
+                "event_id", "event_type", "aggregate_type", "aggregate_id",
+                "aggregate_version", "payload_json", "payload_hash", "committed_at",
+            }),
+            "outbox": frozenset({
+                "outbox_id", "event_id", "topic", "payload_json",
+                "created_at", "delivered_at",
+            }),
+            "command_dedupe": frozenset(command_columns),
+        }
+        if cls.SCHEMA_VERSION >= 2:
+            required["projection_checkpoints"] = frozenset({
+                "projection_name", "aggregate_type", "aggregate_id",
+                "aggregate_version", "state_json", "state_hash", "updated_at",
+            })
+        return required
+
+    @staticmethod
+    def _unique_index_columns(connection, table_name: str) -> set[tuple[str, ...]]:
+        unique_indexes: set[tuple[str, ...]] = set()
+        for index_row in connection.execute(f"PRAGMA index_list({table_name})"):
+            if not bool(index_row["unique"]):
+                continue
+            index_name = str(index_row["name"]).replace("'", "''")
+            columns = tuple(
+                str(column_row["name"])
+                for column_row in connection.execute(
+                    f"PRAGMA index_info('{index_name}')"
+                )
+            )
+            unique_indexes.add(columns)
+        return unique_indexes
+
+    @classmethod
+    def _validate_key_contracts(cls, connection) -> None:
+        expected_primary_keys = {
+            "events": ("event_id",),
+            "outbox": ("outbox_id",),
+            "command_dedupe": ("command_id",),
+        }
+        if cls.SCHEMA_VERSION >= 2:
+            expected_primary_keys["projection_checkpoints"] = (
+                "projection_name",
+                "aggregate_type",
+                "aggregate_id",
+            )
+        expected_unique = {
+            "events": {
+                ("aggregate_type", "aggregate_id", "aggregate_version"),
+            },
+            "outbox": {("event_id",)},
+            "command_dedupe": (
+                {("actor", "environment", "idempotency_key")}
+                if cls.SCHEMA_VERSION >= 3
+                else {("idempotency_key",)}
+            ),
+        }
+        for table_name, expected_pk in expected_primary_keys.items():
+            pk_columns = tuple(
+                str(row["name"])
+                for row in sorted(
+                    (
+                        row
+                        for row in connection.execute(
+                            f"PRAGMA table_info({table_name})"
+                        )
+                        if int(row["pk"]) > 0
+                    ),
+                    key=lambda row: int(row["pk"]),
+                )
+            )
+            if pk_columns != expected_pk:
+                raise ValueError(
+                    f"Journal schema table {table_name} has invalid primary key"
+                )
+
+        for table_name, required_indexes in expected_unique.items():
+            actual = cls._unique_index_columns(connection, table_name)
+            missing = required_indexes - actual
+            if missing:
+                rendered = "; ".join(",".join(columns) for columns in sorted(missing))
+                raise ValueError(
+                    f"Journal schema table {table_name} is missing unique constraint: "
+                    + rendered
+                )
+
+        foreign_keys = [
+            row
+            for row in connection.execute("PRAGMA foreign_key_list(outbox)")
+            if (
+                str(row["table"]) == "events"
+                and str(row["from"]) == "event_id"
+                and str(row["to"]) == "event_id"
+                and str(row["on_delete"]).upper() == "RESTRICT"
+            )
+        ]
+        if not foreign_keys:
+            raise ValueError(
+                "Journal schema table outbox is missing event ownership foreign key"
+            )
+
     def _initialize(self) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
-            )
-            versions = [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")]
-            if any(version > self.SCHEMA_VERSION for version in versions):
-                raise ValueError("Journal schema is newer than this runtime")
-            if self.SCHEMA_VERSION not in versions:
-                connection.executescript(
-                    """
-                    CREATE TABLE IF NOT EXISTS events (
-                        event_id TEXT PRIMARY KEY,
-                        event_type TEXT NOT NULL,
-                        aggregate_type TEXT NOT NULL,
-                        aggregate_id TEXT NOT NULL,
-                        aggregate_version INTEGER NOT NULL CHECK (aggregate_version > 0),
-                        payload_json TEXT NOT NULL,
-                        payload_hash TEXT NOT NULL,
-                        committed_at TEXT NOT NULL,
-                        UNIQUE (aggregate_type, aggregate_id, aggregate_version)
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_events_aggregate
-                        ON events(aggregate_type, aggregate_id, aggregate_version);
-
-                    CREATE TABLE IF NOT EXISTS outbox (
-                        outbox_id TEXT PRIMARY KEY,
-                        event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id) ON DELETE RESTRICT,
-                        topic TEXT NOT NULL,
-                        payload_json TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        delivered_at TEXT
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_outbox_pending
-                        ON outbox(delivered_at, created_at, outbox_id);
-
-                    CREATE TABLE IF NOT EXISTS command_dedupe (
-                        command_id TEXT PRIMARY KEY,
-                        idempotency_key TEXT NOT NULL UNIQUE,
-                        request_hash TEXT NOT NULL,
-                        result_json TEXT NOT NULL,
-                        state_version INTEGER NOT NULL CHECK (state_version >= 0),
-                        created_at TEXT NOT NULL
-                    );
-                    """
-                )
+            try:
                 connection.execute(
-                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                    (self.SCHEMA_VERSION, self._now()),
+                    "CREATE TABLE IF NOT EXISTS schema_migrations "
+                    "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
                 )
-            connection.commit()
+                versions = [
+                    int(row[0])
+                    for row in connection.execute(
+                        "SELECT version FROM schema_migrations ORDER BY version"
+                    )
+                ]
+                if any(version > self.SCHEMA_VERSION for version in versions):
+                    raise ValueError("Journal schema is newer than this runtime")
+                if versions:
+                    expected = list(range(1, versions[-1] + 1))
+                    if versions != expected:
+                        raise ValueError("Journal schema migration history is not contiguous")
+
+                current = versions[-1] if versions else 0
+                for version in range(current + 1, self.SCHEMA_VERSION + 1):
+                    for statement in self._migration_statements(version):
+                        connection.execute(statement)
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                        (version, self._now()),
+                    )
+
+                required_tables = {
+                    "schema_migrations",
+                    "events",
+                    "outbox",
+                    "command_dedupe",
+                }
+                if self.SCHEMA_VERSION >= 2:
+                    required_tables.add("projection_checkpoints")
+                present_tables = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+                missing_tables = required_tables - present_tables
+                if missing_tables:
+                    raise ValueError(
+                        "Journal schema is incomplete: " + ", ".join(sorted(missing_tables))
+                    )
+
+                # Table names alone are not sufficient evidence of a valid
+                # migration.  A crash or legacy partial migration can leave a
+                # pre-existing table that makes CREATE TABLE IF NOT EXISTS a
+                # no-op.  Verify the structural column contract before
+                # recording this runtime as schema-compatible.
+                for table_name, required_columns in self._required_table_columns().items():
+                    actual_columns = {
+                        str(row["name"])
+                        for row in connection.execute(
+                            f"PRAGMA table_info({table_name})"
+                        )
+                    }
+                    missing_columns = required_columns - actual_columns
+                    if missing_columns:
+                        raise ValueError(
+                            "Journal schema table "
+                            + table_name
+                            + " is missing required columns: "
+                            + ", ".join(sorted(missing_columns))
+                        )
+                self._validate_key_contracts(connection)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def current_schema_version(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT MAX(version) FROM schema_migrations"
+            ).fetchone()
+        return 0 if row is None or row[0] is None else int(row[0])
 
     @staticmethod
     def _now() -> str:
@@ -112,10 +370,10 @@ class JournalStore:
     def _require_text(value: Any, name: str) -> str:
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{name} must be non-empty text")
-        return value
+        return value.strip()
 
     def get_event(self, event_id: str) -> dict[str, Any] | None:
-        self._require_text(event_id, "event_id")
+        event_id = self._require_text(event_id, "event_id")
         with self._connect() as connection:
             row = connection.execute(
                 """
@@ -139,8 +397,8 @@ class JournalStore:
         }
 
     def next_aggregate_version(self, aggregate_type: str, aggregate_id: str) -> int:
-        self._require_text(aggregate_type, "aggregate_type")
-        self._require_text(aggregate_id, "aggregate_id")
+        aggregate_type = self._require_text(aggregate_type, "aggregate_type")
+        aggregate_id = self._require_text(aggregate_id, "aggregate_id")
         with self._connect() as connection:
             current = connection.execute(
                 "SELECT MAX(aggregate_version) FROM events WHERE aggregate_type = ? AND aggregate_id = ?",
@@ -154,11 +412,16 @@ class JournalStore:
         aggregate_type = self._require_text(envelope.get("aggregate_type"), "aggregate_type")
         aggregate_id = self._require_text(envelope.get("aggregate_id"), "aggregate_id")
         try:
-            aggregate_version = int(envelope["aggregate_version"])
-        except (KeyError, TypeError, ValueError) as error:
-            raise ValueError("aggregate_version must be a positive integer") from error
-        if aggregate_version <= 0:
-            raise ValueError("aggregate_version must be a positive integer")
+            raw_aggregate_version = envelope["aggregate_version"]
+        except KeyError as error:
+            raise ValueError(
+                "aggregate_version must be a positive canonical integer sequence string"
+            ) from error
+        aggregate_version = _sequence(
+            raw_aggregate_version,
+            name="aggregate_version",
+            positive=True,
+        )
         payload = envelope.get("payload")
         expected_hash = payload_digest(payload)
         supplied_hash = envelope.get("payload_hash")
@@ -167,7 +430,7 @@ class JournalStore:
         payload_json = canonical_json(payload)
         committed_at = self._require_text(envelope.get("committed_at"), "committed_at")
         if outbox_topic is not None:
-            self._require_text(outbox_topic, "outbox_topic")
+            outbox_topic = self._require_text(outbox_topic, "outbox_topic")
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -230,8 +493,8 @@ class JournalStore:
         return AppendResult(event_id, aggregate_version, True)
 
     def load_events(self, aggregate_type: str, aggregate_id: str) -> list[dict[str, Any]]:
-        self._require_text(aggregate_type, "aggregate_type")
-        self._require_text(aggregate_id, "aggregate_id")
+        aggregate_type = self._require_text(aggregate_type, "aggregate_type")
+        aggregate_id = self._require_text(aggregate_id, "aggregate_id")
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -256,6 +519,148 @@ class JournalStore:
             }
             for row in rows
         ]
+
+    def save_projection_checkpoint(
+        self,
+        *,
+        projection_name: str,
+        aggregate_type: str,
+        aggregate_id: str,
+        aggregate_version: int,
+        state: Any,
+    ) -> bool:
+        """Persist only derived projection state; the event journal remains authoritative."""
+
+        projection_name = self._require_text(
+            projection_name, "projection_name"
+        )
+        aggregate_type = self._require_text(
+            aggregate_type, "aggregate_type"
+        )
+        aggregate_id = self._require_text(aggregate_id, "aggregate_id")
+        if (
+            not isinstance(aggregate_version, int)
+            or isinstance(aggregate_version, bool)
+            or aggregate_version < 0
+        ):
+            raise ValueError("aggregate_version must be a non-negative integer")
+        state_json = canonical_json(state)
+        state_hash = payload_digest(state)
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                current = connection.execute(
+                    "SELECT MAX(aggregate_version) FROM events "
+                    "WHERE aggregate_type = ? AND aggregate_id = ?",
+                    (aggregate_type, aggregate_id),
+                ).fetchone()[0]
+                journal_version = 0 if current is None else int(current)
+                if aggregate_version > journal_version:
+                    raise ValueError("projection checkpoint cannot outrun the journal")
+
+                existing = connection.execute(
+                    """
+                    SELECT aggregate_version, state_json, state_hash
+                    FROM projection_checkpoints
+                    WHERE projection_name = ?
+                      AND aggregate_type = ?
+                      AND aggregate_id = ?
+                    """,
+                    (projection_name, aggregate_type, aggregate_id),
+                ).fetchone()
+                if existing is not None:
+                    existing_version = int(existing["aggregate_version"])
+                    exact = (
+                        existing_version == aggregate_version
+                        and existing["state_json"] == state_json
+                        and existing["state_hash"] == state_hash
+                    )
+                    if exact:
+                        connection.commit()
+                        return False
+                    if aggregate_version <= existing_version:
+                        raise ValueError(
+                            "projection checkpoint cannot regress or change at the same version"
+                        )
+
+                connection.execute(
+                    """
+                    INSERT INTO projection_checkpoints(
+                        projection_name, aggregate_type, aggregate_id,
+                        aggregate_version, state_json, state_hash, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(projection_name, aggregate_type, aggregate_id)
+                    DO UPDATE SET
+                        aggregate_version = excluded.aggregate_version,
+                        state_json = excluded.state_json,
+                        state_hash = excluded.state_hash,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        projection_name,
+                        aggregate_type,
+                        aggregate_id,
+                        aggregate_version,
+                        state_json,
+                        state_hash,
+                        self._now(),
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return True
+
+    def load_projection_checkpoint(
+        self,
+        *,
+        projection_name: str,
+        aggregate_type: str,
+        aggregate_id: str,
+    ) -> dict[str, Any] | None:
+        projection_name = self._require_text(
+            projection_name, "projection_name"
+        )
+        aggregate_type = self._require_text(
+            aggregate_type, "aggregate_type"
+        )
+        aggregate_id = self._require_text(aggregate_id, "aggregate_id")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT aggregate_version, state_json, state_hash, updated_at
+                FROM projection_checkpoints
+                WHERE projection_name = ?
+                  AND aggregate_type = ?
+                  AND aggregate_id = ?
+                """,
+                (projection_name, aggregate_type, aggregate_id),
+            ).fetchone()
+            if row is None:
+                return None
+            current = connection.execute(
+                "SELECT MAX(aggregate_version) FROM events "
+                "WHERE aggregate_type = ? AND aggregate_id = ?",
+                (aggregate_type, aggregate_id),
+            ).fetchone()[0]
+
+        state = json.loads(row["state_json"])
+        if payload_digest(state) != row["state_hash"]:
+            raise ValueError("projection checkpoint hash does not match state")
+        journal_version = 0 if current is None else int(current)
+        if int(row["aggregate_version"]) > journal_version:
+            raise ValueError("projection checkpoint is ahead of the journal")
+        return {
+            "projection_name": projection_name,
+            "aggregate_type": aggregate_type,
+            "aggregate_id": aggregate_id,
+            "aggregate_version": int(row["aggregate_version"]),
+            "state": state,
+            "state_hash": row["state_hash"],
+            "updated_at": row["updated_at"],
+        }
 
     def pending_outbox(self, *, limit: int = 100) -> list[dict[str, Any]]:
         if not isinstance(limit, int) or limit < 1 or limit > 1000:
@@ -283,7 +688,7 @@ class JournalStore:
         ]
 
     def mark_outbox_delivered(self, outbox_id: str) -> bool:
-        self._require_text(outbox_id, "outbox_id")
+        outbox_id = self._require_text(outbox_id, "outbox_id")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -302,26 +707,76 @@ class JournalStore:
             connection.commit()
         return True
 
+    @staticmethod
+    def _command_environment(value: object) -> str:
+        normalized = value.strip().upper() if isinstance(value, str) else ""
+        if normalized not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+            raise ValueError(
+                "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
+            )
+        return normalized
+
+    def _command_scope(
+        self,
+        *,
+        actor: str,
+        environment: str,
+        idempotency_key: str,
+    ) -> tuple[str, str, str]:
+        return (
+            self._require_text(actor, "actor"),
+            self._command_environment(environment),
+            self._require_text(idempotency_key, "idempotency_key"),
+        )
+
+    @staticmethod
+    def _reject_legacy_unscoped_key(connection, idempotency_key: str) -> None:
+        legacy = connection.execute(
+            "SELECT 1 FROM command_dedupe "
+            "WHERE actor = '__LEGACY_UNSCOPED__' "
+            "AND environment = '__LEGACY_UNSCOPED__' "
+            "AND idempotency_key = ?",
+            (idempotency_key,),
+        ).fetchone()
+        if legacy is not None:
+            raise ValueError(
+                "idempotency_key exists in legacy unscoped command history; "
+                "use a new key"
+            )
+
     def record_command(
         self,
         *,
         command_id: str,
+        actor: str,
+        environment: str,
         idempotency_key: str,
         request: Any,
         result: Any,
         state_version: int,
     ) -> tuple[Any, bool]:
-        self._require_text(command_id, "command_id")
-        self._require_text(idempotency_key, "idempotency_key")
-        if not isinstance(state_version, int) or state_version < 0:
+        command_id = self._require_text(command_id, "command_id")
+        actor, environment, idempotency_key = self._command_scope(
+            actor=actor,
+            environment=environment,
+            idempotency_key=idempotency_key,
+        )
+        if (
+            not isinstance(state_version, int)
+            or isinstance(state_version, bool)
+            or state_version < 0
+        ):
             raise ValueError("state_version must be a non-negative integer")
         request_hash = payload_digest(request)
         result_json = canonical_json(result)
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self._reject_legacy_unscoped_key(connection, idempotency_key)
             existing = connection.execute(
-                "SELECT * FROM command_dedupe WHERE idempotency_key = ?", (idempotency_key,)
+                "SELECT * FROM command_dedupe "
+                "WHERE actor = ? AND environment = ? AND idempotency_key = ?",
+                (actor, environment, idempotency_key),
             ).fetchone()
             if existing is not None:
                 if existing["request_hash"] != request_hash:
@@ -337,10 +792,14 @@ class JournalStore:
             connection.execute(
                 """
                 INSERT INTO command_dedupe(
-                    command_id, idempotency_key, request_hash, result_json, state_version, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    command_id, actor, environment, idempotency_key,
+                    request_hash, result_json, state_version, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (command_id, idempotency_key, request_hash, result_json, state_version, self._now()),
+                (
+                    command_id, actor, environment, idempotency_key,
+                    request_hash, result_json, state_version, self._now(),
+                ),
             )
             connection.commit()
         return result, True
@@ -349,6 +808,8 @@ class JournalStore:
         self,
         *,
         command_id: str,
+        actor: str,
+        environment: str,
         idempotency_key: str,
         request: Any,
         result: Any,
@@ -357,8 +818,12 @@ class JournalStore:
     ) -> tuple[Any, bool, tuple[AppendResult, ...]]:
         """Atomically commit command dedupe, ordered events and outbox rows."""
 
-        self._require_text(command_id, "command_id")
-        self._require_text(idempotency_key, "idempotency_key")
+        command_id = self._require_text(command_id, "command_id")
+        actor, environment, idempotency_key = self._command_scope(
+            actor=actor,
+            environment=environment,
+            idempotency_key=idempotency_key,
+        )
         if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
         if not events:
@@ -380,11 +845,16 @@ class JournalStore:
             aggregate_type = self._require_text(envelope.get("aggregate_type"), "aggregate_type")
             aggregate_id = self._require_text(envelope.get("aggregate_id"), "aggregate_id")
             try:
-                aggregate_version = int(envelope["aggregate_version"])
-            except (KeyError, TypeError, ValueError) as error:
-                raise ValueError("aggregate_version must be a positive integer") from error
-            if aggregate_version <= 0:
-                raise ValueError("aggregate_version must be a positive integer")
+                raw_aggregate_version = envelope["aggregate_version"]
+            except KeyError as error:
+                raise ValueError(
+                    "aggregate_version must be a positive canonical integer sequence string"
+                ) from error
+            aggregate_version = _sequence(
+                raw_aggregate_version,
+                name="aggregate_version",
+                positive=True,
+            )
             payload = envelope.get("payload")
             payload_json = canonical_json(payload)
             supplied_hash = envelope.get("payload_hash")
@@ -411,9 +881,11 @@ class JournalStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                self._reject_legacy_unscoped_key(connection, idempotency_key)
                 existing = connection.execute(
-                    "SELECT * FROM command_dedupe WHERE idempotency_key = ?",
-                    (idempotency_key,),
+                    "SELECT * FROM command_dedupe "
+                    "WHERE actor = ? AND environment = ? AND idempotency_key = ?",
+                    (actor, environment, idempotency_key),
                 ).fetchone()
                 if existing is not None:
                     if existing["request_hash"] != request_hash:
@@ -455,12 +927,14 @@ class JournalStore:
                 connection.execute(
                     """
                     INSERT INTO command_dedupe(
-                        command_id, idempotency_key, request_hash, result_json,
-                        state_version, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        command_id, actor, environment, idempotency_key,
+                        request_hash, result_json, state_version, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         command_id,
+                        actor,
+                        environment,
                         idempotency_key,
                         request_hash,
                         result_json,

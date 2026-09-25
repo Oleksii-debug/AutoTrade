@@ -85,6 +85,38 @@ class DurableReconciliationAuthorityTests(unittest.TestCase):
 
 
 class RuntimeRecoveryTests(unittest.TestCase):
+    def _record_durable_reconciliation(
+        self,
+        controller,
+        store,
+        *,
+        account_id="acct",
+        environment="PAPER",
+        reconciliation_id="runtime-ready",
+    ):
+        owner = controller.owner
+        if owner is None:
+            raise AssertionError("controller owner must exist before reconciliation")
+        result = reconciliation(
+            account_id=account_id,
+            environment=environment,
+            provider_activity_account_id=account_id,
+        )
+        record_reconciliation_checkpoint(
+            store,
+            reconciliation_id=reconciliation_id,
+            result=result,
+            observed_at="2026-09-24T19:00:00Z",
+            host_id=owner.owner_id,
+            owner_epoch=str(owner.epoch),
+        )
+        return controller.record_reconciliation_checkpoint(
+            reconciliation_id=reconciliation_id,
+            provider_id=result.provider_id,
+            account_id=result.account_id,
+            environment=result.environment,
+        )
+
     def _ready(self):
         controller = RecoveryController()
         owner = controller.start("host-a")
@@ -376,7 +408,9 @@ class RuntimeRecoveryTests(unittest.TestCase):
                 owner_scope="PAPER:paper-account",
             )
             owner_one = first.start("host-a")
-            first.record_reconciliation(consistent=True)
+            self._record_durable_reconciliation(
+                first, first._owner_store, account_id="paper-account"
+            )
             first.validate_sender(owner_one.owner_id, owner_one.epoch)
             self.assertEqual(owner_one.epoch, 1)
 
@@ -395,7 +429,9 @@ class RuntimeRecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(PermissionError, "Durable sender fence"):
                 first.record_reconciliation(consistent=True)
 
-            second.record_reconciliation(consistent=True)
+            self._record_durable_reconciliation(
+                second, second._owner_store, account_id="paper-account"
+            )
             second.validate_sender(owner_two.owner_id, owner_two.epoch)
 
             third = RecoveryController(
@@ -423,14 +459,17 @@ class RuntimeRecoveryTests(unittest.TestCase):
             self.assertEqual(paper_owner.epoch, 1)
             self.assertEqual(live_owner.epoch, 1)
 
-            paper.record_reconciliation(consistent=True)
+            self._record_durable_reconciliation(paper, shared, account_id="acct")
             transferred = paper.transfer_owner(
                 new_owner_id="paper-host-2",
                 old_sender_fenced=True,
                 reconciled=True,
             )
             self.assertEqual(transferred.epoch, 2)
-            live.record_reconciliation(consistent=True)
+            self._record_durable_reconciliation(
+                live, shared, account_id="acct", environment="LIVE",
+                reconciliation_id="runtime-live-ready",
+            )
             live.validate_sender(live_owner.owner_id, live_owner.epoch)
 
     def test_durable_transfer_fences_an_observer_of_old_generation(self):
@@ -441,7 +480,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
                 owner_scope="PAPER:acct",
             )
             owner = first.start("host-a")
-            first.record_reconciliation(consistent=True)
+            self._record_durable_reconciliation(first, first._owner_store, account_id="acct")
 
             stale = RecoveryController(
                 owner_store=JournalStore(path),
@@ -489,7 +528,9 @@ class RuntimeRecoveryTests(unittest.TestCase):
                 owner_scope="PAPER:acct",
             )
             owner = controller.start("host-a")
-            controller.record_reconciliation(consistent=True)
+            self._record_durable_reconciliation(
+                controller, controller._owner_store, account_id="acct"
+            )
 
             connection = sqlite3.connect(path)
             try:

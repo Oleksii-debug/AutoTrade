@@ -412,9 +412,10 @@ def parse_submission_response(
     *,
     attempt_id: str,
     client_order_id: str,
-    response: Mapping[str, object],
+    response: Mapping[str, object] | None,
     observed_at: str,
     environment: str,
+    transport_ambiguous: bool = False,
 ) -> dict[str, object]:
     """Map a recorded successful create-order response to SubmissionResult.
 
@@ -422,10 +423,32 @@ def parse_submission_response(
     filled, unique execution economics must come from activity evidence.
     """
 
-    if not isinstance(response, Mapping):
-        raise TypeError("response must be a mapping")
     aid = _uuid_text(attempt_id, name="attempt_id")
     cid = validate_client_order_id(client_order_id)
+    when = _utc_text(observed_at, name="observed_at")
+    env = _text(environment, name="environment").upper()
+    if env not in {"PAPER", "LIVE"}:
+        raise AlpacaAdapterError("response environment must be PAPER or LIVE")
+    if type(transport_ambiguous) is not bool:
+        raise TypeError("transport_ambiguous must be boolean")
+    if transport_ambiguous:
+        if response is not None:
+            raise AlpacaAdapterError(
+                "ambiguous transport must not fabricate a provider response"
+            )
+        return {
+            "attempt_id": aid,
+            "outcome": "UNKNOWN",
+            "client_order_id": cid,
+            "provider_received_at": None,
+            "observed_at": when,
+            "provider_environment": env,
+            "reason_code": "ALPACA_TRANSPORT_AMBIGUOUS",
+            "evidence": [],
+            "retry_disposition": "RECONCILE_FIRST",
+        }
+    if not isinstance(response, Mapping):
+        raise TypeError("response must be a mapping")
     provider_order_id = _uuid_text(response.get("id"), name="response.id")
     echoed = validate_client_order_id(
         _text(response.get("client_order_id"), name="response.client_order_id")
@@ -434,7 +457,6 @@ def parse_submission_response(
         raise AlpacaAdapterError(
             "Alpaca client_order_id response does not match request"
         )
-    when = _utc_text(observed_at, name="observed_at")
     return {
         "attempt_id": aid,
         "outcome": "ACKNOWLEDGED",
@@ -445,7 +467,7 @@ def parse_submission_response(
             _response_evidence(
                 response,
                 observed_at=when,
-                environment=environment,
+                environment=env,
             )
         ],
         "retry_disposition": "NEVER",

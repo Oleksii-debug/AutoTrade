@@ -22,7 +22,12 @@ from typing import Any, Sequence
 from .diagnostics import build_diagnostic_snapshot
 from .persistence import JournalStore, payload_digest
 from .reconciliation_journal import require_current_reconciliation_checkpoint
-from .recovery import HostState, OwnerFence, RecoveryController
+from .recovery import (
+    HostState,
+    OwnerFence,
+    RecoveryController,
+    load_sender_fence_receipt,
+)
 
 
 BACKUP_SCHEMA_VERSION = 1
@@ -312,91 +317,42 @@ def _read_restore_marker(root: Path) -> dict[str, Any]:
 
 def _load_sender_fence_evidence(
     root: Path,
-    digest_ref: str,
+    event_id: str,
     *,
     marker: dict[str, Any],
     restored_at: datetime,
     completed_at: datetime,
 ) -> dict[str, Any]:
-    canonical = _canonical_sha256_ref(
-        digest_ref,
-        name="sender fencing evidence",
+    """Load fencing proof only from the journal authority used by final send guards."""
+
+    event_identity = _nonempty_text(
+        event_id,
+        name="sender fencing event_id",
     )
-    digest = canonical.removeprefix("sha256:")
-    object_path = (
-        root
-        / "artifacts"
-        / "objects"
-        / "sha256"
-        / digest[:2]
-        / digest
-    )
-    if (
-        object_path.is_symlink()
-        or not object_path.is_file()
-        or _sha256_file(object_path) != digest
-    ):
-        raise BackupIntegrityError(
-            "Sender fencing evidence object is missing or corrupt"
-        )
     try:
-        payload = json.loads(object_path.read_bytes())
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        receipt = load_sender_fence_receipt(
+            JournalStore(root / "state" / "journal.sqlite3"),
+            event_id=event_identity,
+            owner_scope=_nonempty_text(
+                marker["source_owner_scope"],
+                name="source_owner_scope",
+            ),
+            expected_context_sha256=_canonical_sha256_ref(
+                marker["backup_manifest_sha256"],
+                name="backup_manifest_sha256",
+            ),
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
         raise BackupIntegrityError(
-            "Sender fencing evidence is not valid JSON"
+            "Sender fencing evidence is not authority-issued durable truth"
         ) from error
-    required = {
-        "schema_version",
-        "kind",
-        "backup_manifest_sha256",
-        "old_owner_id",
-        "old_owner_epoch",
-        "new_owner_id",
-        "new_owner_epoch",
-        "fenced_at",
-        "method",
-    }
-    if not isinstance(payload, dict) or set(payload) != required:
-        raise BackupIntegrityError(
-            "Sender fencing evidence structure is invalid"
-        )
-    if (
-        payload["schema_version"] != 1
-        or payload["kind"] != "AUTOTRADE_SENDER_FENCE_EVIDENCE"
-        or payload["backup_manifest_sha256"]
-        != marker["backup_manifest_sha256"]
-    ):
-        raise BackupIntegrityError(
-            "Sender fencing evidence is not bound to this restore"
-        )
-    old_owner_id = _nonempty_text(
-        payload["old_owner_id"], name="old_owner_id"
-    )
-    new_owner_id = _nonempty_text(
-        payload["new_owner_id"], name="new_owner_id"
-    )
-    old_epoch = payload["old_owner_epoch"]
-    new_epoch = payload["new_owner_epoch"]
-    if (
-        isinstance(old_epoch, bool)
-        or not isinstance(old_epoch, int)
-        or old_epoch < 1
-        or isinstance(new_epoch, bool)
-        or not isinstance(new_epoch, int)
-        or new_epoch != old_epoch + 1
-        or new_owner_id == old_owner_id
-    ):
-        raise BackupIntegrityError(
-            "Sender fencing evidence owner transition is invalid"
-        )
-    fenced_at = _utc_text(payload["fenced_at"], name="fenced_at")
+
+    fenced_at = _utc_text(receipt["fenced_at"], name="fenced_at")
     if fenced_at < restored_at or fenced_at > completed_at:
         raise BackupIntegrityError(
             "Sender fencing evidence timestamp is outside restore completion window"
         )
-    _nonempty_text(payload["method"], name="fencing method")
-    return {"sha256": canonical, **payload}
-
+    return dict(receipt)
 
 def _validate_stored_reconciliation_payload(payload: object) -> dict[str, Any]:
     if not isinstance(payload, dict):
@@ -1302,12 +1258,13 @@ def complete_restore_reconciliation(
     fencing_evidence: Sequence[str],
     completed_at: str,
 ) -> dict[str, Any]:
-    """Durably clear a restore gate from journal-issued reconciliation and fence evidence.
+    """Durably clear a restore gate from journal-issued reconciliation and fencing.
 
     Reconciliation authority is recovered from the exact current AccountReconciled
-    event for the current recovery owner. Callers cannot supply a copied
-    ReconciliationResult. Sender-fence issuer authenticity is validated separately
-    by the fencing evidence boundary.
+    event for the current recovery owner. Each fencing_evidence item is an exact
+    RecoveryOwnerChanged event id whose transition is reloaded from the same
+    journal authority consumed by the final send barrier; caller-authored JSON
+    or content-addressed files cannot satisfy this gate.
     """
 
     root = Path(destination_root)
@@ -1551,21 +1508,20 @@ def restore_requires_reconciliation(destination_root: str | Path) -> bool:
             or not stored_evidence
         ):
             return True
-        seen_refs: set[str] = set()
+        seen_event_ids: set[str] = set()
         for index, stored in enumerate(stored_evidence):
             if not isinstance(stored, dict):
                 return True
-            ref = stored.get("sha256")
-            canonical = _canonical_sha256_ref(
-                ref,
-                name="sender fencing evidence",
-            )
-            if canonical in seen_refs:
+            event_id = stored.get("event_id")
+            if not isinstance(event_id, str) or not event_id.strip():
                 return True
-            seen_refs.add(canonical)
+            event_id = event_id.strip()
+            if event_id in seen_event_ids:
+                return True
+            seen_event_ids.add(event_id)
             loaded = _load_sender_fence_evidence(
                 root,
-                canonical,
+                event_id,
                 marker=marker,
                 restored_at=restored,
                 completed_at=completed,

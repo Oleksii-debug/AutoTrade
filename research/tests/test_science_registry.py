@@ -16,13 +16,28 @@ def protocol():
         "strategy": "deterministic baseline",
         "features": ["price_return"],
         "search_space": {"lookback": [5, 10]},
-        "train_period": "t0-t1",
-        "validation_period": "t1-t2",
-        "test_period": "t2-t3",
-        "forward_period": "future",
+        "train_period": {
+            "start": "2025-01-01T00:00:00Z",
+            "end": "2025-12-31T23:59:59Z",
+        },
+        "validation_period": {
+            "start": "2026-01-02T00:00:00Z",
+            "end": "2026-03-31T23:59:59Z",
+        },
+        "test_period": {
+            "start": "2026-04-02T00:00:00Z",
+            "end": "2026-06-30T23:59:59Z",
+        },
+        "forward_period": {
+            "start": "2026-07-02T00:00:00Z",
+            "end": "2026-09-30T23:59:59Z",
+        },
         "labels": ["net_return"],
         "horizons": ["1d"],
-        "purge_embargo": {"purge": "1d", "embargo": "1d"},
+        "purge_embargo": {
+            "purge_seconds": 86400,
+            "embargo_seconds": 86400,
+        },
         "universe": ["AAA"],
         "cost_fill_model": "base-v1",
         "baselines": ["cash", "passive"],
@@ -40,6 +55,56 @@ def protocol():
 
 
 class ScientificRegistryTests(unittest.TestCase):
+    def test_protocol_windows_are_machine_checked_for_causal_order(self):
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+
+            opaque = protocol()
+            opaque["train_period"] = "t0-t1"
+            with self.assertRaisesRegex(ProtocolViolation, "train_period must be an object"):
+                registry.register_protocol(opaque)
+
+            reversed_window = protocol()
+            reversed_window["validation_period"] = {
+                "start": "2026-03-31T23:59:59Z",
+                "end": "2026-01-02T00:00:00Z",
+            }
+            with self.assertRaisesRegex(ProtocolViolation, "strictly before end"):
+                registry.register_protocol(reversed_window)
+
+            overlapping = protocol()
+            overlapping["validation_period"] = {
+                "start": "2025-12-31T23:00:00Z",
+                "end": "2026-03-31T23:59:59Z",
+            }
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "train_period must end strictly before validation_period",
+            ):
+                registry.register_protocol(overlapping)
+
+            short_gap = protocol()
+            short_gap["validation_period"] = {
+                "start": "2026-01-01T12:00:00Z",
+                "end": "2026-03-31T23:59:59Z",
+            }
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "gap is shorter than registered purge/embargo",
+            ):
+                registry.register_protocol(short_gap)
+
+            invalid_exclusion = protocol()
+            invalid_exclusion["purge_embargo"] = {
+                "purge_seconds": True,
+                "embargo_seconds": 86400,
+            }
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "purge_embargo.purge_seconds must be a non-negative integer",
+            ):
+                registry.register_protocol(invalid_exclusion)
+
     def test_protocol_is_immutable_after_registration(self):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")

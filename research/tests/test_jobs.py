@@ -27,6 +27,31 @@ def checkpoint_ref(artifact_id: str, payload: str) -> str:
     return f"artifact:{artifact_id}@{digest(payload)}"
 
 
+def checkpoint_artifact(
+    artifact_store,
+    *,
+    job_id,
+    generation,
+    input_hashes,
+    payload,
+    artifact_id=None,
+):
+    data = payload.encode("utf-8")
+    manifest = artifact_store.publish_bytes(
+        artifact_id=str(uuid4()) if artifact_id is None else artifact_id,
+        data=data,
+        media_type="application/octet-stream",
+        rights={"storage": True, "export": False},
+        source_refs=input_hashes,
+        metadata={
+            "artifact_kind": "RESEARCH_JOB_CHECKPOINT",
+            "job_id": job_id,
+            "job_generation": generation,
+        },
+    )
+    return f"artifact:{manifest['artifact_id']}@{manifest['sha256']}"
+
+
 def resolution_proof(
     directory,
     *,
@@ -830,25 +855,40 @@ class ResearchJobStoreTests(unittest.TestCase):
             store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
             job, _ = self._enqueue(store)
             claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
+            generation = int(claimed["generation"])
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            first_ref = checkpoint_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=generation,
+                input_hashes=job["input_hashes"],
+                payload="checkpoint-1",
+            )
             updated = store.checkpoint(
                 job["job_id"],
                 worker_id="worker-a",
-                generation=int(claimed["generation"]),
-                checkpoint_ref=checkpoint_ref("11111111-1111-4111-8111-111111111111", "checkpoint-1"),
+                generation=generation,
+                checkpoint_ref=first_ref,
                 resource_usage={"wall_seconds": 20, "memory_bytes": 512},
+                artifact_store=artifacts,
                 now=self.now + timedelta(seconds=1),
             )
-            self.assertEqual(
-                updated["checkpoint_ref"],
-                checkpoint_ref("11111111-1111-4111-8111-111111111111", "checkpoint-1"),
+            self.assertEqual(updated["checkpoint_ref"], first_ref)
+            second_ref = checkpoint_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=generation,
+                input_hashes=job["input_hashes"],
+                payload="checkpoint-2",
             )
             with self.assertRaises(JobBudgetError):
                 store.checkpoint(
                     job["job_id"],
                     worker_id="worker-a",
-                    generation=int(claimed["generation"]),
-                    checkpoint_ref=checkpoint_ref("22222222-2222-4222-8222-222222222222", "checkpoint-2"),
+                    generation=generation,
+                    checkpoint_ref=second_ref,
                     resource_usage={"wall_seconds": 61, "memory_bytes": 512},
+                    artifact_store=artifacts,
                     now=self.now + timedelta(seconds=2),
                 )
 
@@ -865,11 +905,81 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=int(claimed["generation"]),
                     checkpoint_ref="artifact:mutable-checkpoint",
                     resource_usage={"wall_seconds": 1},
+                    artifact_store=ArtifactStore(Path(directory) / "artifacts"),
                     now=self.now + timedelta(seconds=1),
                 )
             after = store.get(job["job_id"])
             self.assertNotIn("checkpoint_ref", after)
             self.assertEqual(after["resource_usage"], before["resource_usage"])
+
+    def test_checkpoint_rejects_nonexistent_or_wrong_generation_artifact(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            job, _ = self._enqueue(store, "checkpoint-binding")
+            claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
+            generation = int(claimed["generation"])
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+
+            nonexistent = checkpoint_ref(
+                "11111111-1111-4111-8111-111111111111",
+                "missing",
+            )
+            with self.assertRaisesRegex(JobConflictError, "job-bound immutable"):
+                store.checkpoint(
+                    job["job_id"],
+                    worker_id="worker-a",
+                    generation=generation,
+                    checkpoint_ref=nonexistent,
+                    resource_usage={"wall_seconds": 1},
+                    artifact_store=artifacts,
+                    now=self.now + timedelta(seconds=1),
+                )
+
+            wrong_generation = checkpoint_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=generation + 1,
+                input_hashes=job["input_hashes"],
+                payload="wrong-generation",
+            )
+            with self.assertRaisesRegex(JobConflictError, "job-bound immutable"):
+                store.checkpoint(
+                    job["job_id"],
+                    worker_id="worker-a",
+                    generation=generation,
+                    checkpoint_ref=wrong_generation,
+                    resource_usage={"wall_seconds": 1},
+                    artifact_store=artifacts,
+                    now=self.now + timedelta(seconds=1),
+                )
+            self.assertNotIn("checkpoint_ref", store.get(job["job_id"]))
+
+    def test_publish_checkpoint_bytes_binds_restart_safe_checkpoint(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "jobs.sqlite3"
+            store = ResearchJobStore(path)
+            job, _ = self._enqueue(store, "checkpoint-publish")
+            claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
+            generation = int(claimed["generation"])
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+
+            manifest, updated = store.publish_checkpoint_bytes(
+                job["job_id"],
+                worker_id="worker-a",
+                generation=generation,
+                artifact_store=artifacts,
+                data=b"checkpoint-state",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                resource_usage={"wall_seconds": 2},
+                now=self.now + timedelta(seconds=1),
+            )
+            expected = f"artifact:{manifest['artifact_id']}@{manifest['sha256']}"
+            self.assertEqual(updated["checkpoint_ref"], expected)
+
+            reopened = ResearchJobStore(path)
+            self.assertEqual(reopened.get(job["job_id"])["checkpoint_ref"], expected)
+            self.assertEqual(artifacts.read_bytes(manifest["artifact_id"]), b"checkpoint-state")
 
     def test_checkpoint_resource_usage_is_monotonic_and_sparse_updates_preserve_totals(self):
         with TemporaryDirectory() as directory:
@@ -877,36 +987,61 @@ class ResearchJobStoreTests(unittest.TestCase):
             job, _ = self._enqueue(store, "monotonic-usage")
             claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
             generation = int(claimed["generation"])
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
 
+            first_ref = checkpoint_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=generation,
+                input_hashes=job["input_hashes"],
+                payload="checkpoint-1",
+            )
             first = store.checkpoint(
                 job["job_id"],
                 worker_id="worker-a",
                 generation=generation,
-                checkpoint_ref=checkpoint_ref("11111111-1111-4111-8111-111111111111", "checkpoint-1"),
+                checkpoint_ref=first_ref,
                 resource_usage={"wall_seconds": 20, "memory_bytes": 512},
+                artifact_store=artifacts,
                 now=self.now + timedelta(seconds=1),
             )
             self.assertEqual(first["resource_usage"]["wall_seconds"], 20.0)
             self.assertEqual(first["resource_usage"]["memory_bytes"], 512.0)
 
+            second_ref = checkpoint_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=generation,
+                input_hashes=job["input_hashes"],
+                payload="checkpoint-2",
+            )
             second = store.checkpoint(
                 job["job_id"],
                 worker_id="worker-a",
                 generation=generation,
-                checkpoint_ref=checkpoint_ref("22222222-2222-4222-8222-222222222222", "checkpoint-2"),
+                checkpoint_ref=second_ref,
                 resource_usage={"memory_bytes": 768},
+                artifact_store=artifacts,
                 now=self.now + timedelta(seconds=2),
             )
             self.assertEqual(second["resource_usage"]["wall_seconds"], 20.0)
             self.assertEqual(second["resource_usage"]["memory_bytes"], 768.0)
 
+            regression_ref = checkpoint_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=generation,
+                input_hashes=job["input_hashes"],
+                payload="checkpoint-regression",
+            )
             with self.assertRaises(JobBudgetError):
                 store.checkpoint(
                     job["job_id"],
                     worker_id="worker-a",
                     generation=generation,
-                    checkpoint_ref=checkpoint_ref("33333333-3333-4333-8333-333333333333", "checkpoint-regression"),
+                    checkpoint_ref=regression_ref,
                     resource_usage={"wall_seconds": 19},
+                    artifact_store=artifacts,
                     now=self.now + timedelta(seconds=3),
                 )
             current = store.get(job["job_id"])

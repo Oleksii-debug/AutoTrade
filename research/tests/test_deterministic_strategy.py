@@ -570,10 +570,7 @@ class DeterministicStrategyTests(unittest.TestCase):
             to_decision_proposal(
                 unregistered,
                 proposal_id="12345678-1234-5678-9234-567812345678",
-                economics_binding=economics_binding(
-                    proposal,
-                    instrument_version="instrument:v1",
-                ),
+                economics_binding=None,
                 exit_policy_ref="exit-policy:v1",
                 compute_cost_currency="USD",
             )

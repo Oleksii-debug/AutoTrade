@@ -744,8 +744,9 @@ class AlpacaAdapterTests(unittest.TestCase):
                 client_ids_by_order_id={order_id: "at-ack-1"},
                 fees_by_activity_id={},
             )
+        duplicate_observation = bound_activity_response([row, row])
         fills = parse_trade_activities(
-            bound_activity_response([row, row]),
+            duplicate_observation,
             instrument_versions={"AAPL": "AAPL:v1"},
             client_ids_by_order_id={order_id: "at-ack-1"},
             fees_by_activity_id={row["id"]: ("0.01", "USD")},
@@ -754,7 +755,7 @@ class AlpacaAdapterTests(unittest.TestCase):
         self.assertEqual(fills[0].fee_amount, Decimal("0.01"))
         self.assertEqual((fills[0].account_id, fills[0].environment), ("paper-1", "PAPER"))
         self.assertEqual((fills[0].side, fills[0].position_side), ("BUY", "BOTH"))
-        self.assertEqual(fills[0].evidence_refs, (observation.evidence_ref,))
+        self.assertEqual(fills[0].evidence_refs, (duplicate_observation.evidence_ref,))
 
     def test_trade_activity_requires_provider_evidenced_side(self):
         order_id = str(uuid4())

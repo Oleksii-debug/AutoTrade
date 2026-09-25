@@ -108,6 +108,23 @@ class ScientificRegistryTests(unittest.TestCase):
             self.assertEqual(result["untouched"], 0)
             self.assertEqual(result["prior_access_count"], 1)
 
+    def test_locked_evaluation_exposes_exact_immutable_hashes(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            p = store.register_protocol(protocol())
+            row = store.register_evaluation(
+                p.protocol_id,
+                holdout_id="holdout-A",
+                result={"score": "0.1"},
+            )
+            evidence = store.locked_evaluation(row["evaluation_id"])
+            self.assertEqual(evidence.protocol_id, p.protocol_id)
+            self.assertEqual(evidence.protocol_hash, p.protocol_hash)
+            self.assertEqual(evidence.result_hash, row["result_hash"])
+            self.assertTrue(evidence.untouched)
+            self.assertEqual(evidence.prior_access_count, 0)
+            self.assertEqual(evidence.result, {"score": "0.1"})
+
     def test_records_survive_reopen(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "science.sqlite3"

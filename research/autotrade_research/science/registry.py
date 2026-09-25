@@ -79,6 +79,19 @@ class ProtocolRegistration:
     created_at: str
 
 
+@dataclass(frozen=True)
+class LockedEvaluationEvidence:
+    evaluation_id: str
+    protocol_id: str
+    holdout_id: str
+    protocol_hash: str
+    result_hash: str
+    prior_access_count: int
+    untouched: bool
+    result: dict[str, Any]
+    created_at: str
+
+
 class ScientificRegistry:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -282,6 +295,137 @@ class ScientificRegistry:
             con.commit()
             row = con.execute("SELECT * FROM evaluations WHERE evaluation_id=?", (identifier,)).fetchone()
             return dict(row)
+
+    def locked_evaluation(self, evaluation_id: str) -> LockedEvaluationEvidence:
+        identifier = _id(evaluation_id)
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT * FROM evaluations WHERE evaluation_id=?",
+                (identifier,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(identifier)
+        try:
+            result = json.loads(row["result_json"])
+        except json.JSONDecodeError as error:
+            raise ProtocolViolation("locked evaluation result is corrupt") from error
+        if not isinstance(result, dict) or not result:
+            raise ProtocolViolation("locked evaluation result is invalid")
+        if _hash(result) != row["result_hash"]:
+            raise ProtocolViolation("locked evaluation result hash mismatch")
+        return LockedEvaluationEvidence(
+            evaluation_id=row["evaluation_id"],
+            protocol_id=row["protocol_id"],
+            holdout_id=row["holdout_id"],
+            protocol_hash=row["protocol_hash"],
+            result_hash=row["result_hash"],
+            prior_access_count=int(row["prior_access_count"]),
+            untouched=bool(row["untouched"]),
+            result=result,
+            created_at=row["created_at"],
+        )
+
+    def verify_candidate_promotion_evidence(
+        self,
+        *,
+        evaluation_id: str,
+        protocol_id: str,
+        protocol_hash: str,
+        result_hash: str,
+        candidate_id: str,
+        artifact_hash: str,
+        evaluation_status: str,
+        retention_passed: bool,
+        risk_passed: bool,
+        authority_scope_id: str,
+        evidence_valid_until: str,
+    ) -> LockedEvaluationEvidence:
+        evidence = self.locked_evaluation(evaluation_id)
+        expected_protocol = _id(protocol_id)
+        if evidence.protocol_id != expected_protocol:
+            raise ProtocolViolation("candidate approval protocol_id does not match locked evaluation")
+        if evidence.protocol_hash != _text(protocol_hash, "protocol_hash"):
+            raise ProtocolViolation("candidate approval protocol_hash does not match locked evaluation")
+        if evidence.result_hash != _text(result_hash, "result_hash"):
+            raise ProtocolViolation("candidate approval result_hash does not match locked evaluation")
+        if not evidence.untouched or evidence.prior_access_count != 0:
+            raise ProtocolViolation("candidate promotion requires an untouched locked holdout evaluation")
+        current_access_count = self.holdout_access_count(
+            evidence.protocol_id,
+            evidence.holdout_id,
+        )
+        if current_access_count != 1:
+            raise ProtocolViolation(
+                "candidate promotion requires holdout to remain untouched after locked evaluation"
+            )
+
+        trial_state = self.completeness(expected_protocol)
+        if trial_state["recorded_trials"] < 1:
+            raise ProtocolViolation(
+                "candidate promotion requires at least one registered trial"
+            )
+        with self._connect() as con:
+            trial_rows = con.execute(
+                "SELECT status, payload_json FROM trials WHERE protocol_id=?",
+                (expected_protocol,),
+            ).fetchall()
+        candidate_trial_found = False
+        for row in trial_rows:
+            if row["status"] != "COMPLETED":
+                continue
+            try:
+                payload = json.loads(row["payload_json"])
+            except json.JSONDecodeError as error:
+                raise ProtocolViolation("registered trial payload is corrupt") from error
+            if not isinstance(payload, dict):
+                raise ProtocolViolation("registered trial payload is invalid")
+            if (
+                payload.get("candidate_id") == candidate_id
+                and payload.get("artifact_hash") == artifact_hash
+            ):
+                candidate_trial_found = True
+        if not candidate_trial_found:
+            raise ProtocolViolation(
+                "candidate promotion requires a completed registered trial "
+                "bound to candidate_id and artifact_hash"
+            )
+
+        result = evidence.result
+        required = {
+            "candidate_id": _text(candidate_id, "candidate_id"),
+            "artifact_hash": _text(artifact_hash, "artifact_hash"),
+            "evaluation_status": _text(evaluation_status, "evaluation_status").upper(),
+            "retention_passed": retention_passed,
+            "risk_passed": risk_passed,
+            "authority_scope_id": _text(authority_scope_id, "authority_scope_id"),
+            "evidence_valid_until": _text(evidence_valid_until, "evidence_valid_until"),
+            "recorded_trial_count": trial_state["recorded_trials"],
+            "trial_budget": trial_state["trial_budget"],
+        }
+        for field in ("retention_passed", "risk_passed"):
+            if not isinstance(required[field], bool):
+                raise TypeError(f"{field} must be boolean")
+
+        for field, expected in required.items():
+            observed = result.get(field)
+            if field == "evaluation_status" and isinstance(observed, str):
+                observed = observed.upper()
+            if observed != expected:
+                raise ProtocolViolation(
+                    f"candidate approval {field} does not match locked evaluation result"
+                )
+
+        for required_true in (
+            "reproducible",
+            "causal_audit_passed",
+            "financial_invariants_passed",
+            "trial_log_complete",
+        ):
+            if result.get(required_true) is not True:
+                raise ProtocolViolation(
+                    f"locked evaluation does not prove {required_true}"
+                )
+        return evidence
 
     def completeness(self, protocol_id: str) -> dict[str, Any]:
         protocol = _id(protocol_id)

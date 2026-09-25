@@ -514,7 +514,19 @@
       }
     } catch (error) {
       if (error.status === 409 || error.status === 410) {
-        await refreshSnapshot({announceRefresh: true});
+        try {
+          await refreshSnapshot({announceRefresh: true});
+        } catch {
+          state.snapshotReady = false;
+          state.sessionIdentity = null;
+          setCommandAvailability(false);
+          text(
+            "freshness",
+            "Host synchronization gap could not be recovered; displayed values may be stale.");
+          announce(
+            "Host synchronization gap recovery failed. Commands remain blocked until a fresh canonical snapshot is available.",
+            true);
+        }
       } else {
         state.snapshotReady = false;
         state.sessionIdentity = null;

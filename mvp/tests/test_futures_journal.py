@@ -451,7 +451,8 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 store.load_events("FUTURES_VARIATION_MARGIN", aggregate_id),
                 [],
             )
-            with sqlite3.connect(store.path) as connection:
+            connection = sqlite3.connect(store.path)
+            try:
                 self.assertEqual(
                     connection.execute(
                         "SELECT COUNT(*) FROM command_dedupe WHERE actor = ?",
@@ -459,6 +460,8 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     ).fetchone()[0],
                     0,
                 )
+            finally:
+                connection.close()
 
     def test_sqlite_failure_rolls_back_command_and_settlement_event_together(self):
         contract = self._contract()

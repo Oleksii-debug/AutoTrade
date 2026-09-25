@@ -488,38 +488,24 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
 
             applied = authority.apply(evidence.evidence_ref)
 
+            # Linear funding settles in the instrument settlement currency.
             self.assertTrue(applied.inserted)
-            self.assertEqual(applied.currency, "USD")
-            self.assertEqual(book.cash("USD"), Decimal("-0.200000"))
-            # The canonical instrument still settles in USDT. Funding collateral
-            # comes only from sealed provider/account evidence, not that field.
+            self.assertEqual(applied.currency, "USDT")
+            self.assertEqual(book.cash("USDT"), Decimal("-200000.200000"))
+            # Collateral is a distinct provider/account fact and must not be
+            # manufactured from the instrument settlement currency.
+            event = store.load_events(
+                "perpetual_funding", authority.aggregate_id
+            )[0]
+            self.assertEqual(
+                event["payload"]["collateral_currency"],
+                "USD",
+            )
             self.assertEqual(
                 authority.instrument_registry.exact(
                     f"{FUNDING_ID}@1"
                 ).settlement_currency,
                 "USDT",
-            )
-            event = store.load_events(
-                "perpetual_funding", authority.aggregate_id
-            )[0]
-            self.assertEqual(
-                event["payload"]["observation_digest"],
-                __import__(
-                    "mvp.autotrade_mvp.persistence",
-                    fromlist=["payload_digest"],
-                ).payload_digest(
-                    {
-                        **__import__(
-                            "mvp.autotrade_mvp.perpetual_funding",
-                            fromlist=["canonical_perpetual_funding_observation"],
-                        ).canonical_perpetual_funding_observation(
-                            __import__(
-                                "mvp.autotrade_mvp.perpetual_funding",
-                                fromlist=["_canonical_observation_from_sealed_response"],
-                            )._canonical_observation_from_sealed_response(evidence)
-                        )
-                    }
-                ),
             )
 
     def test_missing_provider_collateral_currency_fails_closed(self):

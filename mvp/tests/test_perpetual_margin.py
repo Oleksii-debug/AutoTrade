@@ -43,6 +43,7 @@ def stress(**overrides):
         exit_cost_fraction=Decimal("0.001"),
         additional_funding_loss=Decimal("0"),
         unavailable_exit_extra_loss=Decimal("0"),
+        notional_increase_fraction=Decimal("0"),
     )
     values.update(overrides)
     return PerpetualStress(**values)
@@ -214,6 +215,45 @@ class PerpetualMarginTests(unittest.TestCase):
                         tier("10000", "0.001", "1", "DEDUCT"),
                     )
                 ),
+            )
+
+
+    def test_adverse_notional_growth_reselects_margin_tier(self):
+        result = evaluate(
+            signed_notional_settlement=Decimal("9000"),
+            collateral_amount=Decimal("5000"),
+            evidence=evidence(
+                margin_tiers=(
+                    tier("10000", "0.005"),
+                    tier("50000", "0.02", "0", "ADD"),
+                )
+            ),
+            stress=stress(
+                price_loss_fraction=Decimal("0"),
+                exit_cost_fraction=Decimal("0"),
+                notional_increase_fraction=Decimal("0.20"),
+            ),
+        )
+        self.assertEqual(result.maintenance_requirement, Decimal("45.000"))
+        self.assertEqual(result.stressed_notional, Decimal("10800.00"))
+        self.assertEqual(
+            result.stressed_maintenance_requirement,
+            Decimal("216.0000"),
+        )
+        self.assertEqual(
+            result.liquidation_headroom,
+            result.stressed_equity_settlement - Decimal("216.0000"),
+        )
+
+    def test_stressed_notional_outside_evidenced_tiers_fails_closed(self):
+        with self.assertRaisesRegex(
+            PerpetualMarginError,
+            "exceeds evidenced margin tier coverage",
+        ):
+            evaluate(
+                signed_notional_settlement=Decimal("49000"),
+                collateral_amount=Decimal("10000"),
+                stress=stress(notional_increase_fraction=Decimal("0.10")),
             )
 
 if __name__ == "__main__":

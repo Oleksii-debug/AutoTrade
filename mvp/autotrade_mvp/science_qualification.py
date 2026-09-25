@@ -11,7 +11,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
-from typing import Callable
+from research.autotrade_research.artifacts.store import ArtifactStore
+
+from .qualification_attestation import (
+    AcceptedQualificationAttestation,
+    QualificationTrustError,
+    QualificationTrustPolicy,
+    SignedQualificationAttestation,
+    verify_qualification_attestation,
+)
 
 
 _VALID_STATUS = {"PASS", "FAIL", "INCONCLUSIVE"}
@@ -26,8 +34,6 @@ _REQUIRED_GATES = (
     "uncertainty",
     "forward_evidence",
 )
-
-GateEvidenceVerifier = Callable[["QualificationGate"], bool]
 
 
 def _sha256_identity(value: str, name: str) -> str:
@@ -72,6 +78,95 @@ class QualificationGate:
 
 
 @dataclass(frozen=True)
+class ScientificQualificationTrustContext:
+    """Pinned signed-attestation inputs for WP-56 gate authenticity.
+
+    ArtifactStore remains the immutable-byte integrity layer. This context only
+    composes the already-canonical qualification attestation authority with the
+    science gate semantics; it does not mint trust or scientific outcomes.
+    """
+
+    source_sha: str
+    protocol_id: str
+    protocol_version: str
+    policy: QualificationTrustPolicy
+    expected_policy_id: str
+    expected_policy_version: str
+    evidence_store: ArtifactStore
+    receipts: tuple[SignedQualificationAttestation, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source_sha, str) or len(self.source_sha) != 40:
+            raise ValueError("source_sha must be a 40-character Git identity")
+        if any(ch not in "0123456789abcdef" for ch in self.source_sha):
+            raise ValueError("source_sha must be lowercase hexadecimal")
+        for name in ("protocol_id", "protocol_version", "expected_policy_id", "expected_policy_version"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} is required")
+        if not isinstance(self.policy, QualificationTrustPolicy):
+            raise TypeError("policy must be QualificationTrustPolicy")
+        if not isinstance(self.evidence_store, ArtifactStore):
+            raise TypeError("evidence_store must be ArtifactStore")
+        receipts = tuple(self.receipts)
+        if not all(isinstance(item, SignedQualificationAttestation) for item in receipts):
+            raise TypeError("receipts must contain SignedQualificationAttestation values")
+        gates = [item.attestation.gate for item in receipts]
+        if len(gates) != len(set(gates)):
+            raise ValueError("science attestation receipts must have unique gate scopes")
+        object.__setattr__(self, "receipts", receipts)
+
+    def receipt_for(self, gate_id: str) -> SignedQualificationAttestation | None:
+        expected_gate = gate_id.upper()
+        matches = tuple(
+            item for item in self.receipts if item.attestation.gate == expected_gate
+        )
+        if len(matches) > 1:
+            raise QualificationTrustError(
+                "multiple signed attestations claim the same science gate"
+            )
+        return matches[0] if matches else None
+
+
+def _verify_gate_attestation(
+    gate: QualificationGate,
+    trust: ScientificQualificationTrustContext,
+) -> AcceptedQualificationAttestation:
+    receipt = trust.receipt_for(gate.gate_id)
+    if receipt is None:
+        raise QualificationTrustError(
+            "signed science attestation is missing for gate"
+        )
+    observed_hashes = tuple(
+        sorted(ref.sha256 for ref in receipt.attestation.evidence_refs)
+    )
+    expected_hashes = tuple(sorted(gate.evidence_hashes))
+    if observed_hashes != expected_hashes:
+        raise QualificationTrustError(
+            "signed science attestation evidence set does not match gate"
+        )
+    accepted = verify_qualification_attestation(
+        receipt,
+        policy=trust.policy,
+        evidence_store=trust.evidence_store,
+        expected_policy_id=trust.expected_policy_id,
+        expected_policy_version=trust.expected_policy_version,
+        expected_source_sha=trust.source_sha,
+        expected_domain="SCIENCE",
+        expected_gate=gate.gate_id,
+        expected_package_id="WP-56",
+        expected_protocol_id=trust.protocol_id,
+        expected_protocol_version=trust.protocol_version,
+        expected_requirement_id=f"science.gate.{gate.gate_id}",
+    )
+    if accepted.result != gate.status:
+        raise QualificationTrustError(
+            "signed science attestation result does not match gate status"
+        )
+    return accepted
+
+
+@dataclass(frozen=True)
 class ScientificQualificationInput:
     candidate_hash: str
     frozen_protocol_hash: str
@@ -113,15 +208,21 @@ class ScientificQualificationResult:
     economic_claim_accepted: bool
     checks: tuple[tuple[str, str], ...]
     reason_codes: tuple[str, ...]
+    qualification_policy_id: str | None = None
+    qualification_attestations: tuple[tuple[str, str, str, str], ...] = ()
     release_or_trading_authority: bool = False
 
 
 def qualify_scientific_learning(
     evidence: ScientificQualificationInput,
     *,
-    evidence_verifier: GateEvidenceVerifier | None = None,
+    trust_context: ScientificQualificationTrustContext | None = None,
 ) -> ScientificQualificationResult:
-    """Audit independently verified scientific evidence without authority expansion."""
+    """Audit science evidence under the canonical signed trust boundary.
+
+    No caller-supplied boolean verifier is accepted. Without a valid signed
+    attestation for each gate, terminal qualification remains INCONCLUSIVE.
+    """
     if not isinstance(evidence, ScientificQualificationInput):
         raise TypeError("evidence must be ScientificQualificationInput")
     by_id = {gate.gate_id: gate for gate in evidence.gates}
@@ -129,6 +230,7 @@ def qualify_scientific_learning(
     reasons: list[str] = []
     effective_status: dict[str, str] = {}
     verification_state: dict[str, str] = {}
+    accepted_attestations: list[tuple[str, str, str, str]] = []
 
     for gate_id in _REQUIRED_GATES:
         gate = by_id.get(gate_id)
@@ -150,22 +252,27 @@ def qualify_scientific_learning(
             reasons.append("SCIENCE.EVIDENCE_BINDING_MISMATCH:" + gate_id)
             continue
 
-        verified = False
-        if evidence_verifier is not None:
+        accepted: AcceptedQualificationAttestation | None = None
+        if trust_context is not None:
             try:
-                verification = evidence_verifier(gate)
-            except Exception:
-                verification = False
-            if not isinstance(verification, bool):
-                verification = False
-            verified = verification
-        if not verified:
+                accepted = _verify_gate_attestation(gate, trust_context)
+            except (QualificationTrustError, TypeError, ValueError):
+                reasons.append("SCIENCE.ATTESTATION_INVALID:" + gate_id)
+        if accepted is None:
             checks.append((gate_id, "INCONCLUSIVE"))
             effective_status[gate_id] = "INCONCLUSIVE"
             verification_state[gate_id] = "UNVERIFIED"
             reasons.append("SCIENCE.EVIDENCE_UNVERIFIED:" + gate_id)
             continue
 
+        accepted_attestations.append(
+            (
+                gate_id,
+                accepted.attestation_id,
+                accepted.attestation_digest,
+                accepted.trust_root_id,
+            )
+        )
         verification_state[gate_id] = "VERIFIED"
         checks.append((gate_id, gate.status))
         effective_status[gate_id] = gate.status
@@ -245,6 +352,20 @@ def qualify_scientific_learning(
             "holdout_used_for_tuning": evidence.holdout_used_for_tuning,
             "future_information_used_for_routing": evidence.future_information_used_for_routing,
             "population_coverage_hash": evidence.population_coverage_hash,
+            "qualification_policy_id": (
+                trust_context.expected_policy_id
+                if accepted_attestations and trust_context is not None
+                else None
+            ),
+            "qualification_attestations": [
+                {
+                    "gate_id": item[0],
+                    "attestation_id": item[1],
+                    "attestation_digest": item[2],
+                    "trust_root_id": item[3],
+                }
+                for item in sorted(accepted_attestations)
+            ],
             "gates": [
                 {
                     "gate_id": gate.gate_id,
@@ -270,4 +391,10 @@ def qualify_scientific_learning(
         economic_claim_accepted=economic_claim_accepted,
         checks=tuple(checks),
         reason_codes=tuple(dict.fromkeys(reasons)),
+        qualification_policy_id=(
+            trust_context.expected_policy_id
+            if accepted_attestations and trust_context is not None
+            else None
+        ),
+        qualification_attestations=tuple(sorted(accepted_attestations)),
     )

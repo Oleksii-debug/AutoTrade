@@ -160,6 +160,21 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             with self.assertRaisesRegex(ProtocolViolation, "canonical duration"):
                 registry.register_protocol(malformed)
 
+            whitespace = protocol()
+            whitespace["horizons"] = [" 1d "]
+            with self.assertRaisesRegex(ProtocolViolation, "canonical duration"):
+                registry.register_protocol(whitespace)
+
+            boolean = protocol()
+            boolean["horizons"] = [True]
+            with self.assertRaisesRegex(ProtocolViolation, "canonical duration"):
+                registry.register_protocol(boolean)
+
+            negative = protocol()
+            negative["purge_embargo"] = {"purge": -1, "embargo": "1d"}
+            with self.assertRaisesRegex(ProtocolViolation, "canonical duration"):
+                registry.register_protocol(negative)
+
             missing = protocol()
             missing["purge_embargo"] = {"purge": "1d"}
             with self.assertRaisesRegex(ProtocolViolation, "exactly purge and embargo"):

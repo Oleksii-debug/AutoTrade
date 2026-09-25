@@ -138,6 +138,46 @@ class ReconciliationJournalTests(unittest.TestCase):
                 ["CASH:USD"],
             )
 
+    def test_checkpoint_retains_exact_execution_ids_across_restart(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            unknown = UnknownSubmission.create(
+                attempt_id="attempt-checkpoint-execution",
+                intent_id="intent-checkpoint-execution",
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                client_order_id="c1",
+                started_at="2026-09-24T17:30:00Z",
+            )
+            result = reconciliation(unknown_submissions=[unknown])
+            self.assertEqual(
+                result.submission_resolutions[0].provider_execution_ids,
+                ("e1",),
+            )
+
+            record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="acct-execution-identity",
+                result=result,
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            reopened = JournalStore(path)
+            latest = load_latest_reconciliation_checkpoint(
+                reopened,
+                reconciliation_id="acct-execution-identity",
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+            )
+            resolution = latest["payload"]["submission_resolutions"][0]
+            self.assertEqual(resolution["outcome"], "OBSERVED_EXECUTION")
+            self.assertEqual(resolution["provider_execution_ids"], ["e1"])
+            self.assertEqual(resolution["provider_order_ids"], [])
+
     def test_changed_checkpoint_appends_new_version(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

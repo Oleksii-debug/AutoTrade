@@ -76,7 +76,11 @@ def liquidation_evidence(
         "state_version": state_version,
         "observed_at": observed_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
         "expires_at": expires.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "headroom": str(Decimal(headroom).normalize()),
+        "headroom": (
+            "0"
+            if Decimal(headroom) == 0
+            else format(Decimal(headroom).normalize(), "f")
+        ),
     }
     raw = json.dumps(
         payload,
@@ -1268,17 +1272,37 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertFalse(missing_rule.passed)
         self.assertEqual(missing_rule.observed, "UNKNOWN")
 
-        exact = evaluate_risk(
+        # A numerically valid caller value is no longer financial authority.
+        bare = evaluate_risk(
             intent,
             context(liquidation_headroom="0.25"),
             configured,
         )
-        self.assertTrue(
-            next(x for x in exact.rules if x.rule == "liquidation_headroom").passed
+        bare_rule = next(
+            x for x in bare.rules if x.rule == "liquidation_headroom"
         )
+        self.assertFalse(bare_rule.passed)
+        self.assertEqual(bare_rule.observed, "UNVERIFIED")
+
+        store = _LiquidationEvidenceStore()
+        bound = liquidation_evidence(store, headroom="0.25")
+        exact = evaluate_risk(
+            intent,
+            context(**bound),
+            configured,
+            evidence_store=store,
+        )
+        exact_rule = next(
+            x for x in exact.rules if x.rule == "liquidation_headroom"
+        )
+        self.assertTrue(exact_rule.passed)
+        self.assertEqual(exact_rule.observed, "0.25")
+        self.assertTrue(exact.admitted)
 
     def test_negative_liquidation_headroom_is_evidence_not_a_parse_failure(self):
         configured = policy(min_liquidation_headroom="0.25")
+        store = _LiquidationEvidenceStore()
+        bound = liquidation_evidence(store, headroom="-0.10")
         increasing = evaluate_risk(
             RiskIntent.create(
                 symbol="ABC",
@@ -1287,8 +1311,9 @@ class IndependentRiskTests(unittest.TestCase):
                 price="100",
                 expected_state_version=7,
             ),
-            context(liquidation_headroom="-0.10"),
+            context(**bound),
             configured,
+            evidence_store=store,
         )
         increasing_rule = next(
             x for x in increasing.rules if x.rule == "liquidation_headroom"
@@ -1309,9 +1334,10 @@ class IndependentRiskTests(unittest.TestCase):
             context(
                 positions={"ABC": "2"},
                 stress_scenarios=({"ABC": "-0.10"},),
-                liquidation_headroom="-0.10",
+                **bound,
             ),
             configured,
+            evidence_store=store,
         )
         protective_rule = next(
             x for x in protective.rules if x.rule == "liquidation_headroom"
@@ -1417,6 +1443,8 @@ class IndependentRiskTests(unittest.TestCase):
         )
 
     def test_strict_reduce_only_can_pass_known_liquidation_breach_when_tail_improves(self):
+        store = _LiquidationEvidenceStore()
+        bound = liquidation_evidence(store, headroom="0.10")
         decision = evaluate_risk(
             RiskIntent.create(
                 symbol="ABC",
@@ -1431,7 +1459,7 @@ class IndependentRiskTests(unittest.TestCase):
                 marks={"ABC": "100"},
                 stress_scenarios=({"ABC": "-0.50"},),
                 tail_scenarios=({"ABC": "-0.50"},),
-                liquidation_headroom="0.10",
+                **bound,
             ),
             policy(
                 max_abs_position="5",
@@ -1443,6 +1471,7 @@ class IndependentRiskTests(unittest.TestCase):
                 min_liquidation_headroom="0.25",
                 max_stress_loss="100",
             ),
+            evidence_store=store,
         )
         self.assertTrue(decision.admitted)
         self.assertTrue(

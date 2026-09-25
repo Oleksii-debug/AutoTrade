@@ -716,6 +716,8 @@ def parse_submission_result(
     env = _text(environment, name="environment").upper()
     point = _instant(observed_at, name="observed_at")
 
+    if type(transport_ambiguous) is not bool:
+        raise WhiteBitAdapterError("transport_ambiguous must be boolean")
     if transport_ambiguous:
         if response_body is not None or http_status is not None:
             raise WhiteBitAdapterError(

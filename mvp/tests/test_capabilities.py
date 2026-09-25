@@ -80,6 +80,52 @@ class CapabilityFoundationTests(unittest.TestCase):
         self.assertEqual(snapshot.status, "UNKNOWN")
         self.assertEqual(snapshot.sources, frozenset())
 
+    def test_unverified_live_refresh_cannot_preserve_older_source_authority(self):
+        older_account = claim(
+            "ACCOUNT",
+            scopes=("ORDER.READ", "ORDER.WRITE"),
+            observed_at=NOW - timedelta(minutes=5),
+            expires_at=NOW + timedelta(minutes=10),
+        )
+        newer_account = claim(
+            "ACCOUNT",
+            scopes=("ORDER.READ",),
+            observed_at=NOW - timedelta(seconds=30),
+            expires_at=NOW + timedelta(minutes=10),
+        )
+        claims = (
+            claim("DOCUMENTED"),
+            claim("API"),
+            older_account,
+            newer_account,
+            claim("INSTRUMENT"),
+        )
+
+        def verifier(item):
+            if item is newer_account:
+                return EvidenceVerification(
+                    valid=False,
+                    reason="newer capability evidence is unavailable",
+                )
+            return EvidenceVerification(valid=True)
+
+        snapshot = _derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=claims,
+            observed_at=NOW,
+            evidence_verifier=verifier,
+        )
+
+        self.assertEqual(snapshot.status, "UNKNOWN")
+        self.assertFalse(
+            snapshot.admits(
+                at=NOW,
+                order_type="LIMIT",
+                time_in_force="DAY",
+                permission_scope="ORDER.WRITE",
+            )
+        )
+
     def test_verified_snapshot_is_exact_intersection(self):
         claims = (
             claim("DOCUMENTED", order_types=("LIMIT", "MARKET"), tif=("DAY", "GTC")),

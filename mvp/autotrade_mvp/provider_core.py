@@ -12,8 +12,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
-from typing import Iterable, Literal, Mapping
+from hashlib import sha256
+import json
 import re
+from typing import Any, Iterable, Literal, Mapping
 
 
 class ProviderCoreError(ValueError):
@@ -64,6 +66,239 @@ class Surface(StrEnum):
     TRADING = "TRADING"
     ACTIVITIES = "ACTIVITIES"
     STREAM = "STREAM"
+
+
+def _canonical_provider_json(value: Any, *, name: str) -> str:
+    def reject_binary_float(item: Any, path: str = "$") -> None:
+        if isinstance(item, float):
+            raise ProviderCoreError(
+                f"{name} must not contain binary float at {path}"
+            )
+        if isinstance(item, Mapping):
+            for key, child in item.items():
+                if not isinstance(key, str):
+                    raise ProviderCoreError(
+                        f"{name} object keys must be text at {path}"
+                    )
+                reject_binary_float(child, f"{path}.{key}")
+        elif isinstance(item, (list, tuple)):
+            for index, child in enumerate(item):
+                reject_binary_float(child, f"{path}[{index}]")
+
+    reject_binary_float(value)
+    try:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as error:
+        raise ProviderCoreError(f"{name} must be canonical JSON data") from error
+
+
+def _sha256_text(value: str) -> str:
+    return "sha256:" + sha256(value.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class PreparedReconciliationRead:
+    """Immutable authenticated-read scope fixed before provider access.
+
+    This object is intentionally provider-neutral. Adapter code prepares it from
+    the exact account/environment/endpoint and request payload before the read is
+    performed. Response parsers then consume only BoundReconciliationResponse,
+    never free caller scope labels.
+    """
+
+    provider_id: str
+    account_id: str
+    environment: str
+    surface: str
+    endpoint: str
+    request_json: str
+    request_sha256: str
+    provenance_id: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        provider_id: str,
+        account_id: str,
+        environment: str,
+        surface: str,
+        endpoint: str,
+        request: Mapping[str, Any],
+    ) -> "PreparedReconciliationRead":
+        if not isinstance(request, Mapping):
+            raise ProviderCoreError("reconciliation read request must be a mapping")
+        provider = _text(provider_id, "provider_id").upper()
+        if provider not in PROVIDERS:
+            raise ProviderCoreError("unknown provider")
+        account = _text(account_id, "account_id")
+        scope = _text(environment, "environment").upper()
+        normalized_surface = _text(surface, "surface").upper()
+        normalized_endpoint = _text(endpoint, "endpoint")
+        request_json = _canonical_provider_json(request, name="reconciliation read request")
+        request_sha = _sha256_text(request_json)
+        identity = _canonical_provider_json(
+            {
+                "provider_id": provider,
+                "account_id": account,
+                "environment": scope,
+                "surface": normalized_surface,
+                "endpoint": normalized_endpoint,
+                "request_sha256": request_sha,
+            },
+            name="reconciliation read provenance",
+        )
+        return cls(
+            provider_id=provider,
+            account_id=account,
+            environment=scope,
+            surface=normalized_surface,
+            endpoint=normalized_endpoint,
+            request_json=request_json,
+            request_sha256=request_sha,
+            provenance_id=_sha256_text(identity),
+        )
+
+    def __post_init__(self) -> None:
+        provider = _text(self.provider_id, "provider_id").upper()
+        if provider not in PROVIDERS or provider != self.provider_id:
+            raise ProviderCoreError("reconciliation read provider_id is not canonical")
+        if _text(self.account_id, "account_id") != self.account_id:
+            raise ProviderCoreError("reconciliation read account_id is not canonical")
+        if _text(self.environment, "environment").upper() != self.environment:
+            raise ProviderCoreError("reconciliation read environment is not canonical")
+        if _text(self.surface, "surface").upper() != self.surface:
+            raise ProviderCoreError("reconciliation read surface is not canonical")
+        if _text(self.endpoint, "endpoint") != self.endpoint:
+            raise ProviderCoreError("reconciliation read endpoint is not canonical")
+        try:
+            request = json.loads(self.request_json)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ProviderCoreError("reconciliation read request_json is invalid") from error
+        canonical_request = _canonical_provider_json(
+            request, name="reconciliation read request"
+        )
+        if canonical_request != self.request_json:
+            raise ProviderCoreError("reconciliation read request_json is not canonical")
+        request_sha = _sha256_text(canonical_request)
+        if request_sha != self.request_sha256:
+            raise ProviderCoreError("reconciliation read request digest mismatch")
+        identity = _canonical_provider_json(
+            {
+                "provider_id": self.provider_id,
+                "account_id": self.account_id,
+                "environment": self.environment,
+                "surface": self.surface,
+                "endpoint": self.endpoint,
+                "request_sha256": request_sha,
+            },
+            name="reconciliation read provenance",
+        )
+        if _sha256_text(identity) != self.provenance_id:
+            raise ProviderCoreError("reconciliation read provenance identity mismatch")
+
+    def request_payload(self) -> dict[str, Any]:
+        value = json.loads(self.request_json)
+        if not isinstance(value, dict):
+            raise ProviderCoreError("reconciliation read request must decode to an object")
+        return value
+
+
+@dataclass(frozen=True)
+class BoundReconciliationResponse:
+    """Exact provider response cryptographically bound to one prepared read."""
+
+    read: PreparedReconciliationRead
+    response_json: str
+    response_sha256: str
+    evidence_id: str
+
+    @classmethod
+    def bind(
+        cls,
+        read: PreparedReconciliationRead,
+        response: Mapping[str, Any] | list[Any],
+    ) -> "BoundReconciliationResponse":
+        if not isinstance(read, PreparedReconciliationRead):
+            raise TypeError("read must be PreparedReconciliationRead")
+        response_json = _canonical_provider_json(
+            response, name="reconciliation provider response"
+        )
+        response_sha = _sha256_text(response_json)
+        identity = _canonical_provider_json(
+            {
+                "read_provenance_id": read.provenance_id,
+                "response_sha256": response_sha,
+            },
+            name="reconciliation response evidence",
+        )
+        return cls(
+            read=read,
+            response_json=response_json,
+            response_sha256=response_sha,
+            evidence_id=_sha256_text(identity),
+        )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.read, PreparedReconciliationRead):
+            raise TypeError("read must be PreparedReconciliationRead")
+        # Re-run prepared-read integrity in case an unsafe construction path was used.
+        self.read.__post_init__()
+        try:
+            response = json.loads(self.response_json)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ProviderCoreError("reconciliation response_json is invalid") from error
+        canonical_response = _canonical_provider_json(
+            response, name="reconciliation provider response"
+        )
+        if canonical_response != self.response_json:
+            raise ProviderCoreError("reconciliation response_json is not canonical")
+        response_sha = _sha256_text(canonical_response)
+        if response_sha != self.response_sha256:
+            raise ProviderCoreError("reconciliation response digest mismatch")
+        identity = _canonical_provider_json(
+            {
+                "read_provenance_id": self.read.provenance_id,
+                "response_sha256": response_sha,
+            },
+            name="reconciliation response evidence",
+        )
+        if _sha256_text(identity) != self.evidence_id:
+            raise ProviderCoreError("reconciliation response evidence identity mismatch")
+
+    def payload(self) -> Any:
+        self.__post_init__()
+        return json.loads(self.response_json)
+
+
+def require_reconciliation_response(
+    evidence: BoundReconciliationResponse,
+    *,
+    provider_id: str,
+    surface: str,
+    endpoint: str,
+) -> tuple[Any, str, str]:
+    """Resolve payload and exact financial scope from immutable read provenance."""
+
+    if not isinstance(evidence, BoundReconciliationResponse):
+        raise TypeError("evidence must be BoundReconciliationResponse")
+    read = evidence.read
+    expected_provider = _text(provider_id, "provider_id").upper()
+    expected_surface = _text(surface, "surface").upper()
+    expected_endpoint = _text(endpoint, "endpoint")
+    if (
+        read.provider_id != expected_provider
+        or read.surface != expected_surface
+        or read.endpoint != expected_endpoint
+    ):
+        raise ProviderCoreError("reconciliation response provenance scope mismatch")
+    return evidence.payload(), read.account_id, read.environment
 
 
 @dataclass(frozen=True)

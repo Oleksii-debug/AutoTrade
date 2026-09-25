@@ -17,7 +17,11 @@ import re
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from .provider_core import ProviderCoreError
+from .provider_core import (
+    BoundReconciliationResponse,
+    ProviderCoreError,
+    require_reconciliation_response,
+)
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
@@ -419,15 +423,19 @@ def parse_submission_response(
 
 
 def parse_executions(
-    response: Mapping[str, Any],
+    evidence: BoundReconciliationResponse,
     *,
-    account_id: str,
-    environment: str,
     instrument_versions: Mapping[str, str],
     qualified_fee_currencies: Mapping[str, str] | None = None,
 ) -> tuple[ProviderFillEvidence, ...]:
-    """Map recorded /v5/execution/list rows to reconciliation fill evidence."""
+    """Map one provenance-bound /v5/execution/list response to fill evidence."""
 
+    response, account_id, environment = require_reconciliation_response(
+        evidence,
+        provider_id="BYBIT",
+        surface="EXECUTIONS",
+        endpoint=BYBIT_DOCUMENTED_ENDPOINTS["EXECUTIONS"],
+    )
     envelope = _mapping(response, name="response")
     if _integer(envelope.get("retCode"), name="retCode") != 0:
         raise ProviderCoreError("Bybit execution response was not successful")

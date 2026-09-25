@@ -9,6 +9,7 @@ from mvp.autotrade_mvp.ibkr_web import (
     IbkrBrokerageSessionStatus,
     IbkrContractIdentity,
     IbkrExecutionEvidence,
+    IbkrReplyRequest,
     IbkrWebAdapterError,
     IbkrWebOrderIntent,
     execution_to_reconciliation_fill,
@@ -421,6 +422,31 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 expected_client_order_id="coid-1",
                 explicit_authorization=True,
             )
+
+    def test_reply_identity_cannot_escape_reply_endpoint_or_mutate_confirmation_body(self):
+        with self.assertRaisesRegex(IbkrWebAdapterError, "path segment"):
+            parse_order_submission_response(
+                [{"id": "../orders", "message": ["Confirm"], "messageIds": ["o1"]}]
+            )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "path segment"):
+            parse_order_submission_response(
+                [{"id": "reply?confirmed=false", "message": ["Confirm"], "messageIds": ["o1"]}]
+            )
+
+        base = {
+            "endpoint": "/iserver/reply/safe-reply-id",
+            "body": {"confirmed": True},
+            "attempt_id": "attempt-1",
+            "account_id": "U1234567",
+            "client_order_id": "at-reply-direct",
+            "response_sha256": "sha256:" + "a" * 64,
+        }
+        request = IbkrReplyRequest(**base)
+        self.assertEqual(dict(request.body), {"confirmed": True})
+        with self.assertRaisesRegex(IbkrWebAdapterError, "reply endpoint|path segment"):
+            IbkrReplyRequest(**{**base, "endpoint": "/iserver/reply/../orders"})
+        with self.assertRaisesRegex(IbkrWebAdapterError, "confirmed=true"):
+            IbkrReplyRequest(**{**base, "body": {"confirmed": False}})
 
     def test_ambiguous_ack_and_reply_shape_fails_closed(self):
         with self.assertRaisesRegex(IbkrWebAdapterError, "ambiguous"):

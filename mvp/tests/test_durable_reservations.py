@@ -8,6 +8,16 @@ from unittest.mock import patch
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.autotrade_mvp.reconciliation import (
+    CoverageSurfaceEvidence,
+    ProviderFillEvidence,
+    SnapshotConsistencyEvidence,
+    reconcile_account,
+)
+from mvp.autotrade_mvp.reconciliation_journal import (
+    record_reconciliation_checkpoint,
+    unknown_submissions_from_dispatch,
+)
 from mvp.autotrade_mvp.persistence import (
     JournalStore,
     _event_envelope_digest,
@@ -47,9 +57,20 @@ class DurableReservationBookTests(unittest.TestCase):
         attempt_id="attempt-r1",
         outcome="PROVEN_ABSENT",
         reconciliation_complete=True,
+        reconciliation_event=None,
     ):
+        reconciliation_event_id = (
+            reconciliation_event["event_id"]
+            if reconciliation_event is not None
+            else "00000000-0000-4000-8000-000000000000"
+        )
+        reconciliation_payload_hash = (
+            reconciliation_event["payload_hash"]
+            if reconciliation_event is not None
+            else "sha256:" + "0" * 64
+        )
         receipt = {
-            "schema_version": 1,
+            "schema_version": 2,
             "evidence_type": "AUTOTRADE_RESERVATION_RESOLUTION",
             "environment": environment,
             "account_id": account_id,
@@ -59,6 +80,8 @@ class DurableReservationBookTests(unittest.TestCase):
             "attempt_id": attempt_id,
             "outcome": outcome,
             "reconciliation_complete": reconciliation_complete,
+            "reconciliation_event_id": reconciliation_event_id,
+            "reconciliation_payload_hash": reconciliation_payload_hash,
         }
         manifest = self.artifacts.publish_bytes(
             artifact_id=artifact_id,
@@ -110,6 +133,88 @@ class DurableReservationBookTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "UNKNOWN")
         return outcome
+
+    def record_reconciliation_resolution(
+        self,
+        *,
+        outcome="PROVEN_ABSENT",
+        attempt_id="attempt-r1",
+        reconciliation_id=None,
+    ):
+        unknowns = unknown_submissions_from_dispatch(
+            self.store,
+            attempt_ids=(attempt_id,),
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        self.assertEqual(len(unknowns), 1)
+        unknown = unknowns[0]
+        provider_fills = ()
+        local_execution_ids = ()
+        searched_client_order_ids = ()
+        absence_coverage = ()
+        if outcome == "PROVEN_ABSENT":
+            searched_client_order_ids = (unknown.client_order_id,)
+            absence_coverage = tuple(
+                CoverageSurfaceEvidence(
+                    surface=surface,
+                    coverage_start="2026-09-24T23:59:00Z",
+                    coverage_end="2026-09-25T00:05:00Z",
+                    pagination_complete=True,
+                    consistency_horizon_satisfied=True,
+                    provider_semantics_exclude_execution=True,
+                )
+                for surface in (
+                    "OPEN_ORDERS",
+                    "ORDER_HISTORY",
+                    "EXECUTIONS",
+                    "ACTIVITIES",
+                )
+            )
+        elif outcome == "FILLED":
+            fill = ProviderFillEvidence.create(
+                provider_execution_id="exec-" + attempt_id,
+                client_order_id=unknown.client_order_id,
+                instrument="TEST",
+                quantity="1",
+                price="1",
+                fee_amount="0",
+                fee_currency="USD",
+                trade_time="2026-09-25T00:01:00Z",
+            )
+            provider_fills = (fill,)
+            local_execution_ids = (fill.provider_execution_id,)
+        else:
+            raise ValueError("unsupported test reconciliation outcome")
+        result = reconcile_account(
+            local_cash={},
+            provider_cash={},
+            local_positions={},
+            provider_positions={},
+            local_execution_ids=local_execution_ids,
+            provider_fills=provider_fills,
+            snapshot_consistency=SnapshotConsistencyEvidence(
+                mode="ATOMIC",
+                query_started_at="2026-09-25T00:00:00Z",
+                query_completed_at="2026-09-25T00:02:00Z",
+            ),
+            unknown_submissions=unknowns,
+            searched_client_order_ids=searched_client_order_ids,
+            coverage_start="2026-09-24T23:59:00Z",
+            coverage_end="2026-09-25T00:05:00Z",
+            pagination_complete=True,
+            absence_coverage=absence_coverage,
+        )
+        self.assertTrue(result.complete)
+        return record_reconciliation_checkpoint(
+            self.store,
+            reconciliation_id=(
+                reconciliation_id
+                or "reconciliation-" + attempt_id + "-" + outcome.lower()
+            ),
+            result=result,
+            observed_at="2026-09-25T00:05:00Z",
+        )
 
     def reserve(self, book, *, amount="70", command="cmd-reserve", idem="idem-reserve"):
         return book.reserve(
@@ -164,6 +269,11 @@ class DurableReservationBookTests(unittest.TestCase):
             reservation_id="r1",
         )
         self.create_unknown_attempt()
+        reconciliation = self.record_reconciliation_resolution()
+        evidence = self.publish_resolution_evidence(
+            artifact_id="66666666-6666-4666-8666-666666666666",
+            reconciliation_event=reconciliation,
+        )
         first.mark_terminal(
             command_id="cmd-terminal",
             idempotency_key="idem-terminal",
@@ -171,7 +281,7 @@ class DurableReservationBookTests(unittest.TestCase):
             outcome="PROVEN_ABSENT",
             provider="SIMULATED",
             attempt_id="attempt-r1",
-            resolution_evidence=self.evidence,
+            resolution_evidence=evidence,
         )
 
         restarted = self.book()
@@ -179,7 +289,7 @@ class DurableReservationBookTests(unittest.TestCase):
         self.assertEqual(snapshot.state, "PROVEN_ABSENT")
         self.assertEqual(
             snapshot.resolution_evidence,
-            self.evidence,
+            evidence,
         )
         self.assertEqual(restarted.total_reserved("CASH:USD"), Decimal("0"))
 
@@ -198,9 +308,11 @@ class DurableReservationBookTests(unittest.TestCase):
             reservation_id="r1",
         )
         self.create_unknown_attempt()
+        reconciliation = self.record_reconciliation_resolution(outcome="FILLED")
         filled_evidence = self.publish_resolution_evidence(
             artifact_id="55555555-5555-4555-8555-555555555555",
             outcome="FILLED",
+            reconciliation_event=reconciliation,
         )
         terminal = book.mark_terminal(
             command_id="cmd-terminal-filled",
@@ -473,6 +585,11 @@ class DurableReservationBookTests(unittest.TestCase):
             reservation_id="r1",
         )
         self.create_unknown_attempt()
+        reconciliation = self.record_reconciliation_resolution()
+        evidence = self.publish_resolution_evidence(
+            artifact_id="77777777-7777-4777-8777-777777777777",
+            reconciliation_event=reconciliation,
+        )
         with self.assertRaises(ReservationConflict):
             book.mark_terminal(
                 command_id="cmd-absent",
@@ -481,7 +598,7 @@ class DurableReservationBookTests(unittest.TestCase):
                 outcome="PROVEN_ABSENT",
                 provider="SIMULATED",
                 attempt_id="attempt-r1",
-                resolution_evidence=self.evidence,
+                resolution_evidence=evidence,
             )
         self.assertEqual(book.total_reserved("CASH:USD"), Decimal("90"))
 
@@ -720,6 +837,11 @@ class DurableReservationBookTests(unittest.TestCase):
             reservation_id="r1",
         )
         self.create_unknown_attempt()
+        reconciliation = self.record_reconciliation_resolution()
+        evidence = self.publish_resolution_evidence(
+            artifact_id="88888888-8888-4888-8888-888888888888",
+            reconciliation_event=reconciliation,
+        )
         book.mark_terminal(
             command_id="cmd-terminal-reverify",
             idempotency_key="idem-terminal-reverify",
@@ -727,9 +849,11 @@ class DurableReservationBookTests(unittest.TestCase):
             outcome="PROVEN_ABSENT",
             provider="SIMULATED",
             attempt_id="attempt-r1",
-            resolution_evidence=self.evidence,
+            resolution_evidence=evidence,
         )
-        manifest = self.artifacts.load_manifest(ARTIFACT_ID)
+        manifest = self.artifacts.load_manifest(
+            "88888888-8888-4888-8888-888888888888"
+        )
         digest = manifest["sha256"].removeprefix("sha256:")
         object_path = self.artifacts.objects / digest[:2] / digest
         object_path.write_bytes(b"corrupt")
@@ -739,6 +863,33 @@ class DurableReservationBookTests(unittest.TestCase):
             "cannot be replayed",
         ):
             self.book()
+
+    def test_self_authored_resolution_receipt_cannot_release_without_checkpoint(self):
+        book = self.book()
+        self.reserve(book)
+        book.mark_unknown(
+            command_id="cmd-unknown-self-authored",
+            idempotency_key="idem-unknown-self-authored",
+            reservation_id="r1",
+        )
+        self.create_unknown_attempt()
+        before = book.total_reserved("CASH:USD")
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "matching durable reconciliation checkpoint",
+        ):
+            book.mark_terminal(
+                command_id="cmd-terminal-self-authored",
+                idempotency_key="idem-terminal-self-authored",
+                reservation_id="r1",
+                outcome="PROVEN_ABSENT",
+                provider="SIMULATED",
+                attempt_id="attempt-r1",
+                resolution_evidence=self.evidence,
+            )
+        self.assertEqual(book.get("r1").state, "UNKNOWN")
+        self.assertEqual(book.total_reserved("CASH:USD"), before)
+        self.assertEqual(self.book().get("r1").state, "UNKNOWN")
 
     def test_terminal_release_requires_immutable_evidence_before_journal_mutation(self):
         book = self.book()

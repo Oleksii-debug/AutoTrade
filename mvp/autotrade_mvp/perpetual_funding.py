@@ -95,6 +95,7 @@ class PerpetualFundingObservation:
     mark_price: Decimal
     index_price: Decimal
     price_basis: str
+    collateral_currency: str
     positive_rate_effect: str
     raw_evidence_digest: str
     corrects_external_event_id: str | None = None
@@ -150,6 +151,12 @@ class PerpetualFundingObservation:
         if price_basis not in {"MARK", "INDEX"}:
             raise PerpetualFundingError("price_basis must be MARK or INDEX")
         object.__setattr__(self, "price_basis", price_basis)
+        collateral_currency = _text(
+            self.collateral_currency, "collateral_currency"
+        ).upper()
+        object.__setattr__(
+            self, "collateral_currency", collateral_currency
+        )
         effect = _text(self.positive_rate_effect, "positive_rate_effect").upper()
         if effect not in {"LONG_PAYS", "LONG_RECEIVES"}:
             raise PerpetualFundingError(
@@ -190,6 +197,7 @@ def canonical_perpetual_funding_observation(
         "mark_price": format(observation.mark_price, "f"),
         "index_price": format(observation.index_price, "f"),
         "price_basis": observation.price_basis,
+        "collateral_currency": observation.collateral_currency,
         "positive_rate_effect": observation.positive_rate_effect,
         "raw_evidence_digest": observation.raw_evidence_digest,
         "corrects_external_event_id": observation.corrects_external_event_id,
@@ -221,6 +229,7 @@ def _canonical_observation_from_sealed_response(
         "mark_price",
         "index_price",
         "price_basis",
+        "collateral_currency",
         "positive_rate_effect",
         "corrects_external_event_id",
     }
@@ -274,6 +283,9 @@ def _canonical_observation_from_sealed_response(
         mark_price=_decimal(payload["mark_price"], "mark_price"),
         index_price=_decimal(payload["index_price"], "index_price"),
         price_basis=_text(payload["price_basis"], "price_basis"),
+        collateral_currency=_text(
+            payload["collateral_currency"], "collateral_currency"
+        ),
         positive_rate_effect=_text(
             payload["positive_rate_effect"],
             "positive_rate_effect",
@@ -452,7 +464,7 @@ class DurablePerpetualFundingAuthority:
         contract = PerpetualContract(
             instrument_id=version.provider_symbol,
             settlement_currency=version.settlement_currency,
-            collateral_currency=version.settlement_currency,
+            collateral_currency=observation.collateral_currency,
             multiplier=version.contract_multiplier,
             payoff=version.payoff,
             face_currency=(
@@ -470,6 +482,7 @@ class DurablePerpetualFundingAuthority:
                 "schema_version": "1.0.0",
                 "instrument_version": observation.instrument_version,
                 "instrument_contract": version.to_contract_dict(),
+                "provider_collateral_currency": observation.collateral_currency,
             }
         )
         return version, contract, contract_digest

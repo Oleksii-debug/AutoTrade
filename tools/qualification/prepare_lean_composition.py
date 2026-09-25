@@ -68,7 +68,10 @@ def prepare(
     if set(approved_blobs) != set(FILES):
         raise ValueError("approved LEAN blob map must exactly match composition files")
 
-    records: list[dict[str, str]] = []
+    # Validate the complete approved preimage set before mutating any file.
+    # This prevents a late mismatch in one project from leaving an earlier
+    # project partially composed.
+    preimages: dict[str, tuple[Path, str]] = {}
     for relative, (old, new) in FILES.items():
         path = root / relative
         if not path.is_file():
@@ -80,6 +83,23 @@ def prepare(
             raise ValueError(
                 f"{relative}: upstream blob mismatch: expected {expected_blob}, got {actual_blob}"
             )
+        try:
+            text = before_bytes.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError(f"{relative}: approved LEAN project is not UTF-8") from error
+        if text.count(old) != 1:
+            raise ValueError(
+                f"{path}: expected exactly one approved composition anchor"
+            )
+        if new in text and old != new:
+            raise ValueError(
+                f"{path}: replacement already present before composition"
+            )
+        preimages[relative] = (path, actual_blob)
+
+    records: list[dict[str, str]] = []
+    for relative, (old, new) in FILES.items():
+        path, actual_blob = preimages[relative]
         before_sha, after_sha = _replace_exact(path, old, new)
         records.append(
             {

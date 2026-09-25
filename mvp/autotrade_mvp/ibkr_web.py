@@ -944,16 +944,14 @@ def parse_web_api_trades(
         fee_currency = _text(
             fee_currency_by_execution_id[execution_id], name="fee_currency"
         )
-        raw_side = _text(raw.get("side"), name="trade.side").upper()
+        raw_side = _text(raw.get("side"), name="trade.side")
         side_by_provider_value = {
             "B": "BUY",
-            "BUY": "BUY",
             "S": "SELL",
-            "SELL": "SELL",
         }
         if raw_side not in side_by_provider_value:
             raise IbkrWebAdapterError(
-                "trade side must be provider-evidenced B/S or BUY/SELL"
+                "trade side must be provider-evidenced B or S"
             )
         side = side_by_provider_value[raw_side]
         trade_time = _text(raw.get("trade_time"), name="trade_time")

@@ -16,10 +16,10 @@ def protocol():
         "strategy": "deterministic baseline",
         "features": ["price_return"],
         "search_space": {"lookback": [5, 10]},
-        "train_period": "t0-t1",
-        "validation_period": "t1-t2",
-        "test_period": "t2-t3",
-        "forward_period": "future",
+        "train_period": {"start": "2024-01-01", "end": "2024-12-31"},
+        "validation_period": {"start": "2025-01-01", "end": "2025-06-30"},
+        "test_period": {"start": "2025-07-01", "end": "2025-12-31"},
+        "forward_period": {"start": "2026-01-01", "end": "2026-06-30"},
         "labels": ["net_return"],
         "horizons": ["1d"],
         "purge_embargo": {"purge": "1d", "embargo": "1d"},
@@ -36,6 +36,15 @@ def protocol():
         "risk_constraints": {"max_drawdown": "0.10"},
         "retention_tolerances": {"prior_regime_loss": "0.02"},
         "promotion_rule": "all registered gates",
+    }
+
+
+def holdout_identity(dataset_digit="a", *, start="2026-01-01", end="2026-06-30", role="LOCKED_FORWARD"):
+    return {
+        "dataset_digest": "sha256:" + dataset_digit * 64,
+        "segment_start": start,
+        "segment_end": end,
+        "role": role,
     }
 
 
@@ -93,9 +102,9 @@ class ScientificRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")
             p = store.register_protocol(protocol())
-            first = store.register_evaluation(p.protocol_id, holdout_id="holdout-A", result={"score": "0.1"})
+            first = store.register_evaluation(p.protocol_id, holdout_id="holdout-A", holdout_identity=holdout_identity(), result={"score": "0.1"})
             self.assertEqual(first["untouched"], 1)
-            second = store.register_evaluation(p.protocol_id, holdout_id="holdout-A", result={"score": "0.2"})
+            second = store.register_evaluation(p.protocol_id, holdout_id="holdout-A", holdout_identity=holdout_identity(), result={"score": "0.2"})
             self.assertEqual(second["untouched"], 0)
             self.assertGreaterEqual(second["prior_access_count"], 1)
 
@@ -103,8 +112,8 @@ class ScientificRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")
             p = store.register_protocol(protocol())
-            store.record_holdout_access(p.protocol_id, holdout_id="holdout-A", purpose="manual inspection")
-            result = store.register_evaluation(p.protocol_id, holdout_id="holdout-A", result={"score": "0.1"})
+            store.record_holdout_access(p.protocol_id, holdout_id="holdout-A", holdout_identity=holdout_identity(), purpose="manual inspection")
+            result = store.register_evaluation(p.protocol_id, holdout_id="holdout-A", holdout_identity=holdout_identity(), result={"score": "0.1"})
             self.assertEqual(result["untouched"], 0)
             self.assertEqual(result["prior_access_count"], 1)
 

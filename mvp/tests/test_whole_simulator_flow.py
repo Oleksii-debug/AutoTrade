@@ -336,7 +336,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                     "provider_execution_id": fill["provider_execution_id"],
                     "instrument_version": fill["instrument_version"],
                     "side": fill["side"],
-                    "last_quantity": fill["last_quantity"]["value"],
+                    "last_quantity": fill["last_quantity"],
                     "last_price": fill["last_price"],
                     "trade_time": fill["trade_time"],
                     "receipt_time": LATER,

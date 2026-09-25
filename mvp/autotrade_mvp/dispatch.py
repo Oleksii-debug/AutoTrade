@@ -375,10 +375,11 @@ class GuardedDispatcher:
             return DispatchOutcome("BLOCKED", client_order_id, None, reason)
 
         guard_called = False
+        barrier_passed = False
         barrier_now = now
 
         def final_guard() -> None:
-            nonlocal guard_called, barrier_now
+            nonlocal guard_called, barrier_passed, barrier_now
             if guard_called:
                 raise RuntimeError("final send guard may be consumed only once")
             guard_called = True
@@ -454,6 +455,7 @@ class GuardedDispatcher:
                 },
                 now=barrier_now,
             )
+            barrier_passed = True
 
         try:
             response = transport_send(client_order_id, request_frozen, final_guard)
@@ -500,6 +502,32 @@ class GuardedDispatcher:
                 now=now,
             )
             return DispatchOutcome("UNKNOWN", client_order_id, None, "provider_guard_contract_violation")
+
+        if not barrier_passed:
+            # A wrapper that catches DispatchBlocked (or any final-guard
+            # failure) and then returns has violated the only safe outbound
+            # contract. We cannot prove that it refrained from sending after
+            # swallowing the barrier, so preserve worst-case exposure and force
+            # reconciliation instead of fabricating SENT or safe-to-retry.
+            events = self._events(attempt_id)
+            last = events[-1]
+            next_version = int(last["aggregate_version"]) + 1
+            self._append(
+                attempt_id=attempt_id,
+                event_type="SubmissionUnknown",
+                version=next_version,
+                payload={
+                    "client_order_id": client_order_id,
+                    "reason": "provider_wrapper_swallowed_final_guard_failure",
+                },
+                now=barrier_now,
+            )
+            return DispatchOutcome(
+                "UNKNOWN",
+                client_order_id,
+                None,
+                "provider_guard_contract_violation",
+            )
 
         try:
             self._append(

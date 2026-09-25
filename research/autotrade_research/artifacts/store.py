@@ -10,7 +10,7 @@ import tempfile
 from typing import Any
 from uuid import UUID
 
-from .durable_publish import atomic_write_json, sha256_file
+from .durable_publish import atomic_write_json, sha256_file, sync_parent_directory
 from .resource_lock import ResourceLock
 from ..io.strict_json import strict_json_loads
 
@@ -175,12 +175,28 @@ class ArtifactStore:
                     raise ArtifactConflict("artifact_id is already committed with different content or metadata")
                 self._verify_manifest_object(existing)
                 if not _verify_manifest_integrity(existing, required=False):
-                    existing = dict(existing)
+                    # Legacy manifests have no authenticated metadata boundary.
+                    # Never make caller-editable historical fields trustworthy by
+                    # hashing the bytes in place. Reconstruct the canonical v1
+                    # manifest from the verified object and the exact immutable
+                    # inputs supplied for this rebind. The timestamp is the
+                    # rebind instant, not an unverifiable legacy creation claim.
+                    existing = {
+                        "schema_version": self.SCHEMA_VERSION,
+                        **immutable,
+                        "created_at": datetime.now(timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                    }
                     existing["manifest_hash"] = _manifest_integrity_hash(existing)
                     atomic_write_json(manifest_path, existing)
                 return existing
 
             object_path.parent.mkdir(parents=True, exist_ok=True)
+            if object_path.is_symlink():
+                raise ArtifactIntegrityError(
+                    "content-addressed object path must not be a symlink"
+                )
             if object_path.exists():
                 if object_path.stat().st_size != len(data) or sha256_file(object_path) != digest:
                     raise ArtifactIntegrityError("content-addressed object path is corrupt")
@@ -202,6 +218,7 @@ class ArtifactStore:
                         raise ArtifactIntegrityError("staged artifact hash changed")
                     os.replace(temporary, object_path)
                     temporary = None
+                    sync_parent_directory(object_path)
                 finally:
                     if temporary is not None:
                         try:
@@ -230,6 +247,8 @@ class ArtifactStore:
             raise ArtifactIntegrityError("manifest digest is invalid")
         digest = digest_value.removeprefix("sha256:")
         object_path = self._object_path(digest)
+        if object_path.is_symlink():
+            raise ArtifactIntegrityError("artifact object must not be a symlink")
         if not object_path.is_file():
             raise ArtifactIntegrityError("artifact object is missing")
         if object_path.stat().st_size != manifest.get("bytes"):
@@ -240,6 +259,7 @@ class ArtifactStore:
 
     def read_bytes(self, artifact_id: str) -> bytes:
         manifest = self.load_manifest(artifact_id)
+        _verify_manifest_integrity(manifest, required=True)
         return self._verify_manifest_object(manifest).read_bytes()
 
     def export(self, artifact_id: str, destination: str | Path) -> Path:
@@ -265,6 +285,7 @@ class ArtifactStore:
                 os.fsync(handle.fileno())
             os.replace(temporary, target)
             temporary = None
+            sync_parent_directory(target)
         finally:
             if temporary is not None:
                 try:
@@ -302,11 +323,29 @@ class ArtifactStore:
                 except Exception:
                     corrupt.append(manifest_path.name)
 
-        object_digests = {
-            path.name
-            for path in self.objects.glob("*/*")
-            if path.is_file() and len(path.name) == 64
-        }
+        object_digests: set[str] = set()
+        for path in self.objects.glob("*/*"):
+            if path.is_symlink():
+                corrupt.append(
+                    "object:" + path.relative_to(self.root).as_posix()
+                )
+                continue
+            if not path.is_file():
+                continue
+            digest = path.name
+            try:
+                canonical = self._object_path(digest)
+            except ValueError:
+                corrupt.append(
+                    "object:" + path.relative_to(self.root).as_posix()
+                )
+                continue
+            if path != canonical:
+                corrupt.append(
+                    "object:" + path.relative_to(self.root).as_posix()
+                )
+                continue
+            object_digests.add(digest)
         return ArtifactAudit(
             manifests=manifest_count,
             objects=len(object_digests),

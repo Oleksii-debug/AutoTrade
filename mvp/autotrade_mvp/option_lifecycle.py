@@ -39,6 +39,27 @@ from .provider_core import ProviderResponseObservation, Surface
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 _EVENT_KINDS = frozenset({"EXERCISE", "ASSIGNMENT", "EXPIRY"})
+_OPTION_LIFECYCLE_PARSER_ID = "autotrade.option-lifecycle.sealed-json"
+_OPTION_LIFECYCLE_PARSER_VERSION = "1.0.0"
+_OPTION_LIFECYCLE_PARSER_CONTRACT_DIGEST = payload_digest(
+    {
+        "parser_id": _OPTION_LIFECYCLE_PARSER_ID,
+        "parser_version": _OPTION_LIFECYCLE_PARSER_VERSION,
+        "source_type": "ProviderResponseObservation",
+        "source_surface": "ACTIVITIES",
+        "payload_fields": [
+            "venue_id",
+            "external_event_id",
+            "event_kind",
+            "signed_contracts",
+            "effective_at",
+            "provider_revision",
+            "underlying_price",
+            "corrects_external_event_id",
+        ],
+        "financial_binding": "EXACT_SEALED_PAYLOAD",
+    }
+)
 
 OptionLifecycleEvidenceResolver = Callable[[str], ProviderResponseObservation]
 
@@ -657,6 +678,9 @@ class DurableOptionLifecycleAuthority:
             ),
             "instrument_version": provider_evidence.query_binding.instrument_version,
             "observed_at": provider_evidence.observed_at,
+            "parser_id": _OPTION_LIFECYCLE_PARSER_ID,
+            "parser_version": _OPTION_LIFECYCLE_PARSER_VERSION,
+            "parser_contract_digest": _OPTION_LIFECYCLE_PARSER_CONTRACT_DIGEST,
         }
         provider_evidence_digest = payload_digest(provider_evidence_payload)
         events = self._events()

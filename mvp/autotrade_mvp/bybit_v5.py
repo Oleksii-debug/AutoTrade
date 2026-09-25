@@ -483,6 +483,7 @@ class BybitPreparedSubmission:
     environment: str
     provider_environment: str
     capability_snapshot_id: str
+    entity_id: str
     instrument_version: str
     body_sha256: str = field(init=False)
     _factory_token: object = field(default=None, repr=False, compare=False)
@@ -531,6 +532,11 @@ class BybitPreparedSubmission:
             self,
             "capability_snapshot_id",
             _text(self.capability_snapshot_id, name="capability_snapshot_id"),
+        )
+        object.__setattr__(
+            self,
+            "entity_id",
+            _text(self.entity_id, name="entity_id"),
         )
         object.__setattr__(
             self,
@@ -622,6 +628,7 @@ def prepare_order_submission(
         environment=runtime_env,
         provider_environment=provider_env,
         capability_snapshot_id=capability.snapshot_id,
+        entity_id=capability.entity_id,
         instrument_version=capability.instrument_version,
         _factory_token=_BYBIT_PREPARED_SUBMISSION_TOKEN,
     )
@@ -642,6 +649,7 @@ def guarded_order_projection(
             "environment": prepared_request.environment,
             "provider_environment": prepared_request.provider_environment,
             "capability_snapshot_id": prepared_request.capability_snapshot_id,
+            "entity_id": prepared_request.entity_id,
             "capability_snapshot_ids": list(
                 prepared_request.capability_snapshot_ids
             ),

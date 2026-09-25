@@ -174,10 +174,34 @@ class BybitV5AdapterTests(unittest.TestCase):
             },
             observed_at="2026-09-24T22:00:00+02:00",
         )
-        self.assertEqual(accepted["provider_received_at"], "2026-09-24T20:00:00Z")
+        self.assertNotIn("provider_received_at", accepted)
         self.assertEqual(
             accepted["evidence"][0]["observed_at"],
             "2026-09-24T20:00:00Z",
+        )
+
+        provider_timed = parse_submission_response(
+            attempt_id=str(uuid4()),
+            client_order_id="client-provider-time",
+            environment="MAINNET",
+            response={
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "orderId": "provider-time-2",
+                    "orderLinkId": "client-provider-time",
+                },
+                "time": 1790280000123,
+            },
+            observed_at="2026-09-24T21:00:00Z",
+        )
+        self.assertEqual(
+            provider_timed["provider_received_at"],
+            "2026-09-24T20:00:00.123Z",
+        )
+        self.assertEqual(
+            provider_timed["evidence"][0]["observed_at"],
+            "2026-09-24T21:00:00Z",
         )
         with self.assertRaisesRegex(ProviderCoreError, "timezone"):
             parse_submission_response(

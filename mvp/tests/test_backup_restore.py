@@ -304,7 +304,17 @@ class BackupRestoreTests(unittest.TestCase):
                     raise OSError("simulated interruption")
                 return original_copy(source, target, *args, **kwargs)
 
-            with patch("mvp.autotrade_mvp.backup.shutil.copy2", side_effect=interrupted):
+            verified_manifest = verify_backup(backup)
+            with (
+                patch(
+                    "mvp.autotrade_mvp.backup.verify_backup",
+                    return_value=verified_manifest,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.backup.shutil.copy2",
+                    side_effect=interrupted,
+                ),
+            ):
                 with self.assertRaises(OSError):
                     restore_backup(backup, destination)
             self.assertFalse(destination.exists())

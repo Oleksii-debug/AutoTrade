@@ -28,8 +28,8 @@ def matched_fill(*, price="100", fee="1", revision=None):
         provider_revision=revision,
     )
     provider = ProviderFillEvidence.create(
-        provider_id="SIMULATED",
-        account_id="paper-1",
+        provider_id="PROVIDER-A",
+        account_id="acct-1",
         environment="PAPER",
         provider_execution_id="exec-1",
         client_order_id="client-1",

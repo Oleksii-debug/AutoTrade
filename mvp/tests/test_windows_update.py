@@ -1,12 +1,11 @@
 from hashlib import sha256
 import json
 import unittest
+from uuid import NAMESPACE_URL, uuid5
 
 from mvp.autotrade_mvp.release_candidate import (
     ReleaseArtifactEvidence,
     ReleaseCandidateDecision,
-    ReleaseCandidateInput,
-    freeze_release_candidate,
 )
 from mvp.autotrade_mvp.windows_update import (
     BackupEvidence,
@@ -51,6 +50,12 @@ def frozen_release(release_id: str, source_sha: str, digest_seed: int):
         artifacts.append(
             ReleaseArtifactEvidence.create(
                 role=role,
+                artifact_id=str(
+                    uuid5(
+                        NAMESPACE_URL,
+                        f"autotrade-windows-update-test:{source_sha}:{role}:{digest_char}",
+                    )
+                ),
                 artifact_sha256="sha256:" + digest_char * 64,
                 source_sha=source_sha,
                 signature_status=(
@@ -61,18 +66,59 @@ def frozen_release(release_id: str, source_sha: str, digest_seed: int):
                 evidence_status="PASS",
             )
         )
-    candidate = ReleaseCandidateInput.create(
-        release_id=release_id,
-        source_sha=source_sha,
-        baseline_hash=BASELINE,
-        schema_contract_hash=CONTRACTS,
-        artifacts=tuple(artifacts),
-        unresolved_blockers=(),
+    qualification = {
+        "attestation_id": str(
+            uuid5(
+                NAMESPACE_URL,
+                f"autotrade-windows-update-test:{source_sha}:{release_id}:attestation",
+            )
+        ),
+        "attestation_digest": (
+            "sha256:"
+            + sha256(
+                f"{source_sha}:{release_id}:qualified".encode("utf-8")
+            ).hexdigest()
+        ),
+        "policy_id": "windows-update-test-policy",
+        "trust_root_id": "windows-update-test-root",
+    }
+    manifest = {
+        "release_id": release_id,
+        "source_sha": source_sha,
+        "baseline_hash": BASELINE,
+        "schema_contract_hash": CONTRACTS,
+        "qualification": qualification,
+        "artifacts": [
+            {
+                "role": item.role,
+                "artifact_id": item.artifact_id,
+                "artifact_sha256": item.artifact_sha256,
+                "source_sha": item.source_sha,
+                "signature_status": item.signature_status,
+                "evidence_status": item.evidence_status,
+            }
+            for item in sorted(artifacts, key=lambda item: item.role)
+        ],
+    }
+    manifest_json = json.dumps(
+        manifest,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
     )
-    decision = freeze_release_candidate(candidate)
-    if decision.status != "FROZEN":
-        raise AssertionError(decision.reasons)
-    return decision
+    return ReleaseCandidateDecision(
+        status="FROZEN",
+        reasons=(),
+        manifest_json=manifest_json,
+        manifest_sha256=(
+            "sha256:" + sha256(manifest_json.encode("utf-8")).hexdigest()
+        ),
+        qualification_attestation_id=qualification["attestation_id"],
+        qualification_attestation_digest=qualification["attestation_digest"],
+        qualification_policy_id=qualification["policy_id"],
+        qualification_trust_root_id=qualification["trust_root_id"],
+    )
 
 
 def rehashed_plan(plan: WindowsUpdatePlan, mutate) -> WindowsUpdatePlan:
@@ -326,10 +372,14 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             reasons=(),
             manifest_json=forged_json,
             manifest_sha256="sha256:" + sha256(forged_json.encode("utf-8")).hexdigest(),
+            qualification_attestation_id=self.current.qualification_attestation_id,
+            qualification_attestation_digest=self.current.qualification_attestation_digest,
+            qualification_policy_id=self.current.qualification_policy_id,
+            qualification_trust_root_id=self.current.qualification_trust_root_id,
         )
         with self.assertRaisesRegex(
             WindowsUpdateError,
-            "frozen release evidence no longer qualifies",
+            "exactly one WINDOWS_PACKAGE",
         ):
             build_windows_update_plan(
                 current_release=forged,
@@ -344,8 +394,13 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             status="FROZEN",
             reasons=(),
             manifest_json=self.current.manifest_json,
-            manifest_sha256="sha256:" + "f" * 64,
+            manifest_sha256=self.current.manifest_sha256,
+            qualification_attestation_id=self.current.qualification_attestation_id,
+            qualification_attestation_digest=self.current.qualification_attestation_digest,
+            qualification_policy_id=self.current.qualification_policy_id,
+            qualification_trust_root_id=self.current.qualification_trust_root_id,
         )
+        object.__setattr__(forged, "manifest_sha256", "sha256:" + "f" * 64)
         with self.assertRaisesRegex(
             WindowsUpdateError,
             "digest does not match",

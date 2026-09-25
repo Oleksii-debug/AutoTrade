@@ -19,7 +19,6 @@ from .release_candidate import (
     ReleaseCandidateDecision,
     ReleaseCandidateError,
     ReleaseCandidateInput,
-    freeze_release_candidate,
 )
 
 
@@ -28,7 +27,7 @@ class WindowsUpdateError(ValueError):
 
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
-_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_GIT_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 _INSTALL_STEPS = (
     "STOP_AND_FENCE_FINANCIAL_SENDER",
@@ -68,7 +67,7 @@ def _git_sha(value: object, *, name: str) -> str:
     text = _text(value, name=name)
     if _GIT_SHA.fullmatch(text) is None:
         raise WindowsUpdateError(
-            f"{name} must be an exact 40-character lowercase Git SHA"
+            f"{name} must be an exact 40- or 64-character lowercase Git object id"
         )
     return text
 
@@ -220,7 +219,14 @@ class WindowsUpdatePlan:
 
 
 def _release_manifest(decision: ReleaseCandidateDecision, *, name: str) -> dict[str, Any]:
-    """Re-derive frozen release truth instead of trusting a constructed decision."""
+    """Validate and project an already-qualified immutable frozen release.
+
+    Release qualification is an upstream authority. This consumer does not
+    manufacture a second PASS by re-freezing self-asserted evidence without the
+    trust inputs used by WP-54. Instead it validates the exact frozen manifest,
+    its qualification provenance identifiers and all artifact identities before
+    constructing an update plan.
+    """
 
     if not isinstance(decision, ReleaseCandidateDecision):
         raise TypeError(f"{name} must be ReleaseCandidateDecision")
@@ -248,9 +254,53 @@ def _release_manifest(decision: ReleaseCandidateDecision, *, name: str) -> dict[
         "baseline_hash",
         "schema_contract_hash",
         "artifacts",
+        "qualification",
     }
     if set(manifest) != expected_manifest_fields:
         raise WindowsUpdateError(f"{name} manifest structure is not canonical")
+
+    canonical = json.dumps(
+        manifest,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    if canonical != decision.manifest_json:
+        raise WindowsUpdateError(f"{name} manifest JSON is not canonical")
+
+    qualification = manifest.get("qualification")
+    expected_qualification = {
+        "attestation_id": decision.qualification_attestation_id,
+        "attestation_digest": decision.qualification_attestation_digest,
+        "policy_id": decision.qualification_policy_id,
+        "trust_root_id": decision.qualification_trust_root_id,
+    }
+    if (
+        not isinstance(qualification, dict)
+        or set(qualification) != set(expected_qualification)
+        or qualification != expected_qualification
+        or any(value is None for value in expected_qualification.values())
+    ):
+        raise WindowsUpdateError(
+            f"{name} qualification provenance does not match frozen decision"
+        )
+    _text(
+        decision.qualification_attestation_id,
+        name=f"{name}.qualification.attestation_id",
+    )
+    _sha256(
+        decision.qualification_attestation_digest,
+        name=f"{name}.qualification.attestation_digest",
+    )
+    _text(
+        decision.qualification_policy_id,
+        name=f"{name}.qualification.policy_id",
+    )
+    _text(
+        decision.qualification_trust_root_id,
+        name=f"{name}.qualification.trust_root_id",
+    )
 
     try:
         artifacts_raw = manifest["artifacts"]
@@ -259,6 +309,7 @@ def _release_manifest(decision: ReleaseCandidateDecision, *, name: str) -> dict[
         artifacts = tuple(
             ReleaseArtifactEvidence.create(
                 role=raw["role"],
+                artifact_id=raw["artifact_id"],
                 artifact_sha256=raw["artifact_sha256"],
                 source_sha=raw["source_sha"],
                 signature_status=raw["signature_status"],
@@ -268,6 +319,7 @@ def _release_manifest(decision: ReleaseCandidateDecision, *, name: str) -> dict[
             and set(raw)
             == {
                 "role",
+                "artifact_id",
                 "artifact_sha256",
                 "source_sha",
                 "signature_status",
@@ -286,7 +338,6 @@ def _release_manifest(decision: ReleaseCandidateDecision, *, name: str) -> dict[
             artifacts=artifacts,
             unresolved_blockers=(),
         )
-        refrozen = freeze_release_candidate(reconstructed)
     except (KeyError, TypeError, ValueError, ReleaseCandidateError) as error:
         if isinstance(error, WindowsUpdateError):
             raise
@@ -294,20 +345,16 @@ def _release_manifest(decision: ReleaseCandidateDecision, *, name: str) -> dict[
             f"{name} frozen release evidence is invalid"
         ) from error
 
-    if refrozen.status != "FROZEN":
-        raise WindowsUpdateError(f"{name} frozen release evidence no longer qualifies")
-    if (
-        refrozen.manifest_json != decision.manifest_json
-        or refrozen.manifest_sha256 != decision.manifest_sha256
-    ):
-        raise WindowsUpdateError(
-            f"{name} frozen release manifest is not canonical for its evidence"
-        )
-
-    release_id = _text(manifest.get("release_id"), name=f"{name}.release_id")
-    source_sha = _git_sha(manifest.get("source_sha"), name=f"{name}.source_sha")
+    release_id = _text(
+        reconstructed.release_id,
+        name=f"{name}.release_id",
+    )
+    source_sha = _git_sha(
+        reconstructed.source_sha,
+        name=f"{name}.source_sha",
+    )
     schema_contract_hash = _sha256(
-        manifest.get("schema_contract_hash"),
+        reconstructed.schema_contract_hash,
         name=f"{name}.schema_contract_hash",
     )
     windows_packages = [
@@ -328,7 +375,6 @@ def _release_manifest(decision: ReleaseCandidateDecision, *, name: str) -> dict[
         "manifest_sha256": decision.manifest_sha256,
         "manifest_json": decision.manifest_json,
     }
-
 
 def build_windows_update_plan(
     *,
@@ -522,15 +568,28 @@ def _validated_plan_release(
     manifest_json = value.get("manifest_json")
     if not isinstance(manifest_json, str) or not manifest_json:
         raise WindowsUpdateError(f"{name}.manifest_json is required")
-    decision = ReleaseCandidateDecision(
-        status="FROZEN",
-        reasons=(),
-        manifest_json=manifest_json,
-        manifest_sha256=_sha256(
-            value.get("manifest_sha256"),
-            name=f"{name}.manifest_sha256",
-        ),
-    )
+    try:
+        parsed_manifest = json.loads(manifest_json)
+        qualification = parsed_manifest["qualification"]
+        if not isinstance(qualification, dict):
+            raise TypeError("qualification must be an object")
+        decision = ReleaseCandidateDecision(
+            status="FROZEN",
+            reasons=(),
+            manifest_json=manifest_json,
+            manifest_sha256=_sha256(
+                value.get("manifest_sha256"),
+                name=f"{name}.manifest_sha256",
+            ),
+            qualification_attestation_id=qualification["attestation_id"],
+            qualification_attestation_digest=qualification["attestation_digest"],
+            qualification_policy_id=qualification["policy_id"],
+            qualification_trust_root_id=qualification["trust_root_id"],
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise WindowsUpdateError(
+            f"{name} frozen release provenance is invalid"
+        ) from error
     canonical = _release_manifest(decision, name=name)
     if value != canonical:
         raise WindowsUpdateError(

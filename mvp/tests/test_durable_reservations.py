@@ -193,6 +193,9 @@ class DurableReservationBookTests(unittest.TestCase):
         else:
             raise ValueError("unsupported test reconciliation outcome")
         result = reconcile_account(
+            provider_id=unknown.provider_id,
+            account_id=unknown.account_id,
+            environment=unknown.environment,
             local_cash={},
             provider_cash={},
             local_positions={},
@@ -200,6 +203,9 @@ class DurableReservationBookTests(unittest.TestCase):
             local_execution_ids=local_execution_ids,
             provider_fills=provider_fills,
             snapshot_consistency=SnapshotConsistencyEvidence(
+                provider_id=unknown.provider_id,
+                account_id=unknown.account_id,
+                environment=unknown.environment,
                 mode="ATOMIC",
                 query_started_at="2026-09-25T00:00:00Z",
                 query_completed_at="2026-09-25T00:02:00Z",
@@ -220,6 +226,8 @@ class DurableReservationBookTests(unittest.TestCase):
             ),
             result=result,
             observed_at="2026-09-25T00:05:00Z",
+            host_id="test-host",
+            owner_epoch="1",
         )
 
     def reserve(self, book, *, amount="70", command="cmd-reserve", idem="idem-reserve"):

@@ -483,6 +483,7 @@ class BybitPreparedSubmission:
     environment: str
     provider_environment: str
     capability_snapshot_id: str
+    entity_id: str
     instrument_version: str
     body_sha256: str = field(init=False)
     _factory_token: object = field(default=None, repr=False, compare=False)
@@ -534,6 +535,11 @@ class BybitPreparedSubmission:
         )
         object.__setattr__(
             self,
+            "entity_id",
+            _text(self.entity_id, name="entity_id"),
+        )
+        object.__setattr__(
+            self,
             "instrument_version",
             _text(self.instrument_version, name="instrument_version"),
         )
@@ -566,6 +572,7 @@ def prepare_order_submission(
     time_in_force: str,
     price: object | None = None,
     reduce_only: bool = False,
+    position_side: str | None = None,
     position_idx: int | None = None,
 ) -> BybitPreparedSubmission:
     if not isinstance(capability, CapabilitySnapshot):
@@ -613,7 +620,13 @@ def prepare_order_submission(
         time_in_force=time_in_force,
         price=price,
         reduce_only=reduce_only,
+        position_side=position_side,
         position_idx=position_idx,
+        capability=capability,
+        capability_at=point,
+        account_id=capability.account_id,
+        instrument_version=capability.instrument_version,
+        provider_environment=provider_env,
     )
     return BybitPreparedSubmission(
         endpoint=BYBIT_DOCUMENTED_ENDPOINTS["PLACE_ORDER"],
@@ -622,8 +635,34 @@ def prepare_order_submission(
         environment=runtime_env,
         provider_environment=provider_env,
         capability_snapshot_id=capability.snapshot_id,
+        entity_id=capability.entity_id,
         instrument_version=capability.instrument_version,
         _factory_token=_BYBIT_PREPARED_SUBMISSION_TOKEN,
+    )
+
+
+def guarded_order_projection(
+    prepared_request: BybitPreparedSubmission,
+) -> Mapping[str, object]:
+    """Project canonical Bybit preparation into the shared guarded transport seam."""
+
+    if not isinstance(prepared_request, BybitPreparedSubmission):
+        raise TypeError("prepared_request must be BybitPreparedSubmission")
+    return MappingProxyType(
+        {
+            "endpoint": prepared_request.endpoint,
+            "body": dict(prepared_request.body),
+            "account_id": prepared_request.account_id,
+            "environment": prepared_request.environment,
+            "provider_environment": prepared_request.provider_environment,
+            "capability_snapshot_id": prepared_request.capability_snapshot_id,
+            "entity_id": prepared_request.entity_id,
+            "capability_snapshot_ids": list(
+                prepared_request.capability_snapshot_ids
+            ),
+            "instrument_versions": list(prepared_request.instrument_versions),
+            "body_sha256": prepared_request.body_sha256,
+        }
     )
 
 

@@ -36,18 +36,11 @@ def schema_definitions(root: Path, names: list[str]) -> dict[str, set[str]]:
     return result
 
 
-def _is_transient_runtime_artifact(path: Path, *, base: Path) -> bool:
-    """Exclude interpreter output that is not part of the committed contract surface."""
-
-    relative = path.relative_to(base)
-    return "__pycache__" in relative.parts or path.suffix in {".pyc", ".pyo"}
-
-
 def contract_bytes(root: Path) -> dict[str, bytes]:
     base = root / "contracts"
     files: dict[str, bytes] = {}
     for path in sorted(base.rglob("*")):
-        if path.is_file() and not _is_transient_runtime_artifact(path, base=base):
+        if path.is_file():
             files[path.relative_to(root).as_posix()] = path.read_bytes()
     return files
 
@@ -103,12 +96,19 @@ def export_ref(ref: str) -> Path:
     return temporary
 
 
+def evaluate_refs(base_ref: str, current_ref: str = "HEAD") -> list[str]:
+    """Compare committed contract trees, never test-mutated working-tree bytes."""
+    base = export_ref(base_ref)
+    current = export_ref(current_ref)
+    return evaluate(base, current)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-ref", required=True)
+    parser.add_argument("--current-ref", default="HEAD")
     args = parser.parse_args()
-    base = export_ref(args.base_ref)
-    errors = evaluate(base, Path.cwd())
+    errors = evaluate_refs(args.base_ref, args.current_ref)
     if errors:
         for error in errors:
             print(f"ERROR: {error}")

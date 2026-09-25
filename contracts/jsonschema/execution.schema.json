@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.autotrade.local/2.0.0/execution.schema.json",
+  "$id": "https://schemas.autotrade.local/3.0.0/execution.schema.json",
   "title": "AutoTrade execution contracts",
   "$defs": {
     "OrderIntent": {

@@ -180,6 +180,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         self.assertEqual(request.body["quantity"], "0.0100")
         self.assertEqual(request.body["price"], "40000.2500")
         self.assertEqual(request.body["newOrderRespType"], "ACK")
+        self.assertRegex(request.filter_source_sha256, r"^sha256:[0-9a-f]{64}$")
         self.assertNotIn("timestamp", request.body)
         self.assertNotIn("signature", request.body)
 

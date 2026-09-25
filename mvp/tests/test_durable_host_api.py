@@ -156,7 +156,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 "event_type": "OPERATION_UPDATED",
                 "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
                 "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
-                "aggregate_version": 1,
+                "aggregate_version": "1",
                 "payload": {
                     "operation_id": "ghost-operation",
                     "phase": "SUCCEEDED",
@@ -196,7 +196,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 "event_type": "OPERATION_UPDATED",
                 "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
                 "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
-                "aggregate_version": 3,
+                "aggregate_version": "3",
                 "payload": payload,
                 "payload_hash": payload_digest(payload),
                 "committed_at": "2026-09-24T18:00:01Z",

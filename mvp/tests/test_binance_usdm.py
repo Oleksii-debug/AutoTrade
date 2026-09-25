@@ -271,6 +271,37 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             "BINANCE-USDM:BTCUSDT:22542179",
         )
 
+    def test_provider_observation_symbol_identity_must_be_canonical_uppercase(self):
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "uppercase"):
+            parse_order_ack(
+                attempt_id=str(uuid4()),
+                client_order_id="at-usdm-lower-ack",
+                response={
+                    "symbol": "btcusdt",
+                    "orderId": 7,
+                    "clientOrderId": "at-usdm-lower-ack",
+                    "updateTime": 1790272800123,
+                },
+            )
+
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "uppercase"):
+            parse_account_trades(
+                [
+                    {
+                        "commission": "0.01",
+                        "commissionAsset": "USDT",
+                        "id": 7,
+                        "orderId": 42,
+                        "price": "100",
+                        "qty": "0.2",
+                        "positionSide": "BOTH",
+                        "symbol": "btcusdt",
+                        "time": 1790272800123,
+                    }
+                ],
+                instrument_versions={"btcusdt": "BTCUSDT-PERP:v1"},
+            )
+
     def test_trade_identity_dedupes_and_preserves_exact_fee(self):
         row = {
             "commission": "0.07819010",

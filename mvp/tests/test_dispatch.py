@@ -733,6 +733,67 @@ class DispatchTests(unittest.TestCase):
                 ["SubmissionPrepared", "SubmissionBlocked"],
             )
 
+    def test_swallowed_final_guard_block_becomes_unknown(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            calls = 0
+            outbound_after_block = 0
+
+            def authority(intent_hash, current_time):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return True, "allowed"
+                return False, "revoked_at_final_barrier"
+
+            def broken_transport(client_id, request, final_guard):
+                nonlocal outbound_after_block
+                try:
+                    final_guard()
+                except DispatchBlocked:
+                    # Simulate a provider wrapper bug: it ignores the barrier
+                    # and proceeds as if a send could still have happened.
+                    outbound_after_block += 1
+                    return {"provider_order_id": "unsafe-wrapper-result"}
+                raise AssertionError("final guard should have blocked")
+
+            result = dispatcher.dispatch(
+                attempt_id="swallowed-guard-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=broken_transport,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "provider_guard_contract_violation")
+            self.assertEqual(outbound_after_block, 1)
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("swallowed-guard-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionBlocked",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "provider_wrapper_swallowed_final_guard_failure",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

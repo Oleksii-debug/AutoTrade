@@ -5,6 +5,26 @@ info:
   description: Canonical UI/host boundary. Accepted commands are not financial-completion claims.
 servers:
   - url: https://localhost
+components:
+  securitySchemes:
+    AutoTradeSession:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: >-
+        Paired host session. The exact header value is
+        "AutoTrade-Session <session-token>"; the token is validated by the
+        canonical SecurityBoundary for the listener origin and action.
+    AutoTradeActor:
+      type: apiKey
+      in: header
+      name: X-AutoTrade-Actor
+      description: >-
+        Authenticated actor identity. It must equal the subject bound to the
+        paired AutoTradeSession and, for commands, the UiCommand.actor.
+security:
+  - AutoTradeSession: []
+    AutoTradeActor: []
 paths:
   /api/v1/state:
     get:
@@ -74,6 +94,7 @@ paths:
   /api/v1/health:
     get:
       operationId: getHealth
+      security: []
       responses:
         "200":
           description: Component readiness/degradation status

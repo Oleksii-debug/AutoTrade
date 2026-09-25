@@ -252,6 +252,17 @@ class OptionLifecycleTests(unittest.TestCase):
             ),
             Decimal("20"),
         )
+        for invalid in (0, 1, "true", None):
+            with self.subTest(atomic_package_guaranteed=invalid):
+                with self.assertRaisesRegex(
+                    OptionError,
+                    "atomic_package_guaranteed must be a boolean",
+                ):
+                    interim_multi_leg_reservation(
+                        ["100", "60"],
+                        atomic_package_guaranteed=invalid,
+                        package_worst_case_loss="20" if invalid else None,
+                    )
 
     def test_exercise_cutoff_expiry_and_provider_window_are_hard_gates(self):
         contract = self._cash_call()
@@ -391,6 +402,22 @@ class OptionRiskEvidenceTests(unittest.TestCase):
             tests_run=("greeks-unit", "scenario-stress"),
             unresolved_limits=(),
         )
+
+    def test_payload_serialization_is_pure_but_consumer_requires_artifact(self):
+        evidence = self._risk()
+        payload = option_risk_evidence_payload(evidence)
+        self.assertEqual(payload["instrument"], "OPT:CALL")
+        self.assertEqual(payload["greeks"]["delta"], "0.52")
+        with TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(OptionError, "immutable artifact evidence_ref"):
+                require_current_option_risk(
+                    evidence,
+                    instrument="OPT:CALL",
+                    at=datetime(2026, 9, 25, 18, 30, tzinfo=timezone.utc),
+                    maximum_calculation_age=timedelta(hours=2),
+                    maximum_market_age=timedelta(hours=2),
+                    artifact_store=ArtifactStore(directory),
+                )
 
     def test_greeks_are_versioned_estimates_and_stress_is_explicit(self):
         evidence = self._risk()

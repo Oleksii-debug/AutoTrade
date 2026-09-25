@@ -546,6 +546,8 @@ class ChampionRegistry:
         labels = tuple(_text(item, name="label reference") for item in label_refs)
         if not labels:
             raise ValueError("online update requires label evidence")
+        if len(set(labels)) != len(labels):
+            raise ValueError("online update label references must be unique")
         if not set(labels).issubset(set(envelope.eligible_label_refs)):
             raise ValueError("online update uses labels outside the approved envelope")
         evidence = tuple(
@@ -554,6 +556,8 @@ class ChampionRegistry:
         )
         if not evidence:
             raise ValueError("online update requires evidence references")
+        if len(set(evidence)) != len(evidence):
+            raise ValueError("online update evidence references must be unique")
         cost = _decimal(
             actual_update_cost,
             name="actual_update_cost",
@@ -603,6 +607,19 @@ class ChampionRegistry:
             if state["authority_scope_id"] != envelope.authority_scope_id:
                 raise ValueError(
                     "online envelope authority scope does not match active champion"
+                )
+
+            prior_envelope = con.execute(
+                """SELECT envelope_hash FROM online_updates
+                   WHERE envelope_id=? LIMIT 1""",
+                (envelope.envelope_id,),
+            ).fetchone()
+            if (
+                prior_envelope is not None
+                and prior_envelope["envelope_hash"] != envelope.envelope_hash
+            ):
+                raise ValueError(
+                    "envelope_id cannot be reused with different immutable content"
                 )
 
             latest = con.execute(

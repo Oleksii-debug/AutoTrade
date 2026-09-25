@@ -915,6 +915,19 @@ def commit_economic_batch_with_reservation_consumption(
             raise ValueError(
                 "settlement book must share provider/account/environment scope"
             )
+        if provider_fill_binding is not None:
+            binding_provider_environment = provider_fill_binding.request.get(
+                "provider_environment",
+                provider_fill_binding.request.get("environment"),
+            )
+            if (
+                binding_provider_environment
+                != settlement_book.scope.provider_environment
+            ):
+                raise AccountingConflict(
+                    "provider fill financial binding provider_environment "
+                    "does not match settlement book"
+                )
         if not settlement_items:
             raise ValueError(
                 "settlement_book requires explicit settlement obligations"

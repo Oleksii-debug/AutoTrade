@@ -241,6 +241,72 @@ def bind_evidence(
 
 
 class DurableSettlementBookTests(unittest.TestCase):
+    def test_bybit_provider_environment_is_part_of_durable_settlement_scope(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires explicit provider_environment",
+        ):
+            SettlementAccountScope(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+            )
+
+        testnet_scope = SettlementAccountScope(
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        demo_scope = SettlementAccountScope(
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        self.assertNotEqual(testnet_scope, demo_scope)
+
+        testnet_rule = SettlementRuleBinding(
+            rule_id="bybit-equity-cash",
+            rule_version="1",
+            scope=testnet_scope,
+            instrument_version="BTCUSDT",
+            settlement_currency="USDT",
+            effective_from=date(2026, 9, 1),
+            effective_to=None,
+            evidence_refs=("provider-rule:bybit",),
+        )
+        demo_rule = replace(testnet_rule, scope=demo_scope)
+        self.assertNotEqual(testnet_rule.digest, demo_rule.digest)
+        self.assertEqual(
+            settlement_rule_evidence_receipt(
+                testnet_rule,
+                trade_date=date(2026, 9, 25),
+                expected_settlement_date=date(2026, 9, 26),
+            )["observation"]["provider_environment"],
+            "TESTNET",
+        )
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            testnet_book = DurableSettlementBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                evidence_artifact_store=artifact_store_for(store),
+            )
+            demo_book = DurableSettlementBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="DEMO",
+                evidence_artifact_store=artifact_store_for(store),
+            )
+            self.assertNotEqual(testnet_book.scope_id, demo_book.scope_id)
+
     def test_registration_restarts_and_exact_retry_is_noop(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

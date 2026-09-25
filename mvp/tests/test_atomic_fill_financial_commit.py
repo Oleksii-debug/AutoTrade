@@ -25,6 +25,7 @@ from mvp.autotrade_mvp.fill_accounting import (
 )
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
+    PreparedProviderFillBinding,
     _provider_fill_binding_aggregate_id,
     _provider_fill_binding_payload,
     commit_economic_batch_with_reservation_consumption,
@@ -264,6 +265,65 @@ class ProviderFillBindingEnvironmentTests(unittest.TestCase):
             ),
         )
 
+
+    def test_settlement_rejects_cross_provider_environment_fill_binding(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            economics = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="bybit-account",
+            )
+            settlements = DurableSettlementBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                evidence_artifact_store=artifact_store_for(store),
+            )
+            demo_binding = PreparedProviderFillBinding(
+                aggregate_id="demo-binding",
+                envelope=None,
+                request={
+                    "provider_id": "BYBIT",
+                    "account_id": "bybit-account",
+                    "environment": "PAPER",
+                    "provider_environment": "DEMO",
+                    "reservation_id": "reservation-1",
+                },
+                result={},
+                aggregate_version=1,
+                already_committed=True,
+            )
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "provider_environment does not match settlement book",
+            ):
+                commit_economic_batch_with_reservation_consumption(
+                    economics,
+                    reservations,
+                    command_id="cross-provider-environment",
+                    idempotency_key="cross-provider-environment",
+                    reservation_id="reservation-1",
+                    usage={"CASH:USDT": "1"},
+                    transactions=(),
+                    settlement_book=settlements,
+                    settlement_obligations=(),
+                    provider_fill_binding=demo_binding,
+                    committed_at="2026-09-25T09:00:02Z",
+                )
+            self.assertEqual(
+                store.load_events_by_aggregate_type("settlement_book"),
+                [],
+            )
 
 class AtomicFillFinancialCommitTests(unittest.TestCase):
     def test_fill_economics_and_reservation_consumption_restart_together(self):

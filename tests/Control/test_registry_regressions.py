@@ -2,8 +2,8 @@ from copy import deepcopy
 import unittest
 
 from control.tools.branch_lease_guard import evaluate_guard
-from control.tools.registry_state import claim, renew, release, RegistryProtocolError, RegistryCollisionError
-from test_registry_state import empty_registry, request, NOW
+from control.tools.registry_state import RegistryProtocolError, RegistryCollisionError
+from test_registry_state import claim, renew, release, empty_registry, request, NOW
 
 
 class RegistryRegressionTests(unittest.TestCase):
@@ -37,11 +37,23 @@ class RegistryRegressionTests(unittest.TestCase):
 
     def test_lost_claim_reply_replays_after_generation_change_and_renew(self):
         state, created = claim(empty_registry(), request(), expected_generation=0, now=NOW)
-        state, _ = renew(state, claim_id=created["claim_id"], run_id="run-a", lease_until="2026-09-22T12:00:00Z", expected_generation=1, now=NOW)
-        replay, result = claim(state, request(), expected_generation=0, now="2026-09-22T11:01:00Z")
+        state, _ = renew(
+            state,
+            claim_id=created["claim_id"],
+            run_id="run-a",
+            expected_generation=1,
+            now="2026-09-22T10:30:00Z",
+            lease_ttl_seconds=3600,
+        )
+        replay, result = claim(
+            state,
+            request(),
+            expected_generation=0,
+            now="2026-09-22T11:01:00Z",
+        )
         self.assertEqual(replay, state)
         self.assertEqual(result["claim_id"], created["claim_id"])
-        self.assertEqual(result["lease_until"], "2026-09-22T12:00:00Z")
+        self.assertEqual(result["lease_until"], "2026-09-22T11:30:00Z")
 
     def test_expired_claim_cannot_release(self):
         state, created = claim(empty_registry(), request(), expected_generation=0, now=NOW)

@@ -567,6 +567,8 @@ class CorporateActionBook:
         return transition
 
     def _split(self, event: CorporateEvent) -> Transition:
+        if set(event.payload) != {"numerator", "denominator"}:
+            raise ValueError("split requires exactly numerator and denominator")
         numerator = _positive(event.payload.get("numerator"), name="numerator")
         denominator = _positive(event.payload.get("denominator"), name="denominator")
         ratio = numerator / denominator
@@ -623,8 +625,10 @@ class CorporateActionBook:
         )
 
     def _delist(self, event: CorporateEvent) -> Transition:
-        if "cash_per_share" not in event.payload:
-            raise ValueError("delisting cannot erase holdings without evidenced consideration")
+        if set(event.payload) != {"cash_per_share", "currency"}:
+            raise ValueError(
+                "delisting requires exactly cash_per_share and currency"
+            )
         return self._merger_cash(
             CorporateEvent(
                 event_id=event.event_id,
@@ -649,9 +653,13 @@ class CorporateActionBook:
                 "symbol change requires only successor_instrument_version"
             )
         raw_version = event.payload["successor_instrument_version"]
-        if not raw_version.isdigit():
+        if (
+            not raw_version
+            or raw_version[0] not in "123456789"
+            or any(character not in "0123456789" for character in raw_version)
+        ):
             raise ValueError(
-                "successor_instrument_version must be a positive integer"
+                "successor_instrument_version must be a canonical positive integer"
             )
         successor_version = int(raw_version)
         current = self.instrument_version

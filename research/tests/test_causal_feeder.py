@@ -317,6 +317,28 @@ class CausalFeederTests(unittest.TestCase):
                 events=(future,),
             )
 
+    def test_strategy_view_rejects_duplicate_or_reordered_events(self):
+        first = event("first", priority=10, sequence=1)
+        second = event("second", priority=10, sequence=2)
+        simulation_time = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
+
+        with self.assertRaisesRegex(CausalReplayError, "duplicate event"):
+            CausalDataView(
+                simulation_time=simulation_time,
+                events=(first, first),
+            )
+        with self.assertRaisesRegex(CausalReplayError, "deterministic causal order"):
+            CausalDataView(
+                simulation_time=simulation_time,
+                events=(second, first),
+            )
+
+        valid = CausalDataView(
+            simulation_time=simulation_time,
+            events=(first, second),
+        )
+        self.assertEqual(valid.events, (first, second))
+
     def test_restore_rejects_tampered_published_prefix(self):
         dataset = CausalDataset.create(
             manifest_sha256=MANIFEST,

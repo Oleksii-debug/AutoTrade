@@ -82,6 +82,20 @@ def _normalize_actions(values, *, name: str) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def _normalize_labels(values, *, name: str) -> tuple[str, ...]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        raise TypeError(f"{name} must be a sequence of labels")
+    normalized: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} values must be non-empty strings")
+        label = value.strip()
+        if label in normalized:
+            raise ValueError(f"{name} values must be unique")
+        normalized.append(label)
+    return tuple(normalized)
+
+
 def _normalize_nested_mapping(values, *, name: str) -> dict[str, dict[str, Decimal]]:
     if not isinstance(values, Mapping):
         raise TypeError(f"{name} must be a mapping")
@@ -177,6 +191,7 @@ class RiskPolicy:
     max_expected_shortfall: Decimal | None = None
     expected_shortfall_tail_fraction: Decimal | None = None
     min_liquidation_headroom: Decimal | None = None
+    required_stress_scenario_labels: tuple[str, ...] | None = None
     max_asset_concentration_fraction: Decimal | None = None
     max_venue_concentration_fraction: Decimal | None = None
     max_order_participation_fraction: Decimal | None = None
@@ -206,6 +221,7 @@ class RiskPolicy:
         max_expected_shortfall=None,
         expected_shortfall_tail_fraction=None,
         min_liquidation_headroom=None,
+        required_stress_scenario_labels: Sequence[str] | None = None,
         max_asset_concentration_fraction=None,
         max_venue_concentration_fraction=None,
         max_order_participation_fraction=None,
@@ -266,6 +282,18 @@ class RiskPolicy:
                 allow_zero=True,
             )
         )
+        normalized_required_stress_labels = (
+            None
+            if required_stress_scenario_labels is None
+            else _normalize_labels(
+                required_stress_scenario_labels,
+                name="required_stress_scenario_labels",
+            )
+        )
+        if normalized_required_stress_labels == ():
+            raise ValueError(
+                "required_stress_scenario_labels must contain at least one label"
+            )
 
         optional_limits: dict[str, Decimal | None] = {}
         for name, raw_value in (
@@ -324,6 +352,7 @@ class RiskPolicy:
             max_expected_shortfall=expected_shortfall_limit,
             expected_shortfall_tail_fraction=expected_shortfall_tail,
             min_liquidation_headroom=liquidation_headroom_limit,
+            required_stress_scenario_labels=normalized_required_stress_labels,
             **optional_limits,
             max_abs_factor_exposure=factor_limit,
             max_clock_age_seconds=clock_limit,
@@ -350,6 +379,7 @@ class RiskContext:
     capability_allowed: bool
     borrow_available: bool | None
     stress_scenarios: Sequence[Mapping[str, Decimal]]
+    stress_scenario_labels: tuple[str, ...] = ()
     tail_scenarios: Sequence[Mapping[str, Decimal]] = ()
     liquidation_headroom: Decimal | None = None
     asset_buckets: Mapping[str, str] | None = None
@@ -383,6 +413,7 @@ class RiskContext:
         capability_allowed: bool,
         borrow_available: bool | None,
         stress_scenarios: Sequence[Mapping[str, object]] = (),
+        stress_scenario_labels: Sequence[str] = (),
         tail_scenarios: Sequence[Mapping[str, object]] = (),
         liquidation_headroom=None,
         asset_buckets: Mapping[str, str] | None = None,
@@ -517,6 +548,14 @@ class RiskContext:
             )
             for index, scenario in enumerate(stress_scenarios)
         )
+        normalized_stress_labels = _normalize_labels(
+            stress_scenario_labels,
+            name="stress_scenario_labels",
+        )
+        if normalized_stress_labels and len(normalized_stress_labels) != len(scenarios):
+            raise ValueError(
+                "stress_scenario_labels must align one-to-one with stress_scenarios"
+            )
         if not isinstance(tail_scenarios, Sequence) or isinstance(
             tail_scenarios,
             (str, bytes),
@@ -577,6 +616,7 @@ class RiskContext:
             capability_allowed=capability_allowed,
             borrow_available=borrow_available,
             stress_scenarios=scenarios,
+            stress_scenario_labels=normalized_stress_labels,
             tail_scenarios=normalized_tail_scenarios,
             liquidation_headroom=normalized_liquidation_headroom,
             asset_buckets=normalized_asset_buckets,
@@ -675,6 +715,7 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         capability_allowed=context.capability_allowed,
         borrow_available=context.borrow_available,
         stress_scenarios=context.stress_scenarios,
+        stress_scenario_labels=context.stress_scenario_labels,
         tail_scenarios=context.tail_scenarios,
         liquidation_headroom=context.liquidation_headroom,
         asset_buckets=context.asset_buckets,
@@ -704,6 +745,7 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         max_expected_shortfall=policy.max_expected_shortfall,
         expected_shortfall_tail_fraction=policy.expected_shortfall_tail_fraction,
         min_liquidation_headroom=policy.min_liquidation_headroom,
+        required_stress_scenario_labels=policy.required_stress_scenario_labels,
         max_asset_concentration_fraction=policy.max_asset_concentration_fraction,
         max_venue_concentration_fraction=policy.max_venue_concentration_fraction,
         max_order_participation_fraction=policy.max_order_participation_fraction,
@@ -841,6 +883,17 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
     stress_symbols = set(notionals)
     stress_coverage_complete = bool(context.stress_scenarios) or not stress_symbols
     missing_stress_symbols: set[str] = set()
+    missing_stress_labels: set[str] = set()
+    stress_regime_coverage_complete = True
+    if policy.required_stress_scenario_labels is not None:
+        observed_labels = set(context.stress_scenario_labels)
+        missing_stress_labels = (
+            set(policy.required_stress_scenario_labels) - observed_labels
+        )
+        stress_regime_coverage_complete = (
+            not missing_stress_labels
+            and len(context.stress_scenario_labels) == len(context.stress_scenarios)
+        )
     for scenario in context.stress_scenarios:
         missing_stress_symbols.update(stress_symbols - set(scenario))
     if missing_stress_symbols:
@@ -1166,6 +1219,18 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         "complete non-empty stress evidence for every non-zero projected position",
         "stress admission must fail closed when scenarios are missing or incomplete",
     )
+    if policy.required_stress_scenario_labels is not None:
+        add(
+            "stress_regime_coverage",
+            stress_regime_coverage_complete,
+            (
+                "MISSING:" + ",".join(sorted(missing_stress_labels))
+                if missing_stress_labels
+                else ",".join(context.stress_scenario_labels)
+            ),
+            ",".join(policy.required_stress_scenario_labels),
+            "configured frozen stress regimes must all be evidenced by labeled scenarios",
+        )
     add(
         "stress_loss",
         stress_coverage_complete

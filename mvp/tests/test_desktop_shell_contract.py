@@ -70,6 +70,20 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("StringComparison.OrdinalIgnoreCase", client)
         self.assertIn(").Validated();", code)
         self.assertLess(code.index(").Validated();"), code.index("if (status.Connected)"))
+    def test_connected_environment_and_state_version_use_canonical_contracts(self):
+        client = CLIENT.read_text(encoding="utf-8")
+        self.assertIn(
+            'value is not ("REPLAY" or "SIMULATION" or "PAPER" or "LIVE")',
+            client,
+        )
+        self.assertIn(
+            "Connected host state version must be a canonical non-negative integer sequence string.",
+            client,
+        )
+        self.assertIn('value == "0"', client)
+        self.assertIn("value[0] is >= '1' and <= '9'", client)
+        self.assertIn("value.All(static character => character is >= '0' and <= '9')", client)
+
     def test_emergency_control_is_named_keyboard_reachable_and_truthful(self):
         text = XAML.read_text(encoding="utf-8")
         code = CODE.read_text(encoding="utf-8")

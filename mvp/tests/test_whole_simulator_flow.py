@@ -22,7 +22,7 @@ from mvp.autotrade_mvp.reconciliation import (
 from mvp.autotrade_mvp.reconciliation_journal import (
     record_reconciliation_checkpoint,
 )
-from mvp.autotrade_mvp.reservations import ReservationBook
+from mvp.autotrade_mvp.reservations import ReservationBook, ReservationConflict
 from mvp.autotrade_mvp.risk import RiskContext, RiskIntent, RiskPolicy
 from mvp.autotrade_mvp.simulated_provider import SimulatedProvider
 from research.autotrade_research.artifacts.store import ArtifactStore

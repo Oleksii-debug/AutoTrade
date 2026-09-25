@@ -640,10 +640,10 @@ def load_account_resource_availability_evidence(
         raise ValueError(
             "resource availability evidence_refs must be a non-empty list"
         )
-    normalized_evidence_refs = tuple(
+    normalized_evidence_refs = [
         _text(value, name="resource_availability.evidence_ref")
         for value in raw_evidence_refs
-    )
+    ]
     if len(normalized_evidence_refs) != len(set(normalized_evidence_refs)):
         raise ValueError("resource availability evidence_refs must be unique")
 

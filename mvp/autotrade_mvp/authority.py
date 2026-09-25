@@ -1115,7 +1115,11 @@ class AuthorityService:
             self._journal_version = event_version
 
     def _validate_durable_financial_evidence(
-        self, record: AdmissionRecord, policy: AuthorityPolicy
+        self,
+        record: AdmissionRecord,
+        policy: AuthorityPolicy,
+        *,
+        as_of: str | None = None,
     ) -> None:
         if self.store is None:
             raise AuthorityConflict(
@@ -1285,6 +1289,20 @@ class AuthorityService:
                 "risk decision was not bound to the reservation journal cut"
             )
 
+        allocation_binding = risk_payload.get("allocation_binding")
+        if allocation_binding is not None:
+            self._validate_persisted_allocation_binding(
+                allocation_binding,
+                record=record,
+                risk_payload=risk_payload,
+                reservation_book=reservation_book,
+                as_of=(
+                    record.admitted_at
+                    if as_of is None
+                    else _text(as_of, name="allocation validation as_of")
+                ),
+            )
+
         request = {
             "command_id": record.financial_command_id,
             "admission_id": record.admission_id,
@@ -1305,6 +1323,7 @@ class AuthorityService:
             "reservation_id": record.reservation_id,
             "reservation": reservation_event["payload"].get("request"),
             "reservation_availability_evidence": availability_evidence,
+            "allocation_binding": allocation_binding,
             "confirmation_id": record.confirmation_id,
             "risk_reducing": record.risk_reducing,
         }
@@ -1582,6 +1601,8 @@ class AuthorityService:
         reservation_provider_id: str,
         reservation_max_age_seconds,
         now: str,
+        allocation_result: EvidenceBoundObjectiveAllocationResult | None = None,
+        allocation_symbol: str | None = None,
         confirmation_id: str | None = None,
         risk_reducing: bool = False,
     ) -> AdmissionRecord:
@@ -1620,6 +1641,7 @@ class AuthorityService:
             raise KeyError(pid)
 
         existing = self._admissions.get(aid)
+        existing_risk_payload: Mapping[str, Any] | None = None
         if existing is None:
             reservation_version = reservation_book.version
             evaluated_at = _text(now, name="now")
@@ -1641,6 +1663,7 @@ class AuthorityService:
                     "existing admission risk evidence is missing or ambiguous"
                 )
             payload = risk_events[0]["payload"]
+            existing_risk_payload = payload
             reservation_version = payload.get("reservation_version")
             if (
                 not isinstance(reservation_version, int)
@@ -1661,6 +1684,68 @@ class AuthorityService:
             ) != _instant(valid_until, name="risk.valid_until"):
                 raise AuthorityConflict(
                     "risk_valid_until changed for an existing financial command"
+                )
+
+        allocation_binding: dict[str, Any] | None = None
+        if allocation_result is None:
+            if allocation_symbol is not None:
+                raise TypeError(
+                    "allocation_symbol requires allocation_result"
+                )
+            if (
+                existing_risk_payload is not None
+                and existing_risk_payload.get("allocation_binding") is not None
+            ):
+                raise AuthorityConflict(
+                    "existing allocation-bound admission requires allocation_result"
+                )
+        else:
+            if allocation_symbol is None:
+                raise TypeError(
+                    "allocation_result requires allocation_symbol"
+                )
+            normalized_allocation_symbol = _text(
+                allocation_symbol,
+                name="allocation_symbol",
+            )
+            if normalized_allocation_symbol != risk_intent.symbol:
+                raise AuthorityConflict(
+                    "allocation symbol does not match risk intent symbol"
+                )
+            allocation_binding = self._allocation_binding(
+                allocation_result,
+                selected_symbol=normalized_allocation_symbol,
+            )
+            if existing is None:
+                self._validate_new_allocation_binding(
+                    allocation_result,
+                    allocation_binding,
+                    account_id=account_id,
+                    environment=environment,
+                    provider_id=reservation_provider_id,
+                    capability_snapshot_id=capability,
+                    instrument_id=instrument_id,
+                    instrument_version=instrument_version,
+                    account_state_version=risk_context.state_version,
+                    reservation_state_version=reservation_book.version,
+                    as_of=now,
+                )
+            else:
+                durable_binding = (
+                    None
+                    if existing_risk_payload is None
+                    else existing_risk_payload.get("allocation_binding")
+                )
+                if durable_binding != allocation_binding:
+                    raise AuthorityConflict(
+                        "allocation binding changed for an existing financial command"
+                    )
+                self._validate_persisted_allocation_binding(
+                    durable_binding,
+                    record=existing,
+                    risk_payload=existing_risk_payload,
+                    reservation_book=reservation_book,
+                    as_of=now,
                 )
 
         decision = evaluate_bound_risk(
@@ -1901,6 +1986,7 @@ class AuthorityService:
             reservation_available=authoritative_available,
             now=now,
             reservation_availability_evidence=availability_evidence,
+            allocation_binding=allocation_binding,
             confirmation_id=confirmation_id,
             risk_reducing=risk_reducing,
         )
@@ -1929,6 +2015,7 @@ class AuthorityService:
         reservation_available,
         now: str,
         reservation_availability_evidence: Mapping[str, Any] | None = None,
+        allocation_binding: Mapping[str, Any] | None = None,
         confirmation_id: str | None = None,
         risk_reducing: bool = False,
     ) -> AdmissionRecord:
@@ -2039,7 +2126,11 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "admission_id already belongs to another financial command"
                 )
-            if reservation_availability_evidence is not None:
+            durable_risk_events = None
+            if (
+                reservation_availability_evidence is not None
+                or allocation_binding is not None
+            ):
                 durable_risk_events = self.store.load_events(
                     "risk_decision", existing.risk_decision_id
                 )
@@ -2048,13 +2139,23 @@ class AuthorityService:
                     or not isinstance(
                         durable_risk_events[0].get("payload"), Mapping
                     )
-                    or durable_risk_events[0]["payload"].get(
-                        "reservation_availability_evidence"
-                    )
-                    != reservation_availability_evidence
                 ):
                     raise AuthorityConflict(
+                        "existing admission risk evidence is missing"
+                    )
+            if reservation_availability_evidence is not None:
+                if durable_risk_events[0]["payload"].get(
+                    "reservation_availability_evidence"
+                ) != reservation_availability_evidence:
+                    raise AuthorityConflict(
                         "reservation availability evidence changed for an existing financial command"
+                    )
+            if allocation_binding is not None:
+                if durable_risk_events[0]["payload"].get(
+                    "allocation_binding"
+                ) != allocation_binding:
+                    raise AuthorityConflict(
+                        "allocation binding changed for an existing financial command"
                     )
             return existing
 
@@ -2131,6 +2232,7 @@ class AuthorityService:
                 reservation_plan.request if reservation_plan is not None else None
             ),
             "reservation_availability_evidence": reservation_availability_evidence,
+            "allocation_binding": allocation_binding,
             "confirmation_id": candidate.confirmation_id,
             "risk_reducing": risk_reducing,
         }
@@ -2160,6 +2262,7 @@ class AuthorityService:
                 risk_decision.reservation_requirements
             ),
             "reservation_availability_evidence": reservation_availability_evidence,
+            "allocation_binding": allocation_binding,
             "capability_snapshot_id": risk_decision.capability_snapshot_id,
             "evaluated_at": risk_decision.evaluated_at,
             "valid_until": risk_decision.valid_until,
@@ -2327,7 +2430,11 @@ class AuthorityService:
             ):
                 return False, "risk_decision_expired"
             try:
-                self._validate_durable_financial_evidence(record, policy)
+                self._validate_durable_financial_evidence(
+                    record,
+                    policy,
+                    as_of=now,
+                )
                 reservation_book = DurableReservationBook(
                     self.store,
                     environment=record.environment,

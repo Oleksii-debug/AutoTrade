@@ -44,6 +44,8 @@ def evidence(**overrides):
         drawdown="0.05",
         adverse_cost_loss="0.01",
         retention_passed=True,
+        untouched_holdout_passed=True,
+        walk_forward_passed=True,
         baseline_advantages={
             "cash": "0.04",
             "passive": "0.035",
@@ -70,6 +72,7 @@ EVIDENCE_KINDS = (
     "causal_audit",
     "financial_invariants",
     "retention",
+    "locked_evaluation",
     "metrics",
     "independent_review",
 )
@@ -87,6 +90,7 @@ def evaluate_with_verified_bundle(gate_profile, evaluation_evidence):
                 "causal_audit",
                 "financial_invariants",
                 "retention",
+                "locked_evaluation",
                 "metrics",
                 "independent_review",
             }
@@ -163,6 +167,32 @@ class EvaluationGateTests(unittest.TestCase):
             "PASS",
         )
 
+
+    def test_locked_holdout_and_walk_forward_are_required_for_terminal_pass(self):
+        holdout = evaluate_with_verified_bundle(
+            profile(),
+            evidence(untouched_holdout_passed=False),
+        )
+        self.assertEqual(holdout.status, "FAIL")
+        self.assertEqual(holdout.checks["untouched_holdout"], "FAIL")
+
+        walk_forward = evaluate_with_verified_bundle(
+            profile(),
+            evidence(walk_forward_passed=False),
+        )
+        self.assertEqual(walk_forward.status, "FAIL")
+        self.assertEqual(walk_forward.checks["walk_forward"], "FAIL")
+
+        missing = evaluate_gates(
+            profile(),
+            evidence(
+                untouched_holdout_passed=None,
+                walk_forward_passed=None,
+            ),
+        )
+        self.assertEqual(missing.status, "INCONCLUSIVE")
+        self.assertEqual(missing.checks["untouched_holdout"], "INCONCLUSIVE")
+        self.assertEqual(missing.checks["walk_forward"], "INCONCLUSIVE")
 
     def test_all_true_metrics_without_resolvable_evidence_cannot_pass(self):
         decision = evaluate_gates(profile(), evidence())

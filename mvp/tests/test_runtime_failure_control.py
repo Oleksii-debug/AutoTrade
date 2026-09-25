@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.tests.test_reconciliation_journal import reconciliation
@@ -332,20 +333,13 @@ class RuntimeRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(PermissionError, "ready"):
             controller.validate_admission(owner.epoch)
 
-    def test_owner_transfer_authority_flags_require_real_booleans(self):
+    def test_owner_transfer_requires_durable_sender_authority(self):
         controller, _ = self._ready()
-        with self.assertRaisesRegex(TypeError, "old_sender_fenced"):
-            controller.transfer_owner(
-                new_owner_id="host-b",
-                old_sender_fenced="true",
-                reconciled=True,
-            )
-        with self.assertRaisesRegex(TypeError, "reconciled"):
-            controller.transfer_owner(
-                new_owner_id="host-b",
-                old_sender_fenced=True,
-                reconciled="true",
-            )
+        with self.assertRaisesRegex(
+            PermissionError,
+            "durable sender-fence authority",
+        ):
+            controller.transfer_owner(new_owner_id="host-b")
         self.assertEqual(controller.owner.owner_id, "host-a")
         self.assertEqual(controller.owner.epoch, 1)
 
@@ -379,62 +373,119 @@ class RuntimeRecoveryTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             controller.validate_sender(owner.owner_id, owner.epoch)
 
-    def test_transfer_requires_old_sender_fencing_and_reconciliation(self):
-        controller, owner = self._ready()
-        with self.assertRaisesRegex(PermissionError, "fenced"):
-            controller.transfer_owner(
-                new_owner_id="host-b",
-                old_sender_fenced=False,
-                reconciled=True,
+    def test_transfer_uses_durable_owner_transition_as_sender_fence(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            controller = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="PAPER:test-account",
             )
-        new_owner = controller.transfer_owner(
-            new_owner_id="host-b",
-            old_sender_fenced=True,
-            reconciled=True,
-        )
-        self.assertEqual(new_owner.epoch, owner.epoch + 1)
-        self.assertEqual(controller.state, HostState.RECOVERING)
-        with self.assertRaises(PermissionError):
-            controller.validate_sender(owner.owner_id, owner.epoch)
+            owner = controller.start("host-a")
+            self._record_durable_ready(controller)
+
+            new_owner = controller.transfer_owner(new_owner_id="host-b")
+            self.assertEqual(new_owner.epoch, owner.epoch + 1)
+            self.assertEqual(controller.state, HostState.RECOVERING)
+            receipt = controller.latest_sender_fence_receipt()
+            self.assertIsNotNone(receipt)
+            self.assertEqual(receipt["old_owner_id"], "host-a")
+            self.assertEqual(receipt["new_owner_id"], "host-b")
+            self.assertEqual(
+                receipt["method"],
+                "DURABLE_OWNER_EPOCH_FINAL_SEND_BARRIER",
+            )
 
     def test_owner_transfer_cannot_self_assert_reconciliation(self):
-        controller, _ = self._ready()
-        controller.set_storage_writable(False)
-        controller.set_storage_writable(True)
-        self.assertFalse(controller.provider_reconciled)
-        self.assertEqual(controller.state, HostState.RECOVERING)
-
-        with self.assertRaisesRegex(
-            PermissionError,
-            "recorded current reconciliation",
-        ):
-            controller.transfer_owner(
-                new_owner_id="host-b",
-                old_sender_fenced=True,
-                reconciled=True,
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            controller = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="PAPER:test-account",
             )
-        self.assertEqual(controller.owner.owner_id, "host-a")
-        self.assertEqual(controller.owner.epoch, 1)
+            controller.start("host-a")
+            self._record_durable_ready(controller)
+            controller.set_storage_writable(False)
+            controller.set_storage_writable(True)
+            self.assertFalse(controller.provider_reconciled)
+            self.assertEqual(controller.state, HostState.RECOVERING)
 
-        controller.record_reconciliation(consistent=True)
-        transferred = controller.transfer_owner(
-            new_owner_id="host-b",
-            old_sender_fenced=True,
-            reconciled=True,
-        )
-        self.assertEqual(transferred.owner_id, "host-b")
+            with self.assertRaisesRegex(
+                PermissionError,
+                "recorded current reconciliation",
+            ):
+                controller.transfer_owner(new_owner_id="host-b")
+            self.assertEqual(controller.owner.owner_id, "host-a")
+            self.assertEqual(controller.owner.epoch, 1)
+
+            self._record_durable_ready(
+                controller,
+                reconciliation_id="runtime-readiness-after-storage",
+            )
+            transferred = controller.transfer_owner(new_owner_id="host-b")
+            self.assertEqual(transferred.owner_id, "host-b")
 
     def test_new_owner_must_reconcile_again_before_sending(self):
-        controller, _ = self._ready()
-        new_owner = controller.transfer_owner(
-            new_owner_id="host-b",
-            old_sender_fenced=True,
-            reconciled=True,
-        )
-        with self.assertRaises(PermissionError):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            controller = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="PAPER:test-account",
+            )
+            controller.start("host-a")
+            self._record_durable_ready(controller)
+            new_owner = controller.transfer_owner(new_owner_id="host-b")
+            with self.assertRaises(PermissionError):
+                controller.validate_sender(new_owner.owner_id, new_owner.epoch)
+            self._record_durable_ready(
+                controller,
+                reconciliation_id="runtime-readiness-new-owner",
+            )
             controller.validate_sender(new_owner.owner_id, new_owner.epoch)
-        controller.record_reconciliation(consistent=True)
-        controller.validate_sender(new_owner.owner_id, new_owner.epoch)
+
+    def test_durable_transfer_blocks_old_dispatcher_at_final_send_barrier(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            controller = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:acct",
+            )
+            old_owner = controller.start("host-a")
+            self._record_durable_ready(controller)
+            old_dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="acct",
+                owner_token=old_owner.owner_id,
+                owner_epoch=old_owner.epoch,
+            )
+            cached_secret = "already-resolved-provider-secret"
+            self.assertTrue(cached_secret)
+
+            controller.transfer_owner(new_owner_id="host-b")
+            outbound = 0
+
+            def transport(_client_id, _request, final_guard):
+                nonlocal outbound
+                self.assertTrue(cached_secret)
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            outcome = old_dispatcher.dispatch(
+                attempt_id="fenced-old-owner",
+                intent_id="intent-1",
+                intent_hash="intent-hash",
+                provider="TEST_PROVIDER",
+                request={"side": "BUY"},
+                now="2026-09-25T10:00:00Z",
+                authority_check=lambda _intent, _now: (True, "allowed"),
+                transport_send=transport,
+                sender_check=controller.validate_sender,
+            )
+            self.assertEqual(outcome.status, "BLOCKED")
+            self.assertEqual(outbound, 0)
+            self.assertIn("sender_fence_rejected", outcome.reason)
 
     def test_durable_owner_epoch_survives_restart_and_fences_old_process(self):
         with TemporaryDirectory() as directory:
@@ -494,8 +545,6 @@ class RuntimeRecoveryTests(unittest.TestCase):
             self._record_durable_ready(paper)
             transferred = paper.transfer_owner(
                 new_owner_id="paper-host-2",
-                old_sender_fenced=True,
-                reconciled=True,
             )
             self.assertEqual(transferred.epoch, 2)
             self._record_durable_ready(live)
@@ -522,24 +571,22 @@ class RuntimeRecoveryTests(unittest.TestCase):
 
             transferred = first.transfer_owner(
                 new_owner_id="host-b",
-                old_sender_fenced=True,
-                reconciled=True,
             )
             self.assertEqual(transferred.epoch, 2)
             with self.assertRaisesRegex(PermissionError, "Durable sender fence"):
                 stale.validate_sender(owner.owner_id, owner.epoch)
 
     def test_owner_identity_is_normalized_before_start_and_transfer(self):
-        controller = RecoveryController()
-        owner = controller.start(" host-a ")
-        self.assertEqual(owner.owner_id, "host-a")
-        controller.record_reconciliation(consistent=True)
-        with self.assertRaisesRegex(ValueError, "differ"):
-            controller.transfer_owner(
-                new_owner_id=" host-a ",
-                old_sender_fenced=True,
-                reconciled=True,
+        with TemporaryDirectory() as directory:
+            controller = RecoveryController(
+                owner_store=JournalStore(Path(directory) / "journal.sqlite3"),
+                owner_scope="PAPER:test-account",
             )
+            owner = controller.start(" host-a ")
+            self.assertEqual(owner.owner_id, "host-a")
+            self._record_durable_ready(controller)
+            with self.assertRaisesRegex(ValueError, "differ"):
+                controller.transfer_owner(new_owner_id=" host-a ")
 
     def test_boolean_cannot_impersonate_owner_epoch_one(self):
         controller, owner = self._ready()

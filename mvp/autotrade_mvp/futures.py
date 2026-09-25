@@ -384,15 +384,24 @@ def _settlement_duplicate_or_require_new(
 ) -> Literal["DUPLICATE", "NEW", "CORRECTION"]:
     _require_settlement_contract(contract, scope, evidence)
     latest_same_period: FuturesSettlementEvidence | None = None
+    matching_observation: FuturesSettlementEvidence | None = None
     for accepted in history:
         if accepted.settlement_id == evidence.settlement_id:
             latest_same_period = accepted
             if accepted.observation_id == evidence.observation_id:
-                if accepted != evidence:
-                    raise FuturesError(
-                        "settlement observation identity conflicts with accepted content"
-                    )
-                return "DUPLICATE"
+                matching_observation = accepted
+
+    if matching_observation is not None:
+        if matching_observation != evidence:
+            raise FuturesError(
+                "settlement observation identity conflicts with accepted content"
+            )
+        if latest_same_period is matching_observation:
+            return "DUPLICATE"
+        raise FuturesError(
+            "settlement revision is stale or conflicts with accepted economics"
+        )
+
     if latest_same_period is not None:
         if evidence.revision <= latest_same_period.revision:
             raise FuturesError(

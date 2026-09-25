@@ -230,6 +230,10 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 checkpoint["aggregate_version"],
             )
             self.assertEqual(
+                evidence["scope_latest_checkpoint_journal_sequence"],
+                checkpoint["journal_sequence"],
+            )
+            self.assertEqual(
                 evidence["availability"],
                 {"CASH:USD": "1000"},
             )
@@ -297,7 +301,7 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 account_id=ACCOUNT_ID,
             )
 
-            with self.assertRaisesRegex(ValueError, "superseded"):
+            with self.assertRaisesRegex(AuthorityConflict, "superseded"):
                 _admit(authority, reservations, older)
             self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("0"))
 
@@ -327,7 +331,7 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 account_id=ACCOUNT_ID,
             )
 
-            with self.assertRaisesRegex(ValueError, "superseded"):
+            with self.assertRaisesRegex(AuthorityConflict, "superseded"):
                 _admit(authority, reservations, older)
             self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("0"))
 

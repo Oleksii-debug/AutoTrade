@@ -39,7 +39,7 @@ jobs:
       - name: Run cross-platform core verification
         run: python tools/verify.py
       - name: Write exact-head core verification evidence
-        run: python tools/write_ci_evidence.py --suite core-repository --command "python tools/verify.py; LEAN/provider/real-NVDA qualification separate" --output "artifacts/verify-${{ runner.os }}.json"
+        run: python tools/write_ci_evidence.py --suite core-repository --command "python tools/verify.py" --output "artifacts/verify-${{ runner.os }}.json"
       - name: Upload exact-head verification evidence
         uses: actions/upload-artifact@v4
         with:

@@ -512,6 +512,13 @@ def parse_cancel_response(
     )
 
 
+def _reply_id(value: object) -> str:
+    reply_id = _text(str(value), name="reply id")
+    if re.fullmatch(r"[A-Za-z0-9._~-]+", reply_id) is None:
+        raise IbkrWebAdapterError("reply id must be a canonical URI path segment")
+    return reply_id
+
+
 @dataclass(frozen=True)
 class IbkrSubmissionOutcome:
     """Provider response classification; acknowledgement is never a fill."""
@@ -614,7 +621,7 @@ def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
             raise IbkrWebAdapterError("isSuppressed must be boolean when present")
         return IbkrSubmissionOutcome(
             status="REPLY_REQUIRED",
-            reply_id=_text(str(item["id"]), name="reply id"),
+            reply_id=_reply_id(item["id"]),
             messages=messages,
             message_ids=message_ids,
         )
@@ -679,8 +686,10 @@ class IbkrRecordedSubmission:
                 raise IbkrWebAdapterError(
                     "recorded acknowledgement requires provider order identity and status"
                 )
-        if outcome == "REPLY_REQUIRED" and self.reply_id is None:
-            raise IbkrWebAdapterError("recorded reply-required outcome needs reply id")
+        if outcome == "REPLY_REQUIRED":
+            if self.reply_id is None:
+                raise IbkrWebAdapterError("recorded reply-required outcome needs reply id")
+            object.__setattr__(self, "reply_id", _reply_id(self.reply_id))
         if outcome == "REJECTED" and self.rejection_reason is None:
             raise IbkrWebAdapterError("recorded rejection needs provider reason")
         if outcome == "UNKNOWN":
@@ -806,7 +815,14 @@ class IbkrReplyRequest:
     response_sha256: str
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "endpoint", _text(self.endpoint, name="endpoint"))
+        endpoint = _text(self.endpoint, name="endpoint")
+        prefix = "/iserver/reply/"
+        if not endpoint.startswith(prefix):
+            raise IbkrWebAdapterError("reply endpoint must use /iserver/reply/<reply-id>")
+        _reply_id(endpoint[len(prefix):])
+        if not isinstance(self.body, Mapping) or dict(self.body) != {"confirmed": True}:
+            raise IbkrWebAdapterError("reply request body must be exactly confirmed=true")
+        object.__setattr__(self, "endpoint", endpoint)
         object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
         object.__setattr__(self, "attempt_id", _text(self.attempt_id, name="attempt_id"))
         object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))

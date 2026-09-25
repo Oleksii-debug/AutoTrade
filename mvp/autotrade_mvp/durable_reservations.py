@@ -806,9 +806,12 @@ class DurableReservationBook:
             matching[0].get("outcome"),
             name="reconciliation submission outcome",
         ).upper()
+        # Reconciliation can prove that at least one execution exists, but an
+        # execution observation alone does not prove that the order is fully
+        # filled.  Keep worst-case reservation capacity held until a canonical
+        # terminal order/fill projection can prove FILLED semantics.
         required_outcome = {
             "PROVEN_ABSENT": "PROVEN_ABSENT",
-            "FILLED": "OBSERVED_EXECUTION",
         }.get(terminal_outcome)
         if required_outcome is None:
             raise ReservationConflict(

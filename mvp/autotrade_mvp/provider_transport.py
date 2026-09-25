@@ -15,7 +15,7 @@ signer/nonce rules rather than introduce another dispatcher.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from hashlib import sha256
 import hmac
 import json
@@ -29,6 +29,7 @@ from urllib.request import (
     build_opener,
 )
 
+from .capabilities import CapabilityRegistry, CapabilitySnapshot
 from .dispatch import ExactJsonTransportResponse
 from .provider_core import (
     AuthenticatedReadQueryBinding,
@@ -66,7 +67,7 @@ class ProviderWireClient(Protocol):
     def send(
         self,
         request: "SignedHttpRequest | AuthenticatedReadHttpRequest",
-    ) -> bytes: ...
+    ) -> "bytes | AuthenticatedReadWireResponse": ...
 
 
 QuotaGate = Callable[[str, str, str, str], None]
@@ -211,6 +212,89 @@ BINANCE_SPOT_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
 
 
 @dataclass(frozen=True)
+class AuthenticatedReadEndpointRule:
+    surface: Surface
+    permission_scope: str
+    data_entitlement: str
+    success_statuses: frozenset[int]
+
+    def __post_init__(self) -> None:
+        if self.surface not in {Surface.AUTHENTICATED_READ, Surface.ACTIVITIES}:
+            raise ProviderTransportScopeError(
+                "authenticated-read endpoint rule requires a read surface"
+            )
+        object.__setattr__(
+            self,
+            "permission_scope",
+            _canonical_text(self.permission_scope, name="permission_scope"),
+        )
+        object.__setattr__(
+            self,
+            "data_entitlement",
+            _canonical_text(self.data_entitlement, name="data_entitlement"),
+        )
+        if (
+            not isinstance(self.success_statuses, frozenset)
+            or not self.success_statuses
+            or any(
+                isinstance(status, bool)
+                or not isinstance(status, int)
+                or status < 200
+                or status > 299
+                for status in self.success_statuses
+            )
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read success_statuses must be a non-empty frozenset of 2xx integers"
+            )
+
+
+BINANCE_SPOT_AUTHENTICATED_READ_ENDPOINTS: Mapping[
+    str, AuthenticatedReadEndpointRule
+] = MappingProxyType(
+    {
+        "/api/v3/account": AuthenticatedReadEndpointRule(
+            surface=Surface.AUTHENTICATED_READ,
+            permission_scope="ORDER.READ",
+            data_entitlement="ACCOUNT",
+            success_statuses=frozenset({200}),
+        ),
+        "/api/v3/openOrders": AuthenticatedReadEndpointRule(
+            surface=Surface.ACTIVITIES,
+            permission_scope="ORDER.READ",
+            data_entitlement="ORDERS",
+            success_statuses=frozenset({200}),
+        ),
+        "/api/v3/myTrades": AuthenticatedReadEndpointRule(
+            surface=Surface.ACTIVITIES,
+            permission_scope="TRADE.READ",
+            data_entitlement="TRADES",
+            success_statuses=frozenset({200}),
+        ),
+    }
+)
+
+
+def _binance_authenticated_read_rule(
+    binding: AuthenticatedReadQueryBinding,
+) -> AuthenticatedReadEndpointRule:
+    rule = BINANCE_SPOT_AUTHENTICATED_READ_ENDPOINTS.get(binding.endpoint)
+    if rule is None:
+        raise ProviderTransportScopeError(
+            "Binance authenticated-read endpoint is not explicitly allowed"
+        )
+    if binding.surface != rule.surface:
+        raise ProviderTransportScopeError(
+            "authenticated-read endpoint surface does not match provider policy"
+        )
+    if binding.permission_scope != rule.permission_scope:
+        raise ProviderTransportScopeError(
+            "authenticated-read permission scope does not match provider endpoint policy"
+        )
+    return rule
+
+
+@dataclass(frozen=True)
 class SignedHttpRequest:
     method: str
     url: str
@@ -311,6 +395,25 @@ class AuthenticatedReadHttpRequest:
         )
 
 
+@dataclass(frozen=True)
+class AuthenticatedReadWireResponse:
+    http_status: int
+    body: bytes
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.http_status, bool)
+            or not isinstance(self.http_status, int)
+            or self.http_status < 100
+            or self.http_status > 599
+        ):
+            raise ProviderTransportScopeError("HTTP status must be an integer 100..599")
+        if type(self.body) is not bytes or not self.body:
+            raise ProviderTransportError(
+                "provider returned an empty or non-byte authenticated-read response"
+            )
+
+
 class _NoRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -345,16 +448,22 @@ class UrllibJsonWireClient:
             headers=dict(request.headers),
             method=method,
         )
+        is_authenticated_read = isinstance(
+            request,
+            AuthenticatedReadHttpRequest,
+        )
+        http_status: int | None = None
         try:
             with self._opener.open(
                 outbound,
                 timeout=request.timeout_seconds,
             ) as response:
+                http_status = int(response.status)
                 raw = response.read()
         except HTTPError as error:
-            # Redirects are prohibited. Once the final barrier has passed even a
-            # redirect response is an ambiguous write outcome, so propagate it
-            # and let GuardedDispatcher preserve UNKNOWN.
+            # Redirects are prohibited for both reads and writes. For reads,
+            # preserve non-redirect HTTP status as a typed outcome so an error
+            # body can never be promoted to successful provider state.
             if 300 <= int(error.code) < 400:
                 raise ProviderTransportError(
                     "provider redirect is prohibited"
@@ -364,9 +473,23 @@ class UrllibJsonWireClient:
                 raise ProviderTransportError(
                     "provider returned an empty HTTP error response"
                 ) from error
+            if is_authenticated_read:
+                return AuthenticatedReadWireResponse(
+                    http_status=int(error.code),
+                    body=raw,
+                )
         if type(raw) is not bytes or not raw:
             raise ProviderTransportError(
                 "provider returned an empty or non-byte response"
+            )
+        if is_authenticated_read:
+            if http_status is None:
+                raise ProviderTransportError(
+                    "authenticated-read HTTP status is unavailable"
+                )
+            return AuthenticatedReadWireResponse(
+                http_status=http_status,
+                body=raw,
             )
         return raw
 
@@ -700,17 +823,7 @@ class BinanceSpotAuthenticatedReadSigner:
             raise ProviderTransportScopeError(
                 "authenticated-read binding provider/environment mismatch"
             )
-        if query_binding.surface not in {
-            Surface.AUTHENTICATED_READ,
-            Surface.ACTIVITIES,
-        }:
-            raise ProviderTransportScopeError(
-                "authenticated-read transport requires read/activity surface"
-            )
-        if "WRITE" in query_binding.permission_scope.upper():
-            raise ProviderTransportScopeError(
-                "authenticated-read transport rejects write permission scope"
-            )
+        _binance_authenticated_read_rule(query_binding)
         if (
             isinstance(timestamp_ms, bool)
             or not isinstance(timestamp_ms, int)
@@ -777,6 +890,7 @@ class BinanceSpotAuthenticatedReadTransport:
         policy: ProviderEndpointPolicy,
         account_id: str,
         capability_snapshot_id: str,
+        capability_registry: CapabilityRegistry,
         secret_resolver: ProviderSecretResolver,
         credential_handle: PersistentCredentialHandle,
         session_token: str,
@@ -815,6 +929,8 @@ class BinanceSpotAuthenticatedReadTransport:
             capability_snapshot_id,
             name="capability_snapshot_id",
         )
+        if not isinstance(capability_registry, CapabilityRegistry):
+            raise TypeError("capability_registry must be CapabilityRegistry")
         if not hasattr(secret_resolver, "resolve_for_execution"):
             raise TypeError(
                 "secret_resolver must implement resolve_for_execution"
@@ -840,6 +956,7 @@ class BinanceSpotAuthenticatedReadTransport:
         self.policy = policy
         self.account_id = account
         self.capability_snapshot_id = capability
+        self.capability_registry = capability_registry
         self.secret_resolver = secret_resolver
         self.credential_handle = credential_handle
         self.session_token = _canonical_text(
@@ -856,6 +973,55 @@ class BinanceSpotAuthenticatedReadTransport:
         self.quota_gate = quota_gate
         self.wire_client = wire_client or UrllibJsonWireClient()
         self.recv_window_ms = recv_window_ms
+
+    def _require_current_capability(
+        self,
+        query_binding: AuthenticatedReadQueryBinding,
+        rule: AuthenticatedReadEndpointRule,
+    ) -> CapabilitySnapshot:
+        point = self.clock_utc()
+        if (
+            not isinstance(point, datetime)
+            or point.tzinfo is None
+            or point.utcoffset() is None
+        ):
+            raise ProviderTransportScopeError(
+                "clock_utc must return a timezone-aware datetime"
+            )
+        point = point.astimezone(timezone.utc)
+        try:
+            current = self.capability_registry.require_verified(
+                provider_id=self.policy.provider_id,
+                account_id=self.account_id,
+                entity_id=query_binding.entity_id,
+                environment=self.policy.environment,
+                instrument_version=query_binding.instrument_version,
+                at=point,
+            )
+        except Exception as error:
+            raise ProviderTransportScopeError(
+                "authenticated-read current capability cannot be verified"
+            ) from error
+        if not isinstance(current, CapabilitySnapshot):
+            raise ProviderTransportScopeError(
+                "capability registry must return CapabilitySnapshot"
+            )
+        if (
+            current.snapshot_id != self.capability_snapshot_id
+            or current.provider_id != self.policy.provider_id
+            or current.account_id != self.account_id
+            or current.entity_id != query_binding.entity_id
+            or current.environment != self.policy.environment
+            or current.instrument_version != query_binding.instrument_version
+            or current.status != "VERIFIED"
+            or not (current.observed_at <= point < current.expires_at)
+            or query_binding.permission_scope not in current.permission_scopes
+            or rule.data_entitlement not in current.data_entitlements
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read capability is no longer valid for exact query binding"
+            )
+        return current
 
     def __call__(
         self,
@@ -874,17 +1040,7 @@ class BinanceSpotAuthenticatedReadTransport:
             raise ProviderTransportScopeError(
                 "authenticated-read query scope mismatch"
             )
-        if query_binding.surface not in {
-            Surface.AUTHENTICATED_READ,
-            Surface.ACTIVITIES,
-        }:
-            raise ProviderTransportScopeError(
-                "authenticated-read query surface mismatch"
-            )
-        if "WRITE" in query_binding.permission_scope.upper():
-            raise ProviderTransportScopeError(
-                "authenticated-read transport rejects write permission scope"
-            )
+        rule = _binance_authenticated_read_rule(query_binding)
 
         if self.quota_gate is not None:
             self.quota_gate(
@@ -893,6 +1049,9 @@ class BinanceSpotAuthenticatedReadTransport:
                 self.policy.environment,
                 "AUTHENTICATED_READ",
             )
+
+        # Revalidate after any quota wait and before touching READ credentials.
+        self._require_current_capability(query_binding, rule)
 
         credential_plaintext = self.secret_resolver.resolve_for_execution(
             self.session_token,
@@ -915,10 +1074,25 @@ class BinanceSpotAuthenticatedReadTransport:
         finally:
             credential_plaintext = None
 
-        raw = self.wire_client.send(signed)
+        # Secret access/signing may take time. Re-resolve authority at the
+        # irreversible boundary so revocation/expiry cannot race the wire send.
+        self._require_current_capability(query_binding, rule)
+        wire_response = self.wire_client.send(signed)
+        if not isinstance(wire_response, AuthenticatedReadWireResponse):
+            raise ProviderTransportError(
+                "authenticated-read wire client must preserve HTTP status"
+            )
+        if wire_response.http_status not in rule.success_statuses:
+            raise ProviderTransportError(
+                "authenticated provider read returned unexpected HTTP status "
+                + str(wire_response.http_status)
+                + "; allowed="
+                + ",".join(str(status) for status in sorted(rule.success_statuses))
+            )
         observed_at = self.clock_utc()
         return observe_authenticated_json_response(
             query_binding=query_binding,
-            response_bytes=raw,
+            http_status=wire_response.http_status,
+            response_bytes=wire_response.body,
             observed_at=observed_at,
         )

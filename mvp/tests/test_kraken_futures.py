@@ -84,6 +84,7 @@ def futures_position_observation(payload, *, account_id="paper-1", endpoint="/ap
     )
     return observe_authenticated_json_response(
         query_binding=binding,
+        http_status=200,
         response_bytes=json.dumps(
             payload,
             sort_keys=True,

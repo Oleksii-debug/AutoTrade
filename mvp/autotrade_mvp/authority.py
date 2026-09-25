@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
@@ -10,7 +10,9 @@ import json
 from typing import Any, Callable, FrozenSet
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from .persistence import JournalStore, payload_digest
+from .durable_reservations import DurableReservationBook
+from .persistence import JournalStore, canonical_json, payload_digest
+from .risk import RiskDecision, risk_decision_fingerprint, validate_bound_risk_decision
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -86,6 +88,7 @@ class AuthorityPolicy:
     autonomous: bool
     valid_from: str = "1970-01-01T00:00:00Z"
     protection_only: bool = False
+    version: int = 1
 
     def __post_init__(self) -> None:
         # The policy object itself is an authority boundary.  Callers can
@@ -96,6 +99,12 @@ class AuthorityPolicy:
             self.protection_only, bool
         ):
             raise TypeError("autonomous and protection_only must be booleans")
+        if (
+            not isinstance(self.version, int)
+            or isinstance(self.version, bool)
+            or self.version < 1
+        ):
+            raise ValueError("authority policy version must be a positive integer")
         if isinstance(self.environments, (str, bytes)):
             raise TypeError("environments must be a collection")
         if isinstance(self.instruments, (str, bytes)):
@@ -153,6 +162,7 @@ class AuthorityPolicy:
         autonomous: bool,
         valid_from: str = "1970-01-01T00:00:00Z",
         protection_only: bool = False,
+        version: int = 1,
     ) -> "AuthorityPolicy":
         normalized_environments = frozenset(
             _text(item, name="environment").upper() for item in environments
@@ -187,6 +197,7 @@ class AuthorityPolicy:
             autonomous=autonomous,
             valid_from=valid_from,
             protection_only=protection_only,
+            version=version,
         )
 
 
@@ -355,6 +366,7 @@ class AuthorityService:
             "autonomous": policy.autonomous,
             "valid_from": policy.valid_from,
             "protection_only": policy.protection_only,
+            "version": policy.version,
         }
 
     @classmethod
@@ -479,6 +491,7 @@ class AuthorityService:
                     autonomous=payload["autonomous"],
                     valid_from=payload["valid_from"],
                     protection_only=payload["protection_only"],
+                    version=payload.get("version", 1),
                 )
                 if len(policy.instruments) != len(instruments):
                     raise AuthorityConflict("durable policy instrument entry malformed")
@@ -742,7 +755,7 @@ class AuthorityService:
             return False, "policy_expired"
         return True, "active"
 
-    def admit(
+    def _admit_unverified(
         self,
         *,
         admission_id: str,
@@ -989,6 +1002,7 @@ class AuthorityService:
                     "autonomous": policy.autonomous,
                     "valid_from": policy.valid_from,
                     "protection_only": policy.protection_only,
+                    "version": policy.version,
                 }
             )
 
@@ -1098,6 +1112,7 @@ class AuthorityService:
                 autonomous=item.get("autonomous"),
                 valid_from=item.get("valid_from"),
                 protection_only=item.get("protection_only"),
+                version=item.get("version", 1),
             )
             if policy.policy_id in seen_policy_ids:
                 raise AuthorityConflict("duplicate policy in authority snapshot")

@@ -140,6 +140,41 @@ class ScientificRegistryTests(unittest.TestCase):
             self.assertEqual(evidence.prior_access_count, 0)
             self.assertEqual(evidence.result, {"score": "0.1"})
 
+    def test_triggered_stopping_rule_requires_immutable_artifact_evidence(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            p = store.register_protocol(protocol())
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "immutable artifact evidence",
+            ):
+                store.register_evaluation(
+                    p.protocol_id,
+                    holdout_id="holdout-early-stop",
+                    result={
+                        "stopping_rule_triggered": True,
+                        "stopping_evidence_ref": "ticket-123",
+                    },
+                )
+
+            canonical_ref = (
+                "artifact:11111111-1111-4111-8111-111111111111@sha256:"
+                + "a" * 64
+            )
+            row = store.register_evaluation(
+                p.protocol_id,
+                holdout_id="holdout-early-stop-valid",
+                result={
+                    "stopping_rule_triggered": True,
+                    "stopping_evidence_ref": canonical_ref,
+                },
+            )
+            locked = store.locked_evaluation(row["evaluation_id"])
+            self.assertEqual(
+                locked.result["stopping_evidence_ref"],
+                canonical_ref,
+            )
+
     def test_records_survive_reopen(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "science.sqlite3"

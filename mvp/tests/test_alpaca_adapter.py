@@ -76,6 +76,20 @@ class AlpacaAdapterTests(unittest.TestCase):
             AlpacaPreparedRequest(**{**base, "capability_snapshot_id": " "})
         with self.assertRaisesRegex(AlpacaAdapterError, "documentation_refs"):
             AlpacaPreparedRequest(**{**base, "documentation_refs": ()})
+        with self.assertRaisesRegex(AlpacaAdapterError, "must be unique"):
+            AlpacaPreparedRequest(
+                **{
+                    **base,
+                    "capability_snapshot_ids": ("cap-1", "cap-1"),
+                }
+            )
+        with self.assertRaisesRegex(AlpacaAdapterError, "primary capability_snapshot_id"):
+            AlpacaPreparedRequest(
+                **{
+                    **base,
+                    "capability_snapshot_ids": ("other-cap",),
+                }
+            )
 
     def test_equity_limit_request_preserves_decimal_strings(self):
         intent = AlpacaOrderIntent.create(
@@ -565,6 +579,13 @@ class AlpacaMlegFoundationTests(unittest.TestCase):
         self.assertEqual(request.body["order_class"], "mleg")
         self.assertEqual(request.account_id, "paper-account")
         self.assertEqual(request.environment, "PAPER")
+        self.assertEqual(
+            request.capability_snapshot_ids,
+            tuple(
+                capabilities[leg.instrument_version].snapshot_id
+                for leg in intent.legs
+            ),
+        )
         self.assertEqual(request.body["qty"], "2")
         self.assertEqual(request.body["limit_price"], "-0.60")
         self.assertNotIn("symbol", request.body)

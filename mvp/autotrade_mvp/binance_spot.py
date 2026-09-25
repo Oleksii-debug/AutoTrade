@@ -205,7 +205,9 @@ class BinanceSpotSymbolRules:
         lot_step = _decimal(self.lot_step_size, name="lot_step_size", positive=True)
         price_min = _decimal(self.price_min, name="price_min")
         price_max = _decimal(self.price_max, name="price_max")
-        tick = _decimal(self.tick_size, name="tick_size", positive=True)
+        tick = _decimal(self.tick_size, name="tick_size")
+        if tick < 0:
+            raise BinanceSpotAdapterError("tick_size cannot be negative")
         if lot_min > lot_max or price_min < 0 or price_max < 0:
             raise BinanceSpotAdapterError("exchangeInfo rule bounds are invalid")
         for name in ("min_notional_applies_to_market", "max_notional_applies_to_market"):
@@ -265,7 +267,9 @@ class BinanceSpotSymbolRules:
         lot_filter = by_type["LOT_SIZE"]
         price_min = _decimal(price_filter.get("minPrice"), name="minPrice")
         price_max = _decimal(price_filter.get("maxPrice"), name="maxPrice")
-        tick_size = _decimal(price_filter.get("tickSize"), name="tickSize", positive=True)
+        tick_size = _decimal(price_filter.get("tickSize"), name="tickSize")
+        if tick_size < 0:
+            raise BinanceSpotAdapterError("tickSize cannot be negative")
         lot_min = _decimal(lot_filter.get("minQty"), name="minQty", positive=True)
         lot_max = _decimal(lot_filter.get("maxQty"), name="maxQty", positive=True)
         lot_step = _decimal(lot_filter.get("stepSize"), name="stepSize", positive=True)
@@ -340,10 +344,18 @@ class BinanceSpotSymbolRules:
         )
 
     @staticmethod
-    def _require_step(value: Decimal, step: Decimal, *, name: str) -> None:
-        if value % step != 0:
+    def _require_step(
+        value: Decimal,
+        step: Decimal,
+        *,
+        origin: Decimal = Decimal("0"),
+        name: str,
+    ) -> None:
+        if step == 0:
+            return
+        if (value - origin) % step != 0:
             raise BinanceSpotAdapterError(
-                f"{name} is not an exact multiple of exchangeInfo step"
+                f"{name} is not aligned to exchangeInfo step"
             )
 
     def validate(
@@ -375,7 +387,12 @@ class BinanceSpotSymbolRules:
         if max_qty is not None and intent.quantity > max_qty:
             raise BinanceSpotAdapterError("quantity exceeds exchangeInfo maximum")
         if step is not None:
-            self._require_step(intent.quantity, step, name="quantity")
+            self._require_step(
+                intent.quantity,
+                step,
+                origin=min_qty or Decimal("0"),
+                name="quantity",
+            )
 
         effective_price = intent.price
         if intent.order_type == "LIMIT":
@@ -385,7 +402,12 @@ class BinanceSpotSymbolRules:
                 raise BinanceSpotAdapterError("price is below exchangeInfo minimum")
             if self.price_max > 0 and effective_price > self.price_max:
                 raise BinanceSpotAdapterError("price exceeds exchangeInfo maximum")
-            self._require_step(effective_price, self.tick_size, name="price")
+            self._require_step(
+                effective_price,
+                self.tick_size,
+                origin=self.price_min,
+                name="price",
+            )
         elif (
             self.min_notional_applies_to_market
             or self.max_notional_applies_to_market

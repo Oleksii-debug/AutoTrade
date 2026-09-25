@@ -185,8 +185,8 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                 spec=spec,
                 plan=current_plan,
                 cut=cut,
-                financial_latency_us=(100, 120),
-                financial_staleness_us=(80, 90),
+                financial_latency_us=(100,),
+                financial_staleness_us=(80,),
                 research_interference_us=(50,),
                 resource_evidence_hash=RESOURCE,
                 resource_metrics={"cpu_peak_millis": 500},
@@ -196,6 +196,31 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
             self.assertIn("financial_event_loss", decision.reasons)
             self.assertEqual(decision.metrics["expected_financial_events"], 2)
             self.assertEqual(decision.metrics["recovered_financial_events"], 1)
+
+    def test_financial_samples_must_cover_each_recovered_event_exactly_once(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec()
+            current_plan = plan(spec, "fin-1", "fin-2")
+            cut = begin_runtime_campaign(journal=journal, spec=spec, plan=current_plan)
+            journal.append_event(envelope("fin-1"))
+            journal.append_event(envelope("fin-2"))
+
+            with self.assertRaisesRegex(
+                RuntimeBudgetError,
+                "bind one-to-one to recovered financial events",
+            ):
+                collect_runtime_campaign_evidence(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                    cut=cut,
+                    financial_latency_us=(100,),
+                    financial_staleness_us=(80,),
+                    research_interference_us=(50,),
+                    resource_evidence_hash=RESOURCE,
+                    resource_metrics={"cpu_peak_millis": 500},
+                )
 
     def test_undeclared_financial_event_cannot_be_hidden_from_campaign_cut(self):
         with TemporaryDirectory() as directory:
@@ -245,6 +270,38 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
             self.assertEqual(decision.status, "FAIL")
             self.assertIn("reconnect_backlog_not_drained", decision.reasons)
             self.assertEqual(evidence.reconnect_backlog_remaining, 1)
+
+    def test_reconnect_backlog_count_is_not_truncated_at_outbox_page_limit(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(samples=1)
+            current_plan = plan(spec, "fin-1")
+            cut = begin_runtime_campaign(journal=journal, spec=spec, plan=current_plan)
+            journal.append_event(envelope("fin-1"))
+            for index in range(1001):
+                journal.append_event(
+                    envelope(
+                        f"research-outbox-{index}",
+                        aggregate_type="research",
+                    ),
+                    outbox_topic="research.events",
+                )
+
+            evidence = collect_runtime_campaign_evidence(
+                journal=journal,
+                spec=spec,
+                plan=current_plan,
+                cut=cut,
+                financial_latency_us=(100,),
+                financial_staleness_us=(80,),
+                research_interference_us=(50,),
+                resource_evidence_hash=RESOURCE,
+                resource_metrics={"cpu_peak_millis": 500},
+            )
+            self.assertEqual(evidence.reconnect_backlog_remaining, 1001)
+            decision = evaluate_runtime_campaign(spec, evidence)
+            self.assertEqual(decision.status, "FAIL")
+            self.assertIn("reconnect_backlog_not_drained", decision.reasons)
 
     def test_plan_factory_rejects_scalar_text_as_event_or_aggregate_collection(self):
         spec = runtime_spec(samples=1)

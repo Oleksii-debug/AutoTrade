@@ -357,16 +357,19 @@ class RuntimeCampaignEvidence:
         object.__setattr__(
             self, "recovered_financial_event_bindings", tuple(bindings)
         )
-        object.__setattr__(
-            self,
-            "financial_latency_us",
-            _series(self.financial_latency_us, name="financial_latency_us"),
+        latency = _series(self.financial_latency_us, name="financial_latency_us")
+        staleness = _series(
+            self.financial_staleness_us,
+            name="financial_staleness_us",
         )
-        object.__setattr__(
-            self,
-            "financial_staleness_us",
-            _series(self.financial_staleness_us, name="financial_staleness_us"),
-        )
+        recovered_count = len(bindings)
+        if len(latency) != recovered_count or len(staleness) != recovered_count:
+            raise RuntimeBudgetError(
+                "financial latency/staleness samples must bind one-to-one "
+                "to recovered financial events in journal order"
+            )
+        object.__setattr__(self, "financial_latency_us", latency)
+        object.__setattr__(self, "financial_staleness_us", staleness)
         object.__setattr__(
             self,
             "research_interference_us",
@@ -566,8 +569,7 @@ def collect_runtime_campaign_evidence(
         if str(event["event_id"]) in expected
     ]
 
-    pending = journal.pending_outbox(limit=1000)
-    backlog_remaining = len(pending)
+    backlog_remaining = journal.pending_outbox_count()
     return RuntimeCampaignEvidence(
         plan_digest=plan.digest,
         spec_digest=spec.digest,

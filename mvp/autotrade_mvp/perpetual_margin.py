@@ -16,6 +16,8 @@ import json
 from typing import Literal, Sequence
 from uuid import UUID
 
+from research.autotrade_research.artifacts.store import ArtifactStore
+
 from .capabilities import CapabilitySnapshot
 
 
@@ -92,17 +94,19 @@ def _canonical_json_bytes(value: object) -> bytes:
 
 
 def _verify_immutable_artifact(
-    store: object,
+    store: ArtifactStore,
     *,
     artifact_id: str,
     expected_payload: object,
     expected_metadata: dict[str, object],
 ) -> None:
+    if not isinstance(store, ArtifactStore):
+        raise PerpetualMarginError(
+            "canonical ArtifactStore is required for immutable margin evidence"
+        )
     try:
-        load_manifest = getattr(store, "load_manifest")
-        read_bytes = getattr(store, "read_bytes")
-        manifest = load_manifest(artifact_id)
-        payload = read_bytes(artifact_id)
+        manifest = store.load_manifest(artifact_id)
+        payload = store.read_bytes(artifact_id)
     except Exception as error:
         raise PerpetualMarginError(
             "immutable margin evidence artifact is missing or corrupt"
@@ -116,6 +120,21 @@ def _verify_immutable_artifact(
     actual_digest = "sha256:" + sha256(payload).hexdigest()
     if manifest.get("sha256") != actual_digest:
         raise PerpetualMarginError("margin evidence artifact digest mismatch")
+    manifest_hash = manifest.get("manifest_hash")
+    if (
+        not isinstance(manifest_hash, str)
+        or len(manifest_hash) != 71
+        or not manifest_hash.startswith("sha256:")
+        or any(ch not in "0123456789abcdef" for ch in manifest_hash[7:])
+    ):
+        raise PerpetualMarginError(
+            "margin evidence artifact manifest integrity binding is required"
+        )
+    rights = manifest.get("rights")
+    if not isinstance(rights, dict) or rights.get("storage") is not True:
+        raise PerpetualMarginError(
+            "margin evidence artifact must preserve storage provenance"
+        )
     if manifest.get("media_type") != "application/json":
         raise PerpetualMarginError("margin evidence artifact media type mismatch")
     metadata = manifest.get("metadata")
@@ -329,7 +348,7 @@ class PerpetualMarginEvidence:
             "margin_tiers_observed_at": self.margin_tiers_observed_at,
         }
 
-    def verify_immutable_artifacts(self, store: object) -> None:
+    def verify_immutable_artifacts(self, store: ArtifactStore) -> None:
         common_metadata = {
             "schema_version": 1,
             "provider_id": self.provider_id,
@@ -444,7 +463,7 @@ def evaluate_perpetual_margin(
     collateral_amount,
     unrealized_pnl_settlement,
     evidence: PerpetualMarginEvidence,
-    artifact_store: object,
+    artifact_store: ArtifactStore,
     stress: PerpetualStress,
     evaluated_at: str,
     maximum_evidence_age_seconds: int,
@@ -464,9 +483,9 @@ def evaluate_perpetual_margin(
         raise TypeError("evidence must be PerpetualMarginEvidence")
     if not isinstance(stress, PerpetualStress):
         raise TypeError("stress must be PerpetualStress")
-    if artifact_store is None:
+    if not isinstance(artifact_store, ArtifactStore):
         raise PerpetualMarginError(
-            "immutable margin evidence artifact store is required"
+            "canonical ArtifactStore is required for immutable margin evidence"
         )
 
     # Scope compatibility is an authority boundary and must be checked before

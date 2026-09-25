@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
+from types import MappingProxyType
 from typing import Mapping
 
 
@@ -41,7 +42,11 @@ def _non_negative(value, *, name: str) -> Decimal:
 
 
 def _utc(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
         raise ValueError(f"{name} must be timezone-aware")
     return value.astimezone(timezone.utc)
 
@@ -62,6 +67,18 @@ class ParameterRule:
     minimum: Decimal
     maximum: Decimal
     max_absolute_step: Decimal
+
+    def __post_init__(self) -> None:
+        name = _text(self.name, name="parameter name")
+        low = _decimal(self.minimum, name="minimum")
+        high = _decimal(self.maximum, name="maximum")
+        step = _non_negative(self.max_absolute_step, name="max_absolute_step")
+        if low > high:
+            raise ValueError("minimum must not exceed maximum")
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "minimum", low)
+        object.__setattr__(self, "maximum", high)
+        object.__setattr__(self, "max_absolute_step", step)
 
     @classmethod
     def create(cls, *, name: str, minimum, maximum, max_absolute_step) -> "ParameterRule":
@@ -88,6 +105,58 @@ class OnlineUpdateEnvelope:
     max_updates_per_window: int
     max_compute_units_per_update: Decimal
     max_drift_score: Decimal
+
+    def __post_init__(self) -> None:
+        envelope_id = _text(self.envelope_id, name="envelope_id")
+        champion_hash = _sha256_identity(
+            self.champion_artifact_hash,
+            name="champion_artifact_hash",
+        )
+        if isinstance(self.parameter_rules, (str, bytes)):
+            raise TypeError("parameter_rules must be a collection")
+        rules = tuple(self.parameter_rules)
+        if not rules or any(not isinstance(rule, ParameterRule) for rule in rules):
+            raise TypeError("parameter_rules must contain ParameterRule values")
+        names = [rule.name for rule in rules]
+        if len(names) != len(set(names)):
+            raise ValueError("parameter rules must have unique names")
+        if isinstance(self.eligible_label_versions, (str, bytes)):
+            raise TypeError("eligible_label_versions must be a collection")
+        labels = tuple(
+            _text(item, name="label version")
+            for item in self.eligible_label_versions
+        )
+        if not labels:
+            raise ValueError("at least one eligible label version is required")
+        if len(labels) != len(set(labels)):
+            raise ValueError("eligible label versions must be unique")
+        for name, value, minimum in (
+            ("min_seconds_between_updates", self.min_seconds_between_updates, 0),
+            ("max_updates_per_window", self.max_updates_per_window, 1),
+        ):
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < minimum
+            ):
+                raise ValueError(f"{name} is invalid")
+        object.__setattr__(self, "envelope_id", envelope_id)
+        object.__setattr__(self, "champion_artifact_hash", champion_hash)
+        object.__setattr__(self, "parameter_rules", rules)
+        object.__setattr__(self, "eligible_label_versions", labels)
+        object.__setattr__(
+            self,
+            "max_compute_units_per_update",
+            _non_negative(
+                self.max_compute_units_per_update,
+                name="max_compute_units_per_update",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "max_drift_score",
+            _non_negative(self.max_drift_score, name="max_drift_score"),
+        )
 
     @classmethod
     def create(
@@ -138,6 +207,9 @@ class OnlineUpdateInput:
     current_parameters: Mapping[str, Decimal]
     proposed_parameters: Mapping[str, Decimal]
     label_version: str
+    label_available_at: datetime
+    outcome_horizon_at: datetime
+    execution_reconciled_at: datetime
     observed_at: datetime
     last_update_at: datetime | None
     updates_in_window: int
@@ -146,6 +218,94 @@ class OnlineUpdateInput:
     operational_invariant_failed: bool = False
     risk_envelope_violated: bool = False
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.current_parameters, Mapping) or not isinstance(
+            self.proposed_parameters, Mapping
+        ):
+            raise TypeError("parameter sets must be mappings")
+
+        def normalized_parameters(values: Mapping[str, Decimal], *, kind: str):
+            normalized: dict[str, Decimal] = {}
+            for raw_name, raw_value in values.items():
+                name = _text(raw_name, name=f"{kind} parameter name")
+                if name in normalized:
+                    raise ValueError(f"duplicate normalized {kind} parameter name")
+                normalized[name] = _decimal(raw_value, name=f"{kind}[{name}]")
+            return MappingProxyType(normalized)
+
+        if (
+            not isinstance(self.updates_in_window, int)
+            or isinstance(self.updates_in_window, bool)
+            or self.updates_in_window < 0
+        ):
+            raise ValueError("updates_in_window must be a non-negative integer")
+        for name in ("operational_invariant_failed", "risk_envelope_violated"):
+            if type(getattr(self, name)) is not bool:
+                raise TypeError(f"{name} must be boolean")
+
+        observed = _utc(self.observed_at, name="observed_at")
+        label_available = _utc(
+            self.label_available_at,
+            name="label_available_at",
+        )
+        outcome_horizon = _utc(
+            self.outcome_horizon_at,
+            name="outcome_horizon_at",
+        )
+        execution_reconciled = _utc(
+            self.execution_reconciled_at,
+            name="execution_reconciled_at",
+        )
+        previous = (
+            None
+            if self.last_update_at is None
+            else _utc(self.last_update_at, name="last_update_at")
+        )
+        if previous is not None and previous > observed:
+            raise ValueError("last_update_at cannot be after observed_at")
+        if label_available > observed:
+            raise ValueError("label cannot be available after observed_at")
+        if label_available < outcome_horizon:
+            raise ValueError("label cannot mature before the outcome horizon")
+        if label_available < execution_reconciled:
+            raise ValueError(
+                "label cannot mature before execution reconciliation"
+            )
+
+        object.__setattr__(
+            self,
+            "current_parameters",
+            normalized_parameters(self.current_parameters, kind="current"),
+        )
+        object.__setattr__(
+            self,
+            "proposed_parameters",
+            normalized_parameters(self.proposed_parameters, kind="proposed"),
+        )
+        object.__setattr__(
+            self,
+            "label_version",
+            _text(self.label_version, name="label_version"),
+        )
+        object.__setattr__(self, "label_available_at", label_available)
+        object.__setattr__(self, "outcome_horizon_at", outcome_horizon)
+        object.__setattr__(self, "execution_reconciled_at", execution_reconciled)
+        object.__setattr__(self, "observed_at", observed)
+        object.__setattr__(self, "last_update_at", previous)
+        object.__setattr__(
+            self,
+            "reserved_compute_units",
+            _non_negative(
+                self.reserved_compute_units,
+                name="reserved_compute_units",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "drift_score",
+            _non_negative(self.drift_score, name="drift_score"),
+        )
+
     @classmethod
     def create(
         cls,
@@ -153,6 +313,9 @@ class OnlineUpdateInput:
         current_parameters,
         proposed_parameters,
         label_version: str,
+        label_available_at: datetime,
+        outcome_horizon_at: datetime,
+        execution_reconciled_at: datetime,
         observed_at: datetime,
         last_update_at: datetime | None,
         updates_in_window: int,
@@ -169,22 +332,50 @@ class OnlineUpdateInput:
         ):
             if not isinstance(value, bool):
                 raise TypeError(f"{name} must be boolean")
-        current = {
-            _text(key, name="current parameter name"): _decimal(value, name=f"current[{key}]")
-            for key, value in current_parameters.items()
-        }
-        proposed = {
-            _text(key, name="proposed parameter name"): _decimal(value, name=f"proposed[{key}]")
-            for key, value in proposed_parameters.items()
-        }
+        if not isinstance(current_parameters, Mapping) or not isinstance(
+            proposed_parameters, Mapping
+        ):
+            raise TypeError("parameter sets must be mappings")
+        # Preserve raw key identity until __post_init__. Normalizing here would
+        # silently collapse keys such as "alpha" and " alpha " before the
+        # immutable duplicate-identity check can reject them.
+        current = dict(current_parameters)
+        proposed = dict(proposed_parameters)
         observed = _utc(observed_at, name="observed_at")
-        previous = None if last_update_at is None else _utc(last_update_at, name="last_update_at")
+        label_available = _utc(
+            label_available_at,
+            name="label_available_at",
+        )
+        outcome_horizon = _utc(
+            outcome_horizon_at,
+            name="outcome_horizon_at",
+        )
+        execution_reconciled = _utc(
+            execution_reconciled_at,
+            name="execution_reconciled_at",
+        )
+        previous = (
+            None
+            if last_update_at is None
+            else _utc(last_update_at, name="last_update_at")
+        )
         if previous is not None and previous > observed:
             raise ValueError("last_update_at cannot be after observed_at")
+        if label_available > observed:
+            raise ValueError("label cannot be available after observed_at")
+        if label_available < outcome_horizon:
+            raise ValueError("label cannot mature before the outcome horizon")
+        if label_available < execution_reconciled:
+            raise ValueError(
+                "label cannot mature before execution reconciliation"
+            )
         return cls(
             current_parameters=current,
             proposed_parameters=proposed,
             label_version=_text(label_version, name="label_version"),
+            label_available_at=label_available,
+            outcome_horizon_at=outcome_horizon,
+            execution_reconciled_at=execution_reconciled,
             observed_at=observed,
             last_update_at=previous,
             updates_in_window=updates_in_window,
@@ -279,6 +470,9 @@ def evaluate_online_update(
             "max_compute_units_per_update": str(envelope.max_compute_units_per_update),
             "max_drift_score": str(envelope.max_drift_score),
             "label_version": update.label_version,
+            "label_available_at": update.label_available_at.isoformat(),
+            "outcome_horizon_at": update.outcome_horizon_at.isoformat(),
+            "execution_reconciled_at": update.execution_reconciled_at.isoformat(),
             "observed_at": update.observed_at.isoformat(),
             "last_update_at": None if update.last_update_at is None else update.last_update_at.isoformat(),
             "updates_in_window": update.updates_in_window,

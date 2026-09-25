@@ -166,6 +166,8 @@ class ProviderSelectionTests(unittest.TestCase):
     def test_adapter_code_sha_requires_canonical_lowercase_hex(self):
         with self.assertRaisesRegex(ValueError, "lowercase"):
             candidate("BYBIT", "SPOT", code_sha="A" * 40)
+        with self.assertRaisesRegex(ValueError, "40-character"):
+            candidate("BYBIT", "SPOT", code_sha="a" * 64)
 
     def test_live_never_inherits_nonlive_qualification(self):
         live = candidate("BYBIT", "SPOT", environment="LIVE")

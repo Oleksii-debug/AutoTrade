@@ -36,6 +36,41 @@ class JournalStoreTests(unittest.TestCase):
             self.assertFalse(store.mark_outbox_delivered(pending[0]["outbox_id"]))
             self.assertEqual(store.pending_outbox(), [])
 
+    def test_outbox_envelope_metadata_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event(), outbox_topic="events")
+
+            connection = sqlite3.connect(path)
+            try:
+                row = connection.execute(
+                    "SELECT outbox_id, payload_json FROM outbox"
+                ).fetchone()
+                payload = json.loads(row[1])
+                payload["committed_at"] = "2099-01-01T00:00:00Z"
+                connection.execute(
+                    "UPDATE outbox SET payload_json = ? WHERE outbox_id = ?",
+                    (
+                        json.dumps(
+                            payload,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        ),
+                        row[0],
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox envelope hash",
+            ):
+                store.pending_outbox()
+
     def test_payload_tamper_and_version_gap_fail_closed(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
@@ -398,7 +433,7 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(legacy.current_schema_version(), 1)
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 3)
+            self.assertEqual(upgraded.current_schema_version(), 4)
             self.assertEqual(
                 upgraded.load_events("account", "paper-1")[0]["event_id"],
                 "evt-1",
@@ -435,7 +470,7 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 3)
+            self.assertEqual(upgraded.current_schema_version(), 4)
             with self.assertRaisesRegex(ValueError, "legacy unscoped"):
                 upgraded.record_command(
                     actor="alice",
@@ -461,11 +496,11 @@ class JournalStoreTests(unittest.TestCase):
 
     def test_failed_migration_rolls_back_schema_and_data_changes(self):
         class BrokenMigrationStore(JournalStore):
-            SCHEMA_VERSION = 4
+            SCHEMA_VERSION = 5
 
             @classmethod
             def _migration_statements(cls, version):
-                if version == 4:
+                if version == 5:
                     return (
                         "CREATE TABLE migration_probe(value TEXT NOT NULL)",
                         "CREATE TABL definitely_invalid(statement TEXT)",
@@ -476,7 +511,7 @@ class JournalStoreTests(unittest.TestCase):
             path = f"{directory}/journal.sqlite3"
             healthy = JournalStore(path)
             healthy.append_event(event())
-            self.assertEqual(healthy.current_schema_version(), 3)
+            self.assertEqual(healthy.current_schema_version(), 4)
 
             with self.assertRaises(sqlite3.OperationalError):
                 BrokenMigrationStore(path)
@@ -499,7 +534,7 @@ class JournalStoreTests(unittest.TestCase):
             finally:
                 connection.close()
 
-            self.assertEqual(versions, [1, 2, 3])
+            self.assertEqual(versions, [1, 2, 3, 4])
             self.assertIsNone(probe)
             self.assertEqual(event_count, 1)
 

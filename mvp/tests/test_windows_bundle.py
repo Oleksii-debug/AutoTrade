@@ -481,6 +481,103 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
                 provenance_path=self.provenance(eligible=False),
             )
 
+    def test_renamed_credential_vault_content_is_rejected(self):
+        disguised = self.staging / "runtime-state.json"
+        disguised.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "records": {
+                        "cred-live": {
+                            "handle": {
+                                "handle_id": "cred-live",
+                                "account_id": "acct-1",
+                                "provider": "SIMULATED",
+                                "environment": "LIVE",
+                                "purpose": "TRADE",
+                                "generation": 1,
+                            },
+                            "owner_identity": "windows-user",
+                            "ciphertext": "AAECAwQ=",
+                            "active": True,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(BundleError, "credential-vault content"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "renamed-vault.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+        self.assertFalse((self.root / "renamed-vault.zip").exists())
+
+    def test_embedded_private_key_material_is_rejected_under_innocent_name(self):
+        disguised = self.staging / "runtime-notes.txt"
+        disguised.write_bytes(
+            b"ordinary prefix\n"
+            b"-----BEGIN PRIVATE KEY-----\n"
+            b"must-not-ship\n"
+            b"-----END PRIVATE KEY-----\n"
+        )
+        with self.assertRaisesRegex(BundleError, "private-key material"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "embedded-private-key.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+        self.assertFalse((self.root / "embedded-private-key.zip").exists())
+
+    def test_unrelated_json_with_ciphertext_word_is_not_misclassified_as_vault(self):
+        ordinary = self.staging / "protocol-sample.json"
+        ordinary.write_text(
+            json.dumps(
+                {
+                    "records": [{"ciphertext": "protocol-field"}],
+                    "owner_identity": "documentation-label",
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = build_bundle(
+            staging=self.staging,
+            output=self.root / "ordinary-json.zip",
+            version="0.1.0-dev",
+            source_sha=SOURCE_SHA,
+            mode="diagnostics",
+            provenance_path=self.provenance(eligible=False),
+        )
+        self.assertTrue((self.root / "ordinary-json.zip").exists())
+        self.assertIn(
+            "protocol-sample.json",
+            {item["path"] for item in result["manifest"]["files"]},
+        )
+
+    def test_binary_payload_without_secret_markers_is_not_content_scanned_as_text(self):
+        binary = self.staging / "runtime.bin"
+        binary.write_bytes(bytes(range(256)) * 4)
+        result = build_bundle(
+            staging=self.staging,
+            output=self.root / "binary-ok.zip",
+            version="0.1.0-dev",
+            source_sha=SOURCE_SHA,
+            mode="diagnostics",
+            provenance_path=self.provenance(eligible=False),
+        )
+        self.assertTrue((self.root / "binary-ok.zip").exists())
+        self.assertIn(
+            "runtime.bin",
+            {item["path"] for item in result["manifest"]["files"]},
+        )
+
     def test_hash_sidecar_publish_removes_stale_temporary_file(self):
         provenance = self.provenance(eligible=False)
         output = self.root / "atomic-hash.zip"

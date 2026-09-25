@@ -1107,6 +1107,7 @@ class AuthorityService:
             raise AuthorityConflict(
                 "regenerated reservation availability is malformed"
             )
+        legacy_expected_availability_evidence: dict[str, Any] | None = None
         if borrow_resources:
             if (
                 not isinstance(raw_adjustments, Mapping)
@@ -1184,6 +1185,10 @@ class AuthorityService:
                     "required_increment": _canonical_decimal_text(required_increment),
                 }
             reservation_expected_available = adjusted_available
+            legacy_expected_availability_evidence = {
+                **expected_availability_evidence,
+                "borrow_capacity_adjustments": canonical_adjustments,
+            }
             expected_availability_evidence["availability"] = adjusted_available
             expected_availability_evidence[
                 "borrow_capacity_adjustments"
@@ -1193,10 +1198,16 @@ class AuthorityService:
                 "non-borrow admission carries borrow capacity adjustments"
             )
 
-        if dict(availability_evidence) != expected_availability_evidence:
-            raise AuthorityConflict(
-                "durable reservation availability evidence is inconsistent"
-            )
+        durable_availability_evidence = dict(availability_evidence)
+        if durable_availability_evidence != expected_availability_evidence:
+            if (
+                legacy_expected_availability_evidence is None
+                or durable_availability_evidence
+                != legacy_expected_availability_evidence
+            ):
+                raise AuthorityConflict(
+                    "durable reservation availability evidence is inconsistent"
+                )
         if reservation_request.get("available") != reservation_expected_available:
             raise AuthorityConflict(
                 "durable reservation exceeds authoritative account availability"
@@ -2010,45 +2021,132 @@ class AuthorityService:
                 )
                 for resource, amount in authoritative_available.items()
             }
-            if caller_available != canonical_available:
+            caller_expected_available = dict(canonical_available)
+            durable_borrow_adjustment: tuple[Decimal, Decimal] | None = None
+            if existing is not None and required_borrow_resource is not None:
+                raw_adjustments = availability_evidence.get(
+                    "borrow_capacity_adjustments"
+                )
+                if (
+                    not isinstance(raw_adjustments, Mapping)
+                    or set(raw_adjustments) != {required_borrow_resource}
+                ):
+                    raise AuthorityConflict(
+                        "existing borrow admission lacks exact capacity adjustment"
+                    )
+                raw_adjustment = raw_adjustments.get(required_borrow_resource)
+                required_adjustment_fields = {
+                    "total_capacity",
+                    "current_borrowed_quantity",
+                    "reservable_capacity",
+                    "required_increment",
+                }
+                if (
+                    not isinstance(raw_adjustment, Mapping)
+                    or set(raw_adjustment) != required_adjustment_fields
+                ):
+                    raise AuthorityConflict(
+                        "existing borrow capacity adjustment is malformed"
+                    )
+                total_capacity = _decimal(
+                    raw_adjustment.get("total_capacity"),
+                    name="borrow.total_capacity",
+                )
+                durable_current_borrowed = _decimal(
+                    raw_adjustment.get("current_borrowed_quantity"),
+                    name="borrow.current_borrowed_quantity",
+                )
+                reservable_capacity = _decimal(
+                    raw_adjustment.get("reservable_capacity"),
+                    name="borrow.reservable_capacity",
+                )
+                durable_required_increment = _decimal(
+                    raw_adjustment.get("required_increment"),
+                    name="borrow.required_increment",
+                )
+                durable_available = canonical_available.get(
+                    required_borrow_resource
+                )
+                if (
+                    durable_available is None
+                    or total_capacity < 0
+                    or durable_current_borrowed < 0
+                    or reservable_capacity < 0
+                    or durable_required_increment < 0
+                    or durable_current_borrowed != current_borrowed_quantity
+                    or durable_required_increment != required_borrow_quantity
+                    or durable_current_borrowed > total_capacity
+                    or reservable_capacity
+                    != total_capacity - durable_current_borrowed
+                    or durable_available
+                    not in {total_capacity, reservable_capacity}
+                ):
+                    raise AuthorityConflict(
+                        "existing borrow capacity adjustment is inconsistent"
+                    )
+                caller_expected_available[required_borrow_resource] = (
+                    total_capacity
+                )
+                durable_borrow_adjustment = (
+                    total_capacity,
+                    reservable_capacity,
+                )
+
+            if caller_available != caller_expected_available:
                 raise AuthorityConflict(
                     "reservation_available does not match authoritative reconciliation checkpoint"
                 )
 
             authoritative_available = dict(canonical_available)
             if required_borrow_resource is not None:
-                total_capacity = canonical_available.get(required_borrow_resource)
-                if total_capacity is None:
-                    raise AuthorityConflict(
-                        "authoritative checkpoint lacks required borrow capacity"
+                if durable_borrow_adjustment is not None:
+                    total_capacity, reservable_capacity = (
+                        durable_borrow_adjustment
                     )
-                if total_capacity < current_borrowed_quantity:
-                    raise AuthorityConflict(
-                        "provider borrow capacity is below current local borrow"
+                    authoritative_available[required_borrow_resource] = (
+                        reservable_capacity
                     )
-                reservable_capacity = total_capacity - current_borrowed_quantity
-                authoritative_available[required_borrow_resource] = (
-                    reservable_capacity
-                )
-                availability_evidence = {
-                    **availability_evidence,
-                    "availability": {
-                        resource: _canonical_decimal_text(amount)
-                        for resource, amount in authoritative_available.items()
-                    },
-                    "borrow_capacity_adjustments": {
-                        required_borrow_resource: {
-                            "total_capacity": _canonical_decimal_text(total_capacity),
-                            "current_borrowed_quantity": _canonical_decimal_text(
-                                current_borrowed_quantity
-                            ),
-                            "reservable_capacity": _canonical_decimal_text(reservable_capacity),
-                            "required_increment": _canonical_decimal_text(
-                                required_borrow_quantity
-                            ),
-                        }
-                    },
-                }
+                else:
+                    total_capacity = canonical_available.get(
+                        required_borrow_resource
+                    )
+                    if total_capacity is None:
+                        raise AuthorityConflict(
+                            "authoritative checkpoint lacks required borrow capacity"
+                        )
+                    if total_capacity < current_borrowed_quantity:
+                        raise AuthorityConflict(
+                            "provider borrow capacity is below current local borrow"
+                        )
+                    reservable_capacity = (
+                        total_capacity - current_borrowed_quantity
+                    )
+                    authoritative_available[required_borrow_resource] = (
+                        reservable_capacity
+                    )
+                    availability_evidence = {
+                        **availability_evidence,
+                        "availability": {
+                            resource: _canonical_decimal_text(amount)
+                            for resource, amount in authoritative_available.items()
+                        },
+                        "borrow_capacity_adjustments": {
+                            required_borrow_resource: {
+                                "total_capacity": _canonical_decimal_text(
+                                    total_capacity
+                                ),
+                                "current_borrowed_quantity": _canonical_decimal_text(
+                                    current_borrowed_quantity
+                                ),
+                                "reservable_capacity": _canonical_decimal_text(
+                                    reservable_capacity
+                                ),
+                                "required_increment": _canonical_decimal_text(
+                                    required_borrow_quantity
+                                ),
+                            }
+                        },
+                    }
 
         allocation_binding = None
         if allocation_result is not None:

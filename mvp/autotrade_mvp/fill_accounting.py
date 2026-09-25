@@ -23,7 +23,7 @@ from .accounting import (
     reverse_transaction,
 )
 from .persistence import payload_digest
-from .reconciliation import ProviderFillEvidence
+from .reconciliation import ProviderFillEvidence, ReconciliationResult
 
 
 def _text(value: str, *, name: str) -> str:
@@ -238,6 +238,134 @@ def _validated_fill_evidence(
         "provider_revision": projected_fill.provider_revision,
     }
     return provider, instrument, settlement, evidence
+
+
+
+def build_unexpected_provider_fill_transaction(
+    *,
+    book: ScopedEconomicBook,
+    reconciliation: ReconciliationResult,
+    provider_fill: ProviderFillEvidence,
+    expected_instrument: str,
+    settlement_currency: str,
+    observed_at: str | None = None,
+) -> JournalTransaction:
+    """Build canonical economics for one provider fill proven unexpected.
+
+    This is intentionally downstream of the existing reconciliation authority.
+    It does not infer direction from local state and it does not support hedge
+    legs until the canonical economic book becomes leg-aware.
+    """
+    if not isinstance(book, ScopedEconomicBook):
+        raise TypeError("book must be ScopedEconomicBook")
+    if not isinstance(reconciliation, ReconciliationResult):
+        raise TypeError("reconciliation must be ReconciliationResult")
+    if not isinstance(provider_fill, ProviderFillEvidence):
+        raise TypeError("provider_fill must be ProviderFillEvidence")
+
+    provider = provider_fill.provider_id
+    if (
+        reconciliation.provider_id != provider
+        or reconciliation.account_id != provider_fill.account_id
+        or reconciliation.environment != provider_fill.environment
+    ):
+        raise AccountingConflict(
+            "unexpected provider fill scope does not match reconciliation"
+        )
+    if (
+        book.account_id != provider_fill.account_id
+        or book.environment != provider_fill.environment
+    ):
+        raise AccountingConflict(
+            "unexpected provider fill scope does not match economic book"
+        )
+    if provider_fill.provider_execution_id not in set(
+        reconciliation.unexpected_execution_ids
+    ):
+        raise AccountingConflict(
+            "provider execution is not proven unexpected by reconciliation"
+        )
+    if provider_fill.side is None:
+        raise AccountingConflict(
+            "unexpected provider fill direction is not independently evidenced"
+        )
+    if provider_fill.position_side in {"LONG", "SHORT"}:
+        raise AccountingConflict(
+            "unexpected hedge-mode fill requires leg-aware economic accounting"
+        )
+
+    instrument = _text(expected_instrument, name="expected_instrument")
+    if provider_fill.instrument != instrument:
+        raise AccountingConflict(
+            "unexpected provider fill instrument does not match expected instrument"
+        )
+    settlement = _text(settlement_currency, name="settlement_currency").upper()
+    evidence = {
+        "schema_version": "1.0.0",
+        "origin": "EXTERNAL_RECONCILED",
+        "provider_id": provider,
+        "environment": provider_fill.environment,
+        "account_id": provider_fill.account_id,
+        "provider_execution_id": provider_fill.provider_execution_id,
+        "client_order_id": provider_fill.client_order_id,
+        "side": provider_fill.side,
+        "position_side": provider_fill.position_side,
+        "instrument": provider_fill.instrument,
+        "quantity": format(provider_fill.quantity, "f"),
+        "price": format(provider_fill.price, "f"),
+        "fee_amount": format(provider_fill.fee_amount, "f"),
+        "fee_currency": provider_fill.fee_currency,
+        "trade_time": provider_fill.trade_time,
+        "evidence_refs": list(provider_fill.evidence_refs),
+    }
+    evidence_digest = payload_digest(evidence)
+    return book_equity_fill(
+        transaction_id=(
+            "external-provider-fill:" + evidence_digest.removeprefix("sha256:")
+        ),
+        cause_event_id=(
+            f"provider:{provider}:environment:{provider_fill.environment}:"
+            f"account:{provider_fill.account_id}:execution:"
+            f"{provider_fill.provider_execution_id}"
+        ),
+        instrument=provider_fill.instrument,
+        settlement_currency=settlement,
+        side=provider_fill.side,
+        quantity=provider_fill.quantity,
+        price=provider_fill.price,
+        fee=provider_fill.fee_amount,
+        fee_currency=provider_fill.fee_currency,
+        economic_effective_at=provider_fill.trade_time,
+        economic_order_key=_economic_order_key(
+            provider,
+            provider_fill.provider_execution_id,
+        ),
+        observed_at=(
+            _utc_text(observed_at, name="observed_at")
+            if observed_at is not None
+            else None
+        ),
+    )
+
+
+def book_unexpected_provider_fill(
+    *,
+    book: ScopedEconomicBook,
+    reconciliation: ReconciliationResult,
+    provider_fill: ProviderFillEvidence,
+    expected_instrument: str,
+    settlement_currency: str,
+    observed_at: str | None = None,
+) -> bool:
+    transaction = build_unexpected_provider_fill_transaction(
+        book=book,
+        reconciliation=reconciliation,
+        provider_fill=provider_fill,
+        expected_instrument=expected_instrument,
+        settlement_currency=settlement_currency,
+        observed_at=observed_at,
+    )
+    return book.append(transaction)
 
 
 def build_provider_fill_transaction(

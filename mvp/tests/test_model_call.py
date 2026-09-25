@@ -522,7 +522,10 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 request,
                 [descriptor()],
                 now_utc=NOW,
-                reservation_context=orchestrator._reservation_context(call_spec),
+                reservation_context=orchestrator._reservation_context(
+                    call_spec,
+                    _pricing_evidence(call_spec, (descriptor(),)),
+                ),
             )
             pricing = _pricing_evidence(call_spec, (descriptor(),))
             prepared = orchestrator._prepared_payload(
@@ -606,7 +609,10 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 request,
                 [descriptor()],
                 now_utc=NOW,
-                reservation_context=orchestrator._reservation_context(call_spec),
+                reservation_context=orchestrator._reservation_context(
+                    call_spec,
+                    _pricing_evidence(call_spec, (descriptor(),)),
+                ),
             )
             self.assertEqual(
                 budget.active_reservation(attempt_id),
@@ -653,7 +659,10 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 request,
                 [descriptor()],
                 now_utc=NOW,
-                reservation_context=orchestrator._reservation_context(original),
+                reservation_context=orchestrator._reservation_context(
+                    original,
+                    _pricing_evidence(original, (descriptor(),)),
+                ),
             )
             with self.assertRaisesRegex(
                 ValueError,
@@ -668,6 +677,73 @@ class ModelCallLifecycleTests(unittest.TestCase):
                     validate_result=lambda _value: True,
                     now_utc=NOW,
                 )
+
+    def test_prepared_restart_uses_durable_pricing_identity_not_new_resolver(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            clock = MutableClock()
+            first = orchestrator_for(budget=budget, clock=clock)
+            call_spec = spec(pricing_evidence_id="pricing-v1")
+            route_descriptor = descriptor()
+            request = request_for(first, call_spec)
+            pricing_p1 = _pricing_evidence(call_spec, (route_descriptor,))
+            decision = budget.admit_route(
+                fixed_policy(),
+                request,
+                [route_descriptor],
+                now_utc=NOW,
+                reservation_context=first._reservation_context(
+                    call_spec,
+                    pricing_p1,
+                ),
+            )
+            prepared = first._prepared_payload(
+                attempt_id=first.attempt_id(call_spec),
+                spec=call_spec,
+                decision=decision,
+                descriptor=route_descriptor,
+                pricing=pricing_p1,
+            )
+            first._append(
+                attempt_id=first.attempt_id(call_spec),
+                event_type="ModelCallPrepared",
+                version=1,
+                payload=prepared,
+            )
+
+            resolver_calls = []
+            def newer_pricing(_spec, _descriptors):
+                resolver_calls.append(True)
+                raise AssertionError(
+                    "prepared restart must not resolve or rebind pricing"
+                )
+
+            restarted = orchestrator_for(
+                budget=budget,
+                clock=clock,
+                pricing_evidence_resolver=newer_pricing,
+            )
+            bindings = []
+            def prove_not_sent(binding, _cancelled):
+                bindings.append(binding)
+                raise ModelCallNotSent("restart test")
+
+            outcome = restarted.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request,
+                descriptors=[route_descriptor],
+                call=prove_not_sent,
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+            self.assertEqual(outcome.status, "NOT_SENT")
+            self.assertEqual(resolver_calls, [])
+            self.assertEqual(len(bindings), 1)
+            self.assertEqual(
+                bindings[0].pricing_evidence_digest,
+                pricing_p1.evidence_digest,
+            )
 
     def test_unverified_or_mismatched_pricing_fails_before_reservation(self):
         with TemporaryDirectory() as directory:

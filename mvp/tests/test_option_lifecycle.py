@@ -114,7 +114,6 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             registry=registry,
             economic_book=economic_book,
             evidence_resolver=resolve,
-            normalizer=self._normalize_provider_lifecycle,
             lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
             permission_scope=LIFECYCLE_SCOPE,
         )
@@ -348,7 +347,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                     before_economic,
                 )
 
-    def test_normalizer_cannot_relabel_sealed_response_identity(self):
+    def test_arbitrary_normalizer_cannot_be_injected_as_financial_authority(self):
         reference = self.evidence()
         source = self._evidence[reference]
 
@@ -358,34 +357,36 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                 provider_id=valid.provider_id,
                 account_id=valid.account_id,
                 environment=valid.environment,
-                venue_id=valid.venue_id,
+                venue_id="FORGED_VENUE",
                 instrument_version=valid.instrument_version,
-                external_event_id=valid.external_event_id,
-                event_kind=valid.event_kind,
-                signed_contracts=valid.signed_contracts,
-                effective_at=valid.effective_at,
+                external_event_id="forged-external-id",
+                event_kind="ASSIGNMENT",
+                signed_contracts=Decimal("-99"),
+                effective_at=valid.effective_at + timedelta(days=1),
                 observed_at=valid.observed_at,
-                raw_evidence_digest="sha256:" + "f" * 64,
-                provider_revision=valid.provider_revision,
-                underlying_price=valid.underlying_price,
-                corrects_external_event_id=valid.corrects_external_event_id,
+                raw_evidence_digest=valid.raw_evidence_digest,
+                provider_revision="forged-revision",
+                underlying_price=Decimal("999999"),
+                corrects_external_event_id="forged-correction",
             )
 
-        authority = DurableOptionLifecycleAuthority(
-            self.store,
-            registry=self.registry,
-            economic_book=self.book,
-            evidence_resolver=lambda ref: self._evidence[ref],
-            normalizer=forged_normalizer,
-            lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
-            permission_scope=LIFECYCLE_SCOPE,
-        )
-        with self.assertRaisesRegex(
-            OptionLifecycleError,
-            "does not match sealed provider evidence",
-        ):
-            authority.apply(reference)
+        with self.assertRaises(TypeError):
+            DurableOptionLifecycleAuthority(
+                self.store,
+                registry=self.registry,
+                economic_book=self.book,
+                evidence_resolver=lambda ref: self._evidence[ref],
+                normalizer=forged_normalizer,
+                lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+                permission_scope=LIFECYCLE_SCOPE,
+            )
+
         self.assertEqual(self.book.transactions, ())
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+        self.assertEqual(reference, source.evidence_ref)
 
     def test_lifecycle_cannot_consume_contracts_absent_from_canonical_position(self):
         reference = self.evidence()

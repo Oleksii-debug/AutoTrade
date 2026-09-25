@@ -185,6 +185,12 @@ def _validated_fill_evidence(
         raise AccountingConflict(
             "provider fill environment scope does not match economic book"
         )
+    if provider_fill.side is None:
+        raise AccountingConflict(
+            "provider fill direction is not independently evidenced"
+        )
+    if provider_fill.side != projected_fill.side:
+        raise AccountingConflict("provider fill side does not match projection")
 
     if projected_fill.correction_of is not None and not allow_correction:
         raise AccountingConflict(
@@ -217,7 +223,8 @@ def _validated_fill_evidence(
         "client_order_id": projected_fill.client_order_id,
         "fill_id": projected_fill.fill_id,
         "intent_id": projected_fill.intent_id,
-        "side": projected_fill.side,
+        "side": provider_fill.side,
+        "position_side": provider_fill.position_side,
         "instrument": provider_fill.instrument,
         "quantity": format(provider_fill.quantity, "f"),
         "price": format(provider_fill.price, "f"),
@@ -259,7 +266,7 @@ def build_provider_fill_transaction(
         cause_event_id=cause_event_id,
         instrument=provider_fill.instrument,
         settlement_currency=settlement,
-        side=projected_fill.side,
+        side=provider_fill.side,
         quantity=provider_fill.quantity,
         price=provider_fill.price,
         fee=provider_fill.fee_amount,
@@ -285,12 +292,14 @@ def _transaction_matches_provider_fill(
     settlement_currency: str,
     economic_order_key: str,
 ) -> bool:
+    if provider_fill.side is None:
+        return False
     expected = book_equity_fill(
         transaction_id=transaction.transaction_id,
         cause_event_id=transaction.cause_event_id,
         instrument=provider_fill.instrument,
         settlement_currency=settlement_currency,
-        side=projected_fill.side,
+        side=provider_fill.side,
         quantity=provider_fill.quantity,
         price=provider_fill.price,
         fee=provider_fill.fee_amount,
@@ -354,6 +363,8 @@ def build_provider_fill_correction_transactions(
         raise AccountingConflict("correction client order identity changed")
     if corrected_projected_fill.side != original_projected_fill.side:
         raise AccountingConflict("correction side changed")
+    if corrected_provider_fill.position_side != original_provider_fill.position_side:
+        raise AccountingConflict("correction provider position_side changed")
 
     observation = _utc_text(correction_observed_at, name="correction_observed_at")
     order_key = _economic_order_key(

@@ -999,6 +999,58 @@ class EconomicSettlementCapitalTests(unittest.TestCase):
         self.assertTrue(capital.blocks_new_risk)
         self.assertEqual(capital.available_cash, Decimal("1000"))
 
+    def test_reservation_authority_uses_available_cash_not_trade_date_cash(self):
+        book = self.funded_book()
+        sold = self.fill(transaction_id="sell-reservation", side="SELL")
+        book.append(sold)
+        settlement = SettlementBook.from_economic_book(
+            economic_book=book,
+            obligations=(self.bound(sold, obligation_id="ob-reservation"),),
+        )
+        capital = settlement.available_capital(
+            scope=self.scope,
+            currency="USD",
+            as_of=datetime(2026, 9, 24, 18, tzinfo=timezone.utc),
+        )
+        reservations = ReservationBook()
+        reservations.reserve_from_capital(
+            reservation_id="reserve-1000",
+            intent_id="intent-1000",
+            requirements={"CASH:USD": "1000"},
+            capital=capital,
+        )
+        with self.assertRaisesRegex(Exception, "Insufficient"):
+            reservations.reserve_from_capital(
+                reservation_id="reserve-extra",
+                intent_id="intent-extra",
+                requirements={"CASH:USD": "1"},
+                capital=capital,
+            )
+        self.assertEqual(book.cash("USD"), Decimal("1100"))
+        self.assertEqual(capital.available_cash, Decimal("1000"))
+
+    def test_overdue_unknown_capital_is_rejected_by_reservation_authority(self):
+        book = self.funded_book()
+        sold = self.fill(transaction_id="sell-block", side="SELL")
+        book.append(sold)
+        settlement = SettlementBook.from_economic_book(
+            economic_book=book,
+            obligations=(self.bound(sold, obligation_id="ob-block"),),
+        )
+        capital = settlement.available_capital(
+            scope=self.scope,
+            currency="USD",
+            as_of=datetime(2026, 9, 26, 9, tzinfo=timezone.utc),
+        )
+        self.assertTrue(capital.blocks_new_risk)
+        with self.assertRaisesRegex(Exception, "blocks new risk"):
+            ReservationBook().reserve_from_capital(
+                reservation_id="blocked",
+                intent_id="blocked-intent",
+                requirements={"CASH:USD": "1"},
+                capital=capital,
+            )
+
     def test_bust_before_or_after_settlement_cannot_double_release_capital(self):
         for settled_first in (False, True):
             with self.subTest(settled_first=settled_first):

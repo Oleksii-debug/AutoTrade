@@ -46,6 +46,40 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
         )
         return path
 
+    def composition(self, *, source_sha=SOURCE_SHA, overrides=None):
+        components = []
+        for path in sorted(self.staging.rglob("*")):
+            if path.is_file() and not path.is_symlink():
+                relative = path.relative_to(self.staging).as_posix()
+                components.append(
+                    {
+                        "component_id": relative.replace("/", "-"),
+                        "kind": "runtime" if relative.endswith(".exe") else "asset",
+                        "path": relative,
+                        "version": "1.0.0",
+                        "sha256": "sha256:" + sha256(path.read_bytes()).hexdigest(),
+                    }
+                )
+        document = {
+            "schema_version": "1.0.0",
+            "product": "AutoTrade",
+            "source_sha": source_sha,
+            "dependency_lock_sha256": "sha256:" + "1" * 64,
+            "sbom_sha256": "sha256:" + "2" * 64,
+            "schema_compatibility": {"minimum": "1.0.0", "maximum": "1.0.x"},
+            "runtime": {
+                "architecture": "x64",
+                "runtime_identifier": "win-x64",
+                "minimum_windows_version": "10.0.22621",
+            },
+            "components": components,
+        }
+        if overrides:
+            document.update(overrides)
+        path = self.root / "composition.json"
+        path.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
+        return path
+
     def test_diagnostics_bundle_is_byte_reproducible(self):
         provenance = self.provenance(eligible=False)
         first = self.root / "first.zip"
@@ -198,9 +232,88 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             source_sha=SOURCE_SHA,
             mode="release",
             provenance_path=self.provenance(eligible=True),
+            composition_path=self.composition(),
         )
         self.assertTrue(result["manifest"]["release_eligible"])
         self.assertFalse(result["manifest"]["trading_authority_granted_by_artifact"])
+
+    def test_release_mode_requires_exact_composition_manifest(self):
+        output = self.root / "missing-composition.zip"
+        with self.assertRaisesRegex(BundleError, "requires an exact Windows composition"):
+            build_bundle(
+                staging=self.staging,
+                output=output,
+                version="1.0.0",
+                source_sha=SOURCE_SHA,
+                mode="release",
+                provenance_path=self.provenance(eligible=True),
+            )
+        self.assertFalse(output.exists())
+
+    def test_release_composition_binds_source_sbom_runtime_and_every_staged_file(self):
+        composition = self.composition()
+        output = self.root / "composed.zip"
+        result = build_bundle(
+            staging=self.staging,
+            output=output,
+            version="1.0.0",
+            source_sha=SOURCE_SHA,
+            mode="release",
+            provenance_path=self.provenance(eligible=True),
+            composition_path=composition,
+        )
+        manifest = result["manifest"]
+        self.assertEqual(
+            manifest["composition_sha256"],
+            "sha256:" + sha256(composition.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(manifest["composition"]["source_sha"], SOURCE_SHA)
+        self.assertEqual(manifest["composition"]["runtime"]["runtime_identifier"], "win-x64")
+        self.assertEqual(
+            {item["path"] for item in manifest["composition"]["components"]},
+            {"AutoTrade.exe", "contracts/baseline.json"},
+        )
+
+        extra = self.staging / "debug.log"
+        extra.write_text("must not silently ship\n", encoding="utf-8")
+        with self.assertRaisesRegex(BundleError, "undeclared staging files"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "extra-file.zip",
+                version="1.0.0",
+                source_sha=SOURCE_SHA,
+                mode="release",
+                provenance_path=self.provenance(eligible=True),
+                composition_path=composition,
+            )
+
+    def test_release_composition_rejects_wrong_source_and_component_digest(self):
+        wrong_source = self.composition(source_sha="b" * 40)
+        with self.assertRaisesRegex(BundleError, "composition source_sha does not match"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "wrong-composition-source.zip",
+                version="1.0.0",
+                source_sha=SOURCE_SHA,
+                mode="release",
+                provenance_path=self.provenance(eligible=True),
+                composition_path=wrong_source,
+            )
+
+        document = json.loads(self.composition().read_text(encoding="utf-8"))
+        document["components"][0]["sha256"] = "sha256:" + "f" * 64
+        bad_digest = self.root / "composition-bad-digest.json"
+        bad_digest.write_text(json.dumps(document), encoding="utf-8")
+        with self.assertRaisesRegex(BundleError, "digest does not match staged file"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "bad-component-digest.zip",
+                version="1.0.0",
+                source_sha=SOURCE_SHA,
+                mode="release",
+                provenance_path=self.provenance(eligible=True),
+                composition_path=bad_digest,
+            )
 
     def test_release_mode_requires_exact_head_provenance_binding(self):
         missing = self.root / "eligible-without-sha.json"

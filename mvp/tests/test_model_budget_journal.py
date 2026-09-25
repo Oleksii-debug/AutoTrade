@@ -531,7 +531,16 @@ class DurableModelBudgetTests(unittest.TestCase):
 
     def test_release_revalidates_exact_amount_before_commit(self):
         class InterleavingBudget(DurableModelBudget):
-            def _commit(self, *, validate, payload, **kwargs):
+            def _commit(self, *, action, validate, payload, **kwargs):
+                if action != "release":
+                    return super()._commit(
+                        action=action,
+                        validate=validate,
+                        payload=payload,
+                        **kwargs,
+                    )
+                # Simulate a concurrent release only at the release commit
+                # boundary, after the durable setup reservation exists.
                 candidate = self._replay()
                 candidate.release(payload["request_id"])
                 validate(candidate)

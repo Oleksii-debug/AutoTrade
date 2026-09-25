@@ -85,7 +85,8 @@ public sealed class WindowsCredentialManagerSessionProvider : IEmergencyHostSess
                     "The paired host credential token is malformed.");
             }
 
-            byte[] tokenBytes = new byte[credential.CredentialBlobSize];
+            byte[] tokenBytes =
+                new byte[checked((int)credential.CredentialBlobSize)];
             try
             {
                 Marshal.Copy(
@@ -254,6 +255,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                 "application/json");
 
             HttpResponseMessage response;
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 response = await _httpClient.SendAsync(
@@ -261,11 +263,13 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                     HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken);
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException error)
             {
                 throw new EmergencyCommandUncertainException(
                     pending.CommandId,
-                    "The host command response timed out. The original command identity is retained for exact recovery.");
+                    "The host command response was cancelled or timed out after sending began. "
+                    + "The original command identity is retained because durable acceptance may already have occurred.",
+                    error);
             }
             catch (HttpRequestException error)
             {
@@ -303,13 +307,10 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                 if (response.StatusCode is not HttpStatusCode.OK
                     and not HttpStatusCode.Conflict)
                 {
-                    if (!recoveringUncertainCommand)
-                    {
-                        _pendingCommand = null;
-                    }
-
-                    throw new HttpRequestException(
-                        $"Host command returned HTTP {(int)response.StatusCode}.");
+                    throw new EmergencyCommandUncertainException(
+                        pending.CommandId,
+                        $"Host command returned HTTP {(int)response.StatusCode} after the send began. "
+                        + "Durable acceptance is not being inferred or denied; the exact command identity is retained.");
                 }
 
                 JsonElement result = await ReadObjectAsync(response, cancellationToken);

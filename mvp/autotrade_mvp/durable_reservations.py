@@ -394,12 +394,15 @@ class DurableReservationBook:
         return self.get(snapshot.reservation_id)
 
     def get(self, reservation_id: str) -> ReservationSnapshot:
+        self._reload()
         return self._book.get(reservation_id)
 
     def total_reserved(self, resource: str) -> Decimal:
+        self._reload()
         return self._book.total_reserved(resource)
 
     def active(self) -> tuple[ReservationSnapshot, ...]:
+        self._reload()
         return self._book.active()
 
     @property

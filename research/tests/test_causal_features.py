@@ -181,6 +181,9 @@ class CausalFeatureTests(unittest.TestCase):
             symbol="AAA",
             anchor_time=BASE + timedelta(days=2),
             anchor_value="102",
+            observations=[future],
+            future_event_time=future.event_time,
+            information_cutoff=BASE + timedelta(days=4),
             future=future,
         )
         with self.assertRaisesRegex(ValueError, "decision_time"):
@@ -236,6 +239,11 @@ class CausalFeatureTests(unittest.TestCase):
                 label_available_at=BASE,
                 value=Decimal("0.1"),
                 source_revision="r1",
+                source_observation_id="future-r1",
+                source_event_time=BASE + timedelta(days=1),
+                information_cutoff=BASE + timedelta(days=1),
+                source_population_fingerprint="sha256:" + "0" * 64,
+                provenance_hash="sha256:" + "0" * 64,
             )
 
     def test_delayed_label_cannot_enter_training_early(self):
@@ -246,13 +254,26 @@ class CausalFeatureTests(unittest.TestCase):
             count=2,
         )
         future = source(2, "102", delay=3)
+        with self.assertRaisesRegex(ValueError, "not uniquely causally available"):
+            make_forward_label(
+                symbol="AAA",
+                anchor_time=BASE + timedelta(days=1),
+                anchor_value="101",
+                observations=[future],
+                future_event_time=future.event_time,
+                information_cutoff=BASE + timedelta(days=3),
+                future=future,
+            )
         label = make_forward_label(
             symbol="AAA",
             anchor_time=BASE + timedelta(days=1),
             anchor_value="101",
+            observations=[future],
+            future_event_time=future.event_time,
+            information_cutoff=BASE + timedelta(days=5),
             future=future,
         )
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "exact training information cutoff"):
             training_row(
                 feature=feature,
                 label=label,
@@ -265,6 +286,116 @@ class CausalFeatureTests(unittest.TestCase):
         )
         self.assertEqual(x, feature.value)
         self.assertEqual(y, label.value)
+
+    def test_forward_label_selects_latest_revision_known_by_cutoff(self):
+        r1 = source(2, "102", revision="r1")
+        r2 = SourceValue.create(
+            observation_id="AAA-2-r2",
+            symbol="AAA",
+            event_time=r1.event_time,
+            available_at=r1.available_at + timedelta(hours=1),
+            value="104",
+            source_revision="r2",
+        )
+        cutoff = r2.available_at
+        label = make_forward_label(
+            symbol="AAA",
+            anchor_time=BASE + timedelta(days=1),
+            anchor_value="100",
+            observations=[r1, r2],
+            future_event_time=r1.event_time,
+            information_cutoff=cutoff,
+        )
+        self.assertEqual(label.source_revision, "r2")
+        self.assertEqual(label.source_observation_id, "AAA-2-r2")
+        self.assertEqual(label.value, Decimal("0.04"))
+        self.assertEqual(label.information_cutoff, cutoff)
+        self.assertTrue(label.provenance_hash.startswith("sha256:"))
+        with self.assertRaisesRegex(ValueError, "latest causally known revision"):
+            make_forward_label(
+                symbol="AAA",
+                anchor_time=BASE + timedelta(days=1),
+                anchor_value="100",
+                observations=[r1, r2],
+                future_event_time=r1.event_time,
+                information_cutoff=cutoff,
+                future=r1,
+            )
+
+    def test_forward_label_does_not_rewrite_history_with_future_revision(self):
+        r1 = source(2, "102", revision="r1")
+        r2 = SourceValue.create(
+            observation_id="AAA-2-r2-late",
+            symbol="AAA",
+            event_time=r1.event_time,
+            available_at=r1.available_at + timedelta(days=2),
+            value="110",
+            source_revision="r2",
+        )
+        cutoff = r1.available_at + timedelta(hours=1)
+        label = make_forward_label(
+            symbol="AAA",
+            anchor_time=BASE + timedelta(days=1),
+            anchor_value="100",
+            observations=[r1, r2],
+            future_event_time=r1.event_time,
+            information_cutoff=cutoff,
+        )
+        self.assertEqual(label.source_revision, "r1")
+        self.assertEqual(label.source_observation_id, r1.observation_id)
+        self.assertEqual(label.value, Decimal("0.02"))
+
+    def test_forward_label_fails_on_simultaneous_conflicting_revisions(self):
+        r1 = source(2, "102", revision="r1")
+        conflict = SourceValue.create(
+            observation_id="AAA-2-r2-conflict",
+            symbol="AAA",
+            event_time=r1.event_time,
+            available_at=r1.available_at,
+            value="103",
+            source_revision="r2",
+        )
+        with self.assertRaisesRegex(ValueError, "ambiguous simultaneously available"):
+            make_forward_label(
+                symbol="AAA",
+                anchor_time=BASE + timedelta(days=1),
+                anchor_value="100",
+                observations=[r1, conflict],
+                future_event_time=r1.event_time,
+                information_cutoff=r1.available_at,
+            )
+
+    def test_forward_label_provenance_changes_with_visible_revision_population(self):
+        r1 = source(2, "102", revision="r1")
+        first = make_forward_label(
+            symbol="AAA",
+            anchor_time=BASE + timedelta(days=1),
+            anchor_value="100",
+            observations=[r1],
+            future_event_time=r1.event_time,
+            information_cutoff=r1.available_at,
+        )
+        r2 = SourceValue.create(
+            observation_id="AAA-2-r2-provenance",
+            symbol="AAA",
+            event_time=r1.event_time,
+            available_at=r1.available_at + timedelta(hours=1),
+            value="102",
+            source_revision="r2",
+        )
+        second = make_forward_label(
+            symbol="AAA",
+            anchor_time=BASE + timedelta(days=1),
+            anchor_value="100",
+            observations=[r1, r2],
+            future_event_time=r1.event_time,
+            information_cutoff=r2.available_at,
+        )
+        self.assertNotEqual(
+            first.source_population_fingerprint,
+            second.source_population_fingerprint,
+        )
+        self.assertNotEqual(first.provenance_hash, second.provenance_hash)
 
     def test_missing_asset_fails_explicitly(self):
         with self.assertRaises(ValueError):
@@ -403,11 +534,15 @@ class CausalFoldTests(unittest.TestCase):
     def test_training_rows_exclude_labels_not_available_before_fold_cutoff(self):
         fold = self.fold(purge_seconds=24 * 60 * 60)
         feature_a = self.point(0, "1")
+        label_a_source = source(1, "101")
         label_a = make_forward_label(
             symbol="AAA",
             anchor_time=feature_a.decision_time,
             anchor_value="100",
-            future=source(1, "101"),
+            observations=[label_a_source],
+            future_event_time=label_a_source.event_time,
+            information_cutoff=fold.training_information_cutoff,
+            future=label_a_source,
         )
         feature_b = self.point(2, "2")
         late = SourceValue.create(
@@ -422,6 +557,9 @@ class CausalFoldTests(unittest.TestCase):
             symbol="AAA",
             anchor_time=feature_b.decision_time,
             anchor_value="100",
+            observations=[late],
+            future_event_time=late.event_time,
+            information_cutoff=late.available_at,
             future=late,
         )
         rows = training_rows_for_fold(

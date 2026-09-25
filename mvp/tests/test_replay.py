@@ -2,10 +2,12 @@ import unittest
 
 from mvp.autotrade_mvp.replay import (
     CausalReplay,
+    CompositeReplayCheckpoint,
     ReplayCheckpoint,
     ReplayError,
     ReplayEvent,
     dataset_digest,
+    resume_from_composite_checkpoint,
 )
 
 
@@ -116,6 +118,129 @@ class CausalReplayTests(unittest.TestCase):
             [item.sequence for item in replay.advance_to("2026-09-24T10:00:00Z")],
             [1],
         )
+
+    def _runtime_components(self, **overrides):
+        names = (
+            "pending_event_queue",
+            "rng_state",
+            "strategy_state",
+            "portfolio_accounting_state",
+            "execution_state",
+            "accrual_state",
+            "policy_state",
+            "instrument_state",
+            "provider_state",
+            "experiment_state",
+        )
+        values = {
+            name: __import__("hashlib").sha256(name.encode("utf-8")).hexdigest()
+            for name in names
+        }
+        values.update(overrides)
+        return values
+
+    def test_composite_checkpoint_rejects_changed_rng_before_next_event(self):
+        events = [
+            event(1, "2026-09-24T10:00:00Z", 1),
+            event(2, "2026-09-24T10:01:00Z", 2),
+        ]
+        replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
+        replay.advance_to("2026-09-24T10:00:00Z")
+        components = self._runtime_components()
+        checkpoint = replay.composite_checkpoint(
+            runtime_components=components,
+            build_sha="a" * 64,
+            protocol_ref="protocol:walk-forward-v1",
+        )
+
+        changed = dict(components)
+        changed["rng_state"] = "f" * 64
+        with self.assertRaisesRegex(ReplayError, "runtime state cut"):
+            resume_from_composite_checkpoint(
+                events,
+                start_at="2026-09-24T09:59:00Z",
+                checkpoint=checkpoint,
+                runtime_components=changed,
+                build_sha="a" * 64,
+                protocol_ref="protocol:walk-forward-v1",
+            )
+
+    def test_composite_checkpoint_requires_all_runtime_authorities(self):
+        replay = CausalReplay(
+            [event(1, "2026-09-24T10:00:00Z", 1)],
+            start_at="2026-09-24T09:59:00Z",
+        )
+        incomplete = self._runtime_components()
+        del incomplete["execution_state"]
+        with self.assertRaisesRegex(ReplayError, "missing required runtime components"):
+            replay.composite_checkpoint(
+                runtime_components=incomplete,
+                build_sha="a" * 64,
+                protocol_ref="protocol:walk-forward-v1",
+            )
+
+    def test_composite_checkpoint_exact_resume_preserves_suffix_and_identity(self):
+        events = [
+            event(1, "2026-09-24T10:00:00Z", 1),
+            event(2, "2026-09-24T10:00:00Z", 2),
+            event(3, "2026-09-24T10:01:00Z", 3),
+        ]
+        uninterrupted = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
+        uninterrupted.advance_to("2026-09-24T10:00:00Z")
+        components = self._runtime_components()
+        checkpoint = uninterrupted.composite_checkpoint(
+            runtime_components=components,
+            build_sha="b" * 64,
+            protocol_ref="protocol:walk-forward-v1",
+        )
+        self.assertEqual(
+            checkpoint.fingerprint,
+            CompositeReplayCheckpoint(
+                replay=checkpoint.replay,
+                runtime_components=dict(reversed(tuple(components.items()))),
+                build_sha="b" * 64,
+                protocol_ref="protocol:walk-forward-v1",
+            ).fingerprint,
+        )
+
+        resumed = resume_from_composite_checkpoint(
+            events,
+            start_at="2026-09-24T09:59:00Z",
+            checkpoint=checkpoint,
+            runtime_components=components,
+            build_sha="b" * 64,
+            protocol_ref="protocol:walk-forward-v1",
+        )
+        suffix_a = uninterrupted.advance_to("2026-09-24T10:02:00Z")
+        suffix_b = resumed.advance_to("2026-09-24T10:02:00Z")
+        self.assertEqual(
+            [(item.sequence, dict(item.payload)) for item in suffix_a],
+            [(item.sequence, dict(item.payload)) for item in suffix_b],
+        )
+
+    def test_composite_checkpoint_rejects_build_or_protocol_drift(self):
+        events = [event(1, "2026-09-24T10:00:00Z", 1)]
+        replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
+        components = self._runtime_components()
+        checkpoint = replay.composite_checkpoint(
+            runtime_components=components,
+            build_sha="c" * 64,
+            protocol_ref="protocol:registered-v1",
+        )
+        for build_sha, protocol_ref in (
+            ("d" * 64, "protocol:registered-v1"),
+            ("c" * 64, "protocol:post-hoc-v2"),
+        ):
+            with self.subTest(build_sha=build_sha, protocol_ref=protocol_ref):
+                with self.assertRaisesRegex(ReplayError, "runtime state cut"):
+                    resume_from_composite_checkpoint(
+                        events,
+                        start_at="2026-09-24T09:59:00Z",
+                        checkpoint=checkpoint,
+                        runtime_components=components,
+                        build_sha=build_sha,
+                        protocol_ref=protocol_ref,
+                    )
 
     def test_clock_cannot_move_backwards(self):
         replay = CausalReplay(

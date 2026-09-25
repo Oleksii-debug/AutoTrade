@@ -66,14 +66,6 @@ def verification_commands() -> tuple[tuple[str, ...], ...]:
             "--configuration",
             "Release",
         ),
-        (
-            "dotnet",
-            "run",
-            "--project",
-            "tests/Integration/LeanAdoption/LeanAdoptionProbe.csproj",
-            "--configuration",
-            "Release",
-        ),
     )
 
 
@@ -85,9 +77,9 @@ def main() -> int:
         if result.returncode:
             return result.returncode
     print(
-        "Repository Python, .NET contracts, desktop client, LEAN probe, simulated MVP, "
-        "observability and baseline checks passed. Provider and real NVDA qualification "
-        "remain separate."
+        "Repository Python, .NET contracts, desktop client, simulated MVP, observability "
+        "and baseline checks passed. LEAN, provider and real NVDA qualification remain "
+        "separate."
     )
     return 0
 

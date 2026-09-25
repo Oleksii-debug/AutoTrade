@@ -192,6 +192,66 @@ class ContractSchemaTests(unittest.TestCase):
         validator = Draft202012Validator({"$ref": f"{schema['$id']}#/$defs/UiCommand"}, registry=self.registry)
         self.assertFalse(validator.is_valid(fixture))
 
+    def test_ui_snapshot_and_command_share_public_session_reference_contract(self):
+        schema = self.schemas["ui.schema.json"]
+        self.assertEqual(
+            schema["$defs"]["UiSnapshot"]["properties"]["permission_summary"],
+            {"$ref": "#/$defs/PermissionSummary"},
+        )
+        self.assertEqual(
+            schema["$defs"]["PermissionSummary"]["properties"]["session"],
+            {"$ref": "#/$defs/SessionReference"},
+        )
+        self.assertEqual(
+            schema["$defs"]["UiCommand"]["properties"]["session"],
+            {"$ref": "#/$defs/SessionReference"},
+        )
+        validator = Draft202012Validator(
+            {"$ref": f"{schema['$id']}#/$defs/PermissionSummary"},
+            registry=self.registry,
+        )
+        public_session = "sid-" + "a" * 64
+        self.assertTrue(
+            validator.is_valid(
+                {
+                    "actor": "owner",
+                    "session": public_session,
+                    "role": "OWNER",
+                    "capabilities": ["BLOCK_NEW_EXPOSURE"],
+                }
+            )
+        )
+        for invalid in (
+            {"actor": "owner", "session": "raw-bearer-token", "role": "OWNER"},
+            {"actor": "owner", "session": public_session},
+            {
+                "actor": "owner",
+                "session": public_session,
+                "role": "OWNER",
+                "token": "must-never-be-serialized",
+            },
+        ):
+            with self.subTest(invalid=invalid):
+                self.assertFalse(validator.is_valid(invalid))
+
+    def test_ui_command_requires_canonical_public_session_reference(self):
+        fixture = json.loads((FIXTURES / "ui-command.valid.json").read_text())
+        schema = self.schemas["ui.schema.json"]
+        validator = Draft202012Validator(
+            {"$ref": f"{schema['$id']}#/$defs/UiCommand"},
+            registry=self.registry,
+        )
+        self.assertTrue(validator.is_valid(fixture))
+        for invalid_session in (
+            "desktop-session-1",
+            "sid-" + "A" * 64,
+            "sid-" + "a" * 63,
+        ):
+            candidate = dict(fixture)
+            candidate["session"] = invalid_session
+            with self.subTest(session=invalid_session):
+                self.assertFalse(validator.is_valid(candidate))
+
     def test_ui_command_action_set_matches_runtime_policy_and_rejects_unknown(self):
         fixture = json.loads((FIXTURES / "ui-command.valid.json").read_text())
         schema = self.schemas["ui.schema.json"]

@@ -102,6 +102,23 @@ def _period(payload: Any, name: str) -> tuple[date, date]:
     return start, end
 
 
+_DURATION_RE = re.compile(r"^(0|[1-9][0-9]*)(s|m|h|d)$")
+_DURATION_MULTIPLIERS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _duration_seconds(value: Any, name: str, *, allow_zero: bool = False) -> int:
+    raw = _text(value, name)
+    match = _DURATION_RE.fullmatch(raw)
+    if match is None:
+        raise ProtocolViolation(
+            f"{name} must use canonical duration <integer><s|m|h|d>"
+        )
+    amount = int(match.group(1))
+    if amount == 0 and not allow_zero:
+        raise ProtocolViolation(f"{name} must be positive")
+    return amount * _DURATION_MULTIPLIERS[match.group(2)]
+
+
 def _validate_causal_periods(payload: dict[str, Any]) -> None:
     names = ("train_period", "validation_period", "test_period", "forward_period")
     parsed = [(name, *_period(payload[name], name)) for name in names]
@@ -109,6 +126,48 @@ def _validate_causal_periods(payload: dict[str, Any]) -> None:
         if left_end >= right_start:
             raise ProtocolViolation(
                 f"{left_name} must end before {right_name} starts"
+            )
+
+    horizons = payload.get("horizons")
+    if not isinstance(horizons, list) or not horizons:
+        raise ProtocolViolation("horizons must be a non-empty list")
+    horizon_seconds = [
+        _duration_seconds(value, f"horizons[{index}]")
+        for index, value in enumerate(horizons)
+    ]
+    longest_horizon = max(horizon_seconds)
+
+    purge_embargo = payload.get("purge_embargo")
+    if not isinstance(purge_embargo, dict) or set(purge_embargo) != {"purge", "embargo"}:
+        raise ProtocolViolation(
+            "purge_embargo must contain exactly purge and embargo"
+        )
+    purge_seconds = _duration_seconds(
+        purge_embargo["purge"],
+        "purge_embargo.purge",
+        allow_zero=True,
+    )
+    embargo_seconds = _duration_seconds(
+        purge_embargo["embargo"],
+        "purge_embargo.embargo",
+        allow_zero=True,
+    )
+    if purge_seconds < longest_horizon:
+        raise ProtocolViolation(
+            "purge must cover the longest registered label horizon"
+        )
+    if embargo_seconds < longest_horizon:
+        raise ProtocolViolation(
+            "embargo must cover the longest registered dependency horizon"
+        )
+
+    required_gap_seconds = max(longest_horizon, purge_seconds, embargo_seconds)
+    for (left_name, _left_start, left_end), (right_name, right_start, _right_end) in zip(parsed, parsed[1:]):
+        actual_gap_seconds = (right_start - left_end).days * 86400
+        if actual_gap_seconds < required_gap_seconds:
+            raise ProtocolViolation(
+                f"{left_name} to {right_name} gap is shorter than the "
+                "registered purge/embargo dependency horizon"
             )
 
 

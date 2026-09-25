@@ -29,6 +29,48 @@ class GateProfile:
     require_causal_audit: bool
     require_financial_invariants: bool
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.profile_id, str) or not self.profile_id.strip():
+            raise ValueError("profile_id is required")
+        practical_effect = _decimal(
+            self.minimum_net_advantage,
+            name="minimum_net_advantage",
+        )
+        drawdown = _decimal(self.max_drawdown, name="max_drawdown")
+        adverse_cost_limit = _decimal(
+            self.max_adverse_cost_loss,
+            name="max_adverse_cost_loss",
+        )
+        power = _decimal(self.min_power, name="min_power")
+        if practical_effect < 0:
+            raise ValueError("minimum_net_advantage must be non-negative")
+        if drawdown < 0 or drawdown > 1:
+            raise ValueError("max_drawdown must be between zero and one")
+        if adverse_cost_limit < 0:
+            raise ValueError("max_adverse_cost_loss must be non-negative")
+        if power <= 0 or power > 1:
+            raise ValueError("min_power must be in (0, 1]")
+        for name in (
+            "require_complete_trials",
+            "require_causal_audit",
+            "require_financial_invariants",
+        ):
+            if type(getattr(self, name)) is not bool:
+                raise TypeError(f"{name} must be boolean")
+        object.__setattr__(self, "profile_id", self.profile_id.strip())
+        object.__setattr__(
+            self,
+            "minimum_net_advantage",
+            practical_effect,
+        )
+        object.__setattr__(self, "max_drawdown", drawdown)
+        object.__setattr__(
+            self,
+            "max_adverse_cost_loss",
+            adverse_cost_limit,
+        )
+        object.__setattr__(self, "min_power", power)
+
     @classmethod
     def create(
         cls,
@@ -89,6 +131,61 @@ class EvaluationEvidence:
     drawdown: Decimal | None
     adverse_cost_loss: Decimal | None
     retention_passed: bool | None
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.registered_profile_id, str)
+            or not self.registered_profile_id.strip()
+        ):
+            raise ValueError(
+                "registered_profile_id must be a non-empty string"
+            )
+        object.__setattr__(
+            self,
+            "registered_profile_id",
+            self.registered_profile_id.strip(),
+        )
+        for name in (
+            "dependence_aware_lower_bound",
+            "estimated_power",
+            "net_advantage",
+            "drawdown",
+            "adverse_cost_loss",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    name,
+                    _decimal(value, name=name),
+                )
+        for name in (
+            "profile_unchanged_after_results",
+            "reproducible",
+            "causal_audit_passed",
+            "financial_invariants_passed",
+            "trial_log_complete",
+            "retention_passed",
+        ):
+            value = getattr(self, name)
+            if value is not None and type(value) is not bool:
+                raise TypeError(f"{name} must be boolean or None")
+        if (
+            self.estimated_power is not None
+            and (self.estimated_power < 0 or self.estimated_power > 1)
+        ):
+            raise ValueError(
+                "estimated_power must be between zero and one"
+            )
+        if self.drawdown is not None and self.drawdown < 0:
+            raise ValueError("drawdown must be non-negative")
+        if (
+            self.adverse_cost_loss is not None
+            and self.adverse_cost_loss < 0
+        ):
+            raise ValueError(
+                "adverse_cost_loss must be non-negative"
+            )
 
     @classmethod
     def create(cls, **kwargs) -> "EvaluationEvidence":

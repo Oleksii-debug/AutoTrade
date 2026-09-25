@@ -821,12 +821,6 @@ class ResearchJobStore:
         worker = _require_text(worker_id, "worker_id")
         if not isinstance(output_refs, list) or not output_refs:
             raise ValueError("output_refs must be a non-empty list")
-        outputs = sorted(
-            _require_immutable_artifact_ref(value, "output_ref")
-            for value in output_refs
-        )
-        if len(outputs) != len(set(outputs)):
-            raise ValueError("output_refs must not contain duplicates")
         current = _utc(now or datetime.now(timezone.utc))
 
         with self._connect() as connection:
@@ -836,13 +830,31 @@ class ResearchJobStore:
                 connection.rollback()
                 raise KeyError(identifier)
             if row["state"] == "SUCCEEDED":
+                outputs = sorted(
+                    _require_immutable_artifact_ref(value, "output_ref")
+                    for value in output_refs
+                )
+                if len(outputs) != len(set(outputs)):
+                    connection.rollback()
+                    raise ValueError("output_refs must not contain duplicates")
                 existing = json.loads(row["output_refs_json"])
                 if existing == outputs and row["generation"] == generation:
                     connection.commit()
                     return False
                 connection.rollback()
                 raise JobConflictError("job already published a different accepted result")
+
+            # Generation/lease fencing precedes result parsing. A stale or
+            # cancelled worker must never progress far enough to influence
+            # publication validation or learn acceptance details.
             self._require_live_lease(row, worker, generation, current)
+            outputs = sorted(
+                _require_immutable_artifact_ref(value, "output_ref")
+                for value in output_refs
+            )
+            if len(outputs) != len(set(outputs)):
+                connection.rollback()
+                raise ValueError("output_refs must not contain duplicates")
             input_hashes = json.loads(row["input_hashes_json"])
             if artifact_store is None or any(
                 not _verify_job_output_artifact(

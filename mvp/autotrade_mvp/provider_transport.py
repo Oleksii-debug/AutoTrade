@@ -578,7 +578,6 @@ class UrllibJsonWireClient:
         )
 
 
-@dataclass(frozen=True)
 def _exact_trading_response(
     value: object,
 ) -> ExactJsonTransportResponse:
@@ -599,6 +598,7 @@ def _exact_trading_response(
     )
 
 
+@dataclass(frozen=True)
 class WhiteBitCredential:
     api_key: str
     api_secret: str

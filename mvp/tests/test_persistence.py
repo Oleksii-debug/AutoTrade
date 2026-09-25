@@ -339,6 +339,76 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(len(reopened.pending_outbox()), 1)
             self.assertEqual(len(store.load_events("account", "paper-1")), 2)
 
+    def test_atomic_command_rolls_back_if_outbox_write_fails_then_retries_after_restart(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TRIGGER reject_outbox_insert
+                    BEFORE INSERT ON outbox
+                    BEGIN
+                        SELECT RAISE(ABORT, 'simulated outbox failure');
+                    END
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "simulated outbox failure",
+            ):
+                store.commit_command(
+                    actor="alice",
+                    environment="PAPER",
+                    command_id="cmd-outbox-failure",
+                    idempotency_key="key-outbox-failure",
+                    request={"action": "ORDER.SUBMIT", "intent_id": "i-failure"},
+                    result={"status": "ACCEPTED"},
+                    state_version=1,
+                    events=[(event(), "events")],
+                )
+
+            connection = sqlite3.connect(path)
+            try:
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM command_dedupe").fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM events").fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM outbox").fetchone()[0],
+                    0,
+                )
+                connection.execute("DROP TRIGGER reject_outbox_insert")
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = JournalStore(path)
+            saved, inserted, appended = reopened.commit_command(
+                actor="alice",
+                environment="PAPER",
+                command_id="cmd-outbox-failure",
+                idempotency_key="key-outbox-failure",
+                request={"action": "ORDER.SUBMIT", "intent_id": "i-failure"},
+                result={"status": "ACCEPTED"},
+                state_version=1,
+                events=[(event(), "events")],
+            )
+            self.assertTrue(inserted)
+            self.assertEqual(saved, {"status": "ACCEPTED"})
+            self.assertEqual([item.event_id for item in appended], ["evt-1"])
+            self.assertEqual(len(reopened.pending_outbox()), 1)
+
     def test_atomic_command_rolls_back_on_event_version_gap(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

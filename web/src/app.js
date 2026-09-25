@@ -31,7 +31,8 @@
     pendingAnnouncements: [],
     urgentAnnouncementTimer: null,
     pendingUrgentAnnouncements: [],
-    restoreFocusId: null
+    restoreFocusId: null,
+    pendingCommand: null
   };
 
   const byId = (id) => document.getElementById(id);
@@ -575,6 +576,34 @@
     }
   }
 
+  function newCommandPayload(action) {
+    const commandId = crypto.randomUUID();
+    return Object.freeze({
+      command_id: commandId,
+      idempotency_key: crypto.randomUUID(),
+      expected_state_version: state.version.toString(),
+      actor: state.sessionIdentity.actor,
+      session: state.sessionIdentity.session,
+      action,
+      payload: Object.freeze({})
+    });
+  }
+
+  function commandForSubmission(action) {
+    if (state.pendingCommand !== null) {
+      return state.pendingCommand;
+    }
+    const payload = newCommandPayload(action);
+    state.pendingCommand = payload;
+    return payload;
+  }
+
+  function clearConfirmedCommand(payload) {
+    if (state.pendingCommand === payload) {
+      state.pendingCommand = null;
+    }
+  }
+
   async function submitCommand(event) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -590,21 +619,23 @@
     }
 
     const action = byId("host-action").value;
-    const commandId = crypto.randomUUID();
-    const payload = {
-      command_id: commandId,
-      idempotency_key: crypto.randomUUID(),
-      expected_state_version: state.version.toString(),
-      actor: state.sessionIdentity.actor,
-      session: state.sessionIdentity.session,
-      action,
-      payload: {}
-    };
+    const recovering = state.pendingCommand !== null;
+    const payload = commandForSubmission(action);
+    const commandId = payload.command_id;
+    if (recovering && action !== payload.action) {
+      byId("host-action").value = payload.action;
+    }
 
     button.disabled = true;
-    text("command-result", "Submitting host command.");
+    text(
+      "command-result",
+      recovering
+        ? "Retrying unresolved command " + commandId +
+          " with its original idempotency identity. No new command is being created."
+        : "Submitting host command " + commandId + ".");
     try {
       const result = await submitCanonicalCommand(payload);
+      clearConfirmedCommand(payload);
       if (result.status === "ACCEPTED") {
         let acceptedMessage =
           "Command " + commandId +
@@ -654,7 +685,8 @@
       setCommandAvailability(false);
       text(
         "command-result",
-        "The host command could not be confirmed. No durable financial or safety outcome is being claimed.");
+        "Command " + commandId +
+          " could not be confirmed. Its original command_id and idempotency_key are retained for exact retry after host state recovers. No durable financial or safety outcome is being claimed.");
       byId("command-result").focus();
     } finally {
       setCommandAvailability(state.snapshotReady && state.sessionIdentity !== null);

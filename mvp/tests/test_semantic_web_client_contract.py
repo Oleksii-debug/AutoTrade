@@ -389,5 +389,42 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js,
         )
 
+    def test_ambiguous_command_keeps_exact_identity_for_retry(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("pendingCommand: null", js)
+        self.assertIn("function commandForSubmission(action)", js)
+        self.assertIn("if (state.pendingCommand !== null)", js)
+        self.assertIn("return state.pendingCommand", js)
+        self.assertIn("state.pendingCommand = payload", js)
+        self.assertIn("const payload = commandForSubmission(action)", js)
+        self.assertIn("clearConfirmedCommand(payload)", js)
+        self.assertIn(
+            "Its original command_id and idempotency_key are retained for exact retry",
+            js,
+        )
+        submit = js.index("async function submitCommand(event)")
+        construct = js.index("const payload = commandForSubmission(action)", submit)
+        post = js.index("await submitCanonicalCommand(payload)", construct)
+        clear = js.index("clearConfirmedCommand(payload)", post)
+        ambiguous = js.index("could not be confirmed", clear)
+        self.assertLess(construct, post)
+        self.assertLess(post, clear)
+        self.assertLess(clear, ambiguous)
+
+    def test_pending_command_retry_does_not_mint_new_identifiers_or_new_state_version(self):
+        js = APP.read_text(encoding="utf-8")
+        helper = js[js.index("function commandForSubmission(action)"):]
+        helper = helper[:helper.index("function clearConfirmedCommand")]
+        pending_check = helper.index("if (state.pendingCommand !== null)")
+        pending_return = helper.index("return state.pendingCommand")
+        uuid_mint = helper.index("newCommandPayload(action)")
+        self.assertLess(pending_check, pending_return)
+        self.assertLess(pending_return, uuid_mint)
+        self.assertNotIn("expected_state_version =", helper)
+        self.assertIn(
+            "with its original idempotency identity. No new command is being created.",
+            js,
+        )
+
 if __name__ == "__main__":
     unittest.main()

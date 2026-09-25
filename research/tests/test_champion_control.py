@@ -222,7 +222,7 @@ def online_update(
         payload["purpose"] = purpose
         supporting.append(_publish_online_evidence(registry, payload))
 
-    return online_update(registry,
+    return registry.record_online_update(
         envelope=envelope,
         expected_generation=expected_generation,
         label_refs=label_refs,

@@ -6,6 +6,7 @@ from mvp.autotrade_mvp.reconciliation import (
     ProviderActivityEvidence,
     ProviderFillEvidence,
     ProviderWorkingOrderEvidence,
+    ResourceAvailabilityEvidence,
     SnapshotConsistencyEvidence,
     UnknownSubmission,
     reconcile_account,
@@ -55,6 +56,23 @@ def absence_coverage(**overrides):
     return values
 
 
+def resource_availability(**overrides):
+    values = dict(
+        provider_id="TEST_PROVIDER",
+        account_id="test-account",
+        environment="PAPER",
+        snapshot_id="snapshot-availability-1",
+        query_started_at="2026-09-24T17:00:00Z",
+        query_completed_at="2026-09-24T19:00:00Z",
+        provider_as_of="2026-09-24T18:59:59Z",
+        valid_until="2026-09-24T19:05:00Z",
+        available_resources={"CASH:USD": "850", "MARGIN:USD": "1200.50"},
+        evidence_refs=("provider:snapshot-availability-1",),
+    )
+    values.update(overrides)
+    return ResourceAvailabilityEvidence(**values)
+
+
 class ReconciliationTests(unittest.TestCase):
     def base(self, **overrides):
         values = dict(
@@ -83,6 +101,54 @@ class ReconciliationTests(unittest.TestCase):
         )
         values.update(overrides)
         return reconcile_account(**values)
+
+    def test_resource_availability_is_bound_to_same_provider_snapshot_cut(self):
+        evidence = resource_availability()
+        result = self.base(resource_availability=evidence)
+        self.assertIs(result.resource_availability, evidence)
+        self.assertEqual(
+            result.resource_availability.available_resources["CASH:USD"],
+            Decimal("850"),
+        )
+        self.assertEqual(
+            result.resource_availability.available_resources["MARGIN:USD"],
+            Decimal("1200.50"),
+        )
+
+    def test_resource_availability_scope_or_snapshot_cut_mismatch_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "resource availability scope mismatch"):
+            self.base(
+                resource_availability=resource_availability(account_id="other-account")
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "snapshot cut differs from reconciliation",
+        ):
+            self.base(
+                resource_availability=resource_availability(
+                    query_completed_at="2026-09-24T18:59:00Z",
+                )
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires snapshot consistency evidence",
+        ):
+            self.base(
+                snapshot_consistency=None,
+                resource_availability=resource_availability(),
+            )
+
+    def test_resource_availability_rejects_inflated_or_ambiguous_numeric_shapes(self):
+        with self.assertRaises(TypeError):
+            resource_availability(available_resources={"CASH:USD": 850.5})
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            resource_availability(available_resources={"CASH:USD": "-1"})
+        with self.assertRaisesRegex(ValueError, "unique after normalization"):
+            resource_availability(
+                available_resources={"CASH:USD": "1", " CASH:USD ": "2"}
+            )
+        with self.assertRaisesRegex(ValueError, "valid_until must be after"):
+            resource_availability(valid_until="2026-09-24T19:00:00Z")
 
     def test_complete_matching_window_reconciles(self):
         result = self.base()

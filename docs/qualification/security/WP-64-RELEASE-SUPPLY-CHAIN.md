@@ -12,6 +12,8 @@ The evaluator binds every review to the exact release commit and verifies:
 - license and distribution-rights decisions are explicit;
 - required notices are present;
 - blocking advisories fail while unknown advisory state remains inconclusive;
+- an `ALLOWLISTED` advisory is accepted only when it names an immutable exception
+  evidence identity and SHA-256; changing that exception changes qualification identity;
 - model/data rights are explicit and bound to the same release commit.
 
 A review for an older architecture snapshot cannot approve a different release. Unknown rights or advisory state cannot become PASS.
@@ -28,4 +30,4 @@ Result before publication: 9 passed. Exact-head CI on the GitHub branch remains 
 
 ## Immutable evidence requirement
 
-Internal agreement between declared hashes is not proof that an SBOM, provenance statement, dependency lock or rights record exists. A supply-chain `PASS` therefore requires an independent immutable-evidence verifier for the complete release bundle. If that verifier is absent, unavailable or rejects the bundle, qualification is `INCONCLUSIVE` (or `FAIL` when another hard check fails). This verifier does not grant release authority.
+Internal agreement between declared hashes is not proof that an SBOM, provenance statement, dependency lock, advisory exception or rights record exists. A supply-chain `PASS` therefore requires an independent immutable-evidence verifier for the complete release bundle. If that verifier is absent, unavailable or rejects the bundle, qualification is `INCONCLUSIVE` (or `FAIL` when another hard check fails). This verifier does not grant release authority.

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from research.autotrade_research.artifacts.store import ArtifactStore
@@ -35,6 +36,7 @@ class DurableReservationBookTests(unittest.TestCase):
         environment="PAPER",
         account_id="paper-account",
         reservation_id="r1",
+        intent_id="i1",
         provider="SIMULATED",
         attempt_id="attempt-r1",
         outcome="PROVEN_ABSENT",
@@ -46,6 +48,7 @@ class DurableReservationBookTests(unittest.TestCase):
             "environment": environment,
             "account_id": account_id,
             "reservation_id": reservation_id,
+            "intent_id": intent_id,
             "provider": provider,
             "attempt_id": attempt_id,
             "outcome": outcome,
@@ -66,6 +69,36 @@ class DurableReservationBookTests(unittest.TestCase):
             account_id="paper-account",
             resolution_artifact_store=self.artifacts,
         )
+
+    def create_unknown_attempt(
+        self,
+        *,
+        attempt_id="attempt-r1",
+        intent_id="i1",
+        provider="SIMULATED",
+    ):
+        dispatcher = GuardedDispatcher(
+            self.store,
+            environment="PAPER",
+            account_id="paper-account",
+        )
+
+        def ambiguous_transport(client_order_id, request, final_guard):
+            final_guard()
+            raise TimeoutError("simulated ambiguous provider result")
+
+        outcome = dispatcher.dispatch(
+            attempt_id=attempt_id,
+            intent_id=intent_id,
+            intent_hash="sha256:" + "1" * 64,
+            provider=provider,
+            request={"instrument": "TEST", "quantity": "1"},
+            now="2026-09-25T00:00:00Z",
+            authority_check=lambda intent_hash, now: (True, "allowed"),
+            transport_send=ambiguous_transport,
+        )
+        self.assertEqual(outcome.status, "UNKNOWN")
+        return outcome
 
     def reserve(self, book, *, amount="70", command="cmd-reserve", idem="idem-reserve"):
         return book.reserve(
@@ -119,6 +152,7 @@ class DurableReservationBookTests(unittest.TestCase):
             idempotency_key="idem-unknown",
             reservation_id="r1",
         )
+        self.create_unknown_attempt()
         first.mark_terminal(
             command_id="cmd-terminal",
             idempotency_key="idem-terminal",
@@ -382,12 +416,15 @@ class DurableReservationBookTests(unittest.TestCase):
             idempotency_key="idem-unknown",
             reservation_id="r1",
         )
+        self.create_unknown_attempt()
         with self.assertRaises(ReservationConflict):
             book.mark_terminal(
                 command_id="cmd-absent",
                 idempotency_key="idem-absent",
                 reservation_id="r1",
                 outcome="PROVEN_ABSENT",
+                provider="SIMULATED",
+                attempt_id="attempt-r1",
                 resolution_evidence=self.evidence,
             )
         self.assertEqual(book.total_reserved("CASH:USD"), Decimal("90"))
@@ -537,6 +574,58 @@ class DurableReservationBookTests(unittest.TestCase):
                 resolution_artifact_store=lambda reference: True,
             )
 
+    def test_terminal_release_requires_existing_durable_attempt(self):
+        book = self.book()
+        self.reserve(book)
+        book.mark_unknown(
+            command_id="cmd-unknown-no-attempt",
+            idempotency_key="idem-unknown-no-attempt",
+            reservation_id="r1",
+        )
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "not bound to a durable submission attempt",
+        ):
+            book.mark_terminal(
+                command_id="cmd-terminal-no-attempt",
+                idempotency_key="idem-terminal-no-attempt",
+                reservation_id="r1",
+                outcome="PROVEN_ABSENT",
+                provider="SIMULATED",
+                attempt_id="attempt-r1",
+                resolution_evidence=self.evidence,
+            )
+        self.assertEqual(book.get("r1").state, "UNKNOWN")
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("70"))
+
+    def test_terminal_release_rejects_bool_integer_receipt_alias(self):
+        aliased = self.publish_resolution_evidence(
+            artifact_id="33333333-3333-4333-8333-333333333333",
+            reconciliation_complete=1,
+        )
+        book = self.book()
+        self.reserve(book)
+        book.mark_unknown(
+            command_id="cmd-unknown-bool-alias",
+            idempotency_key="idem-unknown-bool-alias",
+            reservation_id="r1",
+        )
+        self.create_unknown_attempt()
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "does not match reservation scope",
+        ):
+            book.mark_terminal(
+                command_id="cmd-terminal-bool-alias",
+                idempotency_key="idem-terminal-bool-alias",
+                reservation_id="r1",
+                outcome="PROVEN_ABSENT",
+                provider="SIMULATED",
+                attempt_id="attempt-r1",
+                resolution_evidence=aliased,
+            )
+        self.assertEqual(book.get("r1").state, "UNKNOWN")
+
     def test_terminal_release_fails_closed_on_wrong_receipt_scope(self):
         wrong_evidence = self.publish_resolution_evidence(
             artifact_id="22222222-2222-4222-8222-222222222222",
@@ -574,6 +663,7 @@ class DurableReservationBookTests(unittest.TestCase):
             idempotency_key="idem-unknown-reverify",
             reservation_id="r1",
         )
+        self.create_unknown_attempt()
         book.mark_terminal(
             command_id="cmd-terminal-reverify",
             idempotency_key="idem-terminal-reverify",
@@ -605,6 +695,8 @@ class DurableReservationBookTests(unittest.TestCase):
                 idempotency_key="idem-terminal-weak",
                 reservation_id="r1",
                 outcome="PROVEN_ABSENT",
+                provider="SIMULATED",
+                attempt_id="attempt-r1",
                 resolution_evidence="provider-complete-coverage",
             )
         self.assertEqual(book.version, before_version)
@@ -620,6 +712,8 @@ class DurableReservationBookTests(unittest.TestCase):
                 idempotency_key="idem-terminal-bad-digest",
                 reservation_id="r1",
                 outcome="PROVEN_ABSENT",
+                provider="SIMULATED",
+                attempt_id="attempt-r1",
                 resolution_evidence=(
                     "artifact:11111111-1111-4111-8111-111111111111@sha256:"
                     + "A" * 64

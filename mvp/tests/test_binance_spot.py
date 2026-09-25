@@ -209,6 +209,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
                 "qty": "0.2",
                 "commission": "0.001",
                 "commissionAsset": "BNB",
+                "isBuyer": True,
                 "time": 1790272800123,
             }
         ]
@@ -226,6 +227,41 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         self.assertEqual(fills[0].evidence_refs, (observation.evidence_ref,))
         self.assertEqual(fills[0].quantity, Decimal("0.2"))
         self.assertEqual(fills[0].fee_currency, "BNB")
+        self.assertEqual(fills[0].side, "BUY")
+        self.assertEqual(fills[0].position_side, "BOTH")
+
+    def test_account_trade_requires_provider_evidenced_direction(self):
+        base = {
+            "symbol": "BTCUSDT",
+            "id": 8,
+            "orderId": 43,
+            "price": "101.25",
+            "qty": "0.1",
+            "commission": "0.001",
+            "commissionAsset": "BNB",
+            "time": 1790272801123,
+        }
+        for value in (None, "true", 1):
+            with self.subTest(isBuyer=value):
+                row = dict(base)
+                if value is not None:
+                    row["isBuyer"] = value
+                with self.assertRaisesRegex(
+                    BinanceSpotAdapterError,
+                    "isBuyer must be provider-evidenced boolean",
+                ):
+                    parse_account_trades(
+                        execution_observation([row]),
+                        instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
+                    )
+
+        sell = dict(base, isBuyer=False)
+        fills = parse_account_trades(
+            execution_observation([sell]),
+            instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
+        )
+        self.assertEqual(fills[0].side, "SELL")
+        self.assertEqual(fills[0].position_side, "BOTH")
 
     def test_execution_parser_rejects_wrong_authenticated_read_surface(self):
         row = {
@@ -236,6 +272,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             "qty": "0.2",
             "commission": "0.001",
             "commissionAsset": "BNB",
+            "isBuyer": True,
             "time": 1790272800123,
         }
         wrong_surface = execution_observation(
@@ -257,6 +294,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             "qty": "0.2",
             "commission": "0.001",
             "commissionAsset": "BNB",
+            "isBuyer": True,
             "time": 1790272800123,
         }
         changed = dict(first, qty="0.3")

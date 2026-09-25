@@ -125,6 +125,14 @@ def _snapshot_payload(snapshot: ReservationSnapshot) -> dict[str, object]:
     }
 
 
+def reservation_snapshot_digest(snapshot: ReservationSnapshot) -> str:
+    """Return the reservation authority's canonical identity for one state cut."""
+
+    if not isinstance(snapshot, ReservationSnapshot):
+        raise TypeError("snapshot must be ReservationSnapshot")
+    return payload_digest(_snapshot_payload(snapshot))
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -415,6 +423,7 @@ class DurableReservationBook:
         reservation_id: str,
         usage: Mapping[str, object],
         committed_at: str,
+        expected_snapshot_digest: str | None = None,
     ) -> PreparedReservationMutation:
         """Prepare one reservation consumption for a shared durable commit.
 
@@ -431,6 +440,11 @@ class DurableReservationBook:
             "reservation_id": _text(reservation_id, name="reservation_id"),
             "usage": _amount_map(usage, allow_zero=False),
         }
+        expected_cut = (
+            None
+            if expected_snapshot_digest is None
+            else _text(expected_snapshot_digest, name="expected_snapshot_digest")
+        )
         events = self._events()
         candidate, idempotency = self._replay(events)
         existing = idempotency.get(key)
@@ -458,6 +472,13 @@ class DurableReservationBook:
                 ),
                 already_committed=True,
             )
+
+        if expected_cut is not None:
+            current_snapshot = candidate.get(request["reservation_id"])
+            if reservation_snapshot_digest(current_snapshot) != expected_cut:
+                raise ReservationConflict(
+                    "reservation snapshot changed after provider fill plan derivation"
+                )
 
         snapshot = self._apply(candidate, "CONSUME", request)
         snapshot_value = _snapshot_payload(snapshot)

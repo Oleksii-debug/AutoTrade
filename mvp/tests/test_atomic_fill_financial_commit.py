@@ -19,7 +19,10 @@ from mvp.autotrade_mvp.durable_settlement import (
     settlement_rule_evidence_receipt,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
-from mvp.autotrade_mvp.fill_accounting import ProjectedFillEvidence
+from mvp.autotrade_mvp.fill_accounting import (
+    ProjectedFillEvidence,
+    build_provider_fill_financial_plan,
+)
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
     commit_economic_batch_with_reservation_consumption,
@@ -697,6 +700,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             )
             self.assertEqual(binding["fill_id"], "fill-1")
             self.assertEqual(binding["derived_usage"], {"CASH:USD": "100"})
+            self.assertTrue(binding["reservation_cut_digest"].startswith("sha256:"))
             self.assertTrue(binding["plan_digest"].startswith("sha256:"))
             self.assertTrue(binding["transaction_digest"].startswith("sha256:"))
             self.assertTrue(binding["projected_fill_digest"].startswith("sha256:"))
@@ -749,6 +753,112 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             snapshot = reservations.get("reservation-1")
             self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("100"))
             self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("20"))
+
+    def test_equivalent_decimal_exponents_share_reservation_cut_identity(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            durable_snapshot = reservations.get("reservation-1")
+            equivalent_snapshot = replace(
+                durable_snapshot,
+                original={"CASH:USD": Decimal("120.0")},
+                remaining={"CASH:USD": Decimal("120.00")},
+                consumed={"CASH:USD": Decimal("0.000")},
+            )
+            projected = self.projected_fill(
+                quantity="0.5",
+                fill_id="fill-equivalent-cut",
+                provider_execution_id="provider-execution-equivalent-cut",
+            )
+            provider = self.provider_fill(
+                quantity="0.5",
+                provider_execution_id="provider-execution-equivalent-cut",
+            )
+            plan = build_provider_fill_financial_plan(
+                book=economics,
+                provider_id=PROVIDER,
+                projected_fill=projected,
+                provider_fill=provider,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+                reservation_snapshot=equivalent_snapshot,
+                observed_at="2026-09-25T09:00:01Z",
+            )
+
+            prepared = reservations.prepare_consume_mutation(
+                event_key="equivalent-cut-event",
+                idempotency_key="equivalent-cut-idempotency",
+                reservation_id="reservation-1",
+                usage=plan.usage,
+                committed_at="2026-09-25T09:00:02Z",
+                expected_snapshot_digest=plan.reservation_cut_digest,
+            )
+            self.assertFalse(prepared.already_committed)
+            self.assertEqual(
+                prepared.snapshot.consumed["CASH:USD"],
+                Decimal("50"),
+            )
+            self.assertEqual(
+                prepared.snapshot.remaining["CASH:USD"],
+                Decimal("70"),
+            )
+
+    def test_stale_financial_plan_is_fenced_before_atomic_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            projected = self.projected_fill(
+                quantity="0.5",
+                fill_id="fill-stale",
+                provider_execution_id="provider-execution-stale",
+            )
+            provider = self.provider_fill(
+                quantity="0.5",
+                provider_execution_id="provider-execution-stale",
+            )
+            plan = build_provider_fill_financial_plan(
+                book=economics,
+                provider_id=PROVIDER,
+                projected_fill=projected,
+                provider_fill=provider,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+                reservation_snapshot=reservations.get("reservation-1"),
+                observed_at="2026-09-25T09:00:01Z",
+            )
+
+            reservations.consume(
+                command_id="competing-consume-command",
+                idempotency_key="competing-consume-idempotency",
+                reservation_id="reservation-1",
+                usage={"CASH:USD": "1"},
+            )
+            with self.assertRaisesRegex(
+                ReservationConflict,
+                "snapshot changed after provider fill plan derivation",
+            ):
+                commit_economic_batch_with_reservation_consumption(
+                    economics,
+                    reservations,
+                    command_id="stale-plan-command",
+                    idempotency_key="stale-plan-idempotency",
+                    reservation_id="reservation-1",
+                    usage=plan.usage,
+                    transactions=(plan.transaction,),
+                    reservation_expected_snapshot_digest=plan.reservation_cut_digest,
+                    committed_at="2026-09-25T09:00:02Z",
+                )
+
+            self.assertEqual(economics.transactions, ())
+            snapshot = reservations.get("reservation-1")
+            self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("1"))
+            self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("119"))
 
     def test_binding_is_not_left_behind_when_atomic_commit_fails(self):
         with TemporaryDirectory() as directory:

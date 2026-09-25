@@ -488,6 +488,32 @@ class GuardedDispatcher:
                     now=now,
                 )
                 return DispatchOutcome("BLOCKED", client_order_id, None, "transport_failed_before_send")
+            if not barrier_passed:
+                # The provider wrapper invoked a guard that rejected, but did
+                # not propagate DispatchBlocked. Once it masks that rejection
+                # and raises something else, we can no longer prove that it
+                # refrained from an outbound side effect after the guard.
+                # Preserve worst-case exposure and force reconciliation.
+                next_version = int(last["aggregate_version"]) + 1
+                self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionUnknown",
+                    version=next_version,
+                    payload={
+                        "client_order_id": client_order_id,
+                        "reason": (
+                            "provider_wrapper_masked_final_guard_failure:"
+                            + type(error).__name__
+                        ),
+                    },
+                    now=barrier_now,
+                )
+                return DispatchOutcome(
+                    "UNKNOWN",
+                    client_order_id,
+                    None,
+                    "provider_guard_contract_violation",
+                )
             raise
 
         if not guard_called:

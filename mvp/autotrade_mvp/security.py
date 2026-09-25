@@ -2,7 +2,9 @@
 
 Credential persistence and decryption are delegated to the canonical protected
 credential vault. This module owns roles, paired origins and short-lived sessions;
-it deliberately does not keep a second plaintext credential store.
+session minting additionally requires an injected authenticated-identity/role
+verifier, so a paired browser origin is never treated as authentication by itself.
+It deliberately does not keep a second plaintext credential store.
 """
 
 from __future__ import annotations
@@ -80,6 +82,7 @@ class SecurityBoundary:
         *,
         allowed_origins: set[str],
         credential_vault: ProtectedCredentialVault,
+        session_authorizer: Callable[[str, str, str], bool] | None = None,
         now: Callable[[], float] | None = None,
     ) -> None:
         if not allowed_origins:
@@ -88,6 +91,9 @@ class SecurityBoundary:
             raise TypeError("credential_vault must be a ProtectedCredentialVault")
         self._paired_origins = {_authenticated_origin(value) for value in allowed_origins}
         self._credential_vault = credential_vault
+        if session_authorizer is not None and not callable(session_authorizer):
+            raise TypeError("session_authorizer must be callable or None")
+        self._session_authorizer = session_authorizer
         self._now = now or time.time
         self._sessions: dict[str, Session] = {}
 
@@ -119,6 +125,20 @@ class SecurityBoundary:
             raise ValueError("Session lifetime must be an integer number of seconds")
         if ttl_seconds <= 0 or ttl_seconds > 3600:
             raise ValueError("Session lifetime is outside the permitted bound")
+        if self._session_authorizer is None:
+            raise PermissionError("Session authentication verifier is unavailable")
+        try:
+            authenticated = self._session_authorizer(
+                normalized_subject,
+                normalized_role,
+                normalized_origin,
+            )
+        except Exception as error:
+            raise PermissionError("Session authentication failed") from error
+        if authenticated is not True:
+            raise PermissionError(
+                "Session identity and role are not authenticated"
+            )
         session = Session(
             token=secrets.token_urlsafe(32),
             subject=normalized_subject,

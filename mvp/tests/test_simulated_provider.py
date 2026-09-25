@@ -2,7 +2,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from uuid import uuid4
 
-from mvp.autotrade_mvp.dispatch import GuardedDispatcher
+from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.simulated_provider import (
     SimulatedProvider,
@@ -128,6 +128,94 @@ class SimulatedProviderTests(unittest.TestCase):
                 price="100",
                 now="2026-09-24T18:00:00Z",
             )
+
+
+    def test_outage_before_final_guard_is_blocked_without_outbound_send(self):
+        with TemporaryDirectory() as directory:
+            intent_id = str(uuid4())
+            client_order_id = stable_client_order_id("simulated", intent_id)
+            provider = SimulatedProvider(
+                transport_faults={client_order_id: "BEFORE_SEND_OUTAGE"}
+            )
+            dispatcher = GuardedDispatcher(
+                JournalStore(f"{directory}/journal.sqlite3"),
+                owner_token="test-owner",
+            )
+            result = dispatcher.dispatch(
+                attempt_id=str(uuid4()),
+                intent_id=intent_id,
+                intent_hash="sha256:" + "2" * 64,
+                provider="simulated",
+                request={
+                    "attempt_id": str(uuid4()),
+                    "instrument_version": "ABC@1",
+                    "side": "BUY",
+                    "quantity": "1",
+                    "price": "100",
+                    "now": "2026-09-24T18:00:00Z",
+                },
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda *_: (True, "allowed"),
+                transport_send=provider.transport_send,
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(provider.outbound_request_count, 0)
+            self.assertEqual(provider.activity_fills(), ())
+
+    def test_lost_response_after_provider_acceptance_becomes_unknown_and_never_resends(self):
+        with TemporaryDirectory() as directory:
+            intent_id = str(uuid4())
+            attempt_id = str(uuid4())
+            client_order_id = stable_client_order_id("simulated", intent_id)
+            provider = SimulatedProvider(
+                transport_faults={client_order_id: "AFTER_ACCEPT_RESPONSE_LOST"}
+            )
+            dispatcher = GuardedDispatcher(
+                JournalStore(f"{directory}/journal.sqlite3"),
+                owner_token="test-owner",
+            )
+            request = {
+                "attempt_id": attempt_id,
+                "instrument_version": "ABC@1",
+                "side": "BUY",
+                "quantity": "1",
+                "price": "100",
+                "now": "2026-09-24T18:00:00Z",
+            }
+            result = dispatcher.dispatch(
+                attempt_id=attempt_id,
+                intent_id=intent_id,
+                intent_hash="sha256:" + "3" * 64,
+                provider="simulated",
+                request=request,
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda *_: (True, "allowed"),
+                transport_send=provider.transport_send,
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(provider.outbound_request_count, 1)
+            self.assertEqual(len(provider.activity_fills()), 1)
+
+            found = provider.query_order(
+                client_order_id=client_order_id,
+                coverage_start="2026-09-24T17:00:00Z",
+                coverage_end="2026-09-24T19:00:00Z",
+                pagination_complete=True,
+                now="2026-09-24T19:00:00Z",
+            )
+            self.assertEqual(found["verdict"], "FOUND")
+            replay = dispatcher.dispatch(
+                attempt_id=attempt_id,
+                intent_id=intent_id,
+                intent_hash="sha256:" + "3" * 64,
+                provider="simulated",
+                request=request,
+                now="2026-09-24T19:00:00Z",
+                authority_check=lambda *_: (True, "allowed"),
+                transport_send=provider.transport_send,
+            )
+            self.assertEqual(replay.status, "UNKNOWN")
+            self.assertEqual(provider.outbound_request_count, 1)
 
 
 if __name__ == "__main__":

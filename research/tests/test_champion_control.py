@@ -786,5 +786,102 @@ class ChampionRegistryTests(unittest.TestCase):
                     stop_condition_triggered=False,
                 )
 
+
+    def test_same_envelope_id_cannot_change_immutable_content(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            state = registry.promote(
+                approval(science),
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            registry.record_online_update(
+                envelope=online_envelope(interval=0),
+                update_id="envelope-first",
+                expected_generation=state.generation,
+                updates={"threshold": "0.4"},
+                label_refs=("label:reconciled-outcome",),
+                evidence_refs=("episode:envelope-first",),
+                actual_update_cost="1",
+                now=BASE + timedelta(minutes=1),
+                drift_gate_passed=True,
+                stop_condition_triggered=False,
+            )
+            changed = OnlineEnvelope.create(
+                envelope_id="online-envelope-v1",
+                champion_artifact_hash=digest("candidate-a"),
+                authority_scope_id="paper-scope",
+                parameter_bounds=(
+                    ParameterBound.create(
+                        name="threshold",
+                        minimum="0.2",
+                        maximum="0.8",
+                    ),
+                ),
+                minimum_update_interval_seconds=0,
+                maximum_update_cost="2",
+                eligible_label_refs=("label:reconciled-outcome",),
+            )
+            with self.assertRaisesRegex(ValueError, "immutable content"):
+                registry.record_online_update(
+                    envelope=changed,
+                    update_id="envelope-changed",
+                    expected_generation=state.generation,
+                    updates={"threshold": "0.4"},
+                    label_refs=("label:reconciled-outcome",),
+                    evidence_refs=("episode:envelope-changed",),
+                    actual_update_cost="1",
+                    now=BASE + timedelta(minutes=2),
+                    drift_gate_passed=True,
+                    stop_condition_triggered=False,
+                )
+
+    def test_duplicate_label_or_evidence_refs_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            state = registry.promote(
+                approval(science),
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            common = dict(
+                envelope=online_envelope(),
+                expected_generation=state.generation,
+                updates={"threshold": "0.4"},
+                actual_update_cost="1",
+                now=BASE + timedelta(minutes=1),
+                drift_gate_passed=True,
+                stop_condition_triggered=False,
+            )
+            with self.assertRaisesRegex(ValueError, "label references must be unique"):
+                registry.record_online_update(
+                    update_id="duplicate-label",
+                    label_refs=(
+                        "label:reconciled-outcome",
+                        "label:reconciled-outcome",
+                    ),
+                    evidence_refs=("episode:unique",),
+                    **common,
+                )
+            with self.assertRaisesRegex(ValueError, "evidence references must be unique"):
+                registry.record_online_update(
+                    update_id="duplicate-evidence",
+                    label_refs=("label:reconciled-outcome",),
+                    evidence_refs=("episode:dup", "episode:dup"),
+                    **common,
+                )
+
 if __name__ == "__main__":
     unittest.main()

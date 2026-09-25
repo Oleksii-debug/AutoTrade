@@ -50,6 +50,7 @@ class OrderSnapshot:
     state: str
     filled_quantity: Decimal
     open_quantity: Decimal
+    overfill_quantity: Decimal
     average_fill_price: Decimal | None
     provider_order_id: str | None
     oco_group_id: str | None
@@ -73,6 +74,7 @@ class OrderProjection:
         side: str,
         requested_quantity,
         oco_group_id: str | None = None,
+        parent_intent_id: str | None = None,
     ):
         self.client_order_id = _text(client_order_id, name="client_order_id")
         self.instrument = _text(instrument, name="instrument")
@@ -89,6 +91,13 @@ class OrderProjection:
             if oco_group_id is not None
             else None
         )
+        self.parent_intent_id = (
+            _text(parent_intent_id, name="parent_intent_id")
+            if parent_intent_id is not None
+            else None
+        )
+        if self.parent_intent_id == self.client_order_id:
+            raise ValueError("order cannot amend itself")
         self.provider_order_id: str | None = None
         self.submission_state = "PENDING"
         self.cancel_requested = False
@@ -153,6 +162,8 @@ class OrderProjection:
             # later correction/bust. Exact historical duplicates are harmless
             # and must never roll the current projection backward.
             return False
+        if any(item.fill_id == fid for item in self._history):
+            raise OrderProjectionConflict("fill_id already belongs to another observation")
 
         existing = self._fills.get(fid)
         if existing is not None:
@@ -187,14 +198,20 @@ class OrderProjection:
         price: Decimal,
         active: bool,
         provider_revision: str,
+        correction_fill_id: str | None = None,
     ) -> bool:
         fid = _text(fill_id, name="fill_id")
         current = self._fills.get(fid)
         if current is None:
             raise KeyError(fid)
         revision = _text(provider_revision, name="provider_revision")
+        observation_id = (
+            _text(correction_fill_id, name="correction_fill_id")
+            if correction_fill_id is not None
+            else fid
+        )
         candidate = FillRecord(
-            fill_id=fid,
+            fill_id=observation_id,
             provider_execution_id=current.provider_execution_id,
             quantity=quantity,
             price=price,
@@ -210,12 +227,24 @@ class OrderProjection:
             raise OrderProjectionConflict(
                 "provider revision already has different content"
             )
+        if observation_id != fid:
+            for item in self._history:
+                if item.fill_id == observation_id and item != candidate:
+                    raise OrderProjectionConflict(
+                        "correction_fill_id already belongs to another observation"
+                    )
         self._revision_records[key] = candidate
         self._fills[fid] = candidate
         self._history.append(candidate)
         return True
 
-    def bust_fill(self, fill_id: str, *, provider_revision: str) -> bool:
+    def bust_fill(
+        self,
+        fill_id: str,
+        *,
+        provider_revision: str,
+        correction_fill_id: str | None = None,
+    ) -> bool:
         fid = _text(fill_id, name="fill_id")
         existing = self._fills.get(fid)
         if existing is None:
@@ -226,6 +255,7 @@ class OrderProjection:
             price=existing.price,
             active=False,
             provider_revision=provider_revision,
+            correction_fill_id=correction_fill_id,
         )
 
     def correct_fill(
@@ -235,6 +265,7 @@ class OrderProjection:
         quantity,
         price,
         provider_revision: str,
+        correction_fill_id: str | None = None,
     ) -> bool:
         fid = _text(fill_id, name="fill_id")
         existing = self._fills.get(fid)
@@ -250,6 +281,7 @@ class OrderProjection:
             price=px,
             active=existing.active,
             provider_revision=provider_revision,
+            correction_fill_id=correction_fill_id,
         )
 
     def request_cancel(self) -> None:
@@ -350,6 +382,10 @@ class OrderProjection:
             state=self.state,
             filled_quantity=self.filled_quantity,
             open_quantity=self.open_quantity,
+            overfill_quantity=max(
+                self.filled_quantity - self.requested_quantity,
+                Decimal("0"),
+            ),
             average_fill_price=self.average_fill_price,
             provider_order_id=self.provider_order_id,
             oco_group_id=self.oco_group_id,
@@ -359,6 +395,88 @@ class OrderProjection:
             cancel_requested=self.cancel_requested,
             cancel_confirmed=self.cancelled,
         )
+
+
+class OrderBookProjection:
+    """Aggregate multiple canonical orders without creating a second order authority."""
+
+    def __init__(self) -> None:
+        self._orders: dict[str, OrderProjection] = {}
+        self._amend_children: dict[str, str] = {}
+
+    def register(self, order: OrderProjection) -> bool:
+        if not isinstance(order, OrderProjection):
+            raise TypeError("order must be OrderProjection")
+        existing = self._orders.get(order.client_order_id)
+        if existing is not None:
+            if existing is order:
+                return False
+            raise OrderProjectionConflict("client_order_id already registered")
+        parent = order.parent_intent_id
+        if parent is not None:
+            if parent not in self._orders:
+                raise KeyError(parent)
+            child = self._amend_children.get(parent)
+            if child is not None and child != order.client_order_id:
+                raise OrderProjectionConflict(
+                    "parent intent already has another amendment child"
+                )
+            self._amend_children[parent] = order.client_order_id
+        self._orders[order.client_order_id] = order
+        return True
+
+    def create(
+        self,
+        *,
+        client_order_id: str,
+        instrument: str,
+        side: str,
+        requested_quantity,
+        oco_group_id: str | None = None,
+        parent_intent_id: str | None = None,
+    ) -> OrderProjection:
+        order = OrderProjection(
+            client_order_id=client_order_id,
+            instrument=instrument,
+            side=side,
+            requested_quantity=requested_quantity,
+            oco_group_id=oco_group_id,
+            parent_intent_id=parent_intent_id,
+        )
+        self.register(order)
+        return order
+
+    def order(self, client_order_id: str) -> OrderProjection:
+        order_id = _text(client_order_id, name="client_order_id")
+        try:
+            return self._orders[order_id]
+        except KeyError as error:
+            raise KeyError(f"Unknown order: {order_id}") from error
+
+    def amendment_child(self, parent_intent_id: str) -> str | None:
+        return self._amend_children.get(_text(parent_intent_id, name="parent_intent_id"))
+
+    def effective_fills(self) -> tuple[FillRecord, ...]:
+        return tuple(
+            fill
+            for order in self._orders.values()
+            for fill in order.active_fills
+        )
+
+    def snapshots(self) -> tuple[OrderSnapshot, ...]:
+        return tuple(order.snapshot() for order in self._orders.values())
+
+    def oco_breaches(self) -> Mapping[str, tuple[str, ...]]:
+        groups: dict[str, list[str]] = {}
+        for order in self._orders.values():
+            if order.oco_group_id is None or order.filled_quantity <= 0:
+                continue
+            groups.setdefault(order.oco_group_id, []).append(order.client_order_id)
+        return {
+            group: tuple(sorted(order_ids))
+            for group, order_ids in groups.items()
+            if len(order_ids) > 1
+        }
 
 
 class OcoGroupProjection:

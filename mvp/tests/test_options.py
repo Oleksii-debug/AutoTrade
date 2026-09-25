@@ -349,6 +349,22 @@ class OptionRiskEvidenceTests(unittest.TestCase):
             at=datetime(2026, 9, 25, 18, 30, tzinfo=timezone.utc),
         )
 
+    def test_stress_scenarios_allow_zero_underlying_but_reject_negative_price(self):
+        zero = OptionScenarioResult(
+            scenario_id="total-loss-boundary",
+            underlying_price="0",
+            implied_volatility="1.25",
+            pnl="-1000",
+        )
+        self.assertEqual(zero.underlying_price, Decimal("0"))
+        with self.assertRaisesRegex(OptionError, "underlying_price cannot be negative"):
+            OptionScenarioResult(
+                scenario_id="invalid-negative",
+                underlying_price="-0.01",
+                implied_volatility="1.25",
+                pnl="-1000",
+            )
+
     def test_missing_scenarios_and_float_inputs_fail_closed(self):
         with self.assertRaisesRegex(OptionError, "scenario stress"):
             OptionRiskEvidence(

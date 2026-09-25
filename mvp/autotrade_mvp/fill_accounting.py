@@ -400,6 +400,36 @@ def build_provider_fill_correction_transactions(
             raise AccountingConflict(
                 "existing correction lineage conflicts with supplied evidence"
             )
+        retry_evidence = {
+            "schema_version": "1.1.0",
+            "provider_id": provider,
+            "environment": book.environment,
+            "account_id": book.account_id,
+            "correction_of": corrected_projected_fill.correction_of,
+            "correction_observed_at": observation,
+            "original_transaction_id": prior.transaction_id,
+            "original": original_evidence,
+            "corrected": {
+                **corrected_evidence,
+                "correction_of": corrected_projected_fill.correction_of,
+            },
+        }
+        retry_digest = payload_digest(retry_evidence).removeprefix("sha256:")
+        retry_prefix = (
+            f"provider:{provider}:environment:{book.environment}:"
+            f"account:{book.account_id}:correction:{retry_digest}"
+        )
+        if (
+            reversal.transaction_id
+            != f"provider-fill-correction-reversal:{retry_digest}"
+            or reversal.cause_event_id != f"{retry_prefix}:reversal"
+            or committed_original.transaction_id
+            != f"provider-fill-correction-replacement:{retry_digest}"
+            or committed_original.cause_event_id != f"{retry_prefix}:replacement"
+        ):
+            raise AccountingConflict(
+                "existing correction lineage conflicts with immutable correction evidence"
+            )
         return reversal, committed_original
 
     if not _transaction_matches_provider_fill(

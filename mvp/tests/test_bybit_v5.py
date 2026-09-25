@@ -84,11 +84,13 @@ def write_capability(
     instrument_version="BTCUSDT@1",
     expires_at=None,
     permission_scope=None,
+    additional_permission_scopes=(),
 ):
     scope = permission_scope or {
         "LINEAR_DERIVATIVES": "BYBIT.LINEAR.ORDER.WRITE",
         "INVERSE_DERIVATIVES": "BYBIT.INVERSE.ORDER.WRITE",
     }[family]
+    scopes = frozenset({scope, *additional_permission_scopes})
     observed_at = READ_AT - timedelta(minutes=1)
     claims = tuple(
         CapabilityClaim(
@@ -102,7 +104,7 @@ def write_capability(
             expires_at=expires_at or READ_AT + timedelta(minutes=5),
             supported_order_types=frozenset({"LIMIT", "MARKET"}),
             time_in_force=frozenset({"GTC", "IOC"}),
-            permission_scopes=frozenset({scope}),
+            permission_scopes=scopes,
             position_mode=position_mode,
             native_protection=frozenset(),
             rate_limit_policy_id="bybit-v5-write-test",

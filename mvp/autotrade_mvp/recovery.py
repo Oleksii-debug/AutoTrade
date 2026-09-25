@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Iterable
 from uuid import NAMESPACE_URL, uuid5
 
@@ -164,40 +165,75 @@ class RecoveryController:
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-    def _latest_durable_owner(self) -> OwnerFence | None:
+    @property
+    def owner_scope(self) -> str:
+        """Canonical durable owner scope used by this recovery controller."""
+
+        return self._owner_scope
+
+    @property
+    def durable_owner_store_path(self) -> Path | None:
+        """Return the exact journal path backing sender fencing, if durable."""
+
+        return None if self._owner_store is None else self._owner_store.path
+
+    def durable_owner_chain(self) -> tuple[OwnerFence, ...]:
+        """Read and validate the complete monotonic sender-fence chain.
+
+        This is read-only evidence access.  It never grants readiness or
+        changes sender ownership.
+        """
+
         if self._owner_store is None:
-            return None
+            return ()
         events = self._owner_store.load_events(
             self._OWNER_AGGREGATE_TYPE,
             self._owner_scope,
         )
-        if not events:
-            return None
-        latest_owner: OwnerFence | None = None
+        chain: list[OwnerFence] = []
         for expected_epoch, event in enumerate(events, start=1):
             if event["event_type"] != self._OWNER_EVENT_TYPE:
-                raise RuntimeError("Recovery owner journal contains unsupported event type")
+                raise RuntimeError(
+                    "Recovery owner journal contains unsupported event type"
+                )
             payload = event["payload"]
             if not isinstance(payload, dict):
-                raise RuntimeError("Recovery owner journal payload must be an object")
+                raise RuntimeError(
+                    "Recovery owner journal payload must be an object"
+                )
             if payload_digest(payload) != event["payload_hash"]:
-                raise RuntimeError("Recovery owner journal payload hash mismatch")
+                raise RuntimeError(
+                    "Recovery owner journal payload hash mismatch"
+                )
             owner_id = payload.get("owner_id")
             epoch_raw = payload.get("owner_epoch")
             if not isinstance(owner_id, str) or not owner_id.strip():
-                raise RuntimeError("Recovery owner journal contains invalid owner identity")
+                raise RuntimeError(
+                    "Recovery owner journal contains invalid owner identity"
+                )
             if (
                 not isinstance(epoch_raw, str)
                 or not epoch_raw.isdigit()
                 or epoch_raw == "0"
                 or (len(epoch_raw) > 1 and epoch_raw.startswith("0"))
             ):
-                raise RuntimeError("Recovery owner journal contains invalid owner epoch")
+                raise RuntimeError(
+                    "Recovery owner journal contains invalid owner epoch"
+                )
             epoch = int(epoch_raw)
-            if int(event["aggregate_version"]) != expected_epoch or epoch != expected_epoch:
-                raise RuntimeError("Recovery owner journal epoch/version chain is invalid")
-            latest_owner = OwnerFence(owner_id=owner_id.strip(), epoch=epoch)
-        return latest_owner
+            if (
+                int(event["aggregate_version"]) != expected_epoch
+                or epoch != expected_epoch
+            ):
+                raise RuntimeError(
+                    "Recovery owner journal epoch/version chain is invalid"
+                )
+            chain.append(OwnerFence(owner_id=owner_id.strip(), epoch=epoch))
+        return tuple(chain)
+
+    def _latest_durable_owner(self) -> OwnerFence | None:
+        chain = self.durable_owner_chain()
+        return chain[-1] if chain else None
 
     def _append_durable_owner(self, owner: OwnerFence) -> None:
         if self._owner_store is None:

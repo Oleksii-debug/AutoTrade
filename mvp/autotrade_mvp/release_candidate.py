@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 import json
 import re
-from typing import Sequence
+from typing import Callable, Sequence
 
 
 class ReleaseCandidateError(ValueError):
@@ -327,13 +327,24 @@ def _canonical_manifest(candidate: ReleaseCandidateInput) -> str:
 
 def freeze_release_candidate(
     candidate: ReleaseCandidateInput,
+    *,
+    verify_evidence: Callable[[ReleaseArtifactEvidence], bool] | None = None,
 ) -> ReleaseCandidateDecision:
-    """Freeze exact accepted evidence or fail closed without an RC manifest."""
+    """Freeze exact accepted evidence or fail closed without an RC manifest.
+
+    PASS and VERIFIED fields are evidence claims, not proof by themselves.
+    A release candidate can freeze only when an independent verifier resolves
+    every exact artifact record successfully.
+    """
 
     if not isinstance(candidate, ReleaseCandidateInput):
         raise TypeError("candidate must be ReleaseCandidateInput")
+    if verify_evidence is not None and not callable(verify_evidence):
+        raise TypeError("verify_evidence must be callable")
 
     reasons: list[str] = []
+    if verify_evidence is None:
+        reasons.append("independent_evidence_verifier_missing")
     by_role = {artifact.role: artifact for artifact in candidate.artifacts}
 
     for role in sorted(_REQUIRED_ROLES - set(by_role)):
@@ -346,6 +357,16 @@ def freeze_release_candidate(
             reasons.append(f"evidence_failed:{artifact.role}")
         elif artifact.evidence_status == "INCONCLUSIVE":
             reasons.append(f"evidence_inconclusive:{artifact.role}")
+
+        if verify_evidence is not None:
+            try:
+                independently_verified = verify_evidence(artifact)
+            except Exception:
+                independently_verified = False
+            if independently_verified is not True:
+                reasons.append(
+                    f"evidence_not_independently_verified:{artifact.role}"
+                )
         if (
             artifact.role not in _SIGNED_BINARY_ROLES
             and artifact.signature_status in {"MISSING", "INVALID"}

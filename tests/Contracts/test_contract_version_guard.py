@@ -554,6 +554,155 @@ class ContractVersionGuardTests(unittest.TestCase):
             )
             self.assertEqual(evaluate(Path(left), Path(right)), [])
 
+    def test_openapi_default_security_alternative_order_is_semantically_equal(self):
+        schemes = {
+            "Session": {"type": "apiKey", "in": "header", "name": "Authorization"},
+            "Actor": {"type": "apiKey", "in": "header", "name": "X-Actor"},
+        }
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["Session"], ["Actor"]],
+                security_schemes=schemes,
+            )
+            write_tree(Path(right), version="1.0.1")
+            write_openapi(
+                Path(right),
+                "1.0.1",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["Actor"], ["Session"]],
+                security_schemes=schemes,
+            )
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_openapi_default_security_and_member_order_is_semantically_equal(self):
+        schemes = {
+            "Session": {"type": "apiKey", "in": "header", "name": "Authorization"},
+            "Actor": {"type": "apiKey", "in": "header", "name": "X-Actor"},
+        }
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["Session", "Actor"]],
+                security_schemes=schemes,
+            )
+            write_tree(Path(right), version="1.0.1")
+            write_openapi(
+                Path(right),
+                "1.0.1",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["Actor", "Session"]],
+                security_schemes=schemes,
+            )
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_openapi_security_scheme_property_order_is_semantically_equal(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["Session"]],
+                security_schemes={
+                    "Session": {
+                        "type": "apiKey",
+                        "in": "header",
+                        "name": "Authorization",
+                    }
+                },
+            )
+            write_tree(Path(right), version="1.0.1")
+            write_openapi(
+                Path(right),
+                "1.0.1",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["Session"]],
+                security_schemes={
+                    "Session": {
+                        "name": "Authorization",
+                        "type": "apiKey",
+                        "in": "header",
+                    }
+                },
+            )
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_openapi_security_scheme_removal_requires_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["Session"]],
+                security_schemes={
+                    "Session": {
+                        "type": "apiKey",
+                        "in": "header",
+                        "name": "Authorization",
+                    },
+                    "Unused": {
+                        "type": "apiKey",
+                        "in": "header",
+                        "name": "X-Unused",
+                    },
+                },
+            )
+            write_tree(Path(right), version="1.1.0")
+            write_openapi(
+                Path(right),
+                "1.1.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["Session"]],
+                security_schemes={
+                    "Session": {
+                        "type": "apiKey",
+                        "in": "header",
+                        "name": "Authorization",
+                    }
+                },
+            )
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(
+                any("removed OpenAPI security schemes: Unused" in item for item in errors)
+            )
+
+    def test_openapi_block_scope_list_is_multi_item_and_order_insensitive(self):
+        schemes = {
+            "OAuth": {"type": "oauth2", "in": "header", "name": "Authorization"},
+        }
+
+        def write_scoped(root: Path, version: str, scopes: list[str]) -> None:
+            write_tree(root, version=version)
+            write_openapi(
+                root,
+                version,
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["OAuth"]],
+                security_schemes=schemes,
+            )
+            path = root / "contracts" / "openapi" / "host-api.yaml"
+            text = path.read_text(encoding="utf-8")
+            replacement = "  - OAuth:\n" + "\n".join(
+                f"      - {scope}" for scope in scopes
+            )
+            path.write_text(
+                text.replace("  - OAuth: []", replacement),
+                encoding="utf-8",
+            )
+
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_scoped(Path(left), "1.0.0", ["orders:read", "fills:read"])
+            write_scoped(Path(right), "1.0.1", ["fills:read", "orders:read"])
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
     def test_openapi_health_security_override_is_operation_semantics(self):
         schemes = {
             "AutoTradeSession": {"type": "apiKey", "in": "header", "name": "Authorization"},

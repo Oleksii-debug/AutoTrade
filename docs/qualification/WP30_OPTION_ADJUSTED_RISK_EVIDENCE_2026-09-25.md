@@ -26,7 +26,7 @@ not add another ledger, risk engine, provider adapter or model authority.
 - exact source Git SHA;
 - SHA-256 input digest and schema version;
 - market timestamp, calculation timestamp and expiry;
-- explicit stress scenario results.
+- explicit stress scenario results;\n- the exact validation test identifiers actually run;\n- an explicit unresolved-limit set.
 
 Scenario stress is mandatory and independently exposes worst loss. A Greek
 snapshot cannot substitute for stress, and stale/future/cross-instrument

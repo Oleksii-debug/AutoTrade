@@ -122,6 +122,54 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
                     purpose="manual-inspection",
                 )
 
+    def test_purge_embargo_covers_horizon_and_actual_gap(self):
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+
+            short_purge = protocol()
+            short_purge["purge_embargo"] = {"purge": "12h", "embargo": "1d"}
+            with self.assertRaisesRegex(ProtocolViolation, "purge must cover"):
+                registry.register_protocol(short_purge)
+
+            short_embargo = protocol()
+            short_embargo["purge_embargo"] = {"purge": "1d", "embargo": "12h"}
+            with self.assertRaisesRegex(ProtocolViolation, "embargo must cover"):
+                registry.register_protocol(short_embargo)
+
+            short_gap = protocol()
+            short_gap["horizons"] = ["2d"]
+            short_gap["purge_embargo"] = {"purge": "2d", "embargo": "2d"}
+            with self.assertRaisesRegex(ProtocolViolation, "gap is shorter"):
+                registry.register_protocol(short_gap)
+
+            exact_gap = protocol()
+            exact_gap["horizons"] = ["2d"]
+            exact_gap["purge_embargo"] = {"purge": "2d", "embargo": "2d"}
+            exact_gap["train_period"] = {"start": "2024-01-01", "end": "2024-12-30"}
+            exact_gap["validation_period"] = {"start": "2025-01-01", "end": "2025-06-29"}
+            exact_gap["test_period"] = {"start": "2025-07-01", "end": "2025-12-30"}
+            registered = registry.register_protocol(exact_gap)
+            self.assertTrue(registered.protocol_hash.startswith("sha256:"))
+
+    def test_purge_embargo_rejects_noncanonical_duration_shapes(self):
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+
+            malformed = protocol()
+            malformed["horizons"] = ["1 day"]
+            with self.assertRaisesRegex(ProtocolViolation, "canonical duration"):
+                registry.register_protocol(malformed)
+
+            missing = protocol()
+            missing["purge_embargo"] = {"purge": "1d"}
+            with self.assertRaisesRegex(ProtocolViolation, "exactly purge and embargo"):
+                registry.register_protocol(missing)
+
+            empty = protocol()
+            empty["horizons"] = []
+            with self.assertRaisesRegex(ProtocolViolation, "non-empty list"):
+                registry.register_protocol(empty)
+
     def test_failed_and_discarded_trials_consume_registered_budget(self):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")

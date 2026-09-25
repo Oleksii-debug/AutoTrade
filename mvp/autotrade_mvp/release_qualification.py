@@ -59,6 +59,7 @@ class ReleaseCheck:
     status: str
     source_sha: str
     evidence_ref: str
+    evidence_sha256: str
 
     def __post_init__(self) -> None:
         normalized_name = _text(self.name, "name").upper()
@@ -75,6 +76,11 @@ class ReleaseCheck:
             "evidence_ref",
             _text(self.evidence_ref, "evidence_ref"),
         )
+        object.__setattr__(
+            self,
+            "evidence_sha256",
+            _sha256(self.evidence_sha256, "evidence_sha256"),
+        )
 
     @classmethod
     def create(
@@ -84,6 +90,7 @@ class ReleaseCheck:
         status: str,
         source_sha: str,
         evidence_ref: str,
+        evidence_sha256: str,
     ) -> "ReleaseCheck":
         normalized_name = _text(name, "name").upper()
         normalized_status = _text(status, "status").upper()
@@ -94,6 +101,7 @@ class ReleaseCheck:
             status=normalized_status,
             source_sha=_git_sha(source_sha),
             evidence_ref=_text(evidence_ref, "evidence_ref"),
+            evidence_sha256=_sha256(evidence_sha256, "evidence_sha256"),
         )
 
 

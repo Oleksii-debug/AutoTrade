@@ -63,6 +63,11 @@ _REST_BASE_BY_ENVIRONMENT: Mapping[str, str] = {
     "TESTNET": "https://api-testnet.bybit.com",
     "DEMO": "https://api-demo.bybit.com",
 }
+_ACCOUNT_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT: Mapping[str, str] = {
+    "MAINNET": "LIVE",
+    "TESTNET": "PAPER",
+    "DEMO": "PAPER",
+}
 
 
 def _text(value: object, *, name: str) -> str:
@@ -169,7 +174,7 @@ def _response_evidence(
         raise ProviderCoreError("authoritative response_bytes must be non-empty bytes")
     digest = sha256(response_bytes).hexdigest()
     try:
-        rest_base = _REST_BASE_BY_ENVIRONMENT[prepared_request.environment]
+        rest_base = _REST_BASE_BY_ENVIRONMENT[prepared_request.provider_environment]
     except KeyError as error:
         raise ProviderCoreError(
             "Bybit prepared environment must be MAINNET, TESTNET or DEMO"
@@ -181,7 +186,8 @@ def _response_evidence(
             "BYBIT",
             aid,
             prepared_request.account_id,
-            prepared_request.environment,
+            prepared_request.account_environment,
+            prepared_request.provider_environment,
             prepared_request.capability_snapshot_id,
             prepared_request.instrument_version,
             prepared_request.endpoint,
@@ -327,7 +333,8 @@ class BybitPreparedRequest:
     endpoint: str
     body: Mapping[str, Any]
     account_id: str
-    environment: str
+    account_environment: str
+    provider_environment: str
     capability_snapshot_id: str
     instrument_version: str
     body_sha256: str = field(init=False)
@@ -356,15 +363,31 @@ class BybitPreparedRequest:
         except (TypeError, ValueError) as error:
             raise ProviderCoreError("prepared Bybit body must be canonical JSON") from error
         account = _text(self.account_id, name="account_id")
-        environment = _text(self.environment, name="environment").upper()
-        if environment not in _REST_BASE_BY_ENVIRONMENT:
+        account_environment = _text(
+            self.account_environment,
+            name="account_environment",
+        ).upper()
+        provider_environment = _text(
+            self.provider_environment,
+            name="provider_environment",
+        ).upper()
+        if provider_environment not in _REST_BASE_BY_ENVIRONMENT:
             raise ProviderCoreError(
-                "Bybit environment must be MAINNET, TESTNET or DEMO"
+                "Bybit provider_environment must be MAINNET, TESTNET or DEMO"
+            )
+        required_account_environment = (
+            _ACCOUNT_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT[provider_environment]
+        )
+        if account_environment != required_account_environment:
+            raise ProviderCoreError(
+                "Bybit provider endpoint environment does not match canonical "
+                "account environment"
             )
         object.__setattr__(self, "endpoint", endpoint)
         object.__setattr__(self, "body", MappingProxyType(body))
         object.__setattr__(self, "account_id", account)
-        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "account_environment", account_environment)
+        object.__setattr__(self, "provider_environment", provider_environment)
         object.__setattr__(
             self,
             "capability_snapshot_id",
@@ -386,7 +409,7 @@ def prepare_order_request(
     *,
     capability: CapabilitySnapshot,
     account_id: str,
-    environment: str,
+    provider_environment: str,
     instrument_version: str,
     at: datetime,
     product_family: str,
@@ -408,14 +431,26 @@ def prepare_order_request(
         raise ProviderCoreError("at must be timezone-aware")
     point = at.astimezone(timezone.utc)
     account = _text(account_id, name="account_id")
-    env = _text(environment, name="environment").upper()
+    provider_env = _text(
+        provider_environment,
+        name="provider_environment",
+    ).upper()
+    if provider_env not in _REST_BASE_BY_ENVIRONMENT:
+        raise ProviderCoreError(
+            "Bybit provider_environment must be MAINNET, TESTNET or DEMO"
+        )
+    account_env = capability.environment.upper()
+    required_account_env = _ACCOUNT_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT[provider_env]
+    if account_env != required_account_env:
+        raise ProviderCoreError(
+            "Bybit provider endpoint environment does not match canonical "
+            "account environment"
+        )
     instrument = _text(instrument_version, name="instrument_version")
     if capability.provider_id.upper() != "BYBIT":
         raise ProviderCoreError("capability belongs to another provider")
     if capability.account_id != account:
         raise ProviderCoreError("capability account does not match target account")
-    if capability.environment.upper() != env:
-        raise ProviderCoreError("capability environment does not match target environment")
     if capability.instrument_version != instrument:
         raise ProviderCoreError(
             "capability instrument version does not match target instrument"
@@ -443,7 +478,8 @@ def prepare_order_request(
         endpoint=BYBIT_DOCUMENTED_ENDPOINTS["PLACE_ORDER"],
         body=body,
         account_id=account,
-        environment=env,
+        account_environment=account_env,
+        provider_environment=provider_env,
         capability_snapshot_id=capability.snapshot_id,
         instrument_version=instrument,
         _factory_token=_BYBIT_PREPARED_REQUEST_FACTORY_TOKEN,

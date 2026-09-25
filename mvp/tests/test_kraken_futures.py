@@ -87,7 +87,7 @@ def futures_position_observation(payload, *, account_id="paper-1", endpoint="/ap
 def futures_write_capability(
     *,
     account_id="futures-account",
-    environment="DEMO",
+    account_environment="PAPER",
     instrument_version="PI_XBTUSD@v1",
 ):
     observed_at = NOW_DT - timedelta(hours=1)
@@ -97,7 +97,7 @@ def futures_write_capability(
             provider_id="KRAKEN",
             account_id=account_id,
             entity_id="futures-trading",
-            environment=environment,
+            environment=account_environment,
             instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=NOW_DT + timedelta(hours=1),
@@ -127,12 +127,13 @@ def futures_write_capability(
 def prepared_futures_request(
     client_order_id: str,
     *,
-    environment="DEMO",
+    provider_environment="DEMO",
+    account_environment="PAPER",
 ) -> KrakenFuturesPreparedRequest:
     return prepare_order_request(
-        capability=futures_write_capability(environment=environment),
+        capability=futures_write_capability(account_environment=account_environment),
         account_id="futures-account",
-        environment=environment,
+        provider_environment=provider_environment,
         instrument_version="PI_XBTUSD@v1",
         at=NOW_DT,
         symbol="PI_XBTUSD",
@@ -201,6 +202,20 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 client_order_id="this-client-identity-is-not-qualified",
             )
 
+    def test_provider_endpoint_environment_must_match_canonical_account_environment(self):
+        with self.assertRaisesRegex(ProviderCoreError, "canonical account environment"):
+            prepared_futures_request(
+                "bad-demo-live",
+                provider_environment="DEMO",
+                account_environment="LIVE",
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "canonical account environment"):
+            prepared_futures_request(
+                "bad-live-paper",
+                provider_environment="LIVE",
+                account_environment="PAPER",
+            )
+
     def test_success_is_acknowledgement_not_fill(self):
         for send_status in (
             {"order_id": "provider-order-1", "status": "placed"},
@@ -211,7 +226,8 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                     attempt_id=str(uuid4()),
                     prepared_request=prepared_futures_request(
                         "hedge-004",
-                        environment="LIVE",
+                        provider_environment="LIVE",
+                        account_environment="LIVE",
                     ),
                     observed_at=NOW,
                     response_bytes=futures_response_bytes(
@@ -252,7 +268,8 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
             attempt_id=str(uuid4()),
             prepared_request=prepared_futures_request(
                 "hedge-006",
-                environment="LIVE",
+                provider_environment="LIVE",
+                account_environment="LIVE",
             ),
             observed_at=NOW,
             response_bytes=futures_response_bytes(

@@ -31,7 +31,7 @@ def capability():
             provider_id="BYBIT",
             account_id="contract-account",
             entity_id="contract-entity",
-            environment="MAINNET",
+            environment="LIVE",
             instrument_version="BTCUSDT@v1",
             observed_at=observed,
             expires_at=NOW + timedelta(hours=1),
@@ -62,7 +62,7 @@ def prepared(client_order_id: str):
     return prepare_order_request(
         capability=capability(),
         account_id="contract-account",
-        environment="MAINNET",
+        provider_environment="MAINNET",
         instrument_version="BTCUSDT@v1",
         at=NOW,
         product_family="SPOT",

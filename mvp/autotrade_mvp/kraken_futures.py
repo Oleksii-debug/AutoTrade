@@ -32,6 +32,10 @@ KRAKEN_FUTURES_BASE_URLS: Mapping[str, str] = {
     "LIVE": "https://futures.kraken.com",
     "DEMO": "https://demo-futures.kraken.com",
 }
+_KRAKEN_FUTURES_ACCOUNT_ENVIRONMENT: Mapping[str, str] = {
+    "LIVE": "LIVE",
+    "DEMO": "PAPER",
+}
 KRAKEN_FUTURES_ENDPOINTS: Mapping[str, str] = {
     "PLACE_ORDER": "/derivatives/api/v3/sendorder",
     "OPEN_ORDERS": "/derivatives/api/v3/openorders",
@@ -163,13 +167,14 @@ def _response_evidence(
         raise ProviderCoreError("authoritative response_bytes must be non-empty bytes")
     digest = sha256(response_bytes).hexdigest()
     when = _iso_utc(observed_at, name="observed_at")
-    source = f"{futures_base_url(prepared_request.environment)}{prepared_request.endpoint}"
+    source = f"{futures_base_url(prepared_request.provider_environment)}{prepared_request.endpoint}"
     request_identity = "\n".join(
         (
             "KRAKEN_FUTURES",
             aid,
             prepared_request.account_id,
-            prepared_request.environment,
+            prepared_request.account_environment,
+            prepared_request.provider_environment,
             prepared_request.capability_snapshot_id,
             prepared_request.instrument_version,
             prepared_request.endpoint,
@@ -239,7 +244,8 @@ class KrakenFuturesPreparedRequest:
     endpoint: str
     body: Mapping[str, str]
     account_id: str
-    environment: str
+    account_environment: str
+    provider_environment: str
     capability_snapshot_id: str
     instrument_version: str
     body_sha256: str = field(init=False)
@@ -272,12 +278,28 @@ class KrakenFuturesPreparedRequest:
                 "prepared Kraken Futures body must be canonical JSON"
             ) from error
         account = _text(self.account_id, name="account_id")
-        environment = _text(self.environment, name="environment").upper()
-        futures_base_url(environment)
+        account_environment = _text(
+            self.account_environment,
+            name="account_environment",
+        ).upper()
+        provider_environment = _text(
+            self.provider_environment,
+            name="provider_environment",
+        ).upper()
+        futures_base_url(provider_environment)
+        if (
+            account_environment
+            != _KRAKEN_FUTURES_ACCOUNT_ENVIRONMENT[provider_environment]
+        ):
+            raise ProviderCoreError(
+                "Kraken Futures provider endpoint environment does not match "
+                "canonical account environment"
+            )
         object.__setattr__(self, "endpoint", endpoint)
         object.__setattr__(self, "body", MappingProxyType(body))
         object.__setattr__(self, "account_id", account)
-        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "account_environment", account_environment)
+        object.__setattr__(self, "provider_environment", provider_environment)
         object.__setattr__(
             self,
             "capability_snapshot_id",
@@ -299,7 +321,7 @@ def prepare_order_request(
     *,
     capability: CapabilitySnapshot,
     account_id: str,
-    environment: str,
+    provider_environment: str,
     instrument_version: str,
     at: datetime,
     symbol: str,
@@ -319,15 +341,22 @@ def prepare_order_request(
         raise ProviderCoreError("at must be timezone-aware")
     point = at.astimezone(timezone.utc)
     account = _text(account_id, name="account_id")
-    env = _text(environment, name="environment").upper()
-    futures_base_url(env)
+    provider_env = _text(
+        provider_environment,
+        name="provider_environment",
+    ).upper()
+    futures_base_url(provider_env)
+    account_env = capability.environment.upper()
+    if account_env != _KRAKEN_FUTURES_ACCOUNT_ENVIRONMENT[provider_env]:
+        raise ProviderCoreError(
+            "Kraken Futures provider endpoint environment does not match "
+            "canonical account environment"
+        )
     instrument = _text(instrument_version, name="instrument_version")
     if capability.provider_id.upper() != "KRAKEN":
         raise ProviderCoreError("capability belongs to another provider")
     if capability.account_id != account:
         raise ProviderCoreError("capability account does not match target account")
-    if capability.environment.upper() != env:
-        raise ProviderCoreError("capability environment does not match target environment")
     if capability.instrument_version != instrument:
         raise ProviderCoreError(
             "capability instrument version does not match target instrument"
@@ -341,7 +370,7 @@ def prepare_order_request(
     ):
         raise ProviderCoreError("exact capability evidence does not admit this order")
     body = build_order_payload(
-        environment=env,
+        environment=provider_env,
         symbol=symbol,
         side=side,
         order_type=order_type,
@@ -354,7 +383,8 @@ def prepare_order_request(
         endpoint=KRAKEN_FUTURES_ENDPOINTS["PLACE_ORDER"],
         body=body,
         account_id=account,
-        environment=env,
+        account_environment=account_env,
+        provider_environment=provider_env,
         capability_snapshot_id=capability.snapshot_id,
         instrument_version=instrument,
         _factory_token=_KRAKEN_FUTURES_PREPARED_REQUEST_FACTORY_TOKEN,

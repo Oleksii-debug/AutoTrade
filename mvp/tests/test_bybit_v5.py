@@ -38,7 +38,7 @@ def read_capability(*, account_id="paper-1", environment="PAPER", instrument_ver
             provider_id="BYBIT",
             account_id=account_id,
             entity_id="bybit-reconciliation",
-            environment=environment,
+            environment=account_environment,
             instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=READ_AT + timedelta(hours=1),
@@ -102,7 +102,7 @@ def bound_execution_response(
 def write_capability(
     *,
     account_id="bybit-account",
-    environment="MAINNET",
+    account_environment="PAPER",
     instrument_version="BTCUSDT@v1",
 ):
     observed_at = READ_AT - timedelta(hours=1)
@@ -143,12 +143,14 @@ def write_capability(
 def prepared_bybit_request(
     client_order_id: str,
     *,
-    environment="MAINNET",
+    provider_provider_environment="DEMO",
+                        account_environment="PAPER",
+    account_environment="PAPER",
 ) -> BybitPreparedRequest:
     return prepare_order_request(
-        capability=write_capability(environment=environment),
+        capability=write_capability(account_environment=account_environment),
         account_id="bybit-account",
-        environment=environment,
+        provider_environment=provider_environment,
         instrument_version="BTCUSDT@v1",
         at=READ_AT,
         product_family="SPOT",
@@ -260,6 +262,20 @@ class BybitV5AdapterTests(unittest.TestCase):
                 time_in_force="GTC",
             )
 
+    def test_provider_endpoint_environment_must_match_canonical_account_environment(self):
+        with self.assertRaisesRegex(ProviderCoreError, "canonical account environment"):
+            prepared_bybit_request(
+                "bad-mainnet-paper",
+                provider_environment="MAINNET",
+                account_environment="PAPER",
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "canonical account environment"):
+            prepared_bybit_request(
+                "bad-demo-live",
+                provider_environment="DEMO",
+                account_environment="LIVE",
+            )
+
     def test_success_response_is_acknowledgement_not_fill(self):
         attempt = str(uuid4())
         response = {
@@ -301,7 +317,8 @@ class BybitV5AdapterTests(unittest.TestCase):
                     attempt_id=str(uuid4()),
                     prepared_request=prepared_bybit_request(
                         "client-env",
-                        environment=environment,
+                        provider_environment=environment,
+                        account_environment=("LIVE" if environment == "MAINNET" else "PAPER"),
                     ),
                     response_bytes=bybit_response_bytes(base),
                 )

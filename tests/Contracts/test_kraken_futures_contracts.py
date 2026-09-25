@@ -24,7 +24,7 @@ NOW_DT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 NOW = "2026-09-24T20:00:00Z"
 
 
-def capability(environment: str):
+def capability(account_environment: str):
     observed = NOW_DT - timedelta(hours=1)
     claims = tuple(
         CapabilityClaim(
@@ -32,7 +32,7 @@ def capability(environment: str):
             provider_id="KRAKEN",
             account_id="contract-account",
             entity_id="contract-entity",
-            environment=environment,
+            environment=account_environment,
             instrument_version="PI_XBTUSD@v1",
             observed_at=observed,
             expires_at=NOW_DT + timedelta(hours=1),
@@ -59,11 +59,12 @@ def capability(environment: str):
     )
 
 
-def prepared(client_order_id: str, environment: str):
+def prepared(client_order_id: str, provider_environment: str):
+    account_environment = "LIVE" if provider_environment == "LIVE" else "PAPER"
     return prepare_order_request(
-        capability=capability(environment),
+        capability=capability(account_environment),
         account_id="contract-account",
-        environment=environment,
+        provider_environment=provider_environment,
         instrument_version="PI_XBTUSD@v1",
         at=NOW_DT,
         symbol="PI_XBTUSD",

@@ -187,6 +187,119 @@ class ReconciliationJournalTests(unittest.TestCase):
                 "850",
             )
 
+    def test_cash_availability_checkpoint_is_invalidated_by_newer_settlement_truth(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="before-settlement",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            settlement_payload = {
+                "schema_version": "1.0.0",
+                "scope": {
+                    "provider_id": "TEST_PROVIDER",
+                    "account_id": "test-account",
+                    "environment": "PAPER",
+                },
+                "obligations": [{"obligation_id": "trade-cash-1"}],
+            }
+            store.append_event(
+                {
+                    "event_id": "settlement-after-provider-snapshot",
+                    "event_type": "SettlementObligationsRegistered",
+                    "aggregate_type": "settlement_book",
+                    "aggregate_id": "settlement-test-scope",
+                    "aggregate_version": "1",
+                    "payload": settlement_payload,
+                    "payload_hash": payload_digest(settlement_payload),
+                    "committed_at": "2026-09-24T19:00:10Z",
+                }
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "predates settlement financial truth",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                )
+
+            refreshed = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="after-settlement",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:20Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            evidence = load_account_resource_availability_evidence(
+                store,
+                checkpoint_event_id=refreshed["event_id"],
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                resources=("CASH:USD",),
+                now="2026-09-24T19:00:30Z",
+                max_age_seconds="60",
+            )
+            self.assertEqual(evidence["availability"], {"CASH:USD": "850"})
+
+    def test_settlement_freshness_barrier_is_scoped_to_financial_account(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="settlement-scope",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            other_payload = {
+                "schema_version": "1.0.0",
+                "scope": {
+                    "provider_id": "OTHER_PROVIDER",
+                    "account_id": "other-account",
+                    "environment": "PAPER",
+                },
+                "obligations": [{"obligation_id": "other-trade-cash"}],
+            }
+            store.append_event(
+                {
+                    "event_id": "other-settlement-after-provider-snapshot",
+                    "event_type": "SettlementObligationsRegistered",
+                    "aggregate_type": "settlement_book",
+                    "aggregate_id": "other-settlement-test-scope",
+                    "aggregate_version": "1",
+                    "payload": other_payload,
+                    "payload_hash": payload_digest(other_payload),
+                    "committed_at": "2026-09-24T19:00:10Z",
+                }
+            )
+
+            evidence = load_account_resource_availability_evidence(
+                store,
+                checkpoint_event_id=checkpoint["event_id"],
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                resources=("CASH:USD",),
+                now="2026-09-24T19:00:30Z",
+                max_age_seconds="60",
+            )
+            self.assertEqual(evidence["availability"], {"CASH:USD": "850"})
+
     def test_scope_latest_uses_durable_journal_order_not_provider_clock(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

@@ -19,6 +19,7 @@ from typing import Iterable, Mapping, Sequence
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _EVENT_SCHEMA_VERSION = 1
 _CHECKPOINT_SCHEMA_VERSION = 1
+_VIEW_SCHEMA_VERSION = 1
 _ORDERING_POLICY_VERSION = "available_at/source_priority/source_sequence/event_id:v1"
 
 
@@ -260,9 +261,11 @@ class CausalDataset:
 
 @dataclass(frozen=True, slots=True)
 class CausalDataView:
-    """Strategy-facing immutable view containing only already-published events."""
+    """Strategy-facing immutable view bound to one frozen dataset and cutoff."""
 
     simulation_time: datetime
+    manifest_sha256: str
+    dataset_sha256: str
     events: tuple[CausalEvent, ...]
 
     def __post_init__(self) -> None:
@@ -270,6 +273,16 @@ class CausalDataView:
             self,
             "simulation_time",
             _utc(self.simulation_time, name="simulation_time"),
+        )
+        object.__setattr__(
+            self,
+            "manifest_sha256",
+            _digest(self.manifest_sha256, name="manifest_sha256"),
+        )
+        object.__setattr__(
+            self,
+            "dataset_sha256",
+            _digest(self.dataset_sha256, name="dataset_sha256"),
         )
         if not isinstance(self.events, tuple):
             raise TypeError("events must be a tuple")
@@ -284,6 +297,17 @@ class CausalDataView:
             ids.add(item.event_id)
         if self.events != tuple(sorted(self.events, key=lambda item: item.ordering_key)):
             raise CausalReplayError("causal view must preserve deterministic causal order")
+
+    @property
+    def digest(self) -> str:
+        identity = {
+            "schema_version": _VIEW_SCHEMA_VERSION,
+            "simulation_time": self.simulation_time.isoformat(),
+            "manifest_sha256": self.manifest_sha256,
+            "dataset_sha256": self.dataset_sha256,
+            "event_digests": [item.digest for item in self.events],
+        }
+        return "sha256:" + sha256(_canonical_bytes(identity)).hexdigest()
 
     def by_kind(self, kind: str) -> tuple[CausalEvent, ...]:
         target = _text(kind, name="kind").upper()
@@ -476,6 +500,8 @@ class CausalFeeder:
     def view(self) -> CausalDataView:
         return CausalDataView(
             simulation_time=self._clock,
+            manifest_sha256=self._dataset.manifest_sha256,
+            dataset_sha256=self._dataset.dataset_sha256,
             events=self._dataset.events[: self._cursor],
         )
 

@@ -900,6 +900,13 @@ class AuthorityService:
         raw_adjustments = availability_evidence.get(
             "borrow_capacity_adjustments"
         )
+        reservation_expected_available = expected_availability_evidence.get(
+            "availability"
+        )
+        if not isinstance(reservation_expected_available, Mapping):
+            raise AuthorityConflict(
+                "regenerated reservation availability is malformed"
+            )
         if borrow_resources:
             if (
                 not isinstance(raw_adjustments, Mapping)
@@ -976,7 +983,7 @@ class AuthorityService:
                     "reservable_capacity": _canonical_decimal_text(reservable_capacity),
                     "required_increment": _canonical_decimal_text(required_increment),
                 }
-            expected_availability_evidence["availability"] = adjusted_available
+            reservation_expected_available = adjusted_available
             expected_availability_evidence[
                 "borrow_capacity_adjustments"
             ] = canonical_adjustments
@@ -989,9 +996,7 @@ class AuthorityService:
             raise AuthorityConflict(
                 "durable reservation availability evidence is inconsistent"
             )
-        if reservation_request.get("available") != expected_availability_evidence.get(
-            "availability"
-        ):
+        if reservation_request.get("available") != reservation_expected_available:
             raise AuthorityConflict(
                 "durable reservation exceeds authoritative account availability"
             )

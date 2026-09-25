@@ -363,7 +363,11 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     availability = dict(manifest["availability_policy"])
     if availability.get("point_in_time") is not True or availability.get("no_future_leakage") is not True:
         raise HistoricalDataError("availability policy must enforce point-in-time no-future-leakage")
-    _utc(availability.get("cutoff"), "availability cutoff")
+    availability_cutoff = _utc(availability.get("cutoff"), "availability cutoff")
+    if availability_cutoff > created_at:
+        raise HistoricalDataError(
+            "availability cutoff cannot be later than dataset creation"
+        )
     _text(availability.get("basis"), "availability basis")
 
     revision = dict(manifest["revision_policy"])

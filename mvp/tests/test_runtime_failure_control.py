@@ -85,6 +85,31 @@ class DurableReconciliationAuthorityTests(unittest.TestCase):
 
 
 class RuntimeRecoveryTests(unittest.TestCase):
+    def _record_durable_ready(self, controller, *, reconciliation_id="runtime-readiness"):
+        owner = controller.owner
+        self.assertIsNotNone(owner)
+        store_path = controller.durable_owner_store_path
+        self.assertIsNotNone(store_path)
+        store = JournalStore(store_path)
+        result = reconciliation(
+            account_id=controller.owner_scope.split(":", 1)[1],
+            environment=controller.owner_scope.split(":", 1)[0],
+        )
+        record_reconciliation_checkpoint(
+            store,
+            reconciliation_id=reconciliation_id,
+            result=result,
+            observed_at="2026-09-24T19:00:00Z",
+            host_id=owner.owner_id,
+            owner_epoch=str(owner.epoch),
+        )
+        controller.record_reconciliation_checkpoint(
+            reconciliation_id=reconciliation_id,
+            provider_id=result.provider_id,
+            account_id=result.account_id,
+            environment=result.environment,
+        )
+
     def _ready(self):
         controller = RecoveryController()
         owner = controller.start("host-a")
@@ -376,7 +401,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
                 owner_scope="PAPER:paper-account",
             )
             owner_one = first.start("host-a")
-            first.record_reconciliation(consistent=True)
+            self._record_durable_ready(first)
             first.validate_sender(owner_one.owner_id, owner_one.epoch)
             self.assertEqual(owner_one.epoch, 1)
 
@@ -393,9 +418,9 @@ class RuntimeRecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(PermissionError, "Durable sender fence"):
                 first.validate_admission(owner_one.epoch)
             with self.assertRaisesRegex(PermissionError, "Durable sender fence"):
-                first.record_reconciliation(consistent=True)
+                self._record_durable_ready(first)
 
-            second.record_reconciliation(consistent=True)
+            self._record_durable_ready(second)
             second.validate_sender(owner_two.owner_id, owner_two.epoch)
 
             third = RecoveryController(
@@ -423,14 +448,14 @@ class RuntimeRecoveryTests(unittest.TestCase):
             self.assertEqual(paper_owner.epoch, 1)
             self.assertEqual(live_owner.epoch, 1)
 
-            paper.record_reconciliation(consistent=True)
+            self._record_durable_ready(paper)
             transferred = paper.transfer_owner(
                 new_owner_id="paper-host-2",
                 old_sender_fenced=True,
                 reconciled=True,
             )
             self.assertEqual(transferred.epoch, 2)
-            live.record_reconciliation(consistent=True)
+            self._record_durable_ready(live)
             live.validate_sender(live_owner.owner_id, live_owner.epoch)
 
     def test_durable_transfer_fences_an_observer_of_old_generation(self):
@@ -441,7 +466,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
                 owner_scope="PAPER:acct",
             )
             owner = first.start("host-a")
-            first.record_reconciliation(consistent=True)
+            self._record_durable_ready(first)
 
             stale = RecoveryController(
                 owner_store=JournalStore(path),

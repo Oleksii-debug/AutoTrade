@@ -38,6 +38,7 @@ _REQUIRED_EVIDENCE_KINDS = frozenset({
     "financial_invariants",
     "retention",
     "metrics",
+    "independent_review",
 })
 
 

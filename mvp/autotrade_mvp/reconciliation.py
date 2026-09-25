@@ -8,6 +8,8 @@ from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
+from .borrow import BorrowReconciliationEvidence
+
 
 _REQUIRED_ABSENCE_SURFACES = frozenset(
     {"OPEN_ORDERS", "ORDER_HISTORY", "EXECUTIONS", "ACTIVITIES"}
@@ -626,6 +628,7 @@ class ReconciliationResult:
     manual_or_external_activity_ids: tuple[str, ...] = ()
     activity_coverage_complete: bool = True
     resource_availability: ResourceAvailabilityEvidence | None = None
+    borrow_reconciliations: tuple[BorrowReconciliationEvidence, ...] = ()
 
     @property
     def blocks_new_risk(self) -> bool:
@@ -722,6 +725,7 @@ def reconcile_account(
     cash_tolerance: Mapping[str, object] | None = None,
     position_tolerance: Mapping[str, object] | None = None,
     resource_availability: ResourceAvailabilityEvidence | None = None,
+    borrow_reconciliations: Sequence[BorrowReconciliationEvidence] = (),
 ) -> ReconciliationResult:
     """Compare local and provider truth without inventing absence evidence.
 
@@ -744,6 +748,34 @@ def reconcile_account(
     end = _instant(coverage_end, name="coverage_end")
     if end < start:
         raise ValueError("coverage_end must not precede coverage_start")
+
+    normalized_borrow_reconciliations: list[BorrowReconciliationEvidence] = []
+    borrow_resource_keys: set[str] = set()
+    for evidence in borrow_reconciliations:
+        if not isinstance(evidence, BorrowReconciliationEvidence):
+            raise TypeError(
+                "borrow_reconciliations must contain BorrowReconciliationEvidence"
+            )
+        if (
+            evidence.resource.provider_id != provider_scope
+            or evidence.resource.account_id != account_scope
+            or evidence.resource.environment != environment_scope
+        ):
+            raise ValueError("borrow reconciliation scope mismatch")
+        if evidence.resource_key in borrow_resource_keys:
+            raise ValueError(
+                "borrow reconciliation resources must be unique"
+            )
+        observed = _instant(
+            evidence.observed_at,
+            name="borrow_reconciliation.observed_at",
+        )
+        if observed < start or observed > end:
+            raise ValueError(
+                "borrow reconciliation observation is outside reconciliation coverage"
+            )
+        borrow_resource_keys.add(evidence.resource_key)
+        normalized_borrow_reconciliations.append(evidence)
 
     local_cash_map = _amount_map(local_cash, name="local_cash")
     provider_cash_map = _amount_map(provider_cash, name="provider_cash")
@@ -1158,6 +1190,13 @@ def reconcile_account(
 
     blocking: set[str] = set()
     reasons: list[str] = []
+    for evidence in normalized_borrow_reconciliations:
+        if evidence.blocks_new_risk:
+            blocking.add(evidence.resource_key)
+            for reason in evidence.blocking_reasons:
+                reasons.append(
+                    f"securities-borrow {evidence.resource_key}: {reason}"
+                )
     if not snapshot_is_consistent:
         blocking.add("ACCOUNT")
         if snapshot_consistency is None:
@@ -1294,4 +1333,5 @@ def reconcile_account(
         manual_or_external_activity_ids=manual_or_external_activities,
         activity_coverage_complete=activity_coverage_complete,
         resource_availability=resource_availability,
+        borrow_reconciliations=tuple(normalized_borrow_reconciliations),
     )

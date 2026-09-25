@@ -7,7 +7,11 @@ from uuid import uuid4
 from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
 
-from mvp.autotrade_mvp.capabilities import CapabilitySnapshot
+from mvp.autotrade_mvp.capabilities import (
+    CapabilityClaim,
+    EvidenceVerification,
+    derive_capability_snapshot,
+)
 from mvp.autotrade_mvp.kraken_spot import (
     KrakenSpotOrderIntent,
     parse_spot_submission_response,
@@ -42,32 +46,38 @@ class KrakenSpotContractTests(unittest.TestCase):
         ).validate(value)
 
     def prepared(self, client_order_id, *, environment="LIVE"):
-        capability = CapabilitySnapshot(
-            snapshot_id=str(uuid4()),
-            provider_id="KRAKEN",
-            account_id="spot-contract-account",
-            entity_id="kraken-spot",
-            environment=environment,
-            instrument_version="XBTUSD:v1",
-            observed_at=NOW_DT - timedelta(minutes=1),
-            expires_at=NOW_DT + timedelta(minutes=1),
-            supported_order_types=frozenset({"MARKET"}),
-            time_in_force=frozenset({"GTC"}),
-            permission_scopes=frozenset({"ORDER_WRITE"}),
-            position_mode="CASH",
-            native_protection=frozenset(),
-            rate_limit_policy_id="kraken-spot-contract",
-            data_entitlements=frozenset({"ORDERS"}),
-            evidence=(
-                {
+        claim_observed_at = NOW_DT - timedelta(minutes=1)
+        claims = tuple(
+            CapabilityClaim(
+                source=source,
+                provider_id="KRAKEN",
+                account_id="spot-contract-account",
+                entity_id="kraken-spot",
+                environment=environment,
+                instrument_version="XBTUSD:v1",
+                observed_at=claim_observed_at,
+                expires_at=NOW_DT + timedelta(minutes=1),
+                supported_order_types=frozenset({"MARKET"}),
+                time_in_force=frozenset({"GTC"}),
+                permission_scopes=frozenset({"ORDER_WRITE"}),
+                position_mode="CASH",
+                native_protection=frozenset(),
+                rate_limit_policy_id="kraken-spot-contract",
+                data_entitlements=frozenset({"ORDERS"}),
+                evidence_ref={
                     "artifact_id": str(uuid4()),
                     "sha256": "sha256:" + "a" * 64,
                     "observed_at": "2026-09-24T19:59:00Z",
                     "source_uri": "https://www.kraken.com/features/trading-api",
                 },
-            ),
-            status="VERIFIED",
-            sources=frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}),
+            )
+            for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+        )
+        capability = derive_capability_snapshot(
+            snapshot_id=str(uuid4()),
+            claims=claims,
+            observed_at=NOW_DT,
+            evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
         )
         intent = KrakenSpotOrderIntent.create(
             instrument_version="XBTUSD:v1",

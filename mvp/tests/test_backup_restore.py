@@ -691,7 +691,7 @@ class BackupRestoreTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 BackupError,
-                "complete non-blocking reconciliation",
+                "not fully non-blocking",
             ):
                 complete_restore_reconciliation(
                     restored,

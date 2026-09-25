@@ -52,7 +52,7 @@ class JournalStore:
     publication intent; a separate qualified dispatcher must perform delivery.
     """
 
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -166,6 +166,10 @@ class JournalStore:
                 "DROP TABLE command_dedupe",
                 "ALTER TABLE command_dedupe_v3 RENAME TO command_dedupe",
             )
+        if version == 4:
+            return (
+                "ALTER TABLE outbox ADD COLUMN envelope_hash TEXT",
+            )
         raise ValueError(f"Unsupported journal migration version: {version}")
 
     @classmethod
@@ -184,8 +188,8 @@ class JournalStore:
             }),
             "outbox": frozenset({
                 "outbox_id", "event_id", "topic", "payload_json",
-                "created_at", "delivered_at",
-            }),
+                "created_at", "delivered_at"
+            } | ({"envelope_hash"} if cls.SCHEMA_VERSION >= 4 else set())),
             "command_dedupe": frozenset(command_columns),
         }
         if cls.SCHEMA_VERSION >= 2:
@@ -304,6 +308,21 @@ class JournalStore:
                 for version in range(current + 1, self.SCHEMA_VERSION + 1):
                     for statement in self._migration_statements(version):
                         connection.execute(statement)
+                    if version == 4:
+                        for row in connection.execute(
+                            "SELECT outbox_id, payload_json FROM outbox"
+                        ):
+                            envelope_hash = (
+                                "sha256:"
+                                + sha256(
+                                    str(row["payload_json"]).encode("utf-8")
+                                ).hexdigest()
+                            )
+                            connection.execute(
+                                "UPDATE outbox SET envelope_hash = ? "
+                                "WHERE outbox_id = ?",
+                                (envelope_hash, row["outbox_id"]),
+                            )
                     connection.execute(
                         "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                         (version, self._now()),
@@ -514,12 +533,26 @@ class JournalStore:
             if outbox_topic is not None:
                 outbox_payload = canonical_json(envelope)
                 outbox_id = "outbox-" + sha256(event_id.encode("utf-8")).hexdigest()[:32]
+                outbox_hash = (
+                    "sha256:"
+                    + sha256(outbox_payload.encode("utf-8")).hexdigest()
+                )
                 connection.execute(
                     """
-                    INSERT INTO outbox(outbox_id, event_id, topic, payload_json, created_at)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO outbox(
+                        outbox_id, event_id, topic, payload_json,
+                        created_at, envelope_hash
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (outbox_id, event_id, outbox_topic, outbox_payload, self._now()),
+                    (
+                        outbox_id,
+                        event_id,
+                        outbox_topic,
+                        outbox_payload,
+                        self._now(),
+                        outbox_hash,
+                    ),
                 )
             connection.commit()
         return AppendResult(event_id, aggregate_version, True)
@@ -694,6 +727,7 @@ class JournalStore:
                     outbox.topic,
                     outbox.payload_json AS outbox_payload_json,
                     outbox.created_at,
+                    outbox.envelope_hash,
                     events.event_type,
                     events.aggregate_type,
                     events.aggregate_id,
@@ -711,6 +745,16 @@ class JournalStore:
             ).fetchall()
         pending: list[dict[str, Any]] = []
         for row in rows:
+            actual_outbox_hash = (
+                "sha256:"
+                + sha256(
+                    str(row["outbox_payload_json"]).encode("utf-8")
+                ).hexdigest()
+            )
+            if row["envelope_hash"] != actual_outbox_hash:
+                raise ValueError(
+                    "outbox envelope hash does not match stored payload"
+                )
             event_row = {
                 "event_id": row["event_id"],
                 "event_type": row["event_type"],

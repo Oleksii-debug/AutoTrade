@@ -544,6 +544,38 @@ class CorporateSettlementTests(unittest.TestCase):
                 events=(later, earlier),
             )
 
+    def test_dividend_replay_is_restart_idempotent_without_double_receivable(self):
+        current = instrument()
+        registry = InstrumentRegistry(versions=(current,))
+        dividend = corporate_event(
+            event_id="dividend-restart",
+            kind="CASH_DIVIDEND",
+            effective_date=date(2026, 3, 1),
+            source_revision="provider:r1",
+            payload={"per_share": "1.25", "currency": "USD"},
+        )
+        initial = state(unsettled_cash="0")
+        running = CorporateActionBook(
+            initial,
+            instrument_version=current,
+            registry=registry,
+        )
+        first = running.apply(dividend)
+        self.assertEqual(first.after.unsettled_cash, Decimal("12.50"))
+        self.assertEqual(running.events, (dividend,))
+
+        restarted = CorporateActionBook.replay(
+            initial,
+            instrument_version=current,
+            registry=registry,
+            events=running.events,
+        )
+        duplicate = restarted.apply(dividend)
+        self.assertEqual(restarted.state.unsettled_cash, Decimal("12.50"))
+        self.assertEqual(duplicate.after.unsettled_cash, Decimal("12.50"))
+        self.assertEqual(restarted.applied_event_ids, ("dividend-restart",))
+        self.assertEqual(restarted.events, (dividend,))
+
     def test_split_then_symbol_change_replay_is_deterministic(self):
         first = instrument()
         second = instrument(

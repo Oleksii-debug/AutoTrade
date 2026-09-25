@@ -402,14 +402,24 @@ class MarketNormalizer:
             update.source_sequence,
         ) if update.source_sequence is not None else None
 
+        sequence_fingerprint = _canonical(
+            {
+                "payload_sha256": payload_digest,
+                "source_event_at": _utc_text(update.source_event_at),
+                "available_at": _utc_text(update.available_at),
+                "availability_basis": update.availability_basis,
+                "revision": update.revision,
+            }
+        )
+
         new_sequence = False
         if update.source_sequence is not None:
             existing = self._seen_sequence.get(sequence_identity)
             if existing is not None:
-                existing_digest, _ = existing
-                if existing_digest != payload_digest:
+                existing_fingerprint, _ = existing
+                if existing_fingerprint != sequence_fingerprint:
                     raise SequenceConflict(
-                        "source sequence was reused with different normalized content"
+                        "source sequence was reused with different causal content"
                     )
                 flags.add("DUPLICATE")
             else:
@@ -444,7 +454,10 @@ class MarketNormalizer:
         )
         event_id = str(uuid5(NAMESPACE_URL, identity_material))
         if update.source_sequence is not None and new_sequence:
-            self._seen_sequence[sequence_identity] = (payload_digest, event_id)
+            self._seen_sequence[sequence_identity] = (
+                sequence_fingerprint,
+                event_id,
+            )
 
         return NormalizedMarketEvent(
             event_id=event_id,

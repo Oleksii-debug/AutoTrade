@@ -449,27 +449,57 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                 unresolved_limits=(),
             )
 
-        with self.assertRaisesRegex(OptionError, "40-character"):
-            OptionRiskEvidence(
-                instrument="OPT:CALL",
-                model_id="model",
-                model_version="1",
-                source_sha="c" * 64,
-                input_digest="sha256:" + "b" * 64,
-                schema_version=1,
-                market_as_of=at(17),
-                calculated_at=at(18),
-                expires_at=at(19),
-                maximum_market_age=timedelta(hours=2),
-                delta="0",
-                gamma="0",
-                vega="0",
-                theta="0",
-                rho="0",
-                scenarios=(scenario,),
-                tests_run=("scenario-stress",),
-                unresolved_limits=(),
-            )
+        sha256_source = OptionRiskEvidence(
+            instrument="OPT:CALL",
+            model_id="model",
+            model_version="1",
+            source_sha="c" * 64,
+            input_digest="sha256:" + "b" * 64,
+            schema_version=1,
+            market_as_of=at(17),
+            calculated_at=at(18),
+            expires_at=at(19),
+            maximum_market_age=timedelta(hours=2),
+            delta="0",
+            gamma="0",
+            vega="0",
+            theta="0",
+            rho="0",
+            scenarios=(scenario,),
+            tests_run=("scenario-stress",),
+            unresolved_limits=(),
+        )
+        self.assertEqual(sha256_source.source_sha, "c" * 64)
+
+        for source_sha, input_digest in (
+            (" " + ("a" * 40), "sha256:" + ("b" * 64)),
+            ("A" * 40, "sha256:" + ("b" * 64)),
+            ("c" * 64 + " ", "sha256:" + ("b" * 64)),
+            ("a" * 40, " " + "sha256:" + ("b" * 64)),
+            ("a" * 40, "sha256:" + ("B" * 64)),
+        ):
+            with self.subTest(source_sha=source_sha, input_digest=input_digest):
+                with self.assertRaisesRegex(OptionError, "source_sha|input_digest"):
+                    OptionRiskEvidence(
+                        instrument="OPT:CALL",
+                        model_id="model",
+                        model_version="1",
+                        source_sha=source_sha,
+                        input_digest=input_digest,
+                        schema_version=1,
+                        market_as_of=at(17),
+                        calculated_at=at(18),
+                        expires_at=at(19),
+                        maximum_market_age=timedelta(hours=2),
+                        delta="0",
+                        gamma="0",
+                        vega="0",
+                        theta="0",
+                        rho="0",
+                        scenarios=(scenario,),
+                        tests_run=("scenario-stress",),
+                        unresolved_limits=(),
+                    )
 
     def test_option_risk_evidence_records_tests_and_unresolved_limits(self):
         evidence = self._risk()

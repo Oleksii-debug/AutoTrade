@@ -3,17 +3,15 @@ import unittest
 
 from mvp.autotrade_mvp.accounting import AccountingConflict, ScopedEconomicBook
 from mvp.autotrade_mvp.fill_accounting import (
+    ProjectedFillEvidence,
     book_provider_fill,
     build_provider_fill_transaction,
 )
-from mvp.autotrade_mvp.orders import OrderProjection
 from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence
 
 
 def matched_fill(*, price="100", fee="1", revision=None):
-    projection = OrderProjection()
-    projection.register_intent(intent_id="intent-1", side="BUY", quantity="2")
-    projection.observe_fill(
+    projected = ProjectedFillEvidence.create(
         fill_id="fill-1",
         provider_execution_id="exec-1",
         intent_id="intent-1",
@@ -22,7 +20,6 @@ def matched_fill(*, price="100", fee="1", revision=None):
         price=price,
         provider_revision=revision,
     )
-    observed = projection.effective_fills()[0]
     provider = ProviderFillEvidence.create(
         provider_execution_id="exec-1",
         client_order_id="client-1",
@@ -33,12 +30,12 @@ def matched_fill(*, price="100", fee="1", revision=None):
         fee_currency="USD",
         trade_time="2026-01-01T00:00:00Z",
     )
-    return projection, observed, provider
+    return projected, provider
 
 
 class FillAccountingTests(unittest.TestCase):
     def test_only_matched_fill_evidence_books_economics(self):
-        _, observed, provider = matched_fill()
+        observed, provider = matched_fill()
         book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
         self.assertTrue(book_provider_fill(
             book=book,
@@ -53,7 +50,7 @@ class FillAccountingTests(unittest.TestCase):
         self.assertEqual(book.fee_expense("USD"), Decimal("1"))
 
     def test_same_provider_execution_is_idempotent(self):
-        _, observed, provider = matched_fill()
+        observed, provider = matched_fill()
         book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
         args = dict(
             book=book,
@@ -68,7 +65,7 @@ class FillAccountingTests(unittest.TestCase):
         self.assertEqual(book.position("ABC"), Decimal("2"))
 
     def test_conflicting_observation_for_same_execution_fails_closed(self):
-        _, observed, provider = matched_fill()
+        observed, provider = matched_fill()
         book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
         self.assertTrue(book_provider_fill(
             book=book,
@@ -99,18 +96,17 @@ class FillAccountingTests(unittest.TestCase):
             )
         self.assertEqual(book.position("ABC"), Decimal("2"))
 
-    def test_acknowledgement_snapshot_cannot_be_booked_as_fill(self):
-        projection = OrderProjection()
-        projection.register_intent(intent_id="intent-1", side="BUY", quantity="2")
-        projection.acknowledge("intent-1", provider_order_id="order-1")
-        ack = projection.snapshot("intent-1")
-        _, _, provider = matched_fill()
+    def test_acknowledgement_like_object_cannot_be_booked_as_fill(self):
+        class Acknowledgement:
+            provider_order_id = "order-1"
+
+        _, provider = matched_fill()
         book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
         with self.assertRaisesRegex(TypeError, "not an acknowledgement"):
             build_provider_fill_transaction(
                 book=book,
                 provider_id="provider-a",
-                projected_fill=ack,
+                projected_fill=Acknowledgement(),
                 provider_fill=provider,
                 expected_instrument="ABC",
                 settlement_currency="USD",
@@ -118,7 +114,7 @@ class FillAccountingTests(unittest.TestCase):
         self.assertEqual(book.transactions, ())
 
     def test_independent_evidence_must_match_execution_quantity_price_and_instrument(self):
-        _, observed, provider = matched_fill()
+        observed, provider = matched_fill()
         book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
 
         wrong_execution = ProviderFillEvidence.create(
@@ -172,16 +168,17 @@ class FillAccountingTests(unittest.TestCase):
             )
 
     def test_corrected_fill_is_blocked_until_atomic_correction_evidence_exists(self):
-        projection, original, provider = matched_fill()
-        projection.correct_fill(
-            original.fill_id,
-            correction_fill_id="fill-1-r2",
+        _, provider = matched_fill()
+        corrected = ProjectedFillEvidence.create(
+            fill_id="fill-1-r2",
             provider_execution_id="exec-1",
+            intent_id="intent-1",
+            side="BUY",
             quantity="2",
             price="101",
             provider_revision="r2",
+            correction_of="fill-1",
         )
-        corrected = projection.effective_fills()[0]
         corrected_provider = ProviderFillEvidence.create(
             provider_execution_id="exec-1",
             client_order_id="client-1",
@@ -203,7 +200,7 @@ class FillAccountingTests(unittest.TestCase):
             )
 
     def test_scope_is_part_of_audit_identity(self):
-        _, observed, provider = matched_fill()
+        observed, provider = matched_fill()
         paper = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
         live = ScopedEconomicBook(environment="LIVE", account_id="acct-1")
         other_account = ScopedEconomicBook(environment="PAPER", account_id="acct-2")
@@ -218,6 +215,30 @@ class FillAccountingTests(unittest.TestCase):
             )
         self.assertNotEqual(paper.audit_digest(), live.audit_digest())
         self.assertNotEqual(paper.audit_digest(), other_account.audit_digest())
+
+    def test_projection_evidence_normalizes_identity_and_rejects_binary_float(self):
+        observed = ProjectedFillEvidence.create(
+            fill_id=" fill-1 ",
+            provider_execution_id=" exec-1 ",
+            intent_id=" intent-1 ",
+            side=" buy ",
+            quantity="2.00",
+            price="100.0",
+        )
+        self.assertEqual(observed.fill_id, "fill-1")
+        self.assertEqual(observed.provider_execution_id, "exec-1")
+        self.assertEqual(observed.intent_id, "intent-1")
+        self.assertEqual(observed.side, "BUY")
+        self.assertEqual(observed.quantity, Decimal("2.00"))
+        with self.assertRaises(TypeError):
+            ProjectedFillEvidence.create(
+                fill_id="f",
+                provider_execution_id="e",
+                intent_id="i",
+                side="BUY",
+                quantity=1.0,
+                price="100",
+            )
 
 
 if __name__ == "__main__":

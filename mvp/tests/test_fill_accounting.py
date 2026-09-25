@@ -24,6 +24,7 @@ def matched_fill(
     provider_id="PROVIDER-A",
     account_id="acct-1",
     environment="PAPER",
+    provider_side="BUY",
 ):
     projected = ProjectedFillEvidence.create(
         fill_id="fill-1",
@@ -42,6 +43,7 @@ def matched_fill(
         provider_execution_id="exec-1",
         client_order_id="client-1",
         instrument="ABC",
+        side=provider_side,
         quantity="2",
         price=price,
         fee_amount=fee,
@@ -66,6 +68,45 @@ class FillAccountingTests(unittest.TestCase):
         self.assertEqual(book.position("ABC"), Decimal("2"))
         self.assertEqual(book.cash("USD"), Decimal("-201"))
         self.assertEqual(book.fee_expense("USD"), Decimal("1"))
+
+    def test_provider_direction_must_be_evidenced_and_match_projection(self):
+        observed, wrong_side = matched_fill(provider_side="SELL")
+        book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
+        with self.assertRaisesRegex(AccountingConflict, "side does not match"):
+            build_provider_fill_transaction(
+                book=book,
+                provider_id="provider-a",
+                projected_fill=observed,
+                provider_fill=wrong_side,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+            )
+        self.assertEqual(book.transactions, ())
+
+        _, evidenced = matched_fill()
+        missing_side = ProviderFillEvidence.create(
+            provider_id=evidenced.provider_id,
+            account_id=evidenced.account_id,
+            environment=evidenced.environment,
+            provider_execution_id=evidenced.provider_execution_id,
+            client_order_id=evidenced.client_order_id,
+            instrument=evidenced.instrument,
+            quantity=evidenced.quantity,
+            price=evidenced.price,
+            fee_amount=evidenced.fee_amount,
+            fee_currency=evidenced.fee_currency,
+            trade_time=evidenced.trade_time,
+        )
+        with self.assertRaisesRegex(AccountingConflict, "not independently evidenced"):
+            build_provider_fill_transaction(
+                book=book,
+                provider_id="provider-a",
+                projected_fill=observed,
+                provider_fill=missing_side,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+            )
+        self.assertEqual(book.transactions, ())
 
     def test_same_provider_execution_is_idempotent(self):
         observed, provider = matched_fill()
@@ -100,6 +141,7 @@ class FillAccountingTests(unittest.TestCase):
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",
+            side="BUY",
             quantity="2",
             price="101",
             fee_amount="1",
@@ -145,6 +187,7 @@ class FillAccountingTests(unittest.TestCase):
             provider_execution_id="exec-other",
             client_order_id="client-1",
             instrument="ABC",
+            side="BUY",
             quantity="2",
             price="100",
             fee_amount="1",
@@ -168,6 +211,7 @@ class FillAccountingTests(unittest.TestCase):
             provider_execution_id="exec-1",
             client_order_id="client-other",
             instrument="ABC",
+            side="BUY",
             quantity="2",
             price="100",
             fee_amount="1",
@@ -191,6 +235,7 @@ class FillAccountingTests(unittest.TestCase):
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",
+            side="BUY",
             quantity="3",
             price="100",
             fee_amount="1",
@@ -233,6 +278,7 @@ class FillAccountingTests(unittest.TestCase):
                     provider_execution_id="exec-1",
                     client_order_id="client-1",
                     instrument="ABC",
+                    side="BUY",
                     quantity="2",
                     price="100",
                     fee_amount="1",
@@ -274,6 +320,7 @@ class FillAccountingTests(unittest.TestCase):
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",
+            side="BUY",
             quantity="2",
             price="101",
             fee_amount="1",
@@ -376,6 +423,7 @@ class FillAccountingTests(unittest.TestCase):
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",
+            side="BUY",
             quantity="2",
             price="101",
             fee_amount="1",
@@ -471,6 +519,7 @@ class FillAccountingTests(unittest.TestCase):
                 provider_execution_id="exec-1",
                 client_order_id="client-1",
                 instrument="ABC",
+                side="BUY",
                 quantity="2",
                 price=price,
                 fee_amount="1",
@@ -560,6 +609,7 @@ class FillAccountingTests(unittest.TestCase):
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",
+            side="BUY",
             quantity="2",
             price="101",
             fee_amount="1",
@@ -618,6 +668,7 @@ class FillAccountingTests(unittest.TestCase):
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",
+            side="BUY",
             quantity="2",
             price="101",
             fee_amount="1",
@@ -661,6 +712,7 @@ class FillAccountingTests(unittest.TestCase):
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",
+            side="BUY",
             quantity="2",
             price="101",
             fee_amount="1",
@@ -685,6 +737,7 @@ class FillAccountingTests(unittest.TestCase):
                     provider_execution_id="exec-1",
                     client_order_id="client-1",
                     instrument="XYZ",
+                    side="BUY",
                     quantity="2",
                     price="101",
                     fee_amount="1",
@@ -740,6 +793,7 @@ class FillAccountingTests(unittest.TestCase):
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",
+            side="BUY",
             quantity="2",
             price="101",
             fee_amount="1",
@@ -764,6 +818,7 @@ class FillAccountingTests(unittest.TestCase):
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",
+            side="BUY",
             quantity="2",
             price="102",
             fee_amount="1",
@@ -838,6 +893,7 @@ class FillAccountingTests(unittest.TestCase):
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",
+            side="BUY",
             quantity="2",
             price="101",
             fee_amount="1",

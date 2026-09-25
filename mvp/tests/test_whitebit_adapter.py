@@ -860,10 +860,14 @@ class WhiteBitAdapterTests(unittest.TestCase):
             "orderId": 456,
             "feeAsset": "USDT",
         }
-        self.assertEqual(
-            len(parse_execution_history([row, dict(row)], market="BTC_USDT")),
-            1,
+        deals = parse_execution_history([row, dict(row)], market="BTC_USDT")
+        self.assertEqual(len(deals), 1)
+        provider_fill = deals[0].to_reconciliation_fill(
+            account_id="paper-1",
+            environment="PAPER",
         )
+        self.assertEqual(provider_fill.side, "BUY")
+        self.assertIsNone(provider_fill.position_side)
         conflicting = dict(row)
         conflicting["price"] = "41000"
         conflicting["deal"] = "41"

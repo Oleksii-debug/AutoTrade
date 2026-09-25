@@ -18,7 +18,7 @@ This record covers one continuation of the existing independent risk authority. 
 2. Tail scenarios are exact-Decimal inputs. When expected shortfall is enabled, every non-zero projected position must be represented in every tail scenario; missing evidence fails closed.
 3. The admitted observation is the equal-weight mean of the worst `ceil(N * tail_fraction)` non-negative portfolio losses under the supplied frozen scenario distribution.
 4. The calculation uses the whole projected marked portfolio, including durable reserved position deltas already present in the canonical risk context.
-5. A reduce-only exception cannot use the ordinary over-limit escape if configured tail risk worsens.
+5. A reduce-only exception cannot use the ordinary over-limit escape if configured stress/tail risk worsens. When the intent removes a symbol while other projected risk remains, the comparison requires scenario coverage for the removed base symbol too; missing base-side hedge evidence cannot be silently treated as zero return.
 6. Liquidation headroom is optional policy but, when configured, UNKNOWN evidence is not permission. A known breached floor is bypassable only by the existing strict protective-reduction predicate.
 7. Binary floating-point inputs remain rejected for financial/tail values.
 
@@ -26,7 +26,7 @@ This record covers one continuation of the existing independent risk authority. 
 
 `mvp/tests/test_risk.py` adds cases for:
 - exact expected-shortfall boundary and a one-cent breach;
-- absent and incomplete tail scenario coverage;
+- absent and incomplete projected tail scenario coverage, plus missing base-side hedge coverage for reduce-only comparison;
 - paired policy configuration and invalid tail fraction;
 - absent and exact liquidation-headroom evidence;
 - rejection of binary float inputs.

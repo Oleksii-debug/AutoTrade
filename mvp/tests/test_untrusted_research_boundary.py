@@ -2,6 +2,7 @@ import unittest
 
 from mvp.autotrade_mvp.untrusted_research import (
     Redistribution,
+    AdmittedResearchToolRequest,
     ResearchBoundaryError,
     ResearchCapability,
     ResearchEvidence,
@@ -98,6 +99,38 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
                     requested_capabilities=("COMPUTE_STATISTICS",),
                     arguments={},
                 )
+            )
+
+    def test_admitted_request_cannot_be_forged_or_left_mutable(self):
+        nested = {"window": {"size": 20}}
+        admitted = AdmittedResearchToolRequest(
+            request_id="direct-admitted",
+            tool_name="statistics",
+            capabilities=(ResearchCapability.COMPUTE_STATISTICS,),
+            arguments=nested,
+            evidence_refs=("artifact:1",),
+        )
+        nested["window"]["size"] = 999
+        self.assertEqual(admitted.arguments["window"]["size"], 20)
+        with self.assertRaisesRegex(TypeError, "immutable"):
+            admitted.arguments["window"]["size"] = 30
+
+        with self.assertRaisesRegex(ResearchBoundaryError, "ResearchCapability"):
+            AdmittedResearchToolRequest(
+                request_id="forged-capability",
+                tool_name="statistics",
+                capabilities=("COMPUTE_STATISTICS",),
+                arguments={},
+                evidence_refs=(),
+            )
+        with self.assertRaisesRegex(ResearchBoundaryError, "cannot grant authority"):
+            AdmittedResearchToolRequest(
+                request_id="forged-authority",
+                tool_name="statistics",
+                capabilities=(ResearchCapability.COMPUTE_STATISTICS,),
+                arguments={},
+                evidence_refs=(),
+                permission_effect="EXECUTION",
             )
 
     def test_tool_arguments_are_deeply_immutable_across_admission(self):

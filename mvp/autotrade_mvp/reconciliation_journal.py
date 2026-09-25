@@ -367,7 +367,7 @@ def load_latest_reconciliation_checkpoint_for_scope(
         account_id=account_id,
         environment=environment,
     )
-    aggregate_heads: dict[str, tuple[int, str, dict[str, Any]]] = {}
+    aggregate_heads: dict[str, tuple[int, datetime, str, dict[str, Any]]] = {}
     for event in store.load_events_by_aggregate_type("account_reconciliation"):
         if event.get("event_type") != "AccountReconciled":
             continue
@@ -390,10 +390,14 @@ def load_latest_reconciliation_checkpoint_for_scope(
             payload.get("observed_at"),
             name="reconciliation checkpoint observed_at",
         )
+        observed_instant = datetime.fromisoformat(
+            observed_at.replace("Z", "+00:00")
+        )
         current = aggregate_heads.get(aggregate_id)
         if current is None or aggregate_version > current[0]:
             aggregate_heads[aggregate_id] = (
                 aggregate_version,
+                observed_instant,
                 observed_at,
                 event,
             )
@@ -403,7 +407,7 @@ def load_latest_reconciliation_checkpoint_for_scope(
 
     newest_observed_at = max(item[1] for item in aggregate_heads.values())
     newest = [
-        item[2]
+        item[3]
         for item in aggregate_heads.values()
         if item[1] == newest_observed_at
     ]

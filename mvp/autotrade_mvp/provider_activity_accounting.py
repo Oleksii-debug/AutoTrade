@@ -316,6 +316,7 @@ def _prepare_provider_fill_binding(
         "provider_execution_id": plan.provider_execution_id,
         "fill_id": projected_fill.fill_id,
         "provider_revision": projected_fill.provider_revision,
+        "reservation_cut_digest": plan.reservation_cut_digest,
         "plan_digest": plan.plan_digest,
         "transaction_id": plan.transaction.transaction_id,
         "transaction_digest": payload_digest(
@@ -719,6 +720,7 @@ def commit_economic_batch_with_reservation_consumption(
     reservation_id: str,
     usage: Mapping[str, object],
     transactions: Iterable[JournalTransaction],
+    reservation_expected_snapshot_digest: str | None = None,
     committed_at: str | None = None,
     settlement_book: DurableSettlementBook | None = None,
     settlement_obligations: Iterable[SettlementObligation] = (),
@@ -821,6 +823,7 @@ def commit_economic_batch_with_reservation_consumption(
         reservation_id=rid,
         usage=usage,
         committed_at=when,
+        expected_snapshot_digest=reservation_expected_snapshot_digest,
     )
     economic_plan = economic_book.prepare_batch_mutation(
         transactions,
@@ -1046,7 +1049,9 @@ def commit_provider_fill_with_reservation_consumption(
     barrier. It deliberately accepts no caller-authored transaction batch and
     no caller-authored reservation usage map. Both are derived from the same
     normalized provider/projected fill evidence and the admission-bound
-    reservation envelope before JournalStore mutation.
+    reservation envelope before JournalStore mutation. A fresh plan is fenced
+    to the exact reservation snapshot from which it was derived; the same cut
+    digest is included in the per-execution immutable audit binding.
     """
 
     if not isinstance(economic_book, DurableProviderEconomicBook):
@@ -1092,6 +1097,7 @@ def commit_provider_fill_with_reservation_consumption(
         reservation_id=rid,
         usage=plan.usage,
         transactions=(plan.transaction,),
+        reservation_expected_snapshot_digest=plan.reservation_cut_digest,
         committed_at=when,
         settlement_book=settlement_book,
         settlement_obligations=settlement_obligations,

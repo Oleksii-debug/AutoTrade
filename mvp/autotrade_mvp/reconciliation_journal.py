@@ -162,6 +162,24 @@ def reconciliation_payload(
             result.manual_or_external_activity_ids
         ),
         "activity_coverage_complete": result.activity_coverage_complete,
+        "resource_availability": (
+            None
+            if result.resource_availability is None
+            else {
+                "provider_id": result.resource_availability.provider_id,
+                "account_id": result.resource_availability.account_id,
+                "environment": result.resource_availability.environment,
+                "snapshot_id": result.resource_availability.snapshot_id,
+                "query_started_at": result.resource_availability.query_started_at,
+                "query_completed_at": result.resource_availability.query_completed_at,
+                "provider_as_of": result.resource_availability.provider_as_of,
+                "valid_until": result.resource_availability.valid_until,
+                "available_resources": _decimal_map(
+                    result.resource_availability.available_resources
+                ),
+                "evidence_refs": list(result.resource_availability.evidence_refs),
+            }
+        ),
         "blocking_resources": list(result.blocking_resources),
         "reasons": list(result.reasons),
     }

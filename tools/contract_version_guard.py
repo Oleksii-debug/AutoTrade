@@ -36,11 +36,18 @@ def schema_definitions(root: Path, names: list[str]) -> dict[str, set[str]]:
     return result
 
 
+def _is_transient_runtime_artifact(path: Path, *, base: Path) -> bool:
+    """Exclude interpreter output that is not part of the committed contract surface."""
+
+    relative = path.relative_to(base)
+    return "__pycache__" in relative.parts or path.suffix in {".pyc", ".pyo"}
+
+
 def contract_bytes(root: Path) -> dict[str, bytes]:
     base = root / "contracts"
     files: dict[str, bytes] = {}
     for path in sorted(base.rglob("*")):
-        if path.is_file():
+        if path.is_file() and not _is_transient_runtime_artifact(path, base=base):
             files[path.relative_to(root).as_posix()] = path.read_bytes()
     return files
 

@@ -464,9 +464,17 @@ def require_current_option_risk(
     *,
     instrument: str,
     at: datetime,
+    maximum_calculation_age: timedelta,
+    maximum_market_age: timedelta,
 ) -> None:
     if not isinstance(evidence, OptionRiskEvidence):
         raise TypeError("evidence must be OptionRiskEvidence")
+    for name, value in (
+        ("maximum_calculation_age", maximum_calculation_age),
+        ("maximum_market_age", maximum_market_age),
+    ):
+        if not isinstance(value, timedelta) or value <= timedelta(0):
+            raise OptionError(f"{name} must be a positive timedelta")
     expected = _text(instrument, "instrument")
     if evidence.instrument != expected:
         raise OptionError("option risk evidence belongs to another instrument")
@@ -475,6 +483,10 @@ def require_current_option_risk(
         raise OptionError("option risk evidence is from the future")
     if point >= evidence.expires_at:
         raise OptionError("option risk evidence is stale")
+    if point - evidence.calculated_at > maximum_calculation_age:
+        raise OptionError("option risk calculation exceeds independent policy age")
     if point - evidence.market_as_of > evidence.maximum_market_age:
         raise OptionError("option risk market evidence is stale")
+    if point - evidence.market_as_of > maximum_market_age:
+        raise OptionError("option risk market evidence exceeds independent policy age")
 

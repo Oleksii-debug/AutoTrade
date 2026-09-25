@@ -95,5 +95,51 @@ class EvaluationGateTests(unittest.TestCase):
         )
 
 
+    def test_direct_profile_construction_cannot_bypass_registered_thresholds(self):
+        with self.assertRaisesRegex(ValueError, "minimum_net_advantage"):
+            GateProfile(
+                profile_id="direct-bad",
+                minimum_net_advantage="-0.01",
+                max_drawdown="0.10",
+                max_adverse_cost_loss="0.03",
+                min_power="0.80",
+                require_complete_trials=True,
+                require_causal_audit=True,
+                require_financial_invariants=True,
+            )
+
+    def test_direct_evidence_construction_enforces_exact_types_and_ranges(self):
+        with self.assertRaisesRegex(TypeError, "reproducible"):
+            EvaluationEvidence(
+                registered_profile_id="gate-v1",
+                profile_unchanged_after_results=True,
+                reproducible=1,
+                causal_audit_passed=True,
+                financial_invariants_passed=True,
+                trial_log_complete=True,
+                dependence_aware_lower_bound="0.02",
+                estimated_power="0.85",
+                net_advantage="0.03",
+                drawdown="0.05",
+                adverse_cost_loss="0.01",
+                retention_passed=True,
+            )
+        with self.assertRaisesRegex(ValueError, "estimated_power"):
+            EvaluationEvidence(
+                registered_profile_id="gate-v1",
+                profile_unchanged_after_results=True,
+                reproducible=True,
+                causal_audit_passed=True,
+                financial_invariants_passed=True,
+                trial_log_complete=True,
+                dependence_aware_lower_bound="0.02",
+                estimated_power="1.01",
+                net_advantage="0.03",
+                drawdown="0.05",
+                adverse_cost_loss="0.01",
+                retention_passed=True,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

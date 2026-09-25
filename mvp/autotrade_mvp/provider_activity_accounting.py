@@ -12,6 +12,7 @@ closed.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
@@ -27,6 +28,7 @@ from .accounting import (
     book_external_cash_flow,
     canonical_transaction,
 )
+from .durable_reservations import DurableReservationBook
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reconciliation import ProviderActivityEvidence
 
@@ -210,6 +212,19 @@ def _economic_batch_digest(
     return payload_digest(material)
 
 
+@dataclass(frozen=True)
+class PreparedEconomicBatch:
+    """One canonical economic batch prepared from a single durable journal cut."""
+
+    transactions: tuple[JournalTransaction, ...]
+    batch_digest: str
+    envelope: dict[str, Any] | None
+    request: dict[str, Any]
+    result: dict[str, Any]
+    aggregate_version: int
+    already_committed: bool = False
+
+
 class DurableProviderEconomicBook(ScopedEconomicBook):
     """JournalStore-backed provider/account economic book.
 
@@ -316,10 +331,20 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         candidate = self._replay(self._events())
         self._book = candidate._book
 
-    def append(self, transaction: JournalTransaction) -> bool:
-        return self.append_batch((transaction,))
+    def prepare_batch_mutation(
+        self,
+        transactions: Iterable[JournalTransaction],
+        *,
+        committed_at: str | None = None,
+    ) -> PreparedEconomicBatch:
+        """Prepare one economic batch without mutating durable state.
 
-    def append_batch(self, transactions: Iterable[JournalTransaction]) -> bool:
+        The plan is derived from exactly one economic-book journal cut. A
+        caller may combine its event with other aggregate events in one
+        JournalStore.commit_command transaction; aggregate-version fencing then
+        rejects any concurrent economic writer before any member is committed.
+        """
+
         batch = tuple(
             _transaction_from_payload(_transaction_payload(item))
             for item in transactions
@@ -327,16 +352,14 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         if not batch:
             raise ValueError("atomic transaction batch must not be empty")
 
-        self._reload()
+        events = self._events()
+        current = self._replay(events)
         candidate = ScopedEconomicBook(
             environment=self.environment,
             account_id=self.account_id,
-            transactions=self.transactions,
+            transactions=current.transactions,
         )
         inserted_locally = candidate.append_batch(batch)
-        if not inserted_locally:
-            return False
-
         transaction_payloads = [_transaction_payload(item) for item in batch]
         batch_digest = _economic_batch_digest(
             provider_id=self.provider_id,
@@ -344,13 +367,62 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             environment=self.environment,
             transactions=batch,
         )
-        previous_digest = self.audit_digest()
+        request = {
+            "schema_version": "1.0.0",
+            "provider_id": self.provider_id,
+            "account_id": self.account_id,
+            "environment": self.environment,
+            "batch_digest": batch_digest,
+            "transactions": transaction_payloads,
+        }
+
+        if not inserted_locally:
+            matching_batches = [
+                event
+                for event in events
+                if event.get("event_type") == self._BATCH_EVENT
+                and isinstance(event.get("payload"), Mapping)
+                and event["payload"].get("batch_digest") == batch_digest
+                and event["payload"].get("transactions") == transaction_payloads
+            ]
+            matching_single = []
+            if len(batch) == 1:
+                matching_single = [
+                    event
+                    for event in events
+                    if event.get("event_type") == self._SINGLE_EVENT
+                    and isinstance(event.get("payload"), Mapping)
+                    and event["payload"].get("transaction") == transaction_payloads[0]
+                ]
+            matches = matching_batches + matching_single
+            if len(matches) != 1:
+                raise AccountingConflict(
+                    "economic transactions already exist without one canonical durable batch"
+                )
+            result = {
+                "batch_digest": batch_digest,
+                "transaction_ids": [item.transaction_id for item in batch],
+                "resulting_book_digest": current.audit_digest(),
+            }
+            return PreparedEconomicBatch(
+                transactions=batch,
+                batch_digest=batch_digest,
+                envelope=None,
+                request=request,
+                result=result,
+                aggregate_version=int(matches[0]["aggregate_version"]),
+                already_committed=True,
+            )
+
+        previous_digest = current.audit_digest()
         resulting_digest = candidate.audit_digest()
-        next_version = self.store.next_aggregate_version(
-            "economic_book", self.book_id
+        next_version = (
+            1 if not events else int(events[-1]["aggregate_version"]) + 1
         )
-        committed_at = datetime.now(timezone.utc).isoformat().replace(
-            "+00:00", "Z"
+        when = (
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            if committed_at is None
+            else _instant_text(committed_at, name="committed_at")
         )
         event_identity = str(
             uuid5(
@@ -381,10 +453,40 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             "aggregate_type": "economic_book",
             "aggregate_id": self.book_id,
             "aggregate_version": str(next_version),
-            "committed_at": committed_at,
+            "committed_at": when,
             "payload": payload,
             "payload_hash": payload_digest(payload),
         }
+        result = {
+            "batch_digest": batch_digest,
+            "transaction_ids": [item.transaction_id for item in batch],
+            "resulting_book_digest": resulting_digest,
+        }
+        return PreparedEconomicBatch(
+            transactions=batch,
+            batch_digest=batch_digest,
+            envelope=envelope,
+            request=request,
+            result=result,
+            aggregate_version=next_version,
+        )
+
+    def refresh(self) -> None:
+        """Reload the economic projection after an external atomic commit."""
+
+        self._reload()
+
+    def append(self, transaction: JournalTransaction) -> bool:
+        return self.append_batch((transaction,))
+
+    def append_batch(self, transactions: Iterable[JournalTransaction]) -> bool:
+        plan = self.prepare_batch_mutation(transactions)
+        if plan.already_committed:
+            self._reload()
+            return False
+        if plan.envelope is None:
+            raise AccountingConflict("fresh economic batch is missing its durable event")
+
         command_identity = str(
             uuid5(
                 NAMESPACE_URL,
@@ -394,39 +496,169 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                     self.provider_id,
                     self.account_id,
                     self.environment,
-                    batch_digest,
+                    plan.batch_digest,
                 ),
             )
         )
-        request = {
-            "schema_version": "1.0.0",
-            "provider_id": self.provider_id,
-            "account_id": self.account_id,
-            "environment": self.environment,
-            "batch_digest": batch_digest,
-            "transactions": transaction_payloads,
-        }
-        result = {
-            "batch_digest": batch_digest,
-            "transaction_ids": [item.transaction_id for item in batch],
-            "resulting_book_digest": resulting_digest,
-        }
         try:
             _, inserted, _ = self.store.commit_command(
                 command_id=command_identity,
                 actor=self._ACTOR,
                 environment=self.environment,
-                idempotency_key=f"economic-batch:{self.book_id}:{batch_digest}",
-                request=request,
-                result=result,
-                state_version=next_version,
-                events=[(envelope, "autotrade.economic.events")],
+                idempotency_key=f"economic-batch:{self.book_id}:{plan.batch_digest}",
+                request=plan.request,
+                result=plan.result,
+                state_version=plan.aggregate_version,
+                events=[(plan.envelope, "autotrade.economic.events")],
             )
         except Exception:
             self._reload()
             raise
         self._reload()
         return inserted
+
+
+def commit_economic_batch_with_reservation_consumption(
+    economic_book: DurableProviderEconomicBook,
+    reservation_book: DurableReservationBook,
+    *,
+    command_id: str,
+    idempotency_key: str,
+    reservation_id: str,
+    usage: Mapping[str, object],
+    transactions: Iterable[JournalTransaction],
+    committed_at: str | None = None,
+) -> bool:
+    """Atomically commit canonical economics and reservation consumption.
+
+    This function is an integration barrier, not a new finance authority.
+    Reservation semantics remain owned by DurableReservationBook and economic
+    semantics remain owned by DurableProviderEconomicBook. Both prepared
+    events are inserted by one SQLite transaction, so a crash cannot make a
+    fill durable in only one of those projections.
+
+    The caller remains responsible for deriving the exact usage map from
+    independently validated provider/order evidence. This barrier guarantees
+    persistence atomicity and replay identity; it does not invent that mapping.
+    """
+
+    if not isinstance(economic_book, DurableProviderEconomicBook):
+        raise TypeError("economic_book must be DurableProviderEconomicBook")
+    if not isinstance(reservation_book, DurableReservationBook):
+        raise TypeError("reservation_book must be DurableReservationBook")
+    if economic_book.store is not reservation_book.store:
+        raise ValueError("economic and reservation books must share one JournalStore")
+    if (
+        economic_book.environment != reservation_book.environment
+        or economic_book.account_id != reservation_book.account_id
+    ):
+        raise ValueError(
+            "economic and reservation books must share account/environment scope"
+        )
+
+    cid = _text(command_id, name="command_id")
+    idem = _text(idempotency_key, name="idempotency_key")
+    rid = _text(reservation_id, name="reservation_id")
+    when = (
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        if committed_at is None
+        else _instant_text(committed_at, name="committed_at")
+    )
+    reservation_component_key = _scoped_identity(
+        "atomic-fill-reservation",
+        economic_book.provider_id,
+        economic_book.account_id,
+        economic_book.environment,
+        idem,
+    )
+    reservation_plan = reservation_book.prepare_consume_mutation(
+        event_key=_scoped_identity(
+            "atomic-fill-reservation-event",
+            economic_book.provider_id,
+            economic_book.account_id,
+            economic_book.environment,
+            cid,
+        ),
+        idempotency_key=reservation_component_key,
+        reservation_id=rid,
+        usage=usage,
+        committed_at=when,
+    )
+    economic_plan = economic_book.prepare_batch_mutation(
+        transactions,
+        committed_at=when,
+    )
+
+    if reservation_plan.already_committed != economic_plan.already_committed:
+        reservation_book.refresh()
+        economic_book.refresh()
+        raise AccountingConflict(
+            "reservation/economic fill state is only partially committed"
+        )
+    if reservation_plan.already_committed:
+        reservation_book.refresh()
+        economic_book.refresh()
+        return False
+    if reservation_plan.envelope is None or economic_plan.envelope is None:
+        raise AccountingConflict("fresh atomic fill plan is missing durable events")
+
+    request = {
+        "schema_version": "1.0.0",
+        "provider_id": economic_book.provider_id,
+        "account_id": economic_book.account_id,
+        "environment": economic_book.environment,
+        "reservation": reservation_plan.request,
+        "economic_batch": economic_plan.request,
+    }
+    result = {
+        "reservation": reservation_plan.snapshot_payload,
+        "economic_batch": economic_plan.result,
+    }
+    command_identity = str(
+        uuid5(
+            NAMESPACE_URL,
+            "https://commands.autotrade.local/atomic-fill/"
+            + _scoped_identity(
+                "atomic-fill-command",
+                economic_book.provider_id,
+                economic_book.account_id,
+                economic_book.environment,
+                cid,
+            ),
+        )
+    )
+    journal_idempotency_key = "atomic-fill:" + _scoped_identity(
+        "atomic-fill-idempotency",
+        economic_book.provider_id,
+        economic_book.account_id,
+        economic_book.environment,
+        idem,
+    )
+    try:
+        _, inserted, _ = economic_book.store.commit_command(
+            command_id=command_identity,
+            actor="atomic-fill-financial-integration",
+            environment=economic_book.environment,
+            idempotency_key=journal_idempotency_key,
+            request=request,
+            result=result,
+            state_version=max(
+                reservation_plan.aggregate_version,
+                economic_plan.aggregate_version,
+            ),
+            events=[
+                (reservation_plan.envelope, None),
+                (economic_plan.envelope, "autotrade.economic.events"),
+            ],
+        )
+    except Exception:
+        reservation_book.refresh()
+        economic_book.refresh()
+        raise
+
+    reservation_book.refresh()
+    economic_book.refresh()
+    return inserted
 
 
 def book_external_provider_cash_activity(

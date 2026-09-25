@@ -136,6 +136,24 @@ class OrderProjectionTests(unittest.TestCase):
         self.assertEqual(snap.filled_quantity, Decimal("2"))
         self.assertEqual(snap.open_quantity, Decimal("3"))
 
+    def test_full_fill_then_late_cancel_confirmation_remains_explicit_full_fill(self):
+        item = order(requested_quantity="1")
+        item.record_fill(
+            fill_id="full-before-cancel",
+            provider_execution_id="exec-full-before-cancel",
+            quantity="1",
+            price="10",
+        )
+        self.assertEqual(item.state, "FILLED")
+
+        item.confirm_cancel()
+
+        snapshot = item.snapshot()
+        self.assertEqual(snapshot.state, "FILLED_AFTER_CANCEL")
+        self.assertEqual(snapshot.filled_quantity, Decimal("1"))
+        self.assertEqual(snapshot.open_quantity, Decimal("0"))
+        self.assertTrue(snapshot.cancel_confirmed)
+
     def test_overfill_after_cancel_is_not_hidden_as_partial_cancel(self):
         item = order(requested_quantity="1")
         item.cancel()

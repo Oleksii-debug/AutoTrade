@@ -53,7 +53,11 @@ def _decimal(value, name: str, *, non_negative: bool = False) -> Decimal:
 
 
 def _utc(value: datetime, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
         raise ProviderCoreError(f"{name} must be timezone-aware")
     return value.astimezone(timezone.utc)
 
@@ -273,6 +277,28 @@ class WriteOutcome:
     status: Literal["NOT_SENT", "ACKNOWLEDGED", "REJECTED", "UNKNOWN"]
     retry_same_economic_action: bool
     reconciliation_required: bool
+
+    def __post_init__(self) -> None:
+        if self.status not in {"NOT_SENT", "ACKNOWLEDGED", "REJECTED", "UNKNOWN"}:
+            raise ProviderCoreError("unsupported write outcome status")
+        if type(self.retry_same_economic_action) is not bool:
+            raise ProviderCoreError("retry_same_economic_action must be boolean")
+        if type(self.reconciliation_required) is not bool:
+            raise ProviderCoreError("reconciliation_required must be boolean")
+        expected = {
+            "NOT_SENT": (True, False),
+            "ACKNOWLEDGED": (False, False),
+            "REJECTED": (False, False),
+            "UNKNOWN": (False, True),
+        }[self.status]
+        actual = (
+            self.retry_same_economic_action,
+            self.reconciliation_required,
+        )
+        if actual != expected:
+            raise ProviderCoreError(
+                "write outcome flags contradict the canonical send-state invariant"
+            )
 
 
 def classify_write_outcome(

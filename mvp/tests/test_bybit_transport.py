@@ -171,6 +171,38 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
         self.assertEqual(signed.headers["X-BAPI-TIMESTAMP"], "1700000000000")
         self.assertEqual(signed.headers["X-BAPI-RECV-WINDOW"], "5000")
 
+    def test_read_provider_environment_credential_scope_cannot_cross_testnet_and_demo(self):
+        capability = read_capability(
+            family="SPOT",
+            account_id="paper-1",
+            environment="PAPER",
+        )
+        events = []
+        registry = RecordingCapabilityRegistry(events)
+        registry.add(capability)
+        wire = RecordingWire(events)
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "READ credential handle provider environment mismatch",
+        ):
+            BybitV5AuthenticatedReadTransport(
+                policy=BYBIT_V5_ENDPOINT_POLICIES["DEMO"],
+                provider_environment="DEMO",
+                account_id="paper-1",
+                capability_snapshot_id=capability.snapshot_id,
+                capability_registry=registry,
+                secret_resolver=FakeSecretResolver(events),
+                credential_handle=read_handle(provider_environment="TESTNET"),
+                session_token="session-read",
+                origin="https://localhost",
+                execution_identity="host-owner",
+                clock_millis=lambda: 1700000000000,
+                clock_utc=lambda: READ_AT,
+                wire_client=wire,
+            )
+        self.assertEqual(events, [])
+        self.assertEqual(wire.requests, [])
+
     def test_execution_read_revalidates_capability_and_returns_bound_observation(self):
         capability, binding = self.binding()
         events = []

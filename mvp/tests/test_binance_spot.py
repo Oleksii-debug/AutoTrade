@@ -29,7 +29,7 @@ def capability(*, order_types=("LIMIT", "MARKET"), tif=("GTC", "IOC", "FOK", "NO
         provider_id="BINANCE",
         account_id="account-1",
         entity_id="global",
-        environment="TEST",
+        environment="PAPER",
         instrument_version="BTCUSDT:v1",
         observed_at=NOW - timedelta(hours=1),
         expires_at=NOW + timedelta(hours=1),

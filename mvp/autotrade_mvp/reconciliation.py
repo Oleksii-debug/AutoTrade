@@ -8,6 +8,8 @@ from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
+from .securities_borrow import BorrowAvailabilityEvidence
+
 
 _REQUIRED_ABSENCE_SURFACES = frozenset(
     {"OPEN_ORDERS", "ORDER_HISTORY", "EXECUTIONS", "ACTIVITIES"}
@@ -184,6 +186,7 @@ class ResourceAvailabilityEvidence:
     available_resources: Mapping[str, Decimal]
     provider_as_of: str | None = None
     evidence_refs: tuple[str, ...] = ()
+    resource_details: Mapping[str, Mapping[str, str]] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -227,6 +230,82 @@ class ResourceAvailabilityEvidence:
             "available_resources",
             MappingProxyType(dict(sorted(normalized.items()))),
         )
+
+        raw_details = {} if self.resource_details is None else self.resource_details
+        if not isinstance(raw_details, Mapping):
+            raise TypeError("resource_details must be a mapping")
+        normalized_details: dict[str, Mapping[str, str]] = {}
+        for raw_resource, raw_detail in raw_details.items():
+            resource = _text(raw_resource, name="resource_details key")
+            if resource not in normalized:
+                raise ValueError(
+                    "resource_details may only describe available_resources"
+                )
+            if not isinstance(raw_detail, Mapping):
+                raise TypeError("resource detail must be a mapping")
+            detail: dict[str, str] = {}
+            for raw_key, raw_value in raw_detail.items():
+                key = _text(raw_key, name="resource detail key")
+                if not isinstance(raw_value, str):
+                    raise TypeError("resource detail values must be strings")
+                if key in detail:
+                    raise ValueError(
+                        "resource detail keys must be unique after normalization"
+                    )
+                detail[key] = raw_value
+
+            if resource.startswith("BORROW:"):
+                borrow = BorrowAvailabilityEvidence.from_resource_detail(detail)
+                if borrow.resource_key != resource:
+                    raise ValueError(
+                        "borrow resource identity does not match evidence scope"
+                    )
+                if (
+                    borrow.provider_id != self.provider_id
+                    or borrow.account_id != self.account_id
+                    or borrow.environment != self.environment
+                ):
+                    raise ValueError("borrow availability scope mismatch")
+                if borrow.capacity_quantity != normalized[resource]:
+                    raise ValueError(
+                        "borrow capacity differs from available resource amount"
+                    )
+                observed = _instant(
+                    borrow.observed_at,
+                    name="borrow_availability.observed_at",
+                )
+                expires = _instant(
+                    borrow.expires_at,
+                    name="borrow_availability.expires_at",
+                )
+                if observed < started or observed > completed:
+                    raise ValueError(
+                        "borrow availability observation is outside snapshot cut"
+                    )
+                if valid > expires:
+                    raise ValueError(
+                        "resource availability outlives borrow evidence"
+                    )
+            normalized_details[resource] = MappingProxyType(
+                dict(sorted(detail.items()))
+            )
+
+        missing_borrow_details = [
+            resource
+            for resource in normalized
+            if resource.startswith("BORROW:")
+            and resource not in normalized_details
+        ]
+        if missing_borrow_details:
+            raise ValueError(
+                "BORROW resources require typed securities-borrow evidence"
+            )
+        object.__setattr__(
+            self,
+            "resource_details",
+            MappingProxyType(dict(sorted(normalized_details.items()))),
+        )
+
         refs: list[str] = []
         for reference in self.evidence_refs:
             ref = _text(reference, name="evidence_ref")

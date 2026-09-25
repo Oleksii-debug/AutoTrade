@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 
 class ReplayError(ValueError):
@@ -107,6 +107,38 @@ def _build_sha(value: str) -> str:
     ):
         raise ReplayError("build_sha must be a canonical lowercase Git object hash")
     return value
+
+
+RuntimeComponentResolver = Callable[[str], str]
+
+
+def _resolve_runtime_components(
+    resolver: RuntimeComponentResolver,
+    *,
+    component_names: Iterable[str] = REQUIRED_RUNTIME_COMPONENTS,
+) -> Mapping[str, str]:
+    """Read the current state cut from canonical component authorities.
+
+    The resolver is a composition-level authority: callers cannot prove resume
+    equivalence by replaying checkpoint-owned digests back into this function.
+    """
+    if not callable(resolver):
+        raise TypeError("runtime component resolver must be callable")
+    names = tuple(sorted(component_names))
+    if not names:
+        raise ReplayError("runtime component resolver requires component names")
+    resolved: dict[str, str] = {}
+    for name in names:
+        if not isinstance(name, str) or not name.strip() or name != name.strip():
+            raise ReplayError("runtime component names must be canonical text")
+        try:
+            digest = resolver(name)
+        except Exception as error:
+            raise ReplayError(
+                f"runtime component authority failed for {name}"
+            ) from error
+        resolved[name] = digest
+    return _component_bindings(resolved)
 
 
 def _component_bindings(
@@ -333,15 +365,16 @@ class CausalReplay:
     def composite_checkpoint(
         self,
         *,
-        runtime_components: Mapping[str, str],
+        runtime_component_resolver: RuntimeComponentResolver,
         build_sha: str,
         protocol_ref: str,
     ) -> CompositeReplayCheckpoint:
-        """Bind this source cursor to the exact externally owned runtime cut."""
+        """Bind this source cursor to a freshly read authoritative runtime cut."""
 
+        components = _resolve_runtime_components(runtime_component_resolver)
         return CompositeReplayCheckpoint(
             replay=self.checkpoint(),
-            runtime_components=runtime_components,
+            runtime_components=components,
             build_sha=build_sha,
             protocol_ref=protocol_ref,
         )
@@ -352,17 +385,26 @@ def resume_from_composite_checkpoint(
     *,
     start_at: str,
     checkpoint: CompositeReplayCheckpoint,
-    runtime_components: Mapping[str, str],
+    runtime_component_resolver: RuntimeComponentResolver,
     build_sha: str,
     protocol_ref: str,
 ) -> CausalReplay:
-    """Validate the whole runtime cut before exposing the next source event."""
+    """Validate authoritative runtime state before exposing the next source event.
+
+    Component values are re-read from their owning authorities. A caller-supplied
+    digest mapping is intentionally not accepted because it could simply echo the
+    checkpoint and bypass validation of the live resume state.
+    """
 
     if not isinstance(checkpoint, CompositeReplayCheckpoint):
         raise TypeError("checkpoint must be CompositeReplayCheckpoint")
+    components = _resolve_runtime_components(
+        runtime_component_resolver,
+        component_names=checkpoint.runtime_components.keys(),
+    )
     current = CompositeReplayCheckpoint(
         replay=checkpoint.replay,
-        runtime_components=runtime_components,
+        runtime_components=components,
         build_sha=build_sha,
         protocol_ref=protocol_ref,
     )

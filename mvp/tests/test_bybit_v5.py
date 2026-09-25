@@ -103,6 +103,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             capability_at=BYBIT_NOW,
             account_id="bybit-account",
             instrument_version="BTCUSDT@1",
+            provider_environment="DEMO",
         )
         self.assertEqual(payload["category"], "linear")
         self.assertTrue(payload["reduceOnly"])
@@ -138,6 +139,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             capability_at=BYBIT_NOW,
             account_id="bybit-account",
             instrument_version="BTCUSD@1",
+            provider_environment="DEMO",
         )
         self.assertEqual(one_way["positionIdx"], 0)
 
@@ -159,6 +161,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 capability_at=BYBIT_NOW,
                 account_id="bybit-account",
                 instrument_version="BTCUSDT@1",
+                provider_environment="DEMO",
             )
 
     def test_derivative_capability_is_bound_to_account_instrument_category_and_time(self):
@@ -173,6 +176,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             time_in_force="GTC",
             capability_at=BYBIT_NOW,
             instrument_version="BTCUSDT@1",
+            provider_environment="DEMO",
         )
         with self.assertRaisesRegex(ProviderCoreError, "account"):
             build_order_payload(
@@ -240,6 +244,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                     capability_at=BYBIT_NOW,
                     account_id="bybit-account",
                     instrument_version="BTCUSDT@1",
+                    provider_environment="DEMO",
                 )
                 self.assertEqual(payload["positionIdx"], expected)
 
@@ -256,6 +261,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             capability_at=BYBIT_NOW,
             account_id="bybit-account",
             instrument_version="BTCUSDT@1",
+            provider_environment="DEMO",
         )
         with self.assertRaisesRegex(ProviderCoreError, "target position_side"):
             build_order_payload(**common, side="BUY", client_order_id="missing-leg")
@@ -279,6 +285,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 capability_at=BYBIT_NOW,
                 account_id="bybit-account",
                 instrument_version="BTCUSDT@1",
+                provider_environment="DEMO",
             )
 
     def test_unsafe_or_ambiguous_request_shapes_fail_closed(self):

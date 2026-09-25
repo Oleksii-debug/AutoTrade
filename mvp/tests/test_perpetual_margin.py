@@ -209,6 +209,33 @@ class PerpetualMarginTests(unittest.TestCase):
         with self.assertRaisesRegex(PerpetualMarginError, "capability scope mismatch"):
             evaluate(capability=capability(account_id="account-B"))
 
+    def test_capability_identity_case_is_preserved_not_reinterpreted(self):
+        lower = capability(
+            provider_id="bybit",
+            position_mode="one_way",
+        )
+        matching = evidence(
+            provider_id="bybit",
+            position_mode="one_way",
+        )
+        decision = evaluate(
+            capability=lower,
+            evidence=matching,
+        )
+        self.assertIsNotNone(decision)
+
+        with self.assertRaisesRegex(
+            PerpetualMarginError,
+            "capability scope mismatch|position mode",
+        ):
+            evaluate(
+                capability=lower,
+                evidence=evidence(
+                    provider_id="BYBIT",
+                    position_mode="ONE_WAY",
+                ),
+            )
+
     def test_paper_evidence_cannot_be_reused_for_live_scope(self):
         with self.assertRaisesRegex(PerpetualMarginError, "capability scope mismatch"):
             evaluate(capability=capability(environment="LIVE"))

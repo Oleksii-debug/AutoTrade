@@ -1034,6 +1034,7 @@ class IndependentRiskTests(unittest.TestCase):
             policy(),
             intent_hash="sha256:" + "a" * 64,
             policy_version=3,
+            reservation_version=11,
             capability_snapshot_id="capability-snapshot-17",
             evaluated_at="2026-09-24T18:00:00Z",
             valid_until="2026-09-24T18:00:30Z",
@@ -1041,6 +1042,7 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertTrue(decision.admitted)
         self.assertEqual(decision.state_version, 7)
         self.assertEqual(decision.policy_version, 3)
+        self.assertEqual(decision.reservation_version, 11)
         self.assertEqual(
             decision.decision_id,
             "risk:sha256:" + risk_decision_fingerprint(decision),
@@ -1068,6 +1070,7 @@ class IndependentRiskTests(unittest.TestCase):
                 intent_hash="h",
                 state_version=7,
                 policy_version=1,
+                reservation_version=0,
                 capability_snapshot_id="cap",
                 evaluated_at="2026-09-24T18:00:30Z",
                 valid_until="2026-09-24T18:00:30Z",
@@ -1078,6 +1081,7 @@ class IndependentRiskTests(unittest.TestCase):
                 intent_hash="h",
                 state_version=7,
                 policy_version=0,
+                reservation_version=0,
                 capability_snapshot_id="cap",
                 evaluated_at="2026-09-24T18:00:00Z",
                 valid_until="2026-09-24T18:00:30Z",

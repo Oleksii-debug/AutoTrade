@@ -872,6 +872,61 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 )
             self.assertEqual(economics.transactions, ())
 
+    def test_same_caller_idempotency_rejects_changed_fill_plan(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            first_projected = self.projected_fill(
+                quantity="0.4",
+                fill_id="fill-idempotency-1",
+                provider_execution_id="provider-execution-idempotency-1",
+            )
+            first_provider = self.provider_fill(
+                quantity="0.4",
+                provider_execution_id="provider-execution-idempotency-1",
+            )
+            self.assertTrue(
+                self.commit_evidenced_fill(
+                    economics,
+                    reservations,
+                    projected=first_projected,
+                    provider=first_provider,
+                    command_id="idempotency-command-1",
+                    idempotency_key="shared-fill-idempotency",
+                )
+            )
+
+            changed_projected = self.projected_fill(
+                quantity="0.5",
+                fill_id="fill-idempotency-2",
+                provider_execution_id="provider-execution-idempotency-2",
+            )
+            changed_provider = self.provider_fill(
+                quantity="0.5",
+                provider_execution_id="provider-execution-idempotency-2",
+            )
+            with self.assertRaisesRegex(
+                ReservationConflict,
+                "idempotency_key was already used for a different reservation request",
+            ):
+                self.commit_evidenced_fill(
+                    economics,
+                    reservations,
+                    projected=changed_projected,
+                    provider=changed_provider,
+                    command_id="idempotency-command-2",
+                    idempotency_key="shared-fill-idempotency",
+                )
+
+            snapshot = reservations.get("reservation-1")
+            self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("40.0"))
+            self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("80.0"))
+            self.assertEqual(economics.position("ABC"), Decimal("0.4"))
+            self.assertEqual(len(economics.transactions), 1)
+
     def test_exact_retry_after_restart_is_idempotent_across_both_aggregates(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

@@ -841,6 +841,24 @@ class AuthorityService:
             raise AuthorityConflict(
                 "durable admission lacks reservation availability evidence"
             )
+        borrow_resources = tuple(
+            sorted(
+                resource
+                for resource in risk_requirements
+                if resource.startswith("BORROW:")
+            )
+        )
+        if len(borrow_resources) > 1:
+            raise AuthorityConflict(
+                "one financial intent cannot bind multiple securities-borrow resources"
+            )
+        account_resources = tuple(
+            sorted(
+                resource
+                for resource in risk_requirements
+                if not resource.startswith("BORROW:")
+            )
+        )
         try:
             regenerated_availability = (
                 load_account_resource_availability_evidence(
@@ -855,26 +873,83 @@ class AuthorityService:
                     ),
                     account_id=record.account_id,
                     environment=record.environment,
-                    resources=tuple(sorted(risk_requirements)),
+                    resources=account_resources,
                     now=record.admitted_at,
                     max_age_seconds=availability_evidence.get(
                         "max_age_seconds"
                     ),
                 )
             )
+            merged_availability = dict(
+                regenerated_availability.get("availability") or {}
+            )
+            expected_availability_evidence = {
+                **regenerated_availability,
+                "availability": merged_availability,
+                "max_age_seconds": str(
+                    _decimal(
+                        availability_evidence.get("max_age_seconds"),
+                        name="reservation_max_age_seconds",
+                    )
+                ),
+            }
+            if borrow_resources:
+                borrow_snapshot = availability_evidence.get("borrow_authority")
+                if not isinstance(borrow_snapshot, Mapping):
+                    raise ValueError(
+                        "durable short admission lacks borrow authority evidence"
+                    )
+                raw_resource = borrow_snapshot.get("resource")
+                if not isinstance(raw_resource, Mapping):
+                    raise ValueError("borrow authority resource is malformed")
+                borrow_resource = BorrowResourceIdentity(
+                    provider_id=raw_resource.get("provider_id"),
+                    account_id=raw_resource.get("account_id"),
+                    environment=raw_resource.get("environment"),
+                    instrument_id=raw_resource.get("instrument_id"),
+                    instrument_version=raw_resource.get("instrument_version"),
+                )
+                borrow_key = borrow_resources[0]
+                if (
+                    borrow_resource.resource_key != borrow_key
+                    or borrow_resource.provider_id
+                    != regenerated_availability.get("provider_id")
+                    or borrow_resource.account_id != record.account_id
+                    or borrow_resource.environment != record.environment
+                    or borrow_resource.instrument_id
+                    != record.instrument_version.instrument_id
+                    or borrow_resource.instrument_version
+                    != record.instrument_version.version
+                ):
+                    raise ValueError(
+                        "borrow authority scope differs from admitted instrument/account"
+                    )
+                borrow_capacity = BorrowLifecycleJournal(
+                    self.store,
+                    borrow_resource,
+                ).validate_authority_snapshot(
+                    borrow_snapshot,
+                    now=record.admitted_at,
+                )
+                if set(borrow_capacity) != {borrow_key}:
+                    raise ValueError(
+                        "borrow authority capacity has unexpected resources"
+                    )
+                merged_availability.update(borrow_capacity)
+                expected_availability_evidence["availability"] = (
+                    merged_availability
+                )
+                expected_availability_evidence["borrow_authority"] = dict(
+                    borrow_snapshot
+                )
+            elif "borrow_authority" in availability_evidence:
+                raise ValueError(
+                    "non-short admission unexpectedly carries borrow authority"
+                )
         except (KeyError, TypeError, ValueError) as error:
             raise AuthorityConflict(
                 "durable reservation availability evidence is invalid"
             ) from error
-        expected_availability_evidence = {
-            **regenerated_availability,
-            "max_age_seconds": str(
-                _decimal(
-                    availability_evidence.get("max_age_seconds"),
-                    name="reservation_max_age_seconds",
-                )
-            ),
-        }
         if dict(availability_evidence) != expected_availability_evidence:
             raise AuthorityConflict(
                 "durable reservation availability evidence is inconsistent"
@@ -1991,6 +2066,7 @@ class AuthorityService:
                 record.risk_valid_until, name="risk_valid_until"
             ):
                 return False, "risk_decision_expired"
+            borrow_dispatch_fence = None
             try:
                 self._validate_durable_financial_evidence(record, policy)
                 reservation_book = DurableReservationBook(
@@ -2002,11 +2078,91 @@ class AuthorityService:
                 risk_event = self.store.load_events(
                     "risk_decision", record.risk_decision_id
                 )[0]
+                risk_payload = risk_event["payload"]
                 admission_reservation_version = (
-                    int(risk_event["payload"]["reservation_version"]) + 1
+                    int(risk_payload["reservation_version"]) + 1
                 )
+                risk_requirements = risk_payload.get(
+                    "reservation_requirements"
+                )
+                if not isinstance(risk_requirements, Mapping):
+                    raise AuthorityConflict(
+                        "durable risk reservation requirements are malformed"
+                    )
+                borrow_resources = tuple(
+                    sorted(
+                        resource
+                        for resource in risk_requirements
+                        if resource.startswith("BORROW:")
+                    )
+                )
+                if borrow_resources:
+                    if len(borrow_resources) != 1:
+                        raise AuthorityConflict(
+                            "durable admission has ambiguous borrow resources"
+                        )
+                    availability_evidence = risk_payload.get(
+                        "reservation_availability_evidence"
+                    )
+                    if not isinstance(availability_evidence, Mapping):
+                        raise AuthorityConflict(
+                            "durable admission lacks availability evidence"
+                        )
+                    borrow_snapshot = availability_evidence.get(
+                        "borrow_authority"
+                    )
+                    if not isinstance(borrow_snapshot, Mapping):
+                        raise AuthorityConflict(
+                            "durable short admission lacks borrow authority evidence"
+                        )
+                    raw_resource = borrow_snapshot.get("resource")
+                    if not isinstance(raw_resource, Mapping):
+                        raise AuthorityConflict(
+                            "borrow authority resource is malformed"
+                        )
+                    borrow_resource = BorrowResourceIdentity(
+                        provider_id=raw_resource.get("provider_id"),
+                        account_id=raw_resource.get("account_id"),
+                        environment=raw_resource.get("environment"),
+                        instrument_id=raw_resource.get("instrument_id"),
+                        instrument_version=raw_resource.get("instrument_version"),
+                    )
+                    borrow_key = borrow_resources[0]
+                    if borrow_resource.resource_key != borrow_key:
+                        raise AuthorityConflict(
+                            "durable borrow resource identity mismatch"
+                        )
+                    borrow_dispatch_fence = (
+                        BorrowLifecycleJournal(self.store, borrow_resource),
+                        borrow_snapshot,
+                        borrow_key,
+                        risk_requirements[borrow_key],
+                    )
             except Exception:
                 return False, "financial_evidence_invalid"
+            if borrow_dispatch_fence is not None:
+                journal, snapshot, borrow_key, required_amount = (
+                    borrow_dispatch_fence
+                )
+                try:
+                    current_borrow_capacity = (
+                        journal.current_capacity_for_bound_short(
+                            snapshot,
+                            now=now,
+                        )
+                    )
+                    available_amount = _decimal(
+                        current_borrow_capacity.get(borrow_key),
+                        name="current_borrow_capacity",
+                    )
+                    required = _decimal(
+                        required_amount,
+                        name="borrow_requirement",
+                    )
+                except (KeyError, TypeError, ValueError):
+                    return False, "borrow_provider_state_changed"
+                if available_amount < required:
+                    return False, "borrow_capacity_reduced"
             if reservation.intent_id != record.intent_id:
                 return False, "reservation_intent_changed"
             if reservation.state != "WORKING":

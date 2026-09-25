@@ -354,7 +354,11 @@ def _stored_evidence_is_verified(
     store: ArtifactStore,
     artifact: ReleaseArtifactEvidence,
 ) -> bool:
-    """Resolve one exact release artifact through the trusted immutable store."""
+    """Verify exact stored bytes and declared release-evidence bindings.
+
+    ArtifactStore is a content-integrity boundary. It does not authenticate who
+    produced the evidence or who asserted PASS/VERIFIED metadata.
+    """
 
     try:
         manifest = store.load_manifest(artifact.artifact_id)
@@ -393,9 +397,10 @@ def freeze_release_candidate(
 ) -> ReleaseCandidateDecision:
     """Freeze exact accepted evidence or fail closed without an RC manifest.
 
-    PASS and VERIFIED fields are claims, not proof. The exact artifact id,
-    digest, source SHA and release-evidence metadata must resolve through the
-    configured immutable ArtifactStore before a release candidate can freeze.
+    PASS and VERIFIED fields are claims, not proof. ArtifactStore can prove
+    exact bytes and manifest bindings, but a caller can also populate that store.
+    Until a qualified authenticated/signed attestation boundary is integrated,
+    store integrity alone cannot freeze a release candidate.
     """
 
     if not isinstance(candidate, ReleaseCandidateInput):
@@ -405,7 +410,11 @@ def freeze_release_candidate(
 
     reasons: list[str] = []
     if evidence_store is None:
-        reasons.append("trusted_evidence_store_missing")
+        reasons.append("evidence_store_missing")
+    # WP-54 depends on WP-64 for supply-chain trust. A caller-provided
+    # ArtifactStore has no authenticated producer/verifier identity, so it must
+    # not convert self-published PASS/VERIFIED metadata into a frozen release.
+    reasons.append("independent_evidence_trust_unavailable")
     by_role = {artifact.role: artifact for artifact in candidate.artifacts}
 
     for role in sorted(_REQUIRED_ROLES - set(by_role)):
@@ -424,7 +433,7 @@ def freeze_release_candidate(
             and not _stored_evidence_is_verified(evidence_store, artifact)
         ):
             reasons.append(
-                f"evidence_not_independently_verified:{artifact.role}"
+                f"evidence_integrity_unverified:{artifact.role}"
             )
         if (
             artifact.role not in _SIGNED_BINARY_ROLES

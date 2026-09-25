@@ -644,31 +644,34 @@ class AuthorityService:
                         raise AuthorityConflict(
                             "durable admitted record is missing required confirmation"
                         )
-                    request_payload = {
-                        "policy_id": record.policy_id,
-                        "intent_hash": record.intent_hash,
-                        "account_id": record.account_id,
-                        "environment": record.environment,
-                        "instrument_id": record.instrument_version.instrument_id,
-                        "instrument_version": record.instrument_version.version,
-                        "action": record.action,
-                        "notional": str(record.notional),
-                        "state_version": record.state_version,
-                        "risk_admitted": True,
-                        "confirmation_id": record.confirmation_id,
-                        "risk_reducing": record.risk_reducing,
-                    }
-                    expected_fingerprint = sha256(
-                        json.dumps(
-                            request_payload,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        ).encode("utf-8")
-                    ).hexdigest()
-                    if record.request_fingerprint != expected_fingerprint:
-                        raise AuthorityConflict(
-                            "durable admitted record fingerprint is inconsistent"
-                        )
+                    if record.risk_decision_id is None:
+                        request_payload = {
+                            "policy_id": record.policy_id,
+                            "intent_hash": record.intent_hash,
+                            "account_id": record.account_id,
+                            "environment": record.environment,
+                            "instrument_id": record.instrument_version.instrument_id,
+                            "instrument_version": record.instrument_version.version,
+                            "action": record.action,
+                            "notional": str(record.notional),
+                            "state_version": record.state_version,
+                            "risk_admitted": True,
+                            "confirmation_id": record.confirmation_id,
+                            "risk_reducing": record.risk_reducing,
+                        }
+                        expected_fingerprint = sha256(
+                            json.dumps(
+                                request_payload,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode("utf-8")
+                        ).hexdigest()
+                        if record.request_fingerprint != expected_fingerprint:
+                            raise AuthorityConflict(
+                                "durable admitted record fingerprint is inconsistent"
+                            )
+                    else:
+                        self._validate_durable_financial_evidence(record, policy)
                 if record.confirmation_id is not None:
                     if record.confirmation_id not in self._confirmations:
                         raise AuthorityConflict(
@@ -705,6 +708,138 @@ class AuthorityService:
             else:
                 raise AuthorityConflict(f"unknown durable authority event: {event_type}")
             self._journal_version = event_version
+
+    def _validate_durable_financial_evidence(
+        self, record: AdmissionRecord, policy: AuthorityPolicy
+    ) -> None:
+        if self.store is None:
+            raise AuthorityConflict(
+                "durable financial evidence requires a JournalStore"
+            )
+        required = (
+            record.intent_id,
+            record.risk_decision_id,
+            record.reservation_id,
+            record.capability_snapshot_id,
+            record.risk_valid_until,
+            record.policy_version,
+            record.financial_command_id,
+        )
+        if any(value is None for value in required):
+            raise AuthorityConflict(
+                "durable admitted financial record has incomplete evidence"
+            )
+        if record.policy_version != policy.version:
+            raise AuthorityConflict(
+                "durable admitted record policy version is stale"
+            )
+
+        risk_events = self.store.load_events(
+            "risk_decision", record.risk_decision_id
+        )
+        if len(risk_events) != 1 or risk_events[0]["event_type"] != "RiskDecisionRecorded":
+            raise AuthorityConflict(
+                "durable admission references missing risk decision evidence"
+            )
+        risk_payload = risk_events[0]["payload"]
+        if not isinstance(risk_payload, dict):
+            raise AuthorityConflict("durable risk decision payload is malformed")
+        risk_digest = record.risk_decision_id.removeprefix("risk:sha256:")
+        if (
+            risk_payload.get("decision_id") != record.risk_decision_id
+            or risk_payload.get("fingerprint") != risk_digest
+            or risk_payload.get("intent_hash") != record.intent_hash
+            or risk_payload.get("state_version") != record.state_version
+            or risk_payload.get("policy_version") != record.policy_version
+            or risk_payload.get("capability_snapshot_id")
+            != record.capability_snapshot_id
+            or risk_payload.get("valid_until") != record.risk_valid_until
+            or risk_payload.get("verdict") != "ALLOW"
+        ):
+            raise AuthorityConflict(
+                "durable risk decision does not match admitted record"
+            )
+        if _instant(
+            risk_payload.get("evaluated_at"), name="risk.evaluated_at"
+        ) > _instant(record.admitted_at, name="admitted_at"):
+            raise AuthorityConflict("risk decision was evaluated after admission")
+        if _instant(record.admitted_at, name="admitted_at") >= _instant(
+            record.risk_valid_until, name="risk_valid_until"
+        ):
+            raise AuthorityConflict("risk decision was expired at admission")
+
+        reservation_book = DurableReservationBook(
+            self.store,
+            environment=record.environment,
+            account_id=record.account_id,
+        )
+        try:
+            reservation = reservation_book.get(record.reservation_id)
+        except KeyError as error:
+            raise AuthorityConflict(
+                "durable admission references missing reservation"
+            ) from error
+        if reservation.intent_id != record.intent_id:
+            raise AuthorityConflict(
+                "durable reservation intent does not match admission"
+            )
+
+        reservation_events = self.store.load_events(
+            "reservation_book", reservation_book.scope_id
+        )
+        matching_reservations = [
+            event
+            for event in reservation_events
+            if (
+                isinstance(event.get("payload"), dict)
+                and event["payload"].get("operation") == "RESERVE"
+                and isinstance(event["payload"].get("snapshot"), dict)
+                and event["payload"]["snapshot"].get("reservation_id")
+                == record.reservation_id
+            )
+        ]
+        if len(matching_reservations) != 1:
+            raise AuthorityConflict(
+                "durable admission reservation creation evidence is ambiguous"
+            )
+        reservation_event = matching_reservations[0]
+        reservation_version = risk_payload.get("reservation_version")
+        if (
+            not isinstance(reservation_version, int)
+            or isinstance(reservation_version, bool)
+            or reservation_version < 0
+            or int(reservation_event["aggregate_version"]) != reservation_version + 1
+        ):
+            raise AuthorityConflict(
+                "risk decision was not bound to the reservation journal cut"
+            )
+
+        request = {
+            "command_id": record.financial_command_id,
+            "admission_id": record.admission_id,
+            "policy_id": record.policy_id,
+            "policy_version": record.policy_version,
+            "intent_id": record.intent_id,
+            "intent_hash": record.intent_hash,
+            "account_id": record.account_id,
+            "environment": record.environment,
+            "instrument_id": record.instrument_version.instrument_id,
+            "instrument_version": record.instrument_version.version,
+            "action": record.action,
+            "notional": str(record.notional),
+            "current_state_version": record.state_version,
+            "capability_snapshot_id": record.capability_snapshot_id,
+            "risk_decision_id": record.risk_decision_id,
+            "risk_decision_fingerprint": risk_payload.get("fingerprint"),
+            "reservation_id": record.reservation_id,
+            "reservation": reservation_event["payload"].get("request"),
+            "confirmation_id": record.confirmation_id,
+            "risk_reducing": record.risk_reducing,
+        }
+        if payload_digest(request) != record.request_fingerprint:
+            raise AuthorityConflict(
+                "durable financial admission request fingerprint is inconsistent"
+            )
 
     @property
     def epoch(self) -> int:

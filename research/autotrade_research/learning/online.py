@@ -41,7 +41,11 @@ def _non_negative(value, *, name: str) -> Decimal:
 
 
 def _utc(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
         raise ValueError(f"{name} must be timezone-aware")
     return value.astimezone(timezone.utc)
 
@@ -138,6 +142,9 @@ class OnlineUpdateInput:
     current_parameters: Mapping[str, Decimal]
     proposed_parameters: Mapping[str, Decimal]
     label_version: str
+    label_available_at: datetime
+    outcome_horizon_at: datetime
+    execution_reconciled_at: datetime
     observed_at: datetime
     last_update_at: datetime | None
     updates_in_window: int
@@ -153,6 +160,9 @@ class OnlineUpdateInput:
         current_parameters,
         proposed_parameters,
         label_version: str,
+        label_available_at: datetime,
+        outcome_horizon_at: datetime,
+        execution_reconciled_at: datetime,
         observed_at: datetime,
         last_update_at: datetime | None,
         updates_in_window: int,
@@ -178,13 +188,40 @@ class OnlineUpdateInput:
             for key, value in proposed_parameters.items()
         }
         observed = _utc(observed_at, name="observed_at")
-        previous = None if last_update_at is None else _utc(last_update_at, name="last_update_at")
+        label_available = _utc(
+            label_available_at,
+            name="label_available_at",
+        )
+        outcome_horizon = _utc(
+            outcome_horizon_at,
+            name="outcome_horizon_at",
+        )
+        execution_reconciled = _utc(
+            execution_reconciled_at,
+            name="execution_reconciled_at",
+        )
+        previous = (
+            None
+            if last_update_at is None
+            else _utc(last_update_at, name="last_update_at")
+        )
         if previous is not None and previous > observed:
             raise ValueError("last_update_at cannot be after observed_at")
+        if label_available > observed:
+            raise ValueError("label cannot be available after observed_at")
+        if label_available < outcome_horizon:
+            raise ValueError("label cannot mature before the outcome horizon")
+        if label_available < execution_reconciled:
+            raise ValueError(
+                "label cannot mature before execution reconciliation"
+            )
         return cls(
             current_parameters=current,
             proposed_parameters=proposed,
             label_version=_text(label_version, name="label_version"),
+            label_available_at=label_available,
+            outcome_horizon_at=outcome_horizon,
+            execution_reconciled_at=execution_reconciled,
             observed_at=observed,
             last_update_at=previous,
             updates_in_window=updates_in_window,
@@ -279,6 +316,9 @@ def evaluate_online_update(
             "max_compute_units_per_update": str(envelope.max_compute_units_per_update),
             "max_drift_score": str(envelope.max_drift_score),
             "label_version": update.label_version,
+            "label_available_at": update.label_available_at.isoformat(),
+            "outcome_horizon_at": update.outcome_horizon_at.isoformat(),
+            "execution_reconciled_at": update.execution_reconciled_at.isoformat(),
             "observed_at": update.observed_at.isoformat(),
             "last_update_at": None if update.last_update_at is None else update.last_update_at.isoformat(),
             "updates_in_window": update.updates_in_window,

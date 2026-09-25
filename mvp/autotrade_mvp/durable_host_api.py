@@ -151,6 +151,11 @@ class JournalBackedHostCommandStore:
         idempotency_key = self._required_text(command, "idempotency_key")
         actor = self._required_text(command, "actor")
         session = self._required_text(command, "session")
+        environment = self._required_text(command, "environment").upper()
+        if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+            raise ValueError(
+                "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
+            )
         action = self._required_text(command, "action")
         expected_raw = self._required_text(command, "expected_state_version")
         if "payload" not in command or not isinstance(command["payload"], dict):
@@ -172,6 +177,8 @@ class JournalBackedHostCommandStore:
             try:
                 stored, _ = self._journal.record_command(
                     command_id=command_id,
+                    actor=actor,
+                    environment=environment,
                     idempotency_key=idempotency_key,
                     request=dict(command),
                     result=self._result_dict(conflict),
@@ -220,6 +227,8 @@ class JournalBackedHostCommandStore:
         try:
             stored, inserted, _ = self._journal.commit_command(
                 command_id=command_id,
+                actor=actor,
+                environment=environment,
                 idempotency_key=idempotency_key,
                 request=dict(command),
                 result=self._result_dict(result),

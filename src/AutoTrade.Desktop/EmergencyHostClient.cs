@@ -61,13 +61,20 @@ public sealed record EmergencyHostStatus(
 
     private static void ValidateStateVersion(string value)
     {
-        bool canonical =
-            value == "0"
-            || (
-                value.Length > 0
-                && value[0] is >= '1' and <= '9'
-                && value.All(static character => character is >= '0' and <= '9')
-            );
+        bool canonical = value == "0";
+        if (!canonical && value.Length > 0 && value[0] is >= '1' and <= '9')
+        {
+            canonical = true;
+            foreach (char character in value)
+            {
+                if (character is < '0' or > '9')
+                {
+                    canonical = false;
+                    break;
+                }
+            }
+        }
+
         if (!canonical)
         {
             throw new InvalidOperationException(

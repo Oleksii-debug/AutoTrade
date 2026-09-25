@@ -313,7 +313,18 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(saved, result)
             self.assertEqual([item.event_id for item in appended], ["evt-1", "evt-2"])
             self.assertEqual(len(store.load_events("account", "paper-1")), 2)
-            self.assertEqual(len(store.pending_outbox()), 1)
+            pending = store.pending_outbox()
+            self.assertEqual(len(pending), 1)
+            connection = sqlite3.connect(path)
+            try:
+                envelope_hash = connection.execute(
+                    "SELECT envelope_hash FROM outbox WHERE event_id = ?",
+                    ("evt-1",),
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertIsNotNone(envelope_hash)
+            self.assertTrue(str(envelope_hash).startswith("sha256:"))
 
             replayed, inserted, appended = store.commit_command(
                 actor="alice",

@@ -438,7 +438,9 @@ class BinanceSpotSymbolRules:
         self,
         intent: BinanceSpotOrderIntent,
         *,
-        market_reference_price=None,
+        at: datetime,
+        market_reference: BinanceSpotReferencePrice | None = None,
+        maximum_market_reference_age_seconds: int | None = None,
     ) -> None:
         if self.instrument_version != intent.instrument_version:
             raise BinanceSpotAdapterError(
@@ -478,15 +480,36 @@ class BinanceSpotSymbolRules:
             self.min_notional_applies_to_market
             or self.max_notional_applies_to_market
         ):
-            if market_reference_price is None:
+            if not isinstance(market_reference, BinanceSpotReferencePrice):
                 raise BinanceSpotAdapterError(
-                    "market notional filter requires causal reference price"
+                    "market notional filter requires provider reference-price evidence"
                 )
-            effective_price = _decimal(
-                market_reference_price,
-                name="market_reference_price",
-                positive=True,
-            )
+            if market_reference.instrument_version != intent.instrument_version:
+                raise BinanceSpotAdapterError(
+                    "reference-price instrument version does not match intent"
+                )
+            if market_reference.symbol != intent.symbol:
+                raise BinanceSpotAdapterError(
+                    "reference-price symbol does not match intent"
+                )
+            if (
+                isinstance(maximum_market_reference_age_seconds, bool)
+                or not isinstance(maximum_market_reference_age_seconds, int)
+                or maximum_market_reference_age_seconds < 0
+            ):
+                raise BinanceSpotAdapterError(
+                    "maximum_market_reference_age_seconds must be a non-negative integer"
+                )
+            point = _utc(at, name="at")
+            if market_reference.observed_at > point:
+                raise BinanceSpotAdapterError(
+                    "reference-price evidence is from the future"
+                )
+            if point - market_reference.observed_at > timedelta(
+                seconds=maximum_market_reference_age_seconds
+            ):
+                raise BinanceSpotAdapterError("reference-price evidence is stale")
+            effective_price = market_reference.price
 
         if effective_price is not None:
             notional = intent.quantity * effective_price
@@ -506,6 +529,7 @@ class BinanceSpotPreparedRequest:
     body: Mapping[str, str]
     capability_snapshot_id: str
     filter_source_sha256: str
+    market_reference_source_sha256: str | None = None
 
     def __post_init__(self) -> None:
         digest = _text(self.filter_source_sha256, name="filter_source_sha256")
@@ -517,8 +541,27 @@ class BinanceSpotPreparedRequest:
             raise BinanceSpotAdapterError(
                 "filter_source_sha256 must be canonical lowercase SHA-256"
             )
+        reference_digest = self.market_reference_source_sha256
+        if reference_digest is not None:
+            reference_digest = _text(
+                reference_digest,
+                name="market_reference_source_sha256",
+            )
+            if (
+                len(reference_digest) != 71
+                or not reference_digest.startswith("sha256:")
+                or any(ch not in "0123456789abcdef" for ch in reference_digest[7:])
+            ):
+                raise BinanceSpotAdapterError(
+                    "market_reference_source_sha256 must be canonical lowercase SHA-256"
+                )
         object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
         object.__setattr__(self, "filter_source_sha256", digest)
+        object.__setattr__(
+            self,
+            "market_reference_source_sha256",
+            reference_digest,
+        )
 
 
 def prepare_order_request(
@@ -528,7 +571,8 @@ def prepare_order_request(
     capability: CapabilitySnapshot,
     symbol_rules: BinanceSpotSymbolRules,
     at: datetime,
-    market_reference_price=None,
+    market_reference: BinanceSpotReferencePrice | None = None,
+    maximum_market_reference_age_seconds: int | None = None,
 ) -> BinanceSpotPreparedRequest:
     """Prepare but never sign/send a Spot order.
 
@@ -558,7 +602,9 @@ def prepare_order_request(
 
     symbol_rules.validate(
         intent,
-        market_reference_price=market_reference_price,
+        at=point,
+        market_reference=market_reference,
+        maximum_market_reference_age_seconds=maximum_market_reference_age_seconds,
     )
 
     body: dict[str, str] = {
@@ -581,6 +627,9 @@ def prepare_order_request(
         body=body,
         capability_snapshot_id=capability.snapshot_id,
         filter_source_sha256=symbol_rules.source_sha256,
+        market_reference_source_sha256=(
+            None if market_reference is None else market_reference.source_sha256
+        ),
     )
 
 

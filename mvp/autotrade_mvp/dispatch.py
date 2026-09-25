@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
+import json
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5, uuid4
@@ -279,8 +280,9 @@ class GuardedDispatcher:
         if not isinstance(request, Mapping):
             raise TypeError("request must be a mapping")
         _instant(now)
-        request_dict = dict(request)
-        request_hash = "sha256:" + sha256(canonical_json(request_dict).encode("utf-8")).hexdigest()
+        request_canonical = canonical_json(dict(request))
+        request_dict = json.loads(request_canonical)
+        request_hash = "sha256:" + sha256(request_canonical.encode("utf-8")).hexdigest()
         client_order_id = stable_client_order_id(
             provider,
             intent_id,
@@ -353,6 +355,21 @@ class GuardedDispatcher:
             if guard_called:
                 raise RuntimeError("final send guard may be consumed only once")
             guard_called = True
+            current_request_hash = "sha256:" + sha256(
+                canonical_json(request_dict).encode("utf-8")
+            ).hexdigest()
+            if current_request_hash != request_hash:
+                self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionBlocked",
+                    version=2,
+                    payload={
+                        "client_order_id": client_order_id,
+                        "reason": "request_changed_before_final_barrier",
+                    },
+                    now=now,
+                )
+                raise DispatchBlocked("request_changed_before_final_barrier")
             if final_barrier_clock is not None:
                 barrier_now = final_barrier_clock()
                 _instant(barrier_now)

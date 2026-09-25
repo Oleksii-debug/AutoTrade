@@ -26,6 +26,9 @@ def instrument(
     version=1,
     symbol="AAA",
     effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    contract_multiplier=Decimal("1"),
+    settlement_currency="USD",
+    quantity_unit="AAA",
 ):
     return InstrumentVersion(
         instrument_id=instrument_id,
@@ -36,9 +39,9 @@ def instrument(
         asset_class="CASH_EQUITY",
         base_currency="AAA",
         quote_currency="USD",
-        settlement_currency="USD",
-        quantity_unit="AAA",
-        contract_multiplier=Decimal("1"),
+        settlement_currency=settlement_currency,
+        quantity_unit=quantity_unit,
+        contract_multiplier=contract_multiplier,
         price_tick=Decimal("0.01"),
         quantity_step=Decimal("1"),
         minimum_quantity=Decimal("1"),
@@ -402,6 +405,37 @@ class CorporateSettlementTests(unittest.TestCase):
         self.assertEqual(result.after.unsettled_cash, before.unsettled_cash)
         self.assertEqual(book.instrument_version, second)
         self.assertEqual(book.apply(event), result)
+
+    def test_symbol_change_rejects_economic_identity_drift_before_mutation(self):
+        first = instrument()
+        cases = (
+            ("contract_multiplier", {"contract_multiplier": Decimal("2")}),
+            ("settlement_currency", {"settlement_currency": "EUR"}),
+            ("quantity_unit", {"quantity_unit": "BBB"}),
+        )
+        for field, overrides in cases:
+            with self.subTest(field=field):
+                second = instrument(
+                    version=2,
+                    symbol="BBB",
+                    effective_from=datetime(2026, 6, 1, tzinfo=timezone.utc),
+                    **overrides,
+                )
+                registry = InstrumentRegistry(versions=(first, second))
+                book = bound_book(state(), current=first, registry=registry)
+                original_state = book.state
+                event = corporate_event(
+                    event_id="symbol-change-economic-drift-" + field,
+                    kind="SYMBOL_CHANGE",
+                    effective_date=date(2026, 6, 1),
+                    source_revision="r-economic-drift",
+                    payload={"successor_instrument_version": 2},
+                )
+                with self.assertRaisesRegex(ValueError, "economic identity"):
+                    book.apply(event)
+                self.assertEqual(book.state, original_state)
+                self.assertEqual(book.instrument_version, first)
+                self.assertEqual(book.applied_event_ids, ())
 
     def test_symbol_change_rejects_unregistered_or_non_next_successor(self):
         first = instrument()

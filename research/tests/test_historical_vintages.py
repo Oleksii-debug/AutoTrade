@@ -225,6 +225,29 @@ class HistoricalVintageTests(unittest.TestCase):
                 datetime(2026, 1, 1, 12, tzinfo=timezone.utc),
             )
 
+    def test_raw_evidence_cannot_predate_source_event(self):
+        row = {
+            "event_id": str(uuid4()),
+            "instrument_version": "instrument:v1",
+            "kind": "TRADE",
+            "source_event_at": "2026-01-01T10:00:02Z",
+            "available_at": "2026-01-01T10:00:03Z",
+            "ingested_at": "2026-01-01T10:00:04Z",
+            "revision": "1",
+            "availability_basis": "provider",
+            "quality_flags": [],
+            "payload": {"price": "10"},
+            "raw_evidence_ref": evidence("2026-01-01T10:00:01Z"),
+        }
+        with self.assertRaisesRegex(
+            HistoricalDataError,
+            "observed before source_event_at",
+        ):
+            point_in_time_market_events(
+                [row],
+                datetime(2026, 1, 2, tzinfo=timezone.utc),
+            )
+
     def test_raw_evidence_cannot_postdate_event_ingestion(self):
         row = {
             "event_id": str(uuid4()),

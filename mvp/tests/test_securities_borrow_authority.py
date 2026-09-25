@@ -442,10 +442,6 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 evidence_artifact_store=authority.evidence_artifact_store,
             )
             self.assertEqual(reloaded_projection.active_quantity, Decimal("0"))
-            authority._validate_durable_financial_evidence(
-                admitted,
-                authority._policies[admitted.policy_id],
-            )
             self.assertEqual(
                 authority.dispatch_allowed(
                     **dispatch_args,

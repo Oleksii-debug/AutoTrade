@@ -313,6 +313,13 @@ class DurableChampionControl:
                 or payload.get("candidate_version") != decision.candidate_version
                 or payload.get("prior_version") != decision.prior_version
                 or payload.get("source_sha256") != decision.source_sha256
+                or payload.get("scope_id") != decision.scope_id
+                or tuple(payload.get("result_refs", ())) != decision.result_refs
+                or payload.get("envelope_digest") != decision.envelope_digest
+                or payload.get("authority_policy_digest") != decision.authority_policy_digest
+                or payload.get("independent_gate_signer") != decision.independent_gate_signer
+                or payload.get("gate_verdict") != decision.gate_verdict
+                or payload.get("rollback_target") != decision.rollback_target
             ):
                 raise ChampionConflict(
                     "promotion decision identity conflicts with durable event"
@@ -400,6 +407,23 @@ class DurableChampionControl:
         rollback_id = _text(rollback_id, name="rollback_id")
         target = _text(target_version, name="target_version")
         reason = _text(reason_ref, name="reason_ref")
+        event_id = _stable_id(
+            "champion-rollback-",
+            self.scope_id,
+            rollback_id,
+        )
+        existing = self.journal.get_event(event_id)
+        if existing is not None:
+            payload = existing["payload"]
+            if (
+                existing["event_type"] != "ChampionRolledBack"
+                or payload.get("target_version") != target
+                or payload.get("reason_ref") != reason
+            ):
+                raise ChampionConflict(
+                    "rollback identity conflicts with durable event"
+                )
+            return self.snapshot()
         state = self.snapshot()
         if state.generation != expected_generation:
             raise ChampionConflict("champion generation changed")
@@ -420,11 +444,7 @@ class DurableChampionControl:
             event_type="ChampionRolledBack",
             aggregate_version=version,
             payload=payload,
-            event_id=_stable_id(
-                "champion-rollback-",
-                self.scope_id,
-                rollback_id,
-            ),
+            event_id=event_id,
         )
         try:
             self.journal.commit_command(
@@ -469,6 +489,23 @@ class DurableChampionControl:
             raise ChampionControlError(
                 "position-management migration requires compatibility evidence"
             )
+        event_id = _stable_id(
+            "champion-position-migration-",
+            self.scope_id,
+            migration_id,
+        )
+        existing = self.journal.get_event(event_id)
+        if existing is not None:
+            payload = existing["payload"]
+            if (
+                existing["event_type"] != "PositionManagementMigrated"
+                or payload.get("target_version") != target
+                or tuple(payload.get("compatibility_evidence_refs", ())) != refs
+            ):
+                raise ChampionConflict(
+                    "position-management migration identity conflicts with durable event"
+                )
+            return self.snapshot()
         state = self.snapshot()
         if state.generation != expected_generation:
             raise ChampionConflict("champion generation changed")
@@ -486,11 +523,7 @@ class DurableChampionControl:
             event_type="PositionManagementMigrated",
             aggregate_version=version,
             payload=payload,
-            event_id=_stable_id(
-                "champion-position-migration-",
-                self.scope_id,
-                migration_id,
-            ),
+            event_id=event_id,
         )
         try:
             self.journal.commit_command(

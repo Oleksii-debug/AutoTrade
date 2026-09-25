@@ -19,6 +19,7 @@ from typing import Iterable, Literal, Mapping
 import re
 
 from .capabilities import CapabilitySnapshot
+from .dispatch import SubmissionResponseBinding
 
 
 class ProviderCoreError(ValueError):
@@ -73,6 +74,7 @@ class Surface(StrEnum):
 
 _PREPARED_READ_TOKEN = object()
 _OBSERVED_RESPONSE_TOKEN = object()
+_SUBMISSION_OBSERVED_RESPONSE_TOKEN = object()
 
 
 def _utc_text(value: datetime, name: str) -> str:
@@ -441,6 +443,213 @@ def observe_authenticated_json_response(
         _observation_token=_OBSERVED_RESPONSE_TOKEN,
     )
 
+
+
+
+def _thaw_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _thaw_json(nested) for key, nested in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
+
+
+@dataclass(frozen=True)
+class ProviderSubmissionObservation:
+    """Exact write response proven by the canonical durable send journal."""
+
+    response_binding: SubmissionResponseBinding
+    endpoint: str
+    capability_snapshot_ids: tuple[str, ...]
+    instrument_versions: tuple[str, ...]
+    evidence_ref: str
+    payload: object
+    _observation_token: InitVar[object | None] = None
+
+    def __post_init__(self, _observation_token: object | None) -> None:
+        if _observation_token is not _SUBMISSION_OBSERVED_RESPONSE_TOKEN:
+            raise ProviderCoreError(
+                "provider submission observations must come from durable exact response binding"
+            )
+        if not isinstance(self.response_binding, SubmissionResponseBinding):
+            raise TypeError("response_binding must be SubmissionResponseBinding")
+        endpoint = _text(self.endpoint, "endpoint")
+        if not endpoint.startswith("/") or "://" in endpoint:
+            raise ProviderCoreError(
+                "submission endpoint must be a canonical provider-relative path"
+            )
+        object.__setattr__(self, "endpoint", endpoint)
+        capabilities = tuple(
+            _text(value, "capability_snapshot_id")
+            for value in self.capability_snapshot_ids
+        )
+        instruments = tuple(
+            _text(value, "instrument_version")
+            for value in self.instrument_versions
+        )
+        if not capabilities or len(set(capabilities)) != len(capabilities):
+            raise ProviderCoreError(
+                "capability_snapshot_ids must be non-empty and unique"
+            )
+        if not instruments or len(set(instruments)) != len(instruments):
+            raise ProviderCoreError(
+                "instrument_versions must be non-empty and unique"
+            )
+        object.__setattr__(self, "capability_snapshot_ids", capabilities)
+        object.__setattr__(self, "instrument_versions", instruments)
+        if re.fullmatch(
+            r"provider-write:sha256:[0-9a-f]{64}",
+            self.evidence_ref,
+        ) is None:
+            raise ProviderCoreError("submission evidence_ref must be canonical")
+
+    @property
+    def provider_id(self) -> str:
+        return self.response_binding.provider.upper()
+
+    @property
+    def account_id(self) -> str:
+        return self.response_binding.account_id
+
+    @property
+    def environment(self) -> str:
+        return self.response_binding.environment
+
+    @property
+    def client_order_id(self) -> str:
+        return self.response_binding.client_order_id
+
+    @property
+    def response_sha256(self) -> str:
+        return self.response_binding.response_sha256
+
+    @property
+    def observed_at(self) -> str:
+        return self.response_binding.sent_at
+
+    @property
+    def request_sha256(self) -> str:
+        return self.response_binding.request_hash
+
+    def require_scope(
+        self,
+        *,
+        provider_id: str,
+        endpoint: str,
+        prepared_request_sha256: str,
+        capability_snapshot_ids: tuple[str, ...],
+        instrument_versions: tuple[str, ...],
+        account_id: str | None = None,
+        environment: str | None = None,
+        client_order_id: str | None = None,
+    ) -> None:
+        if _text(provider_id, "provider_id").upper() != self.provider_id:
+            raise ProviderCoreError("provider-write provenance provider mismatch")
+        if _text(endpoint, "endpoint") != self.endpoint:
+            raise ProviderCoreError("provider-write provenance endpoint mismatch")
+        if prepared_request_sha256 != self.request_sha256:
+            raise ProviderCoreError("provider-write provenance request digest mismatch")
+        if tuple(capability_snapshot_ids) != self.capability_snapshot_ids:
+            raise ProviderCoreError("provider-write provenance capability mismatch")
+        if tuple(instrument_versions) != self.instrument_versions:
+            raise ProviderCoreError("provider-write provenance instrument mismatch")
+        if account_id is not None and _text(account_id, "account_id") != self.account_id:
+            raise ProviderCoreError("provider-write provenance account mismatch")
+        if (
+            environment is not None
+            and _text(environment, "environment").upper() != self.environment
+        ):
+            raise ProviderCoreError("provider-write provenance environment mismatch")
+        if (
+            client_order_id is not None
+            and _text(client_order_id, "client_order_id") != self.client_order_id
+        ):
+            raise ProviderCoreError("provider-write provenance client-order mismatch")
+
+
+def observe_submission_json_response(
+    *,
+    response_binding: SubmissionResponseBinding,
+    provider_id: str,
+    endpoint: str,
+    prepared_request_sha256: str,
+    capability_snapshot_ids: tuple[str, ...],
+    instrument_versions: tuple[str, ...],
+) -> ProviderSubmissionObservation:
+    """Project one exact durable write response into provider-neutral evidence."""
+
+    if not isinstance(response_binding, SubmissionResponseBinding):
+        raise TypeError("response_binding must be SubmissionResponseBinding")
+    provider = _text(provider_id, "provider_id").upper()
+    if provider not in PROVIDERS:
+        raise ProviderCoreError("unknown provider")
+    if response_binding.provider.upper() != provider:
+        raise ProviderCoreError("durable submission provider mismatch")
+    normalized_endpoint = _text(endpoint, "endpoint")
+    if not normalized_endpoint.startswith("/") or "://" in normalized_endpoint:
+        raise ProviderCoreError(
+            "submission endpoint must be a canonical provider-relative path"
+        )
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", prepared_request_sha256) is None:
+        raise ProviderCoreError(
+            "prepared_request_sha256 must be a canonical SHA-256 digest"
+        )
+    if response_binding.request_hash != prepared_request_sha256:
+        raise ProviderCoreError("durable submission request digest mismatch")
+    capabilities = tuple(
+        _text(value, "capability_snapshot_id")
+        for value in capability_snapshot_ids
+    )
+    instruments = tuple(
+        _text(value, "instrument_version")
+        for value in instrument_versions
+    )
+    if not capabilities or len(set(capabilities)) != len(capabilities):
+        raise ProviderCoreError(
+            "capability_snapshot_ids must be non-empty and unique"
+        )
+    if not instruments or len(set(instruments)) != len(instruments):
+        raise ProviderCoreError("instrument_versions must be non-empty and unique")
+
+    expected_scope = {
+        "endpoint": normalized_endpoint,
+        "prepared_request_sha256": prepared_request_sha256,
+        "capability_snapshot_ids": list(capabilities),
+        "instrument_versions": list(instruments),
+    }
+    actual_scope = _thaw_json(response_binding.submission_scope)
+    if actual_scope != expected_scope:
+        raise ProviderCoreError(
+            "durable submission scope does not match prepared provider request"
+        )
+
+    identity_material = json.dumps(
+        {
+            "aggregate_id": response_binding.aggregate_id,
+            "provider_id": provider,
+            "request_sha256": response_binding.request_hash,
+            "submission_scope_hash": response_binding.submission_scope_hash,
+            "response_sha256": response_binding.response_sha256,
+            "sent_at": response_binding.sent_at,
+            "endpoint": normalized_endpoint,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    evidence_ref = (
+        "provider-write:sha256:" + sha256(identity_material).hexdigest()
+    )
+    return ProviderSubmissionObservation(
+        response_binding=response_binding,
+        endpoint=normalized_endpoint,
+        capability_snapshot_ids=capabilities,
+        instrument_versions=instruments,
+        evidence_ref=evidence_ref,
+        payload=response_binding.payload,
+        _observation_token=_SUBMISSION_OBSERVED_RESPONSE_TOKEN,
+    )
 
 @dataclass(frozen=True)
 class ProviderDefinition:

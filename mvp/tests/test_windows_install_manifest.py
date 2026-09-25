@@ -29,6 +29,14 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
             '{"contract_version":"1.0.0"}\n',
             encoding="utf-8",
         )
+        (self.staging / "dependency-lock.json").write_text(
+            '{"dependencies":{"runtime":"1.0.0"}}\n',
+            encoding="utf-8",
+        )
+        (self.staging / "sbom.spdx.json").write_text(
+            '{"SPDXID":"SPDXRef-DOCUMENT","spdxVersion":"SPDX-2.3"}\n',
+            encoding="utf-8",
+        )
         self.provenance = self.root / "provenance.json"
         self.provenance.write_text(
             json.dumps(
@@ -42,6 +50,51 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def composition(self):
+        components = []
+        for path in sorted(self.staging.rglob("*")):
+            if not path.is_file() or path.is_symlink():
+                continue
+            relative = path.relative_to(self.staging).as_posix()
+            if relative == "dependency-lock.json":
+                kind = "dependency-lock"
+            elif relative == "sbom.spdx.json":
+                kind = "sbom"
+            elif relative.endswith(".exe"):
+                kind = "runtime"
+            else:
+                kind = "asset"
+            components.append(
+                {
+                    "component_id": relative.replace("/", "-"),
+                    "kind": kind,
+                    "path": relative,
+                    "version": "1.0.0",
+                    "sha256": "sha256:" + sha256(path.read_bytes()).hexdigest(),
+                }
+            )
+        dependency_lock = self.staging / "dependency-lock.json"
+        sbom = self.staging / "sbom.spdx.json"
+        document = {
+            "schema_version": "1.0.0",
+            "product": "AutoTrade",
+            "source_sha": SOURCE_SHA,
+            "dependency_lock_sha256": "sha256:" + sha256(
+                dependency_lock.read_bytes()
+            ).hexdigest(),
+            "sbom_sha256": "sha256:" + sha256(sbom.read_bytes()).hexdigest(),
+            "schema_compatibility": {"minimum": "1.0.0", "maximum": "1.0.x"},
+            "runtime": {
+                "architecture": "x64",
+                "runtime_identifier": "win-x64",
+                "minimum_windows_version": "10.0.22621",
+            },
+            "components": components,
+        }
+        path = self.root / "composition.json"
+        path.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
+        return path
+
     def release_bundle(self, name="release.zip"):
         output = self.root / name
         build_bundle(
@@ -51,6 +104,7 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
             source_sha=SOURCE_SHA,
             mode="release",
             provenance_path=self.provenance,
+            composition_path=self.composition(),
         )
         return output
 
@@ -308,7 +362,12 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
         paths = [item["target_relative_path"] for item in verified["files"]]
         self.assertEqual(
             paths,
-            ["AutoTrade.Desktop.exe", "contracts/manifest.json"],
+            [
+                "AutoTrade.Desktop.exe",
+                "contracts/manifest.json",
+                "dependency-lock.json",
+                "sbom.spdx.json",
+            ],
         )
 
 

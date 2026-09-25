@@ -391,12 +391,15 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 requested_quantity="1",
                 committed_at=T0,
             )
-            with sqlite3.connect(store.path) as connection:
+            connection = sqlite3.connect(store.path)
+            try:
                 connection.execute(
                     "UPDATE events SET payload_json = ? WHERE event_id = ?",
                     ('{"tampered":true}', event.event_id),
                 )
                 connection.commit()
+            finally:
+                connection.close()
 
             with self.assertRaisesRegex(
                 ValueError,

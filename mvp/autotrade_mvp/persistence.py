@@ -745,27 +745,43 @@ class JournalStore:
             if outbox_topic is not None:
                 outbox_payload = envelope_json
                 outbox_id = "outbox-" + sha256(event_id.encode("utf-8")).hexdigest()[:32]
-                outbox_hash = _outbox_envelope_digest(
-                    outbox_topic,
-                    outbox_payload,
-                )
-                connection.execute(
-                    """
-                    INSERT INTO outbox(
-                        outbox_id, event_id, topic, payload_json,
-                        created_at, envelope_hash
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        outbox_id,
-                        event_id,
+                if self.SCHEMA_VERSION >= 4:
+                    outbox_hash = _outbox_envelope_digest(
                         outbox_topic,
                         outbox_payload,
-                        self._now(),
-                        outbox_hash,
-                    ),
-                )
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO outbox(
+                            outbox_id, event_id, topic, payload_json,
+                            created_at, envelope_hash
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            outbox_id,
+                            event_id,
+                            outbox_topic,
+                            outbox_payload,
+                            self._now(),
+                            outbox_hash,
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        INSERT INTO outbox(
+                            outbox_id, event_id, topic, payload_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            outbox_id,
+                            event_id,
+                            outbox_topic,
+                            outbox_payload,
+                            self._now(),
+                        ),
+                    )
             connection.commit()
         return AppendResult(event_id, aggregate_version, True)
 

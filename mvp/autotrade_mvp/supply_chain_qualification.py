@@ -203,7 +203,7 @@ def _store_artifact_matches(
     release_sha: str,
     metadata: dict[str, object],
 ) -> bool:
-    """Verify one exact immutable supply-chain artifact through ArtifactStore."""
+    """Verify exact immutable bytes and declared bindings through ArtifactStore.\n\n    ArtifactStore is an integrity boundary, not an independent trust anchor: the\n    caller that opens a store may also have populated it. Producer/authenticator\n    trust is therefore evaluated separately and must remain fail-closed until a\n    qualified attestation boundary exists.\n    """
 
     try:
         manifest = store.load_manifest(artifact_id)
@@ -371,6 +371,17 @@ def qualify_supply_chain(
             else _INCONCLUSIVE,
             "SUPPLY_CHAIN.EVIDENCE_UNVERIFIED",
         )
+
+    # Content-addressed storage can prove that exact bytes and metadata exist and
+    # have not changed. It cannot prove who produced or independently verified
+    # those assertions because the caller may populate an ArtifactStore itself.
+    # Until WP-64 has a qualified authenticated/signed attestation boundary,
+    # integrity evidence alone must never elevate supply-chain qualification to PASS.
+    record(
+        "independent_evidence_trust",
+        _INCONCLUSIVE,
+        "SUPPLY_CHAIN.TRUST_ANCHOR_UNAVAILABLE",
+    )
 
     exact_head = evidence.release_commit_sha == evidence.built_from_commit_sha
     record("exact_release_head", _PASS if exact_head else _FAIL, "SUPPLY_CHAIN.BUILD_SHA_MISMATCH")

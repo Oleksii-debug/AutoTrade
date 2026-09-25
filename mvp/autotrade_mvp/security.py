@@ -258,7 +258,9 @@ class SecurityBoundary:
     ) -> Session:
         """Re-authenticate and rotate a session without changing its identity scope."""
 
-        current = self.validate_session(token, origin=origin)
+        normalized_token = _required_text(token, name="session token")
+        prior = self._sessions.get(normalized_token)
+        current = self.validate_session(normalized_token, origin=origin)
         ttl = self._session_lifetime(ttl_seconds, name="Session lifetime")
         idle_timeout = (
             current.idle_timeout_seconds
@@ -268,11 +270,16 @@ class SecurityBoundary:
                 name="Session idle timeout",
             )
         )
-        self._authenticate_session_identity(
-            subject=current.subject,
-            role=current.role,
-            origin=current.origin,
-        )
+        try:
+            self._authenticate_session_identity(
+                subject=current.subject,
+                role=current.role,
+                origin=current.origin,
+            )
+        except PermissionError:
+            if prior is not None and normalized_token in self._sessions:
+                self._sessions[normalized_token] = prior
+            raise
         now = self._now_value()
         replacement = self._issue_session(
             subject=current.subject,

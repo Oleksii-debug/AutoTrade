@@ -1264,6 +1264,191 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(len(store.pending_outbox()), 1)
 
 
+    def test_public_financial_admission_rejects_stale_reservation_cut(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            item = policy(autonomous=True)
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store, environment="PAPER", account_id="paper-1"
+            )
+            stale = bound_risk_decision(
+                policy_version=item.version,
+                reservation_version=reservations.version,
+            )
+            reservations.reserve(
+                command_id="other-command",
+                idempotency_key="other-command",
+                reservation_id="other-reservation",
+                intent_id="other-intent",
+                requirements={"CASH:USD": "1"},
+                available={"CASH:USD": "1000"},
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict, "reservation_version is stale"
+            ):
+                authority.admit(
+                    command_id="stale-command",
+                    idempotency_key="stale-command",
+                    admission_id="stale-admission",
+                    policy_id=item.policy_id,
+                    intent_id="intent-stale",
+                    intent_hash=stale.intent_hash,
+                    account_id="paper-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    current_state_version=7,
+                    capability_snapshot_id=stale.capability_snapshot_id,
+                    risk_decision=stale,
+                    reservation_book=reservations,
+                    reservation_id="stale-reservation",
+                    reservation_requirements={"CASH:USD": "100"},
+                    reservation_available={"CASH:USD": "1000"},
+                    now="2026-09-24T18:01:00Z",
+                )
+
+    def test_public_dispatch_rechecks_capability_and_reservation_state(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            item = policy(autonomous=True)
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store, environment="PAPER", account_id="paper-1"
+            )
+            decision = bound_risk_decision(
+                policy_version=item.version,
+                reservation_version=reservations.version,
+            )
+            admitted = authority.admit(
+                command_id="dispatch-command",
+                idempotency_key="dispatch-command",
+                admission_id="dispatch-admission",
+                policy_id=item.policy_id,
+                intent_id="dispatch-intent",
+                intent_hash=decision.intent_hash,
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                current_state_version=7,
+                capability_snapshot_id=decision.capability_snapshot_id,
+                risk_decision=decision,
+                reservation_book=reservations,
+                reservation_id="dispatch-reservation",
+                reservation_requirements={"CASH:USD": "100"},
+                reservation_available={"CASH:USD": "1000"},
+                now="2026-09-24T18:01:00Z",
+            )
+            common = dict(
+                intent_hash=decision.intent_hash,
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                now="2026-09-24T18:02:00Z",
+            )
+            self.assertEqual(
+                authority.dispatch_allowed(admitted.admission_id, **common),
+                (False, "capability_snapshot_required"),
+            )
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    admitted.admission_id,
+                    capability_snapshot_id="different-capability",
+                    **common,
+                ),
+                (False, "capability_snapshot_changed"),
+            )
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    admitted.admission_id,
+                    capability_snapshot_id=decision.capability_snapshot_id,
+                    **common,
+                ),
+                (True, "allowed"),
+            )
+            reservations.mark_unknown(
+                command_id="dispatch-unknown",
+                idempotency_key="dispatch-unknown",
+                reservation_id="dispatch-reservation",
+            )
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    admitted.admission_id,
+                    capability_snapshot_id=decision.capability_snapshot_id,
+                    **common,
+                ),
+                (False, "reservation_not_dispatchable"),
+            )
+
+    def test_public_dispatch_blocks_after_other_reservation_advances_book(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            item = policy(autonomous=True)
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store, environment="PAPER", account_id="paper-1"
+            )
+            decision = bound_risk_decision(
+                policy_version=item.version,
+                reservation_version=reservations.version,
+            )
+            admitted = authority.admit(
+                command_id="first-command",
+                idempotency_key="first-command",
+                admission_id="first-admission",
+                policy_id=item.policy_id,
+                intent_id="first-intent",
+                intent_hash=decision.intent_hash,
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                current_state_version=7,
+                capability_snapshot_id=decision.capability_snapshot_id,
+                risk_decision=decision,
+                reservation_book=reservations,
+                reservation_id="first-reservation",
+                reservation_requirements={"CASH:USD": "100"},
+                reservation_available={"CASH:USD": "1000"},
+                now="2026-09-24T18:01:00Z",
+            )
+            reservations.reserve(
+                command_id="second-command",
+                idempotency_key="second-command",
+                reservation_id="second-reservation",
+                intent_id="second-intent",
+                requirements={"CASH:USD": "1"},
+                available={"CASH:USD": "1000"},
+            )
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    admitted.admission_id,
+                    intent_hash=decision.intent_hash,
+                    account_id="paper-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    now="2026-09-24T18:02:00Z",
+                    capability_snapshot_id=decision.capability_snapshot_id,
+                ),
+                (False, "reservation_state_changed"),
+            )
+
+
+
 
 if __name__ == "__main__":
     unittest.main()

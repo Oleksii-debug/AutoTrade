@@ -113,6 +113,8 @@ class AlpacaOptionLifecycleObservation:
         symbol = _text(self.symbol, name="symbol").upper()
         observed_at = _instant(self.observed_at, name="observed_at")
         effective_at = _instant(self.effective_at, name="effective_at")
+        if effective_at > observed_at:
+            raise AlpacaAdapterError("effective_at cannot be after observed_at")
         provider_activity_id = _text(self.provider_activity_id, name="provider_activity_id")
         digest = _text(self.source_sha256, name="source_sha256").lower()
         if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Mapping
+from typing import Callable, Mapping
 from uuid import UUID, NAMESPACE_URL, uuid5
 
 from .persistence import JournalStore, canonical_json, payload_digest
@@ -151,12 +151,19 @@ class DurableReservationBook:
         *,
         environment: str,
         account_id: str,
+        resolution_evidence_verifier: Callable[[str], bool] | None = None,
     ):
         if not isinstance(store, JournalStore):
             raise TypeError("store must be JournalStore")
         self.store = store
         self.environment = _environment(environment)
         self.account_id = _text(account_id, name="account_id")
+        if (
+            resolution_evidence_verifier is not None
+            and not callable(resolution_evidence_verifier)
+        ):
+            raise TypeError("resolution_evidence_verifier must be callable or None")
+        self.resolution_evidence_verifier = resolution_evidence_verifier
         self.scope_id = _journal_identity(
             self.environment,
             self.account_id,
@@ -478,10 +485,25 @@ class DurableReservationBook:
         outcome: str,
         resolution_evidence: str,
     ) -> ReservationSnapshot:
+        evidence = _immutable_evidence_ref(resolution_evidence)
+        if self.resolution_evidence_verifier is None:
+            raise ReservationConflict(
+                "terminal release requires an authoritative resolution evidence verifier"
+            )
+        try:
+            verified = self.resolution_evidence_verifier(evidence)
+        except Exception as error:
+            raise ReservationConflict(
+                "resolution evidence verification failed"
+            ) from error
+        if verified is not True:
+            raise ReservationConflict(
+                "resolution evidence was not verified by artifact authority"
+            )
         request = {
             "reservation_id": _text(reservation_id, name="reservation_id"),
             "outcome": _text(outcome, name="outcome").upper(),
-            "resolution_evidence": _immutable_evidence_ref(resolution_evidence),
+            "resolution_evidence": evidence,
         }
         return self._commit(
             command_id=command_id,

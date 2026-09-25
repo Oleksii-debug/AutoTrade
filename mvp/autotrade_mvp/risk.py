@@ -918,8 +918,10 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         )
 
     stress_symbols = set(notionals)
+    base_stress_symbols = set(base_notionals)
     stress_coverage_complete = bool(context.stress_scenarios) or not stress_symbols
     missing_stress_symbols: set[str] = set()
+    missing_base_stress_symbols: set[str] = set()
     missing_stress_labels: set[str] = set()
     stress_regime_coverage_complete = True
     if policy.required_stress_scenario_labels is not None and stress_symbols:
@@ -932,9 +934,19 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
             and len(context.stress_scenario_labels) == len(context.stress_scenarios)
         )
     for scenario in context.stress_scenarios:
-        missing_stress_symbols.update(stress_symbols - set(scenario))
+        scenario_symbols = set(scenario)
+        missing_stress_symbols.update(stress_symbols - scenario_symbols)
+        missing_base_stress_symbols.update(base_stress_symbols - scenario_symbols)
     if missing_stress_symbols:
         stress_coverage_complete = False
+    base_stress_comparison_complete = (
+        not stress_symbols
+        or not base_stress_symbols
+        or (
+            bool(context.stress_scenarios)
+            and not missing_base_stress_symbols
+        )
+    )
 
     base_worst_stress_loss = Decimal("0")
     worst_stress_loss = Decimal("0")
@@ -958,61 +970,91 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
             worst_stress_loss = max(worst_stress_loss, -pnl)
 
     tail_coverage_complete = True
+    base_tail_comparison_complete = True
     missing_tail_symbols: set[str] = set()
+    missing_base_tail_symbols: set[str] = set()
     expected_shortfall: Decimal | None = None
     base_expected_shortfall: Decimal | None = None
     if policy.max_expected_shortfall is not None:
         tail_coverage_complete = bool(context.tail_scenarios) or not stress_symbols
         for scenario in context.tail_scenarios:
-            missing_tail_symbols.update(stress_symbols - set(scenario))
+            scenario_symbols = set(scenario)
+            missing_tail_symbols.update(stress_symbols - scenario_symbols)
+            missing_base_tail_symbols.update(base_stress_symbols - scenario_symbols)
         if missing_tail_symbols:
             tail_coverage_complete = False
+        base_tail_comparison_complete = (
+            not stress_symbols
+            or not base_stress_symbols
+            or (
+                bool(context.tail_scenarios)
+                and not missing_base_tail_symbols
+            )
+        )
+        tail_fraction = policy.expected_shortfall_tail_fraction
+        assert tail_fraction is not None
+        tail_count = (
+            max(
+                1,
+                int(
+                    (Decimal(len(context.tail_scenarios)) * tail_fraction)
+                    .to_integral_value(rounding=ROUND_CEILING)
+                ),
+            )
+            if context.tail_scenarios
+            else 0
+        )
         if tail_coverage_complete and stress_symbols:
-            projected_losses: list[Decimal] = []
-            base_losses: list[Decimal] = []
+            projected_losses = []
             for scenario in context.tail_scenarios:
                 projected_pnl = sum(
                     (notional * scenario[symbol] for symbol, notional in notionals.items()),
                     Decimal("0"),
                 )
+                projected_losses.append(max(-projected_pnl, Decimal("0")))
+            projected_tail = sorted(projected_losses, reverse=True)[:tail_count]
+            expected_shortfall = sum(projected_tail, Decimal("0")) / Decimal(
+                len(projected_tail)
+            )
+        elif tail_coverage_complete:
+            expected_shortfall = Decimal("0")
+
+        if not base_stress_symbols:
+            base_expected_shortfall = Decimal("0")
+        elif base_tail_comparison_complete:
+            base_losses: list[Decimal] = []
+            for scenario in context.tail_scenarios:
                 base_pnl = sum(
                     (
-                        notional * scenario.get(symbol, Decimal("0"))
+                        notional * scenario[symbol]
                         for symbol, notional in base_notionals.items()
                     ),
                     Decimal("0"),
                 )
-                projected_losses.append(max(-projected_pnl, Decimal("0")))
                 base_losses.append(max(-base_pnl, Decimal("0")))
-            tail_fraction = policy.expected_shortfall_tail_fraction
-            assert tail_fraction is not None
-            tail_count = max(
-                1,
-                int(
-                    (Decimal(len(projected_losses)) * tail_fraction)
-                    .to_integral_value(rounding=ROUND_CEILING)
-                ),
-            )
-            projected_tail = sorted(projected_losses, reverse=True)[:tail_count]
             base_tail = sorted(base_losses, reverse=True)[:tail_count]
-            expected_shortfall = sum(projected_tail, Decimal("0")) / Decimal(
-                len(projected_tail)
-            )
             base_expected_shortfall = sum(base_tail, Decimal("0")) / Decimal(
                 len(base_tail)
             )
-        elif tail_coverage_complete:
-            expected_shortfall = Decimal("0")
-            base_expected_shortfall = Decimal("0")
 
     reduces_absolute_exposure = (
         abs(resulting) < abs(base_position)
         and base_position * resulting >= 0
     )
+    stress_nonworsening = (
+        not stress_symbols
+        or (
+            stress_coverage_complete
+            and base_stress_comparison_complete
+            and worst_stress_loss <= base_worst_stress_loss
+        )
+    )
     tail_nonworsening = (
         policy.max_expected_shortfall is None
+        or not stress_symbols
         or (
             tail_coverage_complete
+            and base_tail_comparison_complete
             and expected_shortfall is not None
             and base_expected_shortfall is not None
             and expected_shortfall <= base_expected_shortfall
@@ -1023,7 +1065,7 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         and reduces_absolute_exposure
         and gross < base_gross
         and net <= base_net
-        and worst_stress_loss <= base_worst_stress_loss
+        and stress_nonworsening
         and tail_nonworsening
     )
 

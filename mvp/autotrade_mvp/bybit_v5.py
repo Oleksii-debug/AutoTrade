@@ -478,6 +478,8 @@ def parse_submission_response(
         raise ProviderCoreError(
             "Bybit evidence environment must be MAINNET, TESTNET or DEMO"
         )
+    if type(transport_ambiguous) is not bool:
+        raise ProviderCoreError("transport_ambiguous must be boolean")
     if transport_ambiguous:
         if response is not None:
             raise ProviderCoreError(
@@ -488,6 +490,9 @@ def parse_submission_response(
                 "ambiguous transport requires explicit local observed_at"
             )
         _utc_text(observed_at, name="observed_at")
+        # Local observed_at and provider environment belong to the durable
+        # SubmissionAttempt. With no authoritative provider response there is
+        # deliberately no provider_received_at and no response EvidenceRef.
         return {
             "attempt_id": aid,
             "outcome": "UNKNOWN",
@@ -502,16 +507,26 @@ def parse_submission_response(
         )
     envelope = _mapping(response, name="response")
     code = _integer(envelope.get("retCode"), name="retCode")
-    when = (
+    local_observed_at = (
         _utc_text(observed_at, name="observed_at")
         if observed_at is not None
-        else _millis_to_utc(envelope.get("time"), name="response.time")
+        else None
     )
+    provider_received_at = (
+        _millis_to_utc(envelope.get("time"), name="response.time")
+        if envelope.get("time") is not None
+        else None
+    )
+    evidence_observed_at = local_observed_at or provider_received_at
+    if evidence_observed_at is None:
+        raise ProviderCoreError(
+            "provider response requires observed_at when response.time is absent"
+        )
     evidence = [
         _response_evidence(
             BYBIT_DOCUMENTED_ENDPOINTS["PLACE_ORDER"],
             envelope,
-            observed_at=when,
+            observed_at=evidence_observed_at,
             environment=normalized_environment,
         )
     ]
@@ -529,7 +544,11 @@ def parse_submission_response(
             "outcome": "ACKNOWLEDGED",
             "provider_order_id": provider_order_id,
             "client_order_id": cid,
-            "provider_received_at": when,
+            **(
+                {"provider_received_at": provider_received_at}
+                if provider_received_at is not None
+                else {}
+            ),
             "evidence": evidence,
             "retry_disposition": "NEVER",
         }
@@ -539,7 +558,11 @@ def parse_submission_response(
         "attempt_id": aid,
         "outcome": outcome,
         "client_order_id": cid,
-        "provider_received_at": when,
+        **(
+            {"provider_received_at": provider_received_at}
+            if provider_received_at is not None
+            else {}
+        ),
         "reason_code": f"BYBIT_{code}",
         "evidence": evidence,
         "retry_disposition": (

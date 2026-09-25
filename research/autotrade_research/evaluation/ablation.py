@@ -1100,6 +1100,7 @@ def evaluate_qualified_incremental_value(
             return inconclusive("duplicate_canonical_outcome_identity")
         evidence_index[key] = evidence
 
+    has_immature_outcome = False
     for pair in selected:
         for item in (pair.full, pair.ablated):
             evidence = evidence_index.get((item.case_id, item.variant))
@@ -1116,13 +1117,21 @@ def evaluate_qualified_incremental_value(
                 or evidence.outcome_available_utc != item.outcome_available_utc
             ):
                 return inconclusive("canonical_outcome_economic_mismatch")
-            if evidence.outcome_available_utc > population.evaluation_cutoff_utc:
-                return inconclusive("canonical_outcome_not_mature_at_cutoff")
             if (
                 evidence.superseded_at_utc is not None
                 and evidence.superseded_at_utc <= population.evaluation_cutoff_utc
             ):
                 return inconclusive("stale_canonical_outcome_revision")
+            if evidence.outcome_available_utc > population.evaluation_cutoff_utc:
+                has_immature_outcome = True
+
+    # Caller-authored outcome dataclasses are never qualification authority.
+    # Reject them before their maturity can influence the diagnostic result;
+    # maturity is meaningful only for evidence resolved by the canonical authority.
+    if not trusted:
+        return inconclusive("untrusted_caller_authored_qualification_evidence")
+    if has_immature_outcome:
+        return inconclusive("canonical_outcome_not_mature_at_cutoff")
 
     base = evaluate_incremental_value(
         target,

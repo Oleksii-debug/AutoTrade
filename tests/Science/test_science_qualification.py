@@ -64,6 +64,26 @@ class ScientificQualificationTests(unittest.TestCase):
         )
         self.assertIn("SCIENCE.CLAIM_EXCEEDS_EVIDENCE", result.reason_codes)
 
+    def test_selectively_unverified_forward_claim_is_inconclusive(self):
+        result = qualify_scientific_learning(
+            evidence(claim="ECONOMIC_EDGE_QUALIFIED"),
+            evidence_verifier=lambda gate: gate.gate_id != "forward_evidence",
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertFalse(result.economic_claim_accepted)
+        self.assertIn(
+            "SCIENCE.EVIDENCE_UNVERIFIED:forward_evidence",
+            result.reason_codes,
+        )
+
+    def test_self_asserted_research_candidate_is_inconclusive(self):
+        result = qualify_scientific_learning(
+            evidence(claim="RESEARCH_CANDIDATE")
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertFalse(result.economic_claim_accepted)
+        self.assertIn("SCIENCE.CLAIM_EXCEEDS_EVIDENCE", result.reason_codes)
+
     def test_failed_or_raising_evidence_verifier_never_yields_pass(self):
         value = evidence()
         selective = qualify_scientific_learning(

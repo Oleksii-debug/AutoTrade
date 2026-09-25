@@ -853,15 +853,22 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 fee_currency_by_execution_id={"exec-side-1": "USD"},
             )
 
-        with self.assertRaisesRegex(IbkrWebAdapterError, "provider-evidenced"):
-            parse_web_api_trades(
-                ibkr_trade_observation([dict(base, side="UNKNOWN")]),
-                instrument_versions_by_conid={265598: "AAPL:v1"},
-                fee_currency_by_execution_id={"exec-side-1": "USD"},
-            )
+        for invalid_side in ("UNKNOWN", "BUY", "SELL", "Buy", "b", "s"):
+            with self.subTest(side=invalid_side):
+                with self.assertRaisesRegex(
+                    IbkrWebAdapterError,
+                    "provider-evidenced",
+                ):
+                    parse_web_api_trades(
+                        ibkr_trade_observation(
+                            [dict(base, side=invalid_side)]
+                        ),
+                        instrument_versions_by_conid={265598: "AAPL:v1"},
+                        fee_currency_by_execution_id={"exec-side-1": "USD"},
+                    )
 
         fills = parse_web_api_trades(
-            ibkr_trade_observation([dict(base, side="Buy")]),
+            ibkr_trade_observation([dict(base, side="B")]),
             instrument_versions_by_conid={265598: "AAPL:v1"},
             fee_currency_by_execution_id={"exec-side-1": "USD"},
         )

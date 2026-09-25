@@ -18,11 +18,12 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Callable, Mapping
+from uuid import NAMESPACE_URL, uuid5
 import re
 
 from .corporate_actions import CorporateEvent
 from .instruments import InstrumentVersion
-from .persistence import payload_digest
+from .persistence import JournalStore, payload_digest
 from .provider_core import ProviderResponseObservation, Surface
 
 
@@ -417,3 +418,300 @@ def resolve_authoritative_corporate_action(
         provenance_digest=provenance_digest,
         corrects_external_event_id=observation.corrects_external_event_id,
     )
+
+
+
+class CorporateActionEvidenceConflict(CorporateActionEvidenceError):
+    """Durable provider action identity conflicts with retained evidence."""
+
+
+@dataclass(frozen=True)
+class DurableCorporateActionEvidenceResult:
+    event_id: str
+    external_event_id: str
+    aggregate_version: int
+    inserted: bool
+    provenance_digest: str
+    corrects_external_event_id: str | None
+
+
+class DurableCorporateActionEvidenceStore:
+    """Exactly-once durable history for admitted corporate-action evidence.
+
+    This store persists evidence authority only.  It does not mutate positions,
+    cash, basis or settlement.  A later WP-31 financial writer must atomically
+    combine one retained evidence event with canonical economic-book mutation.
+    """
+
+    _AGGREGATE_TYPE = "corporate_action_evidence"
+    _EVENT_TYPE = "CorporateActionEvidenceAccepted"
+    _ACTOR = "corporate-action-evidence"
+
+    def __init__(
+        self,
+        store: JournalStore,
+        *,
+        provider_id: str,
+        account_id: str,
+        environment: str,
+    ) -> None:
+        if not isinstance(store, JournalStore):
+            raise TypeError("store must be JournalStore")
+        self.store = store
+        self.provider_id = _text(provider_id, "provider_id").upper()
+        self.account_id = _text(account_id, "account_id")
+        self.environment = _text(environment, "environment").upper()
+        if self.environment not in _ENVIRONMENTS:
+            raise CorporateActionEvidenceError("environment must be canonical")
+        self.aggregate_id = (
+            "corporate-action-evidence:"
+            + payload_digest(
+                {
+                    "provider_id": self.provider_id,
+                    "account_id": self.account_id,
+                    "environment": self.environment,
+                }
+            )[7:]
+        )
+
+    def _events(self) -> list[dict[str, object]]:
+        events = self.store.load_events(
+            self._AGGREGATE_TYPE,
+            self.aggregate_id,
+        )
+        expected_version = 1
+        for event in events:
+            if event.get("aggregate_version") != expected_version:
+                raise CorporateActionEvidenceConflict(
+                    "corporate-action evidence versions are not contiguous"
+                )
+            expected_version += 1
+            if event.get("event_type") != self._EVENT_TYPE:
+                raise CorporateActionEvidenceConflict(
+                    "corporate-action evidence journal contains unsupported event"
+                )
+            payload = event.get("payload")
+            if not isinstance(payload, Mapping):
+                raise CorporateActionEvidenceConflict(
+                    "corporate-action durable payload is invalid"
+                )
+            if (
+                payload.get("provider_id") != self.provider_id
+                or payload.get("account_id") != self.account_id
+                or payload.get("environment") != self.environment
+            ):
+                raise CorporateActionEvidenceConflict(
+                    "corporate-action durable scope is invalid"
+                )
+        return events
+
+    @staticmethod
+    def _payload(event: Mapping[str, object]) -> Mapping[str, object]:
+        payload = event.get("payload")
+        if not isinstance(payload, Mapping):
+            raise CorporateActionEvidenceConflict(
+                "corporate-action durable payload is invalid"
+            )
+        return payload
+
+    def record(
+        self,
+        accepted: AuthoritativeCorporateAction,
+    ) -> DurableCorporateActionEvidenceResult:
+        if not isinstance(accepted, AuthoritativeCorporateAction):
+            raise TypeError("accepted must be AuthoritativeCorporateAction")
+        if (
+            accepted.provider_id != self.provider_id
+            or accepted.account_id != self.account_id
+            or accepted.environment != self.environment
+        ):
+            raise CorporateActionEvidenceConflict(
+                "accepted corporate action does not match durable scope"
+            )
+
+        events = self._events()
+        same_identity = [
+            event
+            for event in events
+            if self._payload(event).get("external_event_id")
+            == accepted.external_event_id
+        ]
+        if same_identity:
+            if len(same_identity) != 1:
+                raise CorporateActionEvidenceConflict(
+                    "external corporate-action identity appears more than once"
+                )
+            saved = self._payload(same_identity[0])
+            if (
+                saved.get("provenance_digest") != accepted.provenance_digest
+                or saved.get("evidence_ref") != accepted.evidence_ref
+                or saved.get("raw_evidence_digest")
+                != accepted.raw_evidence_digest
+                or saved.get("provider_revision") != accepted.provider_revision
+                or saved.get("corrects_external_event_id")
+                != accepted.corrects_external_event_id
+            ):
+                raise CorporateActionEvidenceConflict(
+                    "external corporate-action identity was reused with changed evidence"
+                )
+            return DurableCorporateActionEvidenceResult(
+                event_id=str(same_identity[0]["event_id"]),
+                external_event_id=accepted.external_event_id,
+                aggregate_version=int(same_identity[0]["aggregate_version"]),
+                inserted=False,
+                provenance_digest=accepted.provenance_digest,
+                corrects_external_event_id=accepted.corrects_external_event_id,
+            )
+
+        corrected = None
+        if accepted.corrects_external_event_id is not None:
+            if accepted.corrects_external_event_id == accepted.external_event_id:
+                raise CorporateActionEvidenceConflict(
+                    "corporate action cannot correct itself"
+                )
+            prior = [
+                event
+                for event in events
+                if self._payload(event).get("external_event_id")
+                == accepted.corrects_external_event_id
+            ]
+            if len(prior) != 1:
+                raise CorporateActionEvidenceConflict(
+                    "corporate-action correction target must identify one retained event"
+                )
+            prior_payload = self._payload(prior[0])
+            already_corrected = [
+                event
+                for event in events
+                if self._payload(event).get("corrects_external_event_id")
+                == accepted.corrects_external_event_id
+            ]
+            if already_corrected:
+                raise CorporateActionEvidenceConflict(
+                    "corporate-action evidence already has a correction"
+                )
+            if (
+                prior_payload.get("instrument_id")
+                != accepted.event.instrument_id
+                or prior_payload.get("instrument_version")
+                != accepted.event.instrument_version
+                or prior_payload.get("kind") != accepted.event.kind
+            ):
+                raise CorporateActionEvidenceConflict(
+                    "corporate-action correction cannot change immutable action identity"
+                )
+            if prior_payload.get("provider_revision") == accepted.provider_revision:
+                raise CorporateActionEvidenceConflict(
+                    "corporate-action correction requires a new provider revision"
+                )
+            if (
+                prior_payload.get("evidence_ref") == accepted.evidence_ref
+                or prior_payload.get("raw_evidence_digest")
+                == accepted.raw_evidence_digest
+            ):
+                raise CorporateActionEvidenceConflict(
+                    "corporate-action correction requires fresh provider evidence"
+                )
+            corrected = accepted.corrects_external_event_id
+
+        next_version = 1 if not events else int(events[-1]["aggregate_version"]) + 1
+        event_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                "https://events.autotrade.local/corporate-action-evidence/"
+                + self.provider_id
+                + "/"
+                + self.account_id
+                + "/"
+                + self.environment
+                + "/"
+                + accepted.external_event_id,
+            )
+        )
+        durable_payload = {
+            "schema_version": "1.0.0",
+            "provider_id": accepted.provider_id,
+            "account_id": accepted.account_id,
+            "environment": accepted.environment,
+            "external_event_id": accepted.external_event_id,
+            "corrects_external_event_id": corrected,
+            "provider_revision": accepted.provider_revision,
+            "instrument_id": accepted.event.instrument_id,
+            "instrument_version": accepted.event.instrument_version,
+            "kind": accepted.event.kind,
+            "effective_at": _utc_text(accepted.event.effective_at),
+            "observed_at": accepted.observed_at,
+            "source_sequence": accepted.event.source_sequence,
+            "evidence_ref": accepted.evidence_ref,
+            "raw_evidence_digest": accepted.raw_evidence_digest,
+            "query_digest": accepted.query_digest,
+            "capability_snapshot_id": accepted.capability_snapshot_id,
+            "provider_instrument_version": accepted.provider_instrument_version,
+            "provenance_digest": accepted.provenance_digest,
+            "source_revision": accepted.event.source_revision,
+            "payload": dict(accepted.event.payload),
+        }
+        envelope = {
+            "event_id": event_id,
+            "event_type": self._EVENT_TYPE,
+            "aggregate_type": self._AGGREGATE_TYPE,
+            "aggregate_id": self.aggregate_id,
+            "aggregate_version": str(next_version),
+            "committed_at": accepted.observed_at,
+            "payload": durable_payload,
+            "payload_hash": payload_digest(durable_payload),
+        }
+        request = {
+            "schema_version": "1.0.0",
+            "external_event_id": accepted.external_event_id,
+            "provenance_digest": accepted.provenance_digest,
+            "evidence_ref": accepted.evidence_ref,
+        }
+        result = {
+            "event_id": event_id,
+            "external_event_id": accepted.external_event_id,
+            "aggregate_version": next_version,
+            "provenance_digest": accepted.provenance_digest,
+            "corrects_external_event_id": corrected,
+        }
+        command_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                "https://commands.autotrade.local/corporate-action-evidence/"
+                + self.provider_id
+                + "/"
+                + self.account_id
+                + "/"
+                + self.environment
+                + "/"
+                + accepted.external_event_id,
+            )
+        )
+        _, inserted, _ = self.store.commit_command(
+            command_id=command_id,
+            actor=self._ACTOR,
+            environment=self.environment,
+            idempotency_key=(
+                "corporate-action-evidence:"
+                + payload_digest(
+                    {
+                        "provider_id": self.provider_id,
+                        "account_id": self.account_id,
+                        "environment": self.environment,
+                        "external_event_id": accepted.external_event_id,
+                    }
+                )[7:]
+            ),
+            request=request,
+            result=result,
+            state_version=next_version,
+            events=[(envelope, None)],
+        )
+        return DurableCorporateActionEvidenceResult(
+            event_id=event_id,
+            external_event_id=accepted.external_event_id,
+            aggregate_version=next_version,
+            inserted=inserted,
+            provenance_digest=accepted.provenance_digest,
+            corrects_external_event_id=corrected,
+        )

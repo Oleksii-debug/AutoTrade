@@ -757,6 +757,41 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result.selected_symbols, ())
         self.assertIn("complete subset evaluation", result.reason)
 
+    def test_selected_symbols_exclude_targets_that_round_to_zero(self):
+        result = allocate_objective_targets(
+            [
+                ObjectiveCandidate.create(
+                    symbol="AAA_ZERO",
+                    desired_notional="0.5",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.20",
+                ),
+                ObjectiveCandidate.create(
+                    symbol="ZZZ_ACTIVE",
+                    desired_notional="100",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.05",
+                ),
+            ],
+            self.policy(
+                cash_available="1000",
+                max_gross_notional="1000",
+                max_net_notional="1000",
+                max_symbol_notional="1000",
+                max_total_cost="100",
+            ),
+        )
+        self.assertEqual(result.allocation.status, "ALLOCATED")
+        self.assertEqual(result.selected_symbols, ("ZZZ_ACTIVE",))
+        nonzero = tuple(
+            target.symbol
+            for target in result.allocation.targets
+            if target.notional != 0
+        )
+        self.assertEqual(nonzero, ("ZZZ_ACTIVE",))
+
     def test_objective_equal_utility_prefers_lower_cost_subset(self):
         result = allocate_objective_targets(
             [

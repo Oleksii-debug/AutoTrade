@@ -80,6 +80,43 @@ class CausalReplayTests(unittest.TestCase):
                 checkpoint=checkpoint,
             )
 
+    def test_checkpoint_cannot_skip_event_from_the_future(self):
+        events = [
+            event(1, "2026-09-24T10:00:00Z", 1),
+            event(2, "2026-09-24T10:01:00Z", 2),
+        ]
+        checkpoint = ReplayCheckpoint(
+            dataset_digest=dataset_digest(events),
+            cursor=2,
+            clock="2026-09-24T10:00:00Z",
+        )
+        with self.assertRaisesRegex(ReplayError, "unavailable at checkpoint clock"):
+            CausalReplay(
+                events,
+                start_at="2026-09-24T09:59:00Z",
+                checkpoint=checkpoint,
+            )
+
+    def test_checkpoint_may_preserve_visible_but_not_yet_consumed_event(self):
+        events = [
+            event(1, "2026-09-24T10:00:00Z", 1),
+            event(2, "2026-09-24T10:01:00Z", 2),
+        ]
+        checkpoint = ReplayCheckpoint(
+            dataset_digest=dataset_digest(events),
+            cursor=0,
+            clock="2026-09-24T10:00:00Z",
+        )
+        replay = CausalReplay(
+            events,
+            start_at="2026-09-24T09:59:00Z",
+            checkpoint=checkpoint,
+        )
+        self.assertEqual(
+            [item.sequence for item in replay.advance_to("2026-09-24T10:00:00Z")],
+            [1],
+        )
+
     def test_clock_cannot_move_backwards(self):
         replay = CausalReplay(
             [event(1, "2026-09-24T10:00:00Z", 1)],
@@ -99,8 +136,8 @@ class CausalReplayTests(unittest.TestCase):
                 start_at="2026-09-24T09:59:00Z",
             )
 
-    def test_payload_is_frozen_and_digest_is_stable(self):
-        payload = {"nested": {"a": 1}}
+    def test_payload_is_deeply_frozen_and_digest_is_stable(self):
+        payload = {"nested": {"a": 1}, "items": [{"b": 2}]}
         item = ReplayEvent(
             sequence=1,
             available_at="2026-09-24T10:00:00Z",
@@ -108,7 +145,16 @@ class CausalReplayTests(unittest.TestCase):
             payload=payload,
         )
         payload["nested"]["a"] = 9
+        payload["items"][0]["b"] = 8
         self.assertEqual(item.payload["nested"]["a"], 1)
+        self.assertEqual(item.payload["items"][0]["b"], 2)
+
+        with self.assertRaises(TypeError):
+            item.payload["nested"]["a"] = 7
+        with self.assertRaises(TypeError):
+            item.payload["items"][0]["b"] = 7
+        with self.assertRaises(TypeError):
+            item.payload["items"][0] = {"b": 7}
 
         one = dataset_digest([item])
         two = dataset_digest(
@@ -117,11 +163,21 @@ class CausalReplayTests(unittest.TestCase):
                     sequence=1,
                     available_at="2026-09-24T10:00:00Z",
                     source_version="v1",
-                    payload={"nested": {"a": 1}},
+                    payload={"nested": {"a": 1}, "items": [{"b": 2}]},
                 )
             ]
         )
         self.assertEqual(one, two)
+
+        replay = CausalReplay(
+            [item],
+            start_at="2026-09-24T09:59:00Z",
+        )
+        before = replay.digest
+        emitted = replay.advance_to("2026-09-24T10:00:00Z")[0]
+        self.assertEqual(emitted.payload["nested"]["a"], 1)
+        self.assertEqual(emitted.payload["items"][0]["b"], 2)
+        self.assertEqual(replay.digest, before)
 
     def test_invalid_checkpoint_cursor_is_rejected(self):
         events = [event(1, "2026-09-24T10:00:00Z", 1)]

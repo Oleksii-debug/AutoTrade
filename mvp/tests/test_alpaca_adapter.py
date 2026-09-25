@@ -254,6 +254,66 @@ class AlpacaAdapterTests(unittest.TestCase):
                 }
             )
 
+    def test_positive_filled_quantity_requires_average_price(self):
+        with self.assertRaisesRegex(AlpacaAdapterError, "filled_avg_price is required"):
+            parse_order_observation(
+                {
+                    "id": "order-1",
+                    "client_order_id": "at-order-1",
+                    "symbol": "AAPL",
+                    "status": "partially_filled",
+                    "filled_qty": "0.5",
+                    "filled_avg_price": None,
+                }
+            )
+        with self.assertRaisesRegex(AlpacaAdapterError, "filled_avg_price is required"):
+            parse_order_observation(
+                {
+                    "id": "order-1",
+                    "client_order_id": "at-order-1",
+                    "symbol": "AAPL",
+                    "status": "filled",
+                    "filled_qty": "1",
+                    "filled_avg_price": "",
+                }
+            )
+
+    def test_missing_filled_quantity_is_not_silently_zero(self):
+        with self.assertRaisesRegex(AlpacaAdapterError, "filled_qty is required"):
+            parse_order_observation(
+                {
+                    "id": "order-1",
+                    "client_order_id": "at-order-1",
+                    "symbol": "AAPL",
+                    "status": "new",
+                }
+            )
+        with self.assertRaisesRegex(AlpacaAdapterError, "filled_qty is required"):
+            parse_order_observation(
+                {
+                    "id": "order-1",
+                    "client_order_id": "at-order-1",
+                    "symbol": "AAPL",
+                    "status": "new",
+                    "filled_qty": None,
+                }
+            )
+
+    def test_null_provider_identity_fields_fail_closed_instead_of_stringifying(self):
+        base = {
+            "id": "order-1",
+            "client_order_id": "at-order-1",
+            "symbol": "AAPL",
+            "status": "new",
+            "filled_qty": "0",
+        }
+        for field in ("id", "client_order_id", "symbol", "status"):
+            with self.subTest(field=field):
+                payload = dict(base)
+                payload[field] = None
+                with self.assertRaises((AlpacaAdapterError, ValueError, TypeError)):
+                    parse_order_observation(payload)
+
     def test_absence_needs_orders_trade_events_activities_and_horizon(self):
         partial = AlpacaAbsenceEvidence(
             by_client_order_id_complete=True,
@@ -303,6 +363,36 @@ class AlpacaAdapterTests(unittest.TestCase):
         self.assertEqual(result["retry_disposition"], "NEVER")
         self.assertEqual(result["provider_order_id"], order_id)
 
+    def test_transport_ambiguity_is_unknown_and_reconcile_first(self):
+        result = parse_submission_response(
+            attempt_id=str(uuid4()),
+            client_order_id="at-unknown-1",
+            response=None,
+            observed_at="2026-09-24T20:00:00Z",
+            environment="PAPER",
+            transport_ambiguous=True,
+        )
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
+        self.assertIsNone(result["provider_received_at"])
+        self.assertEqual(result["observed_at"], "2026-09-24T20:00:00Z")
+        self.assertEqual(result["provider_environment"], "PAPER")
+        self.assertEqual(result["evidence"], [])
+
+    def test_transport_ambiguity_cannot_claim_provider_response(self):
+        with self.assertRaisesRegex(AlpacaAdapterError, "must not fabricate"):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                client_order_id="at-unknown-2",
+                response={
+                    "id": str(uuid4()),
+                    "client_order_id": "at-unknown-2",
+                },
+                observed_at="2026-09-24T20:00:00Z",
+                environment="PAPER",
+                transport_ambiguous=True,
+            )
+
     def test_trade_activity_requires_order_and_fee_evidence(self):
         order_id = str(uuid4())
         row = {
@@ -342,6 +432,302 @@ class AlpacaAdapterTests(unittest.TestCase):
 
     def test_paper_is_not_live_execution_realism_proof(self):
         self.assertFalse(paper_evidence_proves_live_execution_realism())
+
+
+from mvp.autotrade_mvp.alpaca import (
+    AlpacaMlegLeg,
+    AlpacaMlegOrderIntent,
+    prepare_mleg_order_request,
+)
+
+
+def mleg_capability(instrument_version, *, account_id="paper-account", environment="PAPER"):
+    base = capability(order_types=("MARKET", "LIMIT"), tif=("DAY",))
+    return CapabilitySnapshot(
+        snapshot_id=str(uuid4()),
+        provider_id="ALPACA",
+        account_id=account_id,
+        entity_id="alpaca",
+        environment=environment,
+        instrument_version=instrument_version,
+        observed_at=base.observed_at,
+        expires_at=base.expires_at,
+        supported_order_types=base.supported_order_types,
+        time_in_force=base.time_in_force,
+        permission_scopes=base.permission_scopes,
+        position_mode=base.position_mode,
+        native_protection=base.native_protection,
+        rate_limit_policy_id=base.rate_limit_policy_id,
+        data_entitlements=base.data_entitlements,
+        evidence=base.evidence,
+        status=base.status,
+        sources=base.sources,
+    )
+
+
+class AlpacaMlegFoundationTests(unittest.TestCase):
+    def leg(self, symbol, ratio, side, position_intent):
+        return AlpacaMlegLeg.create(
+            instrument_version=f"{symbol}:v1",
+            underlying_version="AAPL:v1",
+            symbol=symbol,
+            ratio_quantity=ratio,
+            side=side,
+            position_intent=position_intent,
+        )
+
+    def test_limit_spread_keeps_parent_and_leg_identity(self):
+        first = self.leg(
+            "AAPL261218C00200000", "1", "BUY", "buy_to_open"
+        )
+        second = self.leg(
+            "AAPL261218C00210000", "1", "SELL", "sell_to_open"
+        )
+        intent = AlpacaMlegOrderIntent.create(
+            underlying_version="AAPL:v1",
+            quantity="2",
+            order_type="LIMIT",
+            time_in_force="DAY",
+            limit_price="-0.60",
+            legs=(first, second),
+        )
+        request = prepare_mleg_order_request(
+            intent,
+            client_order_id="at-mleg-1",
+            capabilities={
+                first.instrument_version: mleg_capability(first.instrument_version),
+                second.instrument_version: mleg_capability(second.instrument_version),
+            },
+            at=NOW,
+        )
+        self.assertEqual(request.body["order_class"], "mleg")
+        self.assertEqual(request.body["qty"], "2")
+        self.assertEqual(request.body["limit_price"], "-0.60")
+        self.assertNotIn("symbol", request.body)
+        self.assertNotIn("side", request.body)
+        self.assertEqual(request.body["legs"][0]["ratio_qty"], "1")
+        self.assertEqual(
+            request.body["legs"][1]["position_intent"], "sell_to_open"
+        )
+
+    def test_market_has_no_parent_limit_price(self):
+        first = self.leg(
+            "AAPL261218P00200000", 1, "BUY", "buy_to_open"
+        )
+        second = self.leg(
+            "AAPL261218P00190000", 1, "SELL", "sell_to_open"
+        )
+        intent = AlpacaMlegOrderIntent.create(
+            underlying_version="AAPL:v1",
+            quantity=1,
+            order_type="MARKET",
+            time_in_force="DAY",
+            legs=(first, second),
+        )
+        request = prepare_mleg_order_request(
+            intent,
+            client_order_id="at-mleg-market",
+            capabilities={
+                first.instrument_version: mleg_capability(first.instrument_version),
+                second.instrument_version: mleg_capability(second.instrument_version),
+            },
+            at=NOW,
+        )
+        self.assertNotIn("limit_price", request.body)
+
+    def test_mleg_requires_two_to_four_legs(self):
+        first = self.leg(
+            "AAPL261218C00200000", 1, "BUY", "buy_to_open"
+        )
+        with self.assertRaisesRegex(AlpacaAdapterError, "2 to 4"):
+            AlpacaMlegOrderIntent.create(
+                underlying_version="AAPL:v1",
+                quantity=1,
+                order_type="MARKET",
+                time_in_force="DAY",
+                legs=(first,),
+            )
+        with self.assertRaisesRegex(AlpacaAdapterError, "2 to 4"):
+            AlpacaMlegOrderIntent.create(
+                underlying_version="AAPL:v1",
+                quantity=1,
+                order_type="MARKET",
+                time_in_force="DAY",
+                legs=(first, first, first, first, first),
+            )
+
+    def test_duplicate_leg_identity_must_use_ratio_quantity(self):
+        first = self.leg(
+            "AAPL261218C00200000", 1, "BUY", "buy_to_open"
+        )
+        with self.assertRaisesRegex(AlpacaAdapterError, "instrument versions"):
+            AlpacaMlegOrderIntent.create(
+                underlying_version="AAPL:v1",
+                quantity=1,
+                order_type="LIMIT",
+                time_in_force="DAY",
+                limit_price="1",
+                legs=(first, first),
+            )
+
+        duplicate_symbol = AlpacaMlegLeg.create(
+            instrument_version="AAPL261218C00200000:v2",
+            underlying_version="AAPL:v1",
+            symbol="AAPL261218C00200000",
+            ratio_quantity=1,
+            side="SELL",
+            position_intent="sell_to_open",
+        )
+        with self.assertRaisesRegex(AlpacaAdapterError, "provider symbols"):
+            AlpacaMlegOrderIntent.create(
+                underlying_version="AAPL:v1",
+                quantity=1,
+                order_type="LIMIT",
+                time_in_force="DAY",
+                limit_price="1",
+                legs=(first, duplicate_symbol),
+            )
+
+    def test_ratio_quantities_must_be_whole_positive_and_reduced(self):
+        with self.assertRaisesRegex(AlpacaAdapterError, "whole"):
+            self.leg("AAPL261218C00200000", "1.5", "BUY", "buy_to_open")
+        first = self.leg(
+            "AAPL261218C00200000", 4, "BUY", "buy_to_open"
+        )
+        second = self.leg(
+            "AAPL261218C00210000", 2, "SELL", "sell_to_open"
+        )
+        with self.assertRaisesRegex(AlpacaAdapterError, "simplest"):
+            AlpacaMlegOrderIntent.create(
+                underlying_version="AAPL:v1",
+                quantity=1,
+                order_type="LIMIT",
+                time_in_force="DAY",
+                limit_price="1",
+                legs=(first, second),
+            )
+
+    def test_position_intent_must_match_leg_side(self):
+        with self.assertRaisesRegex(AlpacaAdapterError, "BUY"):
+            self.leg(
+                "AAPL261218C00200000",
+                1,
+                "SELL",
+                "buy_to_open",
+            )
+
+    def test_underlying_mismatch_fails_closed(self):
+        first = self.leg(
+            "AAPL261218C00200000", 1, "BUY", "buy_to_open"
+        )
+        second = AlpacaMlegLeg.create(
+            instrument_version="MSFT261218C00500000:v1",
+            underlying_version="MSFT:v1",
+            symbol="MSFT261218C00500000",
+            ratio_quantity=1,
+            side="SELL",
+            position_intent="sell_to_open",
+        )
+        with self.assertRaisesRegex(AlpacaAdapterError, "underlying"):
+            AlpacaMlegOrderIntent.create(
+                underlying_version="AAPL:v1",
+                quantity=1,
+                order_type="LIMIT",
+                time_in_force="DAY",
+                limit_price="1",
+                legs=(first, second),
+            )
+
+    def test_limit_credit_and_debit_are_exact_but_zero_is_rejected(self):
+        first = self.leg(
+            "AAPL261218C00200000", 1, "BUY", "buy_to_open"
+        )
+        second = self.leg(
+            "AAPL261218C00210000", 1, "SELL", "sell_to_open"
+        )
+        credit = AlpacaMlegOrderIntent.create(
+            underlying_version="AAPL:v1",
+            quantity=1,
+            order_type="LIMIT",
+            time_in_force="DAY",
+            limit_price="-1.2500",
+            legs=(first, second),
+        )
+        self.assertEqual(credit.limit_price, Decimal("-1.2500"))
+        with self.assertRaisesRegex(AlpacaAdapterError, "non-zero"):
+            AlpacaMlegOrderIntent.create(
+                underlying_version="AAPL:v1",
+                quantity=1,
+                order_type="LIMIT",
+                time_in_force="DAY",
+                limit_price="0",
+                legs=(first, second),
+            )
+        with self.assertRaises(AlpacaAdapterError):
+            AlpacaMlegOrderIntent.create(
+                underlying_version="AAPL:v1",
+                quantity=1,
+                order_type="LIMIT",
+                time_in_force="DAY",
+                limit_price=1.25,
+                legs=(first, second),
+            )
+
+    def test_day_only_is_explicit_until_mleg_gtc_is_qualified(self):
+        first = self.leg(
+            "AAPL261218C00200000", 1, "BUY", "buy_to_open"
+        )
+        second = self.leg(
+            "AAPL261218C00210000", 1, "SELL", "sell_to_open"
+        )
+        with self.assertRaisesRegex(AlpacaAdapterError, "DAY"):
+            AlpacaMlegOrderIntent.create(
+                underlying_version="AAPL:v1",
+                quantity=1,
+                order_type="LIMIT",
+                time_in_force="GTC",
+                limit_price="1",
+                legs=(first, second),
+            )
+
+    def test_every_leg_needs_same_account_exact_capability(self):
+        first = self.leg(
+            "AAPL261218C00200000", 1, "BUY", "buy_to_open"
+        )
+        second = self.leg(
+            "AAPL261218C00210000", 1, "SELL", "sell_to_open"
+        )
+        intent = AlpacaMlegOrderIntent.create(
+            underlying_version="AAPL:v1",
+            quantity=1,
+            order_type="LIMIT",
+            time_in_force="DAY",
+            limit_price="1",
+            legs=(first, second),
+        )
+        with self.assertRaisesRegex(AlpacaAdapterError, "missing exact capability"):
+            prepare_mleg_order_request(
+                intent,
+                client_order_id="at-mleg-missing",
+                capabilities={
+                    first.instrument_version: mleg_capability(first.instrument_version)
+                },
+                at=NOW,
+            )
+        with self.assertRaisesRegex(AlpacaAdapterError, "same account"):
+            prepare_mleg_order_request(
+                intent,
+                client_order_id="at-mleg-cross-account",
+                capabilities={
+                    first.instrument_version: mleg_capability(
+                        first.instrument_version, account_id="a"
+                    ),
+                    second.instrument_version: mleg_capability(
+                        second.instrument_version, account_id="b"
+                    ),
+                },
+                at=NOW,
+            )
 
 
 if __name__ == "__main__":

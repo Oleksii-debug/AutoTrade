@@ -12,11 +12,12 @@ public static partial class CommonScalarContracts
         new(StringComparer.Ordinal) { "REPLAY", "SIMULATION", "PAPER", "LIVE" };
 
     /// <summary>
-    /// Validates one canonical textual common-scalar value without coercion.
+    /// Validates a textual common-scalar value against the named canonical scalar kind.
     /// </summary>
-    /// <param name="kind">Canonical scalar kind.</param>
-    /// <param name="value">Textual value to validate; null is invalid.</param>
-    /// <returns>True only when the value satisfies the selected canonical scalar contract.</returns>
+    /// <param name="kind">Canonical scalar kind, such as Decimal, Digest, or Environment.</param>
+    /// <param name="value">Textual value to validate without numeric coercion.</param>
+    /// <returns><see langword="true"/> when the value satisfies the selected canonical scalar contract.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown when <paramref name="kind"/> is unsupported.</exception>
     public static bool IsValid(string kind, string? value)
     {
         if (value is null)

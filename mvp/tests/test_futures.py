@@ -6,15 +6,19 @@ import unittest
 from mvp.autotrade_mvp.accounting import EconomicBook
 from mvp.autotrade_mvp.futures import (
     FuturesContract,
+    InverseVariationMarginState,
     FuturesError,
     VariationMarginState,
     apply_variation_margin,
     book_variation_margin,
+    apply_inverse_variation_margin,
     inverse_futures_pnl_exact,
     lifecycle_gate,
     linear_futures_pnl,
     require_open_for_new_exposure,
     settle_fraction,
+    settle_and_book_inverse_variation_margin,
+    unrealized_inverse_after_variation,
     unrealized_after_variation,
 )
 
@@ -68,6 +72,31 @@ class FuturesLifecycleTests(unittest.TestCase):
             Decimal("0.00090909"),
         )
 
+    def test_settlement_quantum_rounding_uses_actual_step_not_only_decimal_places(self):
+        value = Fraction(13, 100)
+        self.assertEqual(
+            settle_fraction(value, quantum=Decimal("0.05"), rounding="HALF_EVEN"),
+            Decimal("0.15"),
+        )
+        self.assertEqual(
+            settle_fraction(value, quantum=Decimal("0.05"), rounding="DOWN"),
+            Decimal("0.10"),
+        )
+        self.assertEqual(
+            settle_fraction(-value, quantum=Decimal("0.05"), rounding="DOWN"),
+            Decimal("-0.10"),
+        )
+
+    def test_half_even_quantum_tie_uses_even_multiple(self):
+        self.assertEqual(
+            settle_fraction(Fraction(1, 8), quantum=Decimal("0.05"), rounding="HALF_EVEN"),
+            Decimal("0.10"),
+        )
+        self.assertEqual(
+            settle_fraction(Fraction(7, 40), quantum=Decimal("0.05"), rounding="HALF_EVEN"),
+            Decimal("0.20"),
+        )
+
     def test_variation_margin_is_not_counted_again_as_unrealized(self):
         state = VariationMarginState(
             contract=self._linear_contract(),
@@ -83,6 +112,175 @@ class FuturesLifecycleTests(unittest.TestCase):
             + unrealized_after_variation(settled, Decimal("104")),
             Decimal("80"),
         )
+
+    def test_inverse_contract_rejects_wrong_settlement_currency_dimension(self):
+        with self.assertRaisesRegex(FuturesError, "settlement_currency must match"):
+            FuturesContract(
+                instrument="BTC-USD-INVERSE",
+                payoff="INVERSE",
+                multiplier=Decimal("1"),
+                quote_currency="USD",
+                settlement_currency="USDT",
+                price_base_currency="BTC",
+                last_trade_at=utc(30, 12),
+                delivery_cutoff=utc(30, 20),
+                expiry=utc(30, 23),
+                settlement_method="CASH",
+            )
+
+    def test_inverse_variation_margin_remains_exact_until_settlement(self):
+        contract = FuturesContract(
+            instrument="BTC-USD-INVERSE",
+            payoff="INVERSE",
+            multiplier=Decimal("1"),
+            quote_currency="USD",
+            settlement_currency="BTC",
+            price_base_currency="BTC",
+            last_trade_at=utc(30, 20),
+            delivery_cutoff=utc(30, 20),
+            expiry=utc(30, 21),
+            settlement_method="CASH",
+        )
+        state = InverseVariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("100"),
+            last_settlement_price=Decimal("10000"),
+        )
+
+        after_first, first = apply_inverse_variation_margin(state, "11000")
+        self.assertEqual(first, Fraction(1, 1100))
+        self.assertEqual(after_first.cumulative_variation_margin, Fraction(1, 1100))
+
+        after_second, second = apply_inverse_variation_margin(after_first, "12000")
+        direct = inverse_futures_pnl_exact(
+            signed_contracts=100,
+            contract_quote_value=1,
+            entry_price=10000,
+            exit_price=12000,
+        )
+        self.assertEqual(after_second.cumulative_variation_margin, direct)
+        self.assertEqual(
+            after_second.cumulative_variation_margin,
+            first + second,
+        )
+        self.assertEqual(
+            settle_fraction(
+                after_second.cumulative_variation_margin,
+                quantum=Decimal("0.00000001"),
+            ),
+            settle_fraction(direct, quantum=Decimal("0.00000001")),
+        )
+
+    def test_inverse_settlement_rounds_once_then_books_settlement_currency(self):
+        contract = FuturesContract(
+            instrument="BTC-USD-INVERSE",
+            payoff="INVERSE",
+            multiplier=Decimal("1"),
+            quote_currency="USD",
+            settlement_currency="BTC",
+            price_base_currency="BTC",
+            last_trade_at=utc(30, 20),
+            delivery_cutoff=utc(30, 20),
+            expiry=utc(30, 21),
+            settlement_method="CASH",
+        )
+        exact = Fraction(1, 1100)
+        settled, transaction = settle_and_book_inverse_variation_margin(
+            transaction_id="inverse-vm-1",
+            cause_event_id="inverse-settlement-1",
+            contract=contract,
+            exact_amount=exact,
+            settlement_quantum=Decimal("0.00000001"),
+        )
+        self.assertEqual(settled, Decimal("0.00090909"))
+        self.assertIsNotNone(transaction)
+        book = EconomicBook([transaction])
+        self.assertEqual(book.cash("BTC"), Decimal("0.00090909"))
+        self.assertEqual(
+            book.balance("FUTURES_VARIATION_PNL:BTC", "BTC"),
+            Decimal("-0.00090909"),
+        )
+
+    def test_sub_quantum_inverse_settlement_does_not_create_zero_journal_entry(self):
+        contract = FuturesContract(
+            instrument="BTC-USD-INVERSE",
+            payoff="INVERSE",
+            multiplier=Decimal("1"),
+            quote_currency="USD",
+            settlement_currency="BTC",
+            price_base_currency="BTC",
+            last_trade_at=utc(30, 20),
+            delivery_cutoff=utc(30, 20),
+            expiry=utc(30, 21),
+            settlement_method="CASH",
+        )
+        settled, transaction = settle_and_book_inverse_variation_margin(
+            transaction_id="inverse-vm-small",
+            cause_event_id="inverse-settlement-small",
+            contract=contract,
+            exact_amount=Fraction(1, 1_000_000_000),
+            settlement_quantum=Decimal("0.00000001"),
+        )
+        self.assertEqual(settled, Decimal("0.00000000"))
+        self.assertIsNone(transaction)
+
+    def test_inverse_unrealized_marks_only_since_last_settlement(self):
+        contract = FuturesContract(
+            instrument="BTC-USD-INVERSE",
+            payoff="INVERSE",
+            multiplier=Decimal("1"),
+            quote_currency="USD",
+            settlement_currency="BTC",
+            price_base_currency="BTC",
+            last_trade_at=utc(30, 20),
+            delivery_cutoff=utc(30, 20),
+            expiry=utc(30, 21),
+            settlement_method="CASH",
+        )
+        state = InverseVariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("100"),
+            last_settlement_price=Decimal("10000"),
+        )
+        settled, _ = apply_inverse_variation_margin(state, "11000")
+        unrealized = unrealized_inverse_after_variation(settled, "12000")
+        self.assertEqual(
+            unrealized,
+            inverse_futures_pnl_exact(
+                signed_contracts=100,
+                contract_quote_value=1,
+                entry_price=11000,
+                exit_price=12000,
+            ),
+        )
+
+    def test_inverse_state_rejects_linear_contract_and_decimalized_accumulator(self):
+        with self.assertRaisesRegex(FuturesError, "requires INVERSE"):
+            InverseVariationMarginState(
+                contract=self._linear_contract(),
+                signed_contracts=Decimal("1"),
+                last_settlement_price=Decimal("100"),
+            )
+
+        inverse = FuturesContract(
+            instrument="BTC-USD-INVERSE",
+            payoff="INVERSE",
+            multiplier=Decimal("1"),
+            quote_currency="USD",
+            settlement_currency="BTC",
+            price_base_currency="BTC",
+            last_trade_at=utc(30, 20),
+            delivery_cutoff=utc(30, 20),
+            expiry=utc(30, 21),
+            settlement_method="CASH",
+        )
+        with self.assertRaisesRegex(FuturesError, "exact Fraction"):
+            InverseVariationMarginState(
+                contract=inverse,
+                signed_contracts=Decimal("1"),
+                last_settlement_price=Decimal("10000"),
+                cumulative_variation_margin=Decimal("0"),
+            )
 
     def test_variation_margin_books_balanced_cash_and_pnl(self):
         transaction = book_variation_margin(

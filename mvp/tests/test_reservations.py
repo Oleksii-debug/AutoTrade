@@ -170,6 +170,43 @@ class ReservationFoundationTests(unittest.TestCase):
             snapshot.remaining["CASH:USD"] = Decimal("0")
         self.assertEqual(book.total_reserved("CASH:USD"), Decimal("10"))
 
+    def test_resource_alias_collision_fails_closed_before_reservation(self):
+        book = ReservationBook()
+        with self.assertRaisesRegex(ValueError, "unique after normalization"):
+            book.reserve(
+                reservation_id="r-alias",
+                intent_id="i-alias",
+                requirements={"CASH:USD": "10", " CASH:USD ": "20"},
+                available={"CASH:USD": "100"},
+            )
+        self.assertEqual(book.active(), ())
+
+        with self.assertRaisesRegex(ValueError, "unique after normalization"):
+            book.reserve(
+                reservation_id="r-available-alias",
+                intent_id="i-available-alias",
+                requirements={"CASH:USD": "10"},
+                available={"CASH:USD": "100", " CASH:USD ": "1"},
+            )
+        self.assertEqual(book.active(), ())
+
+    def test_consumption_resource_alias_collision_does_not_mutate_reservation(self):
+        book = ReservationBook()
+        book.reserve(
+            reservation_id="r1",
+            intent_id="i1",
+            requirements={"CASH:USD": "100"},
+            available={"CASH:USD": "100"},
+        )
+        before = book.get("r1")
+        with self.assertRaisesRegex(ValueError, "unique after normalization"):
+            book.consume(
+                "r1",
+                {"CASH:USD": "10", " CASH:USD ": "20"},
+            )
+        self.assertEqual(book.get("r1"), before)
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("100"))
+
     def test_binary_float_inputs_fail_closed(self):
         book = ReservationBook()
         with self.assertRaises(TypeError):

@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from hashlib import sha256
+import json
 from typing import Mapping, Sequence
+
+
+RISK_ACTIONS = frozenset({"TRADE", "REDUCE", "HEDGE", "FLATTEN", "EXERCISE"})
+RISK_INSTRUMENT_TYPES = frozenset(
+    {"GENERIC", "SPOT", "EQUITY", "FUTURE", "PERPETUAL", "OPTION"}
+)
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -44,6 +52,55 @@ def _normalize_mapping(values, *, name: str, parser) -> dict[str, Decimal]:
     return normalized
 
 
+def _normalize_text_mapping(values, *, name: str) -> dict[str, str]:
+    if not isinstance(values, Mapping):
+        raise TypeError(f"{name} must be a mapping")
+    normalized: dict[str, str] = {}
+    for raw_key, raw_value in values.items():
+        key = _identity_key(raw_key, name=name)
+        if key in normalized:
+            raise ValueError(f"{name} keys must be unique after normalization")
+        normalized[key] = _identity_key(raw_value, name=f"{name} value")
+    return normalized
+
+
+def _normalize_actions(values, *, name: str) -> tuple[str, ...]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        raise TypeError(f"{name} must be a sequence of action names")
+    normalized: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} values must be non-empty strings")
+        action = value.strip().upper()
+        if action not in RISK_ACTIONS:
+            raise ValueError(f"Unsupported risk action: {action}")
+        if action in normalized:
+            raise ValueError(f"{name} values must be unique")
+        normalized.append(action)
+    if not normalized:
+        raise ValueError(f"{name} must contain at least one action")
+    return tuple(normalized)
+
+
+def _normalize_nested_mapping(values, *, name: str) -> dict[str, dict[str, Decimal]]:
+    if not isinstance(values, Mapping):
+        raise TypeError(f"{name} must be a mapping")
+    normalized: dict[str, dict[str, Decimal]] = {}
+    for raw_key, raw_value in values.items():
+        key = _identity_key(raw_key, name=name)
+        if key in normalized:
+            raise ValueError(f"{name} keys must be unique after normalization")
+        normalized[key] = _normalize_mapping(
+            raw_value,
+            name=f"{name}[{key}]",
+            parser=lambda value, factor: _decimal(
+                value,
+                name=f"{name}[{key}][{factor}]",
+            ),
+        )
+    return normalized
+
+
 @dataclass(frozen=True)
 class RiskIntent:
     symbol: str
@@ -52,6 +109,8 @@ class RiskIntent:
     price: Decimal
     expected_state_version: int
     reduce_only: bool = False
+    action: str = "TRADE"
+    instrument_type: str = "GENERIC"
 
     @classmethod
     def create(
@@ -63,6 +122,8 @@ class RiskIntent:
         price,
         expected_state_version: int,
         reduce_only: bool = False,
+        action: str = "TRADE",
+        instrument_type: str = "GENERIC",
     ) -> "RiskIntent":
         if not isinstance(symbol, str) or not symbol.strip():
             raise ValueError("symbol is required")
@@ -73,6 +134,22 @@ class RiskIntent:
             raise ValueError("expected_state_version must be a non-negative integer")
         if not isinstance(reduce_only, bool):
             raise TypeError("reduce_only must be a boolean")
+        if not isinstance(action, str) or not action.strip():
+            raise ValueError("action is required")
+        normalized_action = action.strip().upper()
+        if normalized_action not in RISK_ACTIONS:
+            raise ValueError(f"Unsupported risk action: {normalized_action}")
+        if normalized_action in {"REDUCE", "FLATTEN"} and not reduce_only:
+            raise ValueError(f"{normalized_action} action requires reduce_only")
+        if not isinstance(instrument_type, str) or not instrument_type.strip():
+            raise ValueError("instrument_type is required")
+        normalized_instrument_type = instrument_type.strip().upper()
+        if normalized_instrument_type not in RISK_INSTRUMENT_TYPES:
+            raise ValueError(
+                f"Unsupported risk instrument type: {normalized_instrument_type}"
+            )
+        if normalized_action == "EXERCISE" and normalized_instrument_type != "OPTION":
+            raise ValueError("EXERCISE action requires OPTION instrument_type")
         return cls(
             symbol=symbol.strip(),
             side=normalized_side,
@@ -80,6 +157,8 @@ class RiskIntent:
             price=_positive(price, name="price"),
             expected_state_version=expected_state_version,
             reduce_only=reduce_only,
+            action=normalized_action,
+            instrument_type=normalized_instrument_type,
         )
 
 
@@ -95,6 +174,17 @@ class RiskPolicy:
     max_fx_age_seconds: Decimal
     min_margin_headroom: Decimal
     max_stress_loss: Decimal
+    max_asset_concentration_fraction: Decimal | None = None
+    max_venue_concentration_fraction: Decimal | None = None
+    max_order_participation_fraction: Decimal | None = None
+    max_abs_factor_exposure: Decimal | None = None
+    max_spread_fraction: Decimal | None = None
+    max_slippage_fraction: Decimal | None = None
+    max_clock_age_seconds: Decimal | None = None
+    allowed_actions: tuple[str, ...] | None = None
+    require_settlement_evidence: bool = False
+    require_option_exercise_evidence: bool = False
+    min_futures_delivery_headroom_seconds: Decimal | None = None
 
     @classmethod
     def create(
@@ -110,6 +200,17 @@ class RiskPolicy:
         max_fx_age_seconds,
         min_margin_headroom,
         max_stress_loss,
+        max_asset_concentration_fraction=None,
+        max_venue_concentration_fraction=None,
+        max_order_participation_fraction=None,
+        max_abs_factor_exposure=None,
+        max_spread_fraction=None,
+        max_slippage_fraction=None,
+        max_clock_age_seconds=None,
+        allowed_actions: Sequence[str] | None = None,
+        require_settlement_evidence: bool = False,
+        require_option_exercise_evidence: bool = False,
+        min_futures_delivery_headroom_seconds=None,
     ) -> "RiskPolicy":
         values = {
             "max_abs_position": _positive(max_abs_position, name="max_abs_position"),
@@ -125,7 +226,69 @@ class RiskPolicy:
         }
         if values["max_drawdown_fraction"] > 1:
             raise ValueError("max_drawdown_fraction cannot exceed 1")
-        return cls(**values)
+
+        optional_limits: dict[str, Decimal | None] = {}
+        for name, raw_value in (
+            ("max_asset_concentration_fraction", max_asset_concentration_fraction),
+            ("max_venue_concentration_fraction", max_venue_concentration_fraction),
+            ("max_order_participation_fraction", max_order_participation_fraction),
+            ("max_spread_fraction", max_spread_fraction),
+            ("max_slippage_fraction", max_slippage_fraction),
+        ):
+            if raw_value is None:
+                optional_limits[name] = None
+                continue
+            fraction = _positive(raw_value, name=name, allow_zero=True)
+            if fraction > 1:
+                raise ValueError(f"{name} cannot exceed 1")
+            optional_limits[name] = fraction
+
+        factor_limit = (
+            None
+            if max_abs_factor_exposure is None
+            else _positive(
+                max_abs_factor_exposure,
+                name="max_abs_factor_exposure",
+                allow_zero=True,
+            )
+        )
+        clock_limit = (
+            None
+            if max_clock_age_seconds is None
+            else _positive(
+                max_clock_age_seconds,
+                name="max_clock_age_seconds",
+                allow_zero=True,
+            )
+        )
+        normalized_allowed_actions = (
+            None
+            if allowed_actions is None
+            else _normalize_actions(allowed_actions, name="allowed_actions")
+        )
+        if not isinstance(require_settlement_evidence, bool):
+            raise TypeError("require_settlement_evidence must be a boolean")
+        if not isinstance(require_option_exercise_evidence, bool):
+            raise TypeError("require_option_exercise_evidence must be a boolean")
+        delivery_headroom = (
+            None
+            if min_futures_delivery_headroom_seconds is None
+            else _positive(
+                min_futures_delivery_headroom_seconds,
+                name="min_futures_delivery_headroom_seconds",
+                allow_zero=True,
+            )
+        )
+        return cls(
+            **values,
+            **optional_limits,
+            max_abs_factor_exposure=factor_limit,
+            max_clock_age_seconds=clock_limit,
+            allowed_actions=normalized_allowed_actions,
+            require_settlement_evidence=require_settlement_evidence,
+            require_option_exercise_evidence=require_option_exercise_evidence,
+            min_futures_delivery_headroom_seconds=delivery_headroom,
+        )
 
 
 @dataclass(frozen=True)
@@ -139,10 +302,23 @@ class RiskContext:
     drawdown_fraction: Decimal
     market_data_age_seconds: Decimal
     fx_age_seconds: Mapping[str, Decimal]
+    fx_required: bool
     margin_headroom: Decimal
     capability_allowed: bool
     borrow_available: bool | None
     stress_scenarios: Sequence[Mapping[str, Decimal]]
+    asset_buckets: Mapping[str, str] | None = None
+    venues: Mapping[str, str] | None = None
+    liquidity_capacity: Mapping[str, Decimal] | None = None
+    factor_loadings: Mapping[str, Mapping[str, Decimal]] | None = None
+    spread_fraction: Mapping[str, Decimal] | None = None
+    slippage_fraction: Mapping[str, Decimal] | None = None
+    clock_age_seconds: Decimal | None = None
+    settlement_allowed: bool | None = None
+    option_deliverable_verified: bool | None = None
+    option_exercise_cash_required: Decimal | None = None
+    option_exercise_cash_available: Decimal | None = None
+    futures_delivery_headroom_seconds: Mapping[str, Decimal] | None = None
 
     @classmethod
     def create(
@@ -157,10 +333,23 @@ class RiskContext:
         drawdown_fraction=0,
         market_data_age_seconds=0,
         fx_age_seconds: Mapping[str, object] | None = None,
-        margin_headroom=1,
-        capability_allowed: bool = True,
-        borrow_available: bool | None = True,
+        fx_required: bool = False,
+        margin_headroom,
+        capability_allowed: bool,
+        borrow_available: bool | None,
         stress_scenarios: Sequence[Mapping[str, object]] = (),
+        asset_buckets: Mapping[str, str] | None = None,
+        venues: Mapping[str, str] | None = None,
+        liquidity_capacity: Mapping[str, object] | None = None,
+        factor_loadings: Mapping[str, Mapping[str, object]] | None = None,
+        spread_fraction: Mapping[str, object] | None = None,
+        slippage_fraction: Mapping[str, object] | None = None,
+        clock_age_seconds=None,
+        settlement_allowed: bool | None = None,
+        option_deliverable_verified: bool | None = None,
+        option_exercise_cash_required=None,
+        option_exercise_cash_available=None,
+        futures_delivery_headroom_seconds: Mapping[str, object] | None = None,
     ) -> "RiskContext":
         if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
@@ -191,6 +380,80 @@ class RiskContext:
                 allow_zero=True,
             ),
         )
+        normalized_asset_buckets = _normalize_text_mapping(
+            asset_buckets or {},
+            name="asset_buckets",
+        )
+        normalized_venues = _normalize_text_mapping(
+            venues or {},
+            name="venues",
+        )
+        normalized_liquidity = _normalize_mapping(
+            liquidity_capacity or {},
+            name="liquidity_capacity",
+            parser=lambda value, key: _positive(
+                value,
+                name=f"liquidity capacity {key}",
+                allow_zero=True,
+            ),
+        )
+        normalized_factor_loadings = _normalize_nested_mapping(
+            factor_loadings or {},
+            name="factor_loadings",
+        )
+        normalized_spread = _normalize_mapping(
+            spread_fraction or {},
+            name="spread_fraction",
+            parser=lambda value, key: _positive(
+                value,
+                name=f"spread fraction {key}",
+                allow_zero=True,
+            ),
+        )
+        normalized_slippage = _normalize_mapping(
+            slippage_fraction or {},
+            name="slippage_fraction",
+            parser=lambda value, key: _positive(
+                value,
+                name=f"slippage fraction {key}",
+                allow_zero=True,
+            ),
+        )
+        normalized_clock_age = (
+            None
+            if clock_age_seconds is None
+            else _positive(
+                clock_age_seconds,
+                name="clock_age_seconds",
+                allow_zero=True,
+            )
+        )
+        normalized_exercise_required = (
+            None
+            if option_exercise_cash_required is None
+            else _positive(
+                option_exercise_cash_required,
+                name="option_exercise_cash_required",
+                allow_zero=True,
+            )
+        )
+        normalized_exercise_available = (
+            None
+            if option_exercise_cash_available is None
+            else _positive(
+                option_exercise_cash_available,
+                name="option_exercise_cash_available",
+                allow_zero=True,
+            )
+        )
+        normalized_delivery_headroom = _normalize_mapping(
+            futures_delivery_headroom_seconds or {},
+            name="futures_delivery_headroom_seconds",
+            parser=lambda value, key: _decimal(
+                value,
+                name=f"futures delivery headroom {key}",
+            ),
+        )
         if not isinstance(stress_scenarios, Sequence) or isinstance(
             stress_scenarios,
             (str, bytes),
@@ -214,10 +477,19 @@ class RiskContext:
         )
         if normalized_drawdown > 1:
             raise ValueError("drawdown_fraction cannot exceed 1")
+        if not isinstance(fx_required, bool):
+            raise TypeError("fx_required must be a boolean")
         if not isinstance(capability_allowed, bool):
             raise TypeError("capability_allowed must be a boolean")
         if borrow_available is not None and not isinstance(borrow_available, bool):
             raise TypeError("borrow_available must be a boolean or None")
+        if settlement_allowed is not None and not isinstance(settlement_allowed, bool):
+            raise TypeError("settlement_allowed must be a boolean or None")
+        if (
+            option_deliverable_verified is not None
+            and not isinstance(option_deliverable_verified, bool)
+        ):
+            raise TypeError("option_deliverable_verified must be a boolean or None")
         return cls(
             state_version=state_version,
             equity=_positive(equity, name="equity"),
@@ -228,10 +500,23 @@ class RiskContext:
             drawdown_fraction=normalized_drawdown,
             market_data_age_seconds=_positive(market_data_age_seconds, name="market_data_age_seconds", allow_zero=True),
             fx_age_seconds=normalized_fx,
+            fx_required=fx_required,
             margin_headroom=_positive(margin_headroom, name="margin_headroom", allow_zero=True),
             capability_allowed=capability_allowed,
             borrow_available=borrow_available,
             stress_scenarios=scenarios,
+            asset_buckets=normalized_asset_buckets,
+            venues=normalized_venues,
+            liquidity_capacity=normalized_liquidity,
+            factor_loadings=normalized_factor_loadings,
+            spread_fraction=normalized_spread,
+            slippage_fraction=normalized_slippage,
+            clock_age_seconds=normalized_clock_age,
+            settlement_allowed=settlement_allowed,
+            option_deliverable_verified=option_deliverable_verified,
+            option_exercise_cash_required=normalized_exercise_required,
+            option_exercise_cash_available=normalized_exercise_available,
+            futures_delivery_headroom_seconds=normalized_delivery_headroom,
         )
 
 
@@ -254,7 +539,105 @@ class RiskDecision:
     rules: tuple[RiskRuleResult, ...]
 
 
+def risk_decision_fingerprint(decision: RiskDecision) -> str:
+    if not isinstance(decision, RiskDecision):
+        raise TypeError("decision must be a RiskDecision")
+    payload = {
+        "admitted": decision.admitted,
+        "resulting_position": str(decision.resulting_position),
+        "gross_leverage": str(decision.gross_leverage),
+        "net_leverage": str(decision.net_leverage),
+        "worst_stress_loss": str(decision.worst_stress_loss),
+        "rules": [
+            {
+                "rule": item.rule,
+                "passed": item.passed,
+                "observed": item.observed,
+                "limit": item.limit,
+                "reason": item.reason,
+            }
+            for item in decision.rules
+        ],
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
 def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) -> RiskDecision:
+    if not isinstance(intent, RiskIntent):
+        raise TypeError("intent must be RiskIntent")
+    if not isinstance(context, RiskContext):
+        raise TypeError("context must be RiskContext")
+    if not isinstance(policy, RiskPolicy):
+        raise TypeError("policy must be RiskPolicy")
+
+    intent = RiskIntent.create(
+        symbol=intent.symbol,
+        side=intent.side,
+        quantity=intent.quantity,
+        price=intent.price,
+        expected_state_version=intent.expected_state_version,
+        reduce_only=intent.reduce_only,
+        action=intent.action,
+        instrument_type=intent.instrument_type,
+    )
+    context = RiskContext.create(
+        state_version=context.state_version,
+        equity=context.equity,
+        positions=context.positions,
+        marks=context.marks,
+        reserved_position_delta=context.reserved_position_delta,
+        daily_pnl=context.daily_pnl,
+        drawdown_fraction=context.drawdown_fraction,
+        market_data_age_seconds=context.market_data_age_seconds,
+        fx_age_seconds=context.fx_age_seconds,
+        fx_required=context.fx_required,
+        margin_headroom=context.margin_headroom,
+        capability_allowed=context.capability_allowed,
+        borrow_available=context.borrow_available,
+        stress_scenarios=context.stress_scenarios,
+        asset_buckets=context.asset_buckets,
+        venues=context.venues,
+        liquidity_capacity=context.liquidity_capacity,
+        factor_loadings=context.factor_loadings,
+        spread_fraction=context.spread_fraction,
+        slippage_fraction=context.slippage_fraction,
+        clock_age_seconds=context.clock_age_seconds,
+        settlement_allowed=context.settlement_allowed,
+        option_deliverable_verified=context.option_deliverable_verified,
+        option_exercise_cash_required=context.option_exercise_cash_required,
+        option_exercise_cash_available=context.option_exercise_cash_available,
+        futures_delivery_headroom_seconds=context.futures_delivery_headroom_seconds,
+    )
+    policy = RiskPolicy.create(
+        max_abs_position=policy.max_abs_position,
+        max_single_notional=policy.max_single_notional,
+        max_gross_leverage=policy.max_gross_leverage,
+        max_net_leverage=policy.max_net_leverage,
+        max_daily_loss=policy.max_daily_loss,
+        max_drawdown_fraction=policy.max_drawdown_fraction,
+        max_data_age_seconds=policy.max_data_age_seconds,
+        max_fx_age_seconds=policy.max_fx_age_seconds,
+        min_margin_headroom=policy.min_margin_headroom,
+        max_stress_loss=policy.max_stress_loss,
+        max_asset_concentration_fraction=policy.max_asset_concentration_fraction,
+        max_venue_concentration_fraction=policy.max_venue_concentration_fraction,
+        max_order_participation_fraction=policy.max_order_participation_fraction,
+        max_abs_factor_exposure=policy.max_abs_factor_exposure,
+        max_spread_fraction=policy.max_spread_fraction,
+        max_slippage_fraction=policy.max_slippage_fraction,
+        max_clock_age_seconds=policy.max_clock_age_seconds,
+        allowed_actions=policy.allowed_actions,
+        require_settlement_evidence=policy.require_settlement_evidence,
+        require_option_exercise_evidence=policy.require_option_exercise_evidence,
+        min_futures_delivery_headroom_seconds=policy.min_futures_delivery_headroom_seconds,
+    )
+
     if intent.symbol not in context.marks:
         raise ValueError(f"Missing mark for {intent.symbol}")
     signed = intent.quantity if intent.side == "BUY" else -intent.quantity
@@ -292,6 +675,89 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
     mark_notional = abs(resulting * context.marks[intent.symbol])
     intent_notional = intent.quantity * intent.price
     single_notional = max(mark_notional, intent_notional)
+
+    asset_concentration = Decimal("0")
+    asset_concentration_complete = True
+    missing_asset_buckets: set[str] = set()
+    if policy.max_asset_concentration_fraction is not None and gross > 0:
+        asset_groups: dict[str, Decimal] = {}
+        asset_map = context.asset_buckets or {}
+        for symbol, notional in notionals.items():
+            bucket = asset_map.get(symbol)
+            if bucket is None:
+                missing_asset_buckets.add(symbol)
+                continue
+            asset_groups[bucket] = asset_groups.get(bucket, Decimal("0")) + abs(notional)
+        asset_concentration_complete = not missing_asset_buckets
+        if asset_concentration_complete and asset_groups:
+            asset_concentration = max(asset_groups.values()) / gross
+
+    venue_concentration = Decimal("0")
+    venue_concentration_complete = True
+    missing_venues: set[str] = set()
+    if policy.max_venue_concentration_fraction is not None and gross > 0:
+        venue_groups: dict[str, Decimal] = {}
+        venue_map = context.venues or {}
+        for symbol, notional in notionals.items():
+            venue = venue_map.get(symbol)
+            if venue is None:
+                missing_venues.add(symbol)
+                continue
+            venue_groups[venue] = venue_groups.get(venue, Decimal("0")) + abs(notional)
+        venue_concentration_complete = not missing_venues
+        if venue_concentration_complete and venue_groups:
+            venue_concentration = max(venue_groups.values()) / gross
+
+    participation = Decimal("0")
+    participation_evidenced = True
+    if policy.max_order_participation_fraction is not None:
+        liquidity_map = context.liquidity_capacity or {}
+        capacity = liquidity_map.get(intent.symbol)
+        if capacity is None or capacity <= 0:
+            participation_evidenced = False
+        else:
+            participation = intent.quantity / capacity
+
+    spread_observation = (context.spread_fraction or {}).get(intent.symbol)
+    slippage_observation = (context.slippage_fraction or {}).get(intent.symbol)
+
+    factor_exposure = Decimal("0")
+    base_factor_exposure = Decimal("0")
+    factor_exposure_complete = True
+    missing_factor_loadings: set[str] = set()
+    if policy.max_abs_factor_exposure is not None:
+        loading_map = context.factor_loadings or {}
+        projected_factors: dict[str, Decimal] = {}
+        base_factors: dict[str, Decimal] = {}
+        for symbol, notional in notionals.items():
+            symbol_loadings = loading_map.get(symbol)
+            if not symbol_loadings:
+                missing_factor_loadings.add(symbol)
+                continue
+            for factor, loading in symbol_loadings.items():
+                projected_factors[factor] = (
+                    projected_factors.get(factor, Decimal("0"))
+                    + notional * loading
+                )
+        factor_exposure_complete = not missing_factor_loadings
+        if factor_exposure_complete:
+            factor_exposure = max(
+                (abs(value) for value in projected_factors.values()),
+                default=Decimal("0"),
+            )
+        for symbol, notional in base_notionals.items():
+            symbol_loadings = loading_map.get(symbol)
+            if not symbol_loadings:
+                continue
+            for factor, loading in symbol_loadings.items():
+                base_factors[factor] = (
+                    base_factors.get(factor, Decimal("0"))
+                    + notional * loading
+                )
+        base_factor_exposure = max(
+            (abs(value) for value in base_factors.values()),
+            default=Decimal("0"),
+        )
 
     stress_symbols = set(notionals)
     stress_coverage_complete = bool(context.stress_scenarios) or not stress_symbols
@@ -353,6 +819,62 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         True,
         "account/instrument capability must be currently evidenced",
     )
+    if policy.allowed_actions is not None:
+        add(
+            "allowed_action",
+            intent.action in policy.allowed_actions,
+            intent.action,
+            ",".join(policy.allowed_actions),
+            "intent action class must be explicitly permitted by risk policy",
+        )
+    if policy.require_settlement_evidence:
+        add(
+            "settlement",
+            context.settlement_allowed is True,
+            (
+                context.settlement_allowed
+                if context.settlement_allowed is not None
+                else "UNKNOWN"
+            ),
+            True,
+            "settlement state must affirmatively permit the requested action",
+        )
+    if (
+        policy.require_option_exercise_evidence
+        and intent.action == "EXERCISE"
+    ):
+        add(
+            "option_deliverable",
+            context.option_deliverable_verified is True,
+            (
+                context.option_deliverable_verified
+                if context.option_deliverable_verified is not None
+                else "UNKNOWN"
+            ),
+            True,
+            "option exercise requires a verified current deliverable",
+        )
+        exercise_funding_known = (
+            context.option_exercise_cash_required is not None
+            and context.option_exercise_cash_available is not None
+        )
+        add(
+            "option_exercise_funding",
+            exercise_funding_known
+            and context.option_exercise_cash_available
+            >= context.option_exercise_cash_required,
+            (
+                context.option_exercise_cash_available
+                if exercise_funding_known
+                else "UNKNOWN"
+            ),
+            (
+                context.option_exercise_cash_required
+                if context.option_exercise_cash_required is not None
+                else "UNKNOWN"
+            ),
+            "option exercise requires evidenced buying power for its obligation",
+        )
     add(
         "market_freshness",
         context.market_data_age_seconds <= policy.max_data_age_seconds,
@@ -360,13 +882,23 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         policy.max_data_age_seconds,
         "market data must be fresh enough for admission",
     )
+    if policy.max_clock_age_seconds is not None:
+        add(
+            "clock_freshness",
+            context.clock_age_seconds is not None
+            and context.clock_age_seconds <= policy.max_clock_age_seconds,
+            context.clock_age_seconds if context.clock_age_seconds is not None else "UNKNOWN",
+            policy.max_clock_age_seconds,
+            "clock synchronization evidence must be fresh enough for admission",
+        )
+    fx_evidenced = bool(context.fx_age_seconds) or not context.fx_required
     stale_fx = max(context.fx_age_seconds.values(), default=Decimal("0"))
     add(
         "fx_freshness",
-        stale_fx <= policy.max_fx_age_seconds,
-        stale_fx,
+        fx_evidenced and stale_fx <= policy.max_fx_age_seconds,
+        stale_fx if fx_evidenced else "UNKNOWN",
         policy.max_fx_age_seconds,
-        "FX inputs must be fresh enough for valuation",
+        "required FX inputs must be present and fresh enough for valuation",
     )
     add(
         "position_limit",
@@ -396,6 +928,78 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         policy.max_net_leverage,
         "net leverage must stay within policy",
     )
+    if policy.max_asset_concentration_fraction is not None:
+        add(
+            "asset_concentration",
+            asset_concentration_complete
+            and asset_concentration <= policy.max_asset_concentration_fraction,
+            (
+                asset_concentration
+                if asset_concentration_complete
+                else "MISSING:" + ",".join(sorted(missing_asset_buckets))
+            ),
+            policy.max_asset_concentration_fraction,
+            "projected gross exposure by asset bucket must stay within policy",
+        )
+    if policy.max_venue_concentration_fraction is not None:
+        add(
+            "venue_concentration",
+            venue_concentration_complete
+            and venue_concentration <= policy.max_venue_concentration_fraction,
+            (
+                venue_concentration
+                if venue_concentration_complete
+                else "MISSING:" + ",".join(sorted(missing_venues))
+            ),
+            policy.max_venue_concentration_fraction,
+            "projected gross exposure by venue must stay within policy",
+        )
+    if policy.max_order_participation_fraction is not None:
+        add(
+            "liquidity_participation",
+            participation_evidenced
+            and participation <= policy.max_order_participation_fraction,
+            participation if participation_evidenced else "UNKNOWN",
+            policy.max_order_participation_fraction,
+            "order quantity must stay within evidenced liquidity participation policy",
+        )
+    if policy.max_spread_fraction is not None:
+        add(
+            "spread",
+            spread_observation is not None
+            and spread_observation <= policy.max_spread_fraction,
+            spread_observation if spread_observation is not None else "UNKNOWN",
+            policy.max_spread_fraction,
+            "evidenced execution spread must stay within policy",
+        )
+    if policy.max_slippage_fraction is not None:
+        add(
+            "slippage",
+            slippage_observation is not None
+            and slippage_observation <= policy.max_slippage_fraction,
+            slippage_observation if slippage_observation is not None else "UNKNOWN",
+            policy.max_slippage_fraction,
+            "evidenced execution slippage must stay within policy",
+        )
+    if policy.max_abs_factor_exposure is not None:
+        add(
+            "factor_exposure",
+            factor_exposure_complete
+            and (
+                factor_exposure <= policy.max_abs_factor_exposure
+                or (
+                    protective_reduction
+                    and factor_exposure < base_factor_exposure
+                )
+            ),
+            (
+                factor_exposure
+                if factor_exposure_complete
+                else "MISSING:" + ",".join(sorted(missing_factor_loadings))
+            ),
+            policy.max_abs_factor_exposure,
+            "correlated factor exposure must stay within the independent policy bound",
+        )
     daily_loss = max(-context.daily_pnl, Decimal("0"))
     add(
         "daily_loss",
@@ -443,6 +1047,33 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         True,
         "new or increased short exposure requires affirmative borrow evidence",
     )
+
+    if (
+        policy.min_futures_delivery_headroom_seconds is not None
+        and intent.instrument_type == "FUTURE"
+    ):
+        delivery_headroom = (context.futures_delivery_headroom_seconds or {}).get(
+            intent.symbol
+        )
+        delivery_ok = protective_reduction or (
+            delivery_headroom is not None
+            and delivery_headroom >= policy.min_futures_delivery_headroom_seconds
+        )
+        add(
+            "futures_delivery_cutoff",
+            delivery_ok,
+            (
+                "RISK_REDUCTION"
+                if protective_reduction
+                else (
+                    delivery_headroom
+                    if delivery_headroom is not None
+                    else "UNKNOWN"
+                )
+            ),
+            policy.min_futures_delivery_headroom_seconds,
+            "new futures risk requires sufficient evidenced delivery headroom",
+        )
 
     reduce_only_ok = not intent.reduce_only or reduces_absolute_exposure
     add(

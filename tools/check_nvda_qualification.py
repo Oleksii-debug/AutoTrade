@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import re
 import sys
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -154,13 +155,101 @@ def validate_evidence(
 
 
 def evidence_digest(path: Path) -> str:
-    return "sha256:" + sha256(path.read_bytes()).hexdigest()
+    try:
+        payload = path.read_bytes()
+    except OSError as error:
+        raise NvdaQualificationError("evidence file cannot be read") from error
+    return "sha256:" + sha256(payload).hexdigest()
+
+
+def release_artifact_digest(path: Path) -> str:
+    try:
+        if not path.is_file():
+            raise NvdaQualificationError("release artifact must be a readable file")
+        payload = path.read_bytes()
+    except OSError as error:
+        raise NvdaQualificationError("release artifact cannot be read") from error
+    return "sha256:" + sha256(payload).hexdigest()
+
+
+def _release_bundle_source_sha(release_artifact: Path) -> str:
+    try:
+        with zipfile.ZipFile(release_artifact, "r") as archive:
+            manifest_names = [
+                name for name in archive.namelist()
+                if name == "bundle-manifest.json"
+            ]
+            if len(manifest_names) != 1:
+                raise NvdaQualificationError(
+                    "release artifact must contain exactly one bundle-manifest.json"
+                )
+            info = archive.getinfo("bundle-manifest.json")
+            if info.file_size > 1024 * 1024:
+                raise NvdaQualificationError("release bundle manifest is unreasonably large")
+            try:
+                manifest = json.loads(
+                    archive.read(info).decode("utf-8")
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise NvdaQualificationError(
+                    "release bundle manifest is invalid"
+                ) from error
+    except (OSError, zipfile.BadZipFile, KeyError) as error:
+        raise NvdaQualificationError(
+            "release artifact must be a readable AutoTrade release bundle"
+        ) from error
+
+    if not isinstance(manifest, dict):
+        raise NvdaQualificationError("release bundle manifest must be an object")
+    if manifest.get("product") != "AutoTrade":
+        raise NvdaQualificationError("release bundle product must be AutoTrade")
+    if manifest.get("mode") != "release":
+        raise NvdaQualificationError("NVDA qualification requires a release-mode bundle")
+    if manifest.get("release_eligible") is not True:
+        raise NvdaQualificationError(
+            "NVDA qualification requires a release-eligible bundle"
+        )
+    source_sha = _required_text(
+        manifest.get("source_sha"),
+        name="bundle-manifest.source_sha",
+    ).lower()
+    if GIT_SHA.fullmatch(source_sha) is None:
+        raise NvdaQualificationError(
+            "bundle-manifest.source_sha must be an exact 40-character Git SHA"
+        )
+    return source_sha
+
+
+def validate_release_artifact_binding(
+    evidence: dict[str, object],
+    release_artifact: Path,
+) -> str:
+    declared = _required_text(
+        evidence.get("artifact_sha256"),
+        name="artifact_sha256",
+    ).lower()
+    actual = release_artifact_digest(release_artifact)
+    if declared != actual:
+        raise NvdaQualificationError(
+            "release artifact SHA-256 does not match NVDA evidence"
+        )
+    artifact_source_sha = _release_bundle_source_sha(release_artifact)
+    evidence_source_sha = _required_text(
+        evidence.get("source_sha"),
+        name="source_sha",
+    ).lower()
+    if artifact_source_sha != evidence_source_sha:
+        raise NvdaQualificationError(
+            "release bundle source SHA does not match NVDA evidence"
+        )
+    return actual
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--requirements", type=Path, default=DEFAULT_REQUIREMENTS)
     parser.add_argument("--evidence", type=Path)
+    parser.add_argument("--release-artifact", type=Path)
     parser.add_argument("--status", type=Path, default=DEFAULT_STATUS)
     parser.add_argument("--check-status", action="store_true")
     args = parser.parse_args()
@@ -204,8 +293,16 @@ def main() -> int:
 
         if args.evidence is None:
             raise NvdaQualificationError("--evidence is required unless --check-status is used")
+        if args.release_artifact is None:
+            raise NvdaQualificationError(
+                "--release-artifact is required for real NVDA qualification"
+            )
         evidence = _load(args.evidence, name="evidence")
         result = validate_evidence(evidence, requirements)
+        result["artifact_sha256"] = validate_release_artifact_binding(
+            evidence,
+            args.release_artifact,
+        )
         result["evidence_sha256"] = evidence_digest(args.evidence)
         print(json.dumps(result, sort_keys=True))
         return 0

@@ -33,6 +33,9 @@ permissions:
 
 jobs:
   json-schema:
+    env:
+      AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -42,6 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
@@ -59,3 +63,15 @@ jobs:
       - run: node tests/Contracts.TypeScript/common-scalars.test.cjs
       - if: github.event_name == 'pull_request'
         run: python tools/contract_version_guard.py --base-ref origin/${{ github.base_ref }}
+      - name: Write exact-head contracts evidence for pull request
+        if: github.event_name == 'pull_request'
+        run: python tools/write_ci_evidence.py --suite contracts --command "json-schema + dotnet + typescript + contract-version-guard" --output "artifacts/contracts-${{ runner.os }}.json"
+      - name: Write exact-head contracts evidence for non-PR run
+        if: github.event_name != 'pull_request'
+        run: python tools/write_ci_evidence.py --suite contracts --command "json-schema + dotnet + typescript" --output "artifacts/contracts-${{ runner.os }}.json"
+      - name: Upload exact-head contracts evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: contracts-evidence-${{ runner.os }}
+          path: artifacts/contracts-${{ runner.os }}.json
+          if-no-files-found: error

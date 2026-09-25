@@ -3,10 +3,12 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="AutoTrade"
         Width="760"
-        Height="620"
+        Height="680"
         MinWidth="560"
-        MinHeight="460"
+        MinHeight="500"
         WindowStartupLocation="CenterScreen"
+        Loaded="MainWindow_Loaded"
+        Closed="MainWindow_Closed"
         AutomationProperties.Name="AutoTrade desktop control">
   <DockPanel LastChildFill="True">
     <StatusBar DockPanel.Dock="Bottom"
@@ -34,47 +36,89 @@
         <GroupBox Header="Active connection"
                   Margin="0,0,0,16"
                   AutomationProperties.Name="Active connection">
-          <Grid Margin="12">
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="Auto" />
-              <ColumnDefinition Width="*" />
-            </Grid.ColumnDefinitions>
-            <Grid.RowDefinitions>
-              <RowDefinition Height="Auto" />
-              <RowDefinition Height="Auto" />
-              <RowDefinition Height="Auto" />
-            </Grid.RowDefinitions>
+          <StackPanel Margin="12">
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+              </Grid.ColumnDefinitions>
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+              </Grid.RowDefinitions>
 
-            <Label Grid.Row="0" Grid.Column="0"
-                   Target="{Binding ElementName=HostValue}"
-                   Content="_Host:" />
-            <TextBox x:Name="HostValue"
-                     Grid.Row="0" Grid.Column="1"
-                     Margin="12,2,0,6"
-                     Text="Unavailable"
-                     IsReadOnly="True"
-                     AutomationProperties.Name="Active host" />
+              <Label Grid.Row="0" Grid.Column="0"
+                     Target="{Binding ElementName=HostValue}"
+                     Content="_Host:" />
+              <TextBox x:Name="HostValue"
+                       Grid.Row="0" Grid.Column="1"
+                       Margin="12,2,0,6"
+                       Text="Unavailable"
+                       IsReadOnly="True"
+                       AutomationProperties.Name="Active host" />
 
-            <Label Grid.Row="1" Grid.Column="0"
-                   Target="{Binding ElementName=AccountValue}"
-                   Content="_Account:" />
-            <TextBox x:Name="AccountValue"
-                     Grid.Row="1" Grid.Column="1"
-                     Margin="12,2,0,6"
-                     Text="Unavailable"
-                     IsReadOnly="True"
-                     AutomationProperties.Name="Active account" />
+              <Label Grid.Row="1" Grid.Column="0"
+                     Target="{Binding ElementName=AccountValue}"
+                     Content="_Account:" />
+              <TextBox x:Name="AccountValue"
+                       Grid.Row="1" Grid.Column="1"
+                       Margin="12,2,0,6"
+                       Text="Unavailable"
+                       IsReadOnly="True"
+                       AutomationProperties.Name="Active account" />
 
-            <Label Grid.Row="2" Grid.Column="0"
-                   Target="{Binding ElementName=EnvironmentValue}"
-                   Content="_Environment:" />
-            <TextBox x:Name="EnvironmentValue"
-                     Grid.Row="2" Grid.Column="1"
-                     Margin="12,2,0,2"
-                     Text="Unavailable"
-                     IsReadOnly="True"
-                     AutomationProperties.Name="Active environment" />
-          </Grid>
+              <Label Grid.Row="2" Grid.Column="0"
+                     Target="{Binding ElementName=EnvironmentValue}"
+                     Content="_Environment:" />
+              <TextBox x:Name="EnvironmentValue"
+                       Grid.Row="2" Grid.Column="1"
+                       Margin="12,2,0,6"
+                       Text="Unavailable"
+                       IsReadOnly="True"
+                       AutomationProperties.Name="Active environment" />
+
+              <Label Grid.Row="3" Grid.Column="0"
+                     Target="{Binding ElementName=StateVersionValue}"
+                     Content="State _version:" />
+              <TextBox x:Name="StateVersionValue"
+                       Grid.Row="3" Grid.Column="1"
+                       Margin="12,2,0,6"
+                       Text="Unavailable"
+                       IsReadOnly="True"
+                       AutomationProperties.Name="Host state version" />
+
+              <Label Grid.Row="4" Grid.Column="0"
+                     Target="{Binding ElementName=LastEvidenceValue}"
+                     Content="_Last evidence:" />
+              <TextBox x:Name="LastEvidenceValue"
+                       Grid.Row="4" Grid.Column="1"
+                       Margin="12,2,0,2"
+                       Text="Unavailable"
+                       IsReadOnly="True"
+                       AutomationProperties.Name="Last host evidence time" />
+            </Grid>
+
+            <Button x:Name="RefreshStatusButton"
+                    Width="190"
+                    Margin="0,12,0,0"
+                    HorizontalAlignment="Left"
+                    Padding="10,6"
+                    Content="_Refresh host status"
+                    Click="RefreshHostStatus_Click"
+                    AutomationProperties.Name="Refresh host status"
+                    AutomationProperties.HelpText="Refresh host identity and state evidence. A failed refresh marks previous values stale." />
+
+            <TextBlock x:Name="HostStatusAnnouncement"
+                       Margin="0,10,0,0"
+                       TextWrapping="Wrap"
+                       Focusable="False"
+                       Text="Host status has not been refreshed."
+                       AutomationProperties.Name="Host status announcement"
+                       AutomationProperties.LiveSetting="Polite" />
+          </StackPanel>
         </GroupBox>
 
         <GroupBox Header="Emergency controls"

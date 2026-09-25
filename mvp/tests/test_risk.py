@@ -6,6 +6,7 @@ import unittest
 from uuid import NAMESPACE_URL, uuid5
 
 from mvp.autotrade_mvp.risk import (
+    _canonical_decimal_text,
     LiquidationHeadroomEvidence,
     LiquidationScope,
     RiskContext,
@@ -1462,7 +1463,7 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertFalse(complete.admitted)
         self.assertEqual(
             next(x for x in complete.rules if x.rule == "expected_shortfall").observed,
-            "50.00",
+            "50",
         )
 
     def test_strict_reduce_only_can_pass_known_liquidation_breach_when_tail_improves(self):
@@ -1798,6 +1799,36 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertEqual(first_hash, risk_decision_fingerprint(repeated))
         self.assertNotEqual(first_hash, risk_decision_fingerprint(changed))
         self.assertEqual(len(first_hash), 64)
+
+    def test_decimal_scale_and_negative_zero_do_not_change_risk_identity(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="100",
+            expected_state_version=7,
+        )
+        first = evaluate_risk(
+            intent,
+            context(clock_age_seconds="1.0"),
+            policy(max_clock_age_seconds="5.00"),
+        )
+        equivalent = evaluate_risk(
+            intent,
+            context(clock_age_seconds="1.00"),
+            policy(max_clock_age_seconds="5.0"),
+        )
+        self.assertEqual(first.input_fingerprint, equivalent.input_fingerprint)
+        self.assertEqual(
+            risk_decision_fingerprint(first),
+            risk_decision_fingerprint(equivalent),
+        )
+        clock_rule = next(
+            item for item in equivalent.rules if item.rule == "clock_freshness"
+        )
+        self.assertEqual(clock_rule.observed, "1")
+        self.assertEqual(clock_rule.limit, "5")
+        self.assertEqual(_canonical_decimal_text(Decimal("-0.000")), "0")
 
     def test_risk_decision_fingerprint_rejects_wrong_type(self):
         with self.assertRaises(TypeError):

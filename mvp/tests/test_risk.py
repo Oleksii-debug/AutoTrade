@@ -949,6 +949,30 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertEqual(missing_rule.observed, "MISSING:venue_loss")
         self.assertFalse(missing.admitted)
 
+    def test_full_liquidation_does_not_require_artificial_stress_regime_labels(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="SELL",
+                quantity="2",
+                price="100",
+                expected_state_version=7,
+                reduce_only=True,
+            ),
+            context(
+                positions={"ABC": "2"},
+                stress_scenarios=(),
+                stress_scenario_labels=(),
+            ),
+            policy(required_stress_scenario_labels=("price_gap", "correlation_one")),
+        )
+        regime = next(
+            x for x in decision.rules if x.rule == "stress_regime_coverage"
+        )
+        self.assertTrue(regime.passed)
+        self.assertEqual(regime.observed, "NO_PROJECTED_RISK")
+        self.assertTrue(decision.admitted)
+
     def test_stress_scenario_labels_are_unique_and_align_with_scenarios(self):
         with self.assertRaisesRegex(ValueError, "unique"):
             context(

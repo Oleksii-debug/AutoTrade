@@ -63,6 +63,7 @@ class ProviderSecretResolver(Protocol):
         provider: str,
         environment: str,
         purpose: str,
+        provider_environment: str = "DEFAULT",
     ) -> str: ...
 
 
@@ -1505,6 +1506,10 @@ class BybitV5HttpTransport:
             raise ProviderTransportScopeError(
                 "credential handle provider/environment/purpose mismatch"
             )
+        if credential_handle.provider_environment != provider_env:
+            raise ProviderTransportScopeError(
+                "credential handle provider environment mismatch"
+            )
         account = _canonical_text(account_id, name="account_id")
         if credential_handle.account_id != account:
             raise ProviderTransportScopeError(
@@ -1769,6 +1774,7 @@ class BybitV5HttpTransport:
             provider="BYBIT",
             environment=self.policy.environment,
             purpose="TRADE",
+            provider_environment=self.provider_environment,
         )
         try:
             signed = BybitV5Signer.sign(
@@ -1930,6 +1936,10 @@ class BybitV5AuthenticatedReadTransport:
             raise ProviderTransportScopeError(
                 "READ credential handle provider/environment/purpose mismatch"
             )
+        if credential_handle.provider_environment != provider_env:
+            raise ProviderTransportScopeError(
+                "READ credential handle provider environment mismatch"
+            )
         account = _canonical_text(account_id, name="account_id")
         if credential_handle.account_id != account:
             raise ProviderTransportScopeError(
@@ -2063,6 +2073,7 @@ class BybitV5AuthenticatedReadTransport:
             provider="BYBIT",
             environment=self.policy.environment,
             purpose="READ",
+            provider_environment=self.provider_environment,
         )
         try:
             signed = BybitV5AuthenticatedReadSigner.sign(

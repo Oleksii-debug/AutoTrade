@@ -365,6 +365,7 @@ class SecurityBoundary:
         environment: str,
         purpose: str,
         secret_value: str,
+        provider_environment: str = "DEFAULT",
     ) -> CredentialHandle:
         self.validate_session(token, required_roles={"OWNER"}, origin=origin)
         normalized_purpose = _required_text(purpose, name="purpose").upper()
@@ -377,6 +378,9 @@ class SecurityBoundary:
             environment=_required_text(environment, name="environment").upper(),
             purpose=normalized_purpose,
             secret_value=secret_value,
+            provider_environment=_required_text(
+                provider_environment, name="provider_environment"
+            ).upper(),
         )
 
     def _current_handle(self, handle_id: str) -> CredentialHandle:
@@ -389,6 +393,7 @@ class SecurityBoundary:
             provider=str(metadata["provider"]),
             environment=str(metadata["environment"]),
             purpose=str(metadata["purpose"]),
+            provider_environment=str(metadata["provider_environment"]),
             generation=int(metadata["generation"]),
         )
 
@@ -435,6 +440,7 @@ class SecurityBoundary:
         provider: str,
         environment: str,
         purpose: str,
+        provider_environment: str = "DEFAULT",
     ) -> str:
         self.validate_session(token, required_roles=self._EXECUTION_ROLES, origin=origin)
         if not isinstance(handle, CredentialHandle):
@@ -448,6 +454,9 @@ class SecurityBoundary:
             provider=_required_text(provider, name="provider"),
             environment=_required_text(environment, name="environment").upper(),
             purpose=_required_text(purpose, name="purpose").upper(),
+            provider_environment=_required_text(
+                provider_environment, name="provider_environment"
+            ).upper(),
         )
 
     def describe_handle(self, handle_id: str) -> Mapping[str, object]:

@@ -66,6 +66,7 @@ class FakeSecretResolver:
         provider,
         environment,
         purpose,
+        provider_environment="DEFAULT",
     ):
         self.events.append("resolve")
         self.calls.append(
@@ -77,6 +78,7 @@ class FakeSecretResolver:
                 "account_id": account_id,
                 "provider": provider,
                 "environment": environment,
+                "provider_environment": provider_environment,
                 "purpose": purpose,
             }
         )

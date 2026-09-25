@@ -124,6 +124,58 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
             with self.subTest(values=values), self.assertRaises(PermissionError):
                 self.vault.resolve(handle, **values)
 
+    def test_provider_environment_is_cryptographically_bound_and_v2_fails_closed(self):
+        handle = self.vault.register(
+            handle_id="cred-bybit",
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="BYBIT",
+            environment="PAPER",
+            purpose="TRADE",
+            secret_value="bybit-secret",
+            provider_environment="TESTNET",
+        )
+        self.assertEqual(handle.provider_environment, "TESTNET")
+        self.assertEqual(
+            self.vault.resolve(
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="BYBIT",
+                environment="PAPER",
+                purpose="TRADE",
+                provider_environment="TESTNET",
+            ),
+            "bybit-secret",
+        )
+        with self.assertRaisesRegex(PermissionError, "scope mismatch"):
+            self.vault.resolve(
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="BYBIT",
+                environment="PAPER",
+                purpose="TRADE",
+                provider_environment="DEMO",
+            )
+
+        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            raw["records"]["cred-bybit"]["handle"]["provider_environment"],
+            "TESTNET",
+        )
+
+        legacy_v2 = Path(self.directory.name) / "legacy-v2.json"
+        legacy_v2.write_text(
+            json.dumps({"version": 2, "records": {}}),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(SecretVaultError, "provider-environment"):
+            ProtectedCredentialVault(
+                legacy_v2,
+                protector=DeterministicProtector(),
+            )
+
     def test_rotation_invalidates_old_generation_across_restart(self):
         old = self.register()
         new = self.vault.rotate(

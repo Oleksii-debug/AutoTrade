@@ -27,7 +27,12 @@ from mvp.tests.test_provider_transport import (
 )
 
 
-def read_handle(*, environment="PAPER", account_id="paper-1"):
+def read_handle(
+    *,
+    environment="PAPER",
+    account_id="paper-1",
+    provider_environment="TESTNET",
+):
     return PersistentCredentialHandle(
         handle_id="cred-bybit-read",
         account_id=account_id,
@@ -35,10 +40,16 @@ def read_handle(*, environment="PAPER", account_id="paper-1"):
         environment=environment,
         purpose="READ",
         generation=1,
+        provider_environment=provider_environment,
     )
 
 
-def trade_handle(*, environment="PAPER", account_id="bybit-account"):
+def trade_handle(
+    *,
+    environment="PAPER",
+    account_id="bybit-account",
+    provider_environment="TESTNET",
+):
     return PersistentCredentialHandle(
         handle_id="cred-bybit-trade",
         account_id=account_id,
@@ -46,6 +57,7 @@ def trade_handle(*, environment="PAPER", account_id="bybit-account"):
         environment=environment,
         purpose="TRADE",
         generation=1,
+        provider_environment=provider_environment,
     )
 
 
@@ -188,6 +200,7 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
             ["quota", "capability", "resolve", "capability", "wire"],
         )
         self.assertEqual(len(resolver.calls), 1)
+        self.assertEqual(resolver.calls[0]["provider_environment"], "TESTNET")
         self.assertEqual(observation.provider_id, "BYBIT")
         self.assertEqual(observation.account_id, "paper-1")
         self.assertEqual(observation.environment, "PAPER")
@@ -268,6 +281,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
         policy=None,
         clock_utc=None,
         on_resolve=None,
+        credential_handle=None,
     ):
         registry = RecordingCapabilityRegistry(events)
         registry.add(capability)
@@ -283,7 +297,11 @@ class BybitV5SharedTransportTests(unittest.TestCase):
             capability_snapshot_id=capability.snapshot_id,
             capability_registry=registry,
             secret_resolver=resolver,
-            credential_handle=trade_handle(),
+            credential_handle=(
+                trade_handle(provider_environment=provider_environment)
+                if credential_handle is None
+                else credential_handle
+            ),
             session_token="session-token",
             origin="https://localhost",
             execution_identity="host-owner",
@@ -374,6 +392,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
             ["quota", "capability", "resolve", "capability", "guard", "wire"],
         )
         self.assertEqual(len(resolver.calls), 1)
+        self.assertEqual(resolver.calls[0]["provider_environment"], "TESTNET")
         self.assertEqual(len(wire.requests), 1)
         outbound = wire.requests[0]
         self.assertEqual(
@@ -382,6 +401,23 @@ class BybitV5SharedTransportTests(unittest.TestCase):
         )
         self.assertEqual(outbound.headers["X-BAPI-API-KEY"], "api-key-SECRET")
         self.assertEqual(json.loads(outbound.body), dict(request.body))
+
+    def test_provider_environment_credential_scope_cannot_cross_testnet_and_demo(self):
+        capability, _request = prepared()
+        events = []
+        wire = BybitWriteRecordingWire(events)
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "credential handle provider environment mismatch",
+        ):
+            self.make_transport(
+                capability=capability,
+                events=events,
+                wire=wire,
+                provider_environment="TESTNET",
+                credential_handle=trade_handle(provider_environment="DEMO"),
+            )
+        self.assertEqual(wire.requests, [])
 
     def test_exact_provider_environment_policy_cannot_cross_testnet_and_demo(self):
         capability, _request = prepared()

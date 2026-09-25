@@ -950,10 +950,13 @@ class AblationQualificationAuthority:
         registration = self.scientific_registry.protocol_registration(self.protocol_id)
         if registration.protocol_hash != self.protocol_hash:
             raise ValueError("registered protocol hash does not match qualification binding")
-        registered_at = _parse_utc_text(
-            registration.created_at,
-            "protocol registered_at",
-        )
+        try:
+            registered_raw = datetime.fromisoformat(registration.created_at)
+        except (TypeError, ValueError) as error:
+            raise ValueError("protocol registered_at is invalid") from error
+        registered_at = _utc(registered_raw, "protocol registered_at")
+        if registered_at.isoformat() != registration.created_at:
+            raise ValueError("protocol registered_at is not canonical")
         snapshot = self.experience_memory.coverage_population_snapshot(
             causal_cutoff=self.causal_cutoff,
             granted_permissions=set(self.granted_permissions),

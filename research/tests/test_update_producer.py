@@ -951,6 +951,7 @@ class UpdateProducerTests(unittest.TestCase):
                 outcome_horizon_at=UPDATE_CUTOFF + timedelta(days=1),
                 execution_reconciled_at=UPDATE_CUTOFF + timedelta(days=1),
                 outcome_class="PENDING",
+                intended_side="BUY",
                 canonical_label_mature=False,
                 canonical_reconciliation_state="PENDING",
             )

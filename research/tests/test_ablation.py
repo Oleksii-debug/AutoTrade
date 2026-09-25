@@ -3,17 +3,28 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, localcontext
 from hashlib import sha256
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
+from uuid import UUID
 
 from autotrade_research.evaluation.ablation import (
     AblationOutcome,
     AblationPair,
+    AblationOutcomeArtifactRef,
+    AblationQualificationAuthority,
+    CanonicalAblationOutcomeEvidence,
     CausalInputEvidence,
+    RegisteredAblationPopulation,
     build_ablation_evidence_bundle,
     evaluate_incremental_value,
+    evaluate_qualified_incremental_value,
     summarize_ablation,
     verify_ablation_evidence_bundle,
 )
+from autotrade_research.artifacts.store import ArtifactStore
+from autotrade_research.memory.episodes import ExperienceMemory
+from autotrade_research.science.registry import ScientificRegistry
 
 
 CUT = datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc)
@@ -101,6 +112,7 @@ def pair(
     fingerprint=None,
     full_decision=None,
     ablated_decision=None,
+    cutoff=CUT,
 ):
     case_fingerprint = (
         "sha256:" + sha256(case_id.encode("utf-8")).hexdigest()
@@ -119,6 +131,7 @@ def pair(
             components=("base", "agent"),
             population_unit=population_unit,
             decision=full_decision,
+            cutoff=cutoff,
         ),
         outcome(
             case_id=case_id,
@@ -130,7 +143,57 @@ def pair(
             components=("base",),
             population_unit=population_unit,
             decision=ablated_decision,
+            cutoff=cutoff,
         ),
+    )
+
+
+def canonical_evidence(matched, *, source_revision="9" * 40, superseded_at=None):
+    return tuple(
+        CanonicalAblationOutcomeEvidence(
+            case_id=item.case_id,
+            variant=item.variant,
+            population_unit_id=item.population_unit_id,
+            utility=item.utility,
+            cost=item.cost,
+            outcome_available_utc=item.outcome_available_utc,
+            source_revision=source_revision,
+            utility_evidence_digest=FINGERPRINT_B,
+            cost_evidence_digest=FINGERPRINT_C,
+            evidence_digest=(
+                "sha256:"
+                + sha256(
+                    f"{item.case_id}:{item.variant}:{item.utility}:{item.cost}".encode()
+                ).hexdigest()
+            ),
+            superseded_at_utc=superseded_at,
+        )
+        for item in (matched.full, matched.ablated)
+    )
+
+
+def registered_population(pairs, *, source_revision="9" * 40, registered_at=None, evaluation_cutoff=None, complete=True, extra_units=()):
+    units = tuple(
+        sorted(
+            {pair.full.population_unit_id for pair in pairs}
+            | set(extra_units)
+        )
+    )
+    return RegisteredAblationPopulation(
+        protocol_digest=FINGERPRINT_A,
+        population_digest=FINGERPRINT_D,
+        stopping_rule_digest=FINGERPRINT_C,
+        source_revision=source_revision,
+        registered_at_utc=(
+            CUT - timedelta(days=1) if registered_at is None else registered_at
+        ),
+        evaluation_cutoff_utc=(
+            CUT + timedelta(hours=2)
+            if evaluation_cutoff is None
+            else evaluation_cutoff
+        ),
+        population_unit_ids=units,
+        complete=complete,
     )
 
 
@@ -350,6 +413,77 @@ class AblationTests(unittest.TestCase):
             population_unit="canonical-wire-story-7",
         )
         with self.assertRaisesRegex(ValueError, "independent population unit"):
+            summarize_ablation("agent", [first, second])
+
+    def test_target_content_cannot_be_recounted_across_distinct_cases(self):
+        target = causal_evidence(
+            evidence_id="wire-story-a",
+            digest=FINGERPRINT_C,
+            component="agent",
+        )
+        first = pair("target-dup-a", "1")
+        second = pair("target-dup-b", "1")
+        first = AblationPair(
+            "agent",
+            replace(
+                first.full,
+                input_evidence=(causal_evidence(), target),
+            ),
+            first.ablated,
+        )
+        second_base = causal_evidence(
+            evidence_id="base-b",
+            digest="sha256:" + ("e" * 64),
+        )
+        second = AblationPair(
+            "agent",
+            replace(
+                second.full,
+                input_evidence=(
+                    second_base,
+                    replace(target, evidence_id="wire-story-b"),
+                ),
+            ),
+            replace(second.ablated, input_evidence=(second_base,)),
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate target evidence content"):
+            evaluate_incremental_value(
+                "agent",
+                [first, second],
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+
+    def test_target_syndication_group_cannot_be_recounted_across_cases(self):
+        first_target = causal_evidence(
+            evidence_id="wire-story-a",
+            digest=FINGERPRINT_C,
+            component="agent",
+            syndication_group="wire-group-9",
+        )
+        second_target = causal_evidence(
+            evidence_id="wire-story-b",
+            digest=FINGERPRINT_D,
+            component="agent",
+            syndication_group="wire-group-9",
+        )
+        first = pair("syndicated-a", "1")
+        second = pair("syndicated-b", "1")
+        first = AblationPair(
+            "agent",
+            replace(first.full, input_evidence=(causal_evidence(), first_target)),
+            first.ablated,
+        )
+        second_base = causal_evidence(
+            evidence_id="base-b",
+            digest="sha256:" + ("e" * 64),
+        )
+        second = AblationPair(
+            "agent",
+            replace(second.full, input_evidence=(second_base, second_target)),
+            replace(second.ablated, input_evidence=(second_base,)),
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate target syndication group"):
             summarize_ablation("agent", [first, second])
 
     def test_inferential_value_requires_causal_input_evidence(self):
@@ -857,6 +991,342 @@ class AblationTests(unittest.TestCase):
                 locked,
                 payload=noncanonical_payload,
                 content_digest=noncanonical_digest,
+            )
+
+
+    def test_qualified_pass_requires_canonical_outcome_evidence(self):
+        cases = [
+            pair("qualified-a", "2", population_unit="unit-a"),
+            pair("qualified-b", "2", population_unit="unit-b"),
+        ]
+        result = evaluate_qualified_incremental_value(
+            "agent",
+            cases,
+            population=registered_population(cases),
+            canonical_outcomes=(),
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertEqual(result.reason, "missing_canonical_outcome_evidence")
+
+    def test_qualified_population_must_include_every_registered_unit(self):
+        cases = [
+            pair("qualified-a", "2", population_unit="unit-a"),
+            pair("qualified-b", "2", population_unit="unit-b"),
+        ]
+        evidence = tuple(
+            item
+            for matched in cases
+            for item in canonical_evidence(matched)
+        )
+        result = evaluate_qualified_incremental_value(
+            "agent",
+            cases,
+            population=registered_population(cases, extra_units=("unit-negative-null",)),
+            canonical_outcomes=evidence,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertEqual(result.reason, "incomplete_registered_population")
+
+    def test_qualified_stale_pre_cutoff_revision_is_inconclusive(self):
+        cases = [
+            pair("qualified-a", "2", population_unit="unit-a"),
+            pair("qualified-b", "2", population_unit="unit-b"),
+        ]
+        stale = canonical_evidence(
+            cases[0],
+            superseded_at=CUT + timedelta(hours=1, minutes=30),
+        )
+        evidence = stale + canonical_evidence(cases[1])
+        result = evaluate_qualified_incremental_value(
+            "agent",
+            cases,
+            population=registered_population(cases),
+            canonical_outcomes=evidence,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertEqual(result.reason, "stale_canonical_outcome_revision")
+
+    def test_qualified_post_cutoff_correction_does_not_rewrite_frozen_result(self):
+        cases = [
+            pair("qualified-a", "2", population_unit="unit-a"),
+            pair("qualified-b", "2", population_unit="unit-b"),
+        ]
+        evidence = (
+            canonical_evidence(
+                cases[0],
+                superseded_at=CUT + timedelta(hours=3),
+            )
+            + canonical_evidence(cases[1])
+        )
+        result = evaluate_qualified_incremental_value(
+            "agent",
+            cases,
+            population=registered_population(cases),
+            canonical_outcomes=evidence,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertEqual(
+            result.reason,
+            "untrusted_caller_authored_qualification_evidence",
+        )
+
+    def test_qualified_post_hoc_registration_cannot_pass(self):
+        cases = [
+            pair("qualified-a", "2", population_unit="unit-a"),
+            pair("qualified-b", "2", population_unit="unit-b"),
+        ]
+        evidence = tuple(
+            item
+            for matched in cases
+            for item in canonical_evidence(matched)
+        )
+        result = evaluate_qualified_incremental_value(
+            "agent",
+            cases,
+            population=registered_population(
+                cases,
+                registered_at=CUT + timedelta(seconds=1),
+            ),
+            canonical_outcomes=evidence,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertEqual(
+            result.reason,
+            "post_hoc_population_or_protocol_registration",
+        )
+
+    def test_qualified_evaluation_is_deterministic_for_exact_registered_population(self):
+        cases = [
+            pair("qualified-a", "2", full_cost="0.25", population_unit="unit-a"),
+            pair("qualified-b", "1.5", full_cost="0.10", population_unit="unit-b"),
+        ]
+        evidence = tuple(
+            item
+            for matched in cases
+            for item in canonical_evidence(matched)
+        )
+        population = registered_population(cases)
+        first = evaluate_qualified_incremental_value(
+            "agent",
+            cases,
+            population=population,
+            canonical_outcomes=evidence,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        second = evaluate_qualified_incremental_value(
+            "agent",
+            list(reversed(cases)),
+            population=population,
+            canonical_outcomes=tuple(reversed(evidence)),
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(first.status, "INCONCLUSIVE")
+        self.assertEqual(
+            first.reason,
+            "untrusted_caller_authored_qualification_evidence",
+        )
+
+    def test_qualified_canonical_economics_must_match_scored_numbers(self):
+        cases = [
+            pair("qualified-a", "2", population_unit="unit-a"),
+            pair("qualified-b", "2", population_unit="unit-b"),
+        ]
+        evidence = list(
+            item
+            for matched in cases
+            for item in canonical_evidence(matched)
+        )
+        evidence[0] = replace(evidence[0], utility=Decimal("999"))
+        result = evaluate_qualified_incremental_value(
+            "agent",
+            cases,
+            population=registered_population(cases),
+            canonical_outcomes=evidence,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertEqual(result.reason, "canonical_outcome_economic_mismatch")
+
+
+    def test_terminal_qualification_requires_persistent_protocol_population_and_artifacts(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            science = ScientificRegistry(root / "science.sqlite3")
+            memory = ExperienceMemory(root / "memory.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            protocol_payload = {
+                "hypothesis": "agent adds after-cost value",
+                "strategy": "matched causal ablation",
+                "features": ["base", "agent"],
+                "search_space": {"agent": ["enabled", "ablated"]},
+                "train_period": {"start": "2026-01-01", "end": "2026-01-02"},
+                "validation_period": {"start": "2026-01-04", "end": "2026-01-05"},
+                "test_period": {"start": "2026-01-07", "end": "2026-01-08"},
+                "forward_period": {"start": "2026-01-10", "end": "2026-01-11"},
+                "labels": ["net_value"],
+                "horizons": ["1d"],
+                "purge_embargo": {"purge": "1d", "embargo": "1d"},
+                "universe": ["TEST"],
+                "cost_fill_model": "canonical-cost-v1",
+                "baselines": ["ablated"],
+                "primary_metrics": ["net_incremental_value"],
+                "secondary_metrics": ["latency"],
+                "trial_budget": 2,
+                "stopping_rules": {"maximum_trials": 2},
+                "statistical_estimator": "matched-lower-bound",
+                "multiplicity_treatment": "pre-registered-single-comparison",
+                "minimum_practical_effect": "0",
+                "risk_constraints": {"authority_expansion": False},
+                "retention_tolerances": {"negative_results": "retain"},
+                "promotion_rule": "qualified-only",
+            }
+            registration = science.register_protocol(
+                protocol_payload,
+                protocol_id="11111111-1111-4111-8111-111111111111",
+            )
+            cutoff = CUT + timedelta(days=1)
+            evaluation_cutoff = cutoff + timedelta(hours=2)
+            units = (
+                "22222222-2222-4222-8222-222222222222",
+                "33333333-3333-4333-8333-333333333333",
+            )
+            cases = [
+                pair(
+                    "qualified-authority-a",
+                    "2",
+                    population_unit=units[0],
+                    cutoff=cutoff,
+                ),
+                pair(
+                    "qualified-authority-b",
+                    "2",
+                    population_unit=units[1],
+                    cutoff=cutoff,
+                ),
+            ]
+            for unit, matched in zip(units, cases):
+                memory.append_episode(
+                    episode_id=unit,
+                    decision_time=matched.full.decision_utc,
+                    information_cutoff=matched.full.input_cutoff_utc,
+                    task="ablation-qualification",
+                    regime="test",
+                    instrument_family="EQUITY",
+                    permission_class="RESEARCH",
+                    payload={
+                        "evidence_refs": ["artifact:source"],
+                        "intended_action": {"case_id": matched.full.case_id},
+                        "actual_execution": {"fills": []},
+                        "outcome": {"status": "observed"},
+                        "costs": {"USD": "0"},
+                    },
+                )
+            population = memory.coverage_population_snapshot(
+                causal_cutoff=evaluation_cutoff,
+                granted_permissions={"RESEARCH"},
+                task="ablation-qualification",
+                instrument_family="EQUITY",
+            )
+            refs = []
+            source_revision = "9" * 40
+            artifact_index = 0
+            for matched in cases:
+                for item in (matched.full, matched.ablated):
+                    artifact_index += 1
+                    artifact_id = str(
+                        UUID(int=0x44444444444440008000000000000000 + artifact_index)
+                    )
+                    payload = {
+                        "schema_version": 1,
+                        "case_id": item.case_id,
+                        "variant": item.variant,
+                        "population_unit_id": item.population_unit_id,
+                        "utility": str(item.utility),
+                        "cost": str(item.cost),
+                        "outcome_available_utc": item.outcome_available_utc.isoformat().replace("+00:00", "Z"),
+                        "source_revision": source_revision,
+                        "protocol_id": registration.protocol_id,
+                        "protocol_hash": registration.protocol_hash,
+                        "population_root": population.root_hash,
+                        "utility_evidence_digest": FINGERPRINT_B,
+                        "cost_evidence_digest": FINGERPRINT_C,
+                        "superseded_at_utc": None,
+                    }
+                    raw = json.dumps(
+                        payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                    manifest = artifacts.publish_bytes(
+                        artifact_id=artifact_id,
+                        data=raw,
+                        media_type="application/vnd.autotrade.ablation-outcome+json",
+                        rights={"storage": True, "export": False},
+                        source_refs=[f"protocol:{registration.protocol_id}"],
+                    )
+                    refs.append(
+                        AblationOutcomeArtifactRef(
+                            artifact_id=artifact_id,
+                            sha256=manifest["sha256"],
+                        )
+                    )
+            authority = AblationQualificationAuthority(
+                scientific_registry=science,
+                experience_memory=memory,
+                artifact_store=artifacts,
+                protocol_id=registration.protocol_id,
+                protocol_hash=registration.protocol_hash,
+                source_revision=source_revision,
+                causal_cutoff=evaluation_cutoff,
+                granted_permissions={"RESEARCH"},
+                task="ablation-qualification",
+                instrument_family="EQUITY",
+            )
+            result = evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                authority=authority,
+                outcome_refs=refs,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+            self.assertEqual(result.status, "PASS")
+            self.assertEqual(
+                result.reason,
+                "qualified_registered_canonical_ablation_net_of_cost",
+            )
+
+            forged = canonical_evidence(cases[0]) + canonical_evidence(cases[1])
+            diagnostic = evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                population=registered_population(
+                    cases,
+                    evaluation_cutoff=evaluation_cutoff,
+                ),
+                canonical_outcomes=forged,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+            self.assertEqual(diagnostic.status, "INCONCLUSIVE")
+            self.assertEqual(
+                diagnostic.reason,
+                "untrusted_caller_authored_qualification_evidence",
             )
 
 

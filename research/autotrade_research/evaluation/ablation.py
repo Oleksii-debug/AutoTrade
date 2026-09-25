@@ -14,6 +14,11 @@ import json
 import re
 from typing import Iterable
 
+from autotrade_research.artifacts.store import ArtifactStore
+from autotrade_research.io.strict_json import strict_json_loads
+from autotrade_research.memory.episodes import ExperienceMemory
+from autotrade_research.science.registry import ScientificRegistry
+
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -338,6 +343,8 @@ def _validate_pairs(target_component: str, pairs: Iterable[AblationPair]) -> lis
     seen_case_ids: set[str] = set()
     seen_input_fingerprints: set[str] = set()
     seen_population_units: set[str] = set()
+    seen_target_content_digests: set[str] = set()
+    seen_target_syndication_groups: set[str] = set()
     for pair in selected:
         case_id = pair.full.case_id
         fingerprint = pair.full.input_fingerprint
@@ -355,6 +362,28 @@ def _validate_pairs(target_component: str, pairs: Iterable[AblationPair]) -> lis
                 "cases must be deduplicated"
             )
         seen_population_units.add(population_unit)
+
+        target_evidence = [
+            item
+            for item in pair.full.input_evidence
+            if item.component_id == target_component
+        ]
+        for item in target_evidence:
+            if item.content_digest in seen_target_content_digests:
+                raise ValueError(
+                    "duplicate target evidence content across matched cases; "
+                    "cases are not independent"
+                )
+            seen_target_content_digests.add(item.content_digest)
+
+            group = item.syndication_group
+            if group is not None:
+                if group in seen_target_syndication_groups:
+                    raise ValueError(
+                        "duplicate target syndication group across matched cases; "
+                        "cases are not independent"
+                    )
+                seen_target_syndication_groups.add(group)
     return selected
 
 
@@ -645,6 +674,492 @@ def _evaluation_payload(item: AblationEvaluation) -> dict[str, object]:
             item.uncertainty_multiplier
         ),
     }
+
+
+
+@dataclass(frozen=True)
+class AblationOutcomeArtifactRef:
+    """Immutable reference to one pre-existing canonical ablation outcome artifact."""
+
+    artifact_id: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        from uuid import UUID
+
+        try:
+            canonical_id = str(UUID(self.artifact_id))
+        except (ValueError, AttributeError, TypeError) as error:
+            raise ValueError("artifact_id must be a canonical UUID") from error
+        if canonical_id != self.artifact_id:
+            raise ValueError("artifact_id must use canonical UUID text")
+        object.__setattr__(self, "sha256", _digest(self.sha256, "sha256"))
+
+
+_ABLATION_OUTCOME_MEDIA_TYPE = "application/vnd.autotrade.ablation-outcome+json"
+
+
+def _parse_utc_text(value: object, field: str) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise ValueError(f"{field} must be canonical UTC text")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as error:
+        raise ValueError(f"{field} must be canonical UTC text") from error
+    canonical = parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    if canonical != value:
+        raise ValueError(f"{field} must be canonical UTC text")
+    return parsed.astimezone(timezone.utc)
+
+
+@dataclass(frozen=True)
+class CanonicalAblationOutcomeEvidence:
+    """Immutable binding from one matched outcome to canonical economic evidence."""
+
+    case_id: str
+    variant: str
+    population_unit_id: str
+    utility: Decimal
+    cost: Decimal
+    outcome_available_utc: datetime
+    source_revision: str
+    utility_evidence_digest: str
+    cost_evidence_digest: str
+    evidence_digest: str
+    superseded_at_utc: datetime | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("case_id", "population_unit_id"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} is required")
+            canonical = value.strip()
+            if canonical != value:
+                raise ValueError(f"{name} must use canonical text")
+            object.__setattr__(self, name, canonical)
+        if self.variant not in {"FULL", "ABLATED"}:
+            raise ValueError("variant must be FULL or ABLATED")
+        object.__setattr__(self, "utility", _decimal(self.utility, "utility"))
+        cost = _decimal(self.cost, "cost")
+        if cost < 0:
+            raise ValueError("cost must be non-negative")
+        object.__setattr__(self, "cost", cost)
+        object.__setattr__(
+            self,
+            "outcome_available_utc",
+            _utc(self.outcome_available_utc, "outcome_available_utc"),
+        )
+        if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
+            raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
+        for name in (
+            "utility_evidence_digest",
+            "cost_evidence_digest",
+            "evidence_digest",
+        ):
+            object.__setattr__(self, name, _digest(getattr(self, name), name))
+        if self.superseded_at_utc is not None:
+            superseded = _utc(self.superseded_at_utc, "superseded_at_utc")
+            if superseded <= self.outcome_available_utc:
+                raise ValueError(
+                    "superseded_at_utc must follow outcome availability"
+                )
+            object.__setattr__(self, "superseded_at_utc", superseded)
+
+
+@dataclass(frozen=True)
+class RegisteredAblationPopulation:
+    """Frozen pre-outcome population/protocol identity for qualified ablation."""
+
+    protocol_digest: str
+    population_digest: str
+    stopping_rule_digest: str
+    source_revision: str
+    registered_at_utc: datetime
+    evaluation_cutoff_utc: datetime
+    population_unit_ids: tuple[str, ...]
+    complete: bool = True
+
+    def __post_init__(self) -> None:
+        for name in (
+            "protocol_digest",
+            "population_digest",
+            "stopping_rule_digest",
+        ):
+            object.__setattr__(self, name, _digest(getattr(self, name), name))
+        if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
+            raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
+        registered = _utc(self.registered_at_utc, "registered_at_utc")
+        cutoff = _utc(self.evaluation_cutoff_utc, "evaluation_cutoff_utc")
+        if cutoff < registered:
+            raise ValueError("evaluation cutoff cannot precede population registration")
+        object.__setattr__(self, "registered_at_utc", registered)
+        object.__setattr__(self, "evaluation_cutoff_utc", cutoff)
+        if not isinstance(self.population_unit_ids, tuple) or not self.population_unit_ids:
+            raise ValueError("population_unit_ids must be a non-empty immutable tuple")
+        normalized = tuple(
+            value.strip()
+            for value in self.population_unit_ids
+            if isinstance(value, str) and value.strip()
+        )
+        if len(normalized) != len(self.population_unit_ids):
+            raise ValueError("population_unit_ids must contain canonical non-empty strings")
+        if tuple(sorted(normalized)) != normalized:
+            raise ValueError("population_unit_ids must be sorted canonically")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("population_unit_ids must be unique")
+        object.__setattr__(self, "population_unit_ids", normalized)
+        if type(self.complete) is not bool:
+            raise TypeError("complete must be a boolean")
+
+
+class AblationQualificationAuthority:
+    """Resolve qualification evidence only through canonical persistent authorities.
+
+    The authority never publishes evidence. It consumes an append-only scientific
+    protocol, recomputes the complete ExperienceMemory population at the frozen
+    causal cutoff, and reads pre-existing immutable outcome artifacts from the
+    canonical ArtifactStore.
+    """
+
+    def __init__(
+        self,
+        *,
+        scientific_registry: ScientificRegistry,
+        experience_memory: ExperienceMemory,
+        artifact_store: ArtifactStore,
+        protocol_id: str,
+        protocol_hash: str,
+        source_revision: str,
+        causal_cutoff: datetime,
+        granted_permissions: set[str],
+        task: str | None = None,
+        instrument_family: str | None = None,
+    ) -> None:
+        if not isinstance(scientific_registry, ScientificRegistry):
+            raise TypeError("scientific_registry must be ScientificRegistry")
+        if not isinstance(experience_memory, ExperienceMemory):
+            raise TypeError("experience_memory must be ExperienceMemory")
+        if not isinstance(artifact_store, ArtifactStore):
+            raise TypeError("artifact_store must be ArtifactStore")
+        if not isinstance(protocol_id, str) or not protocol_id.strip():
+            raise ValueError("protocol_id is required")
+        if not isinstance(protocol_hash, str):
+            raise TypeError("protocol_hash must be text")
+        if not isinstance(source_revision, str) or _GIT_SHA.fullmatch(source_revision) is None:
+            raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
+        if not isinstance(granted_permissions, set) or not granted_permissions:
+            raise ValueError("granted_permissions must be a non-empty set")
+        self.scientific_registry = scientific_registry
+        self.experience_memory = experience_memory
+        self.artifact_store = artifact_store
+        self.protocol_id = protocol_id.strip()
+        self.protocol_hash = _digest(protocol_hash, "protocol_hash")
+        self.source_revision = source_revision
+        self.causal_cutoff = _utc(causal_cutoff, "causal_cutoff")
+        self.granted_permissions = set(granted_permissions)
+        self.task = task
+        self.instrument_family = instrument_family
+
+    def _load_outcome(
+        self,
+        reference: AblationOutcomeArtifactRef,
+        *,
+        population_root: str,
+    ) -> CanonicalAblationOutcomeEvidence:
+        if not isinstance(reference, AblationOutcomeArtifactRef):
+            raise TypeError("outcome_refs must contain AblationOutcomeArtifactRef")
+        manifest = self.artifact_store.load_manifest(reference.artifact_id)
+        if manifest.get("sha256") != reference.sha256:
+            raise ValueError("ablation outcome artifact digest mismatch")
+        if manifest.get("media_type") != _ABLATION_OUTCOME_MEDIA_TYPE:
+            raise ValueError("ablation outcome artifact media type is not qualified")
+        data = self.artifact_store.read_bytes(reference.artifact_id)
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("ablation outcome artifact must be UTF-8 JSON") from error
+        try:
+            payload = strict_json_loads(text)
+        except ValueError as error:
+            raise ValueError("ablation outcome artifact JSON is invalid") from error
+        required = {
+            "schema_version",
+            "case_id",
+            "variant",
+            "population_unit_id",
+            "utility",
+            "cost",
+            "outcome_available_utc",
+            "source_revision",
+            "protocol_id",
+            "protocol_hash",
+            "population_root",
+            "utility_evidence_digest",
+            "cost_evidence_digest",
+            "superseded_at_utc",
+        }
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise ValueError("ablation outcome artifact schema is not canonical")
+        if payload.get("schema_version") != 1:
+            raise ValueError("ablation outcome artifact schema version is unsupported")
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        if canonical != text:
+            raise ValueError("ablation outcome artifact JSON must be canonical")
+        if (
+            payload.get("protocol_id") != self.protocol_id
+            or payload.get("protocol_hash") != self.protocol_hash
+            or payload.get("population_root") != population_root
+            or payload.get("source_revision") != self.source_revision
+        ):
+            raise ValueError("ablation outcome artifact authority binding mismatch")
+        superseded_raw = payload.get("superseded_at_utc")
+        superseded = (
+            None
+            if superseded_raw is None
+            else _parse_utc_text(superseded_raw, "superseded_at_utc")
+        )
+        return CanonicalAblationOutcomeEvidence(
+            case_id=payload.get("case_id"),
+            variant=payload.get("variant"),
+            population_unit_id=payload.get("population_unit_id"),
+            utility=payload.get("utility"),
+            cost=payload.get("cost"),
+            outcome_available_utc=_parse_utc_text(
+                payload.get("outcome_available_utc"),
+                "outcome_available_utc",
+            ),
+            source_revision=payload.get("source_revision"),
+            utility_evidence_digest=payload.get("utility_evidence_digest"),
+            cost_evidence_digest=payload.get("cost_evidence_digest"),
+            evidence_digest=reference.sha256,
+            superseded_at_utc=superseded,
+        )
+
+    def resolve(
+        self,
+        pairs: Iterable[AblationPair],
+        *,
+        outcome_refs: Iterable[AblationOutcomeArtifactRef],
+    ) -> tuple[RegisteredAblationPopulation, tuple[CanonicalAblationOutcomeEvidence, ...]]:
+        selected = tuple(pairs)
+        registration = self.scientific_registry.protocol_registration(self.protocol_id)
+        if registration.protocol_hash != self.protocol_hash:
+            raise ValueError("registered protocol hash does not match qualification binding")
+        try:
+            registered_raw = datetime.fromisoformat(registration.created_at)
+        except (TypeError, ValueError) as error:
+            raise ValueError("protocol registered_at is invalid") from error
+        registered_at = _utc(registered_raw, "protocol registered_at")
+        if registered_at.isoformat() != registration.created_at:
+            raise ValueError("protocol registered_at is not canonical")
+        snapshot = self.experience_memory.coverage_population_snapshot(
+            causal_cutoff=self.causal_cutoff,
+            granted_permissions=set(self.granted_permissions),
+            task=self.task,
+            instrument_family=self.instrument_family,
+        )
+        snapshot.verify_integrity()
+        completeness = self.scientific_registry.completeness(self.protocol_id)
+        population = RegisteredAblationPopulation(
+            protocol_digest=self.protocol_hash,
+            population_digest=snapshot.root_hash,
+            stopping_rule_digest=completeness["stopping_rules_hash"],
+            source_revision=self.source_revision,
+            registered_at_utc=registered_at,
+            evaluation_cutoff_utc=self.causal_cutoff,
+            population_unit_ids=tuple(
+                sorted(row["episode_id"] for row in snapshot.rows)
+            ),
+            complete=True,
+        )
+        outcomes = tuple(
+            self._load_outcome(reference, population_root=snapshot.root_hash)
+            for reference in outcome_refs
+        )
+        if selected:
+            earliest_cutoff = min(pair.full.input_cutoff_utc for pair in selected)
+            if registered_at > earliest_cutoff:
+                # Keep the normal evaluator's fail-closed reason deterministic.
+                population = RegisteredAblationPopulation(
+                    protocol_digest=population.protocol_digest,
+                    population_digest=population.population_digest,
+                    stopping_rule_digest=population.stopping_rule_digest,
+                    source_revision=population.source_revision,
+                    registered_at_utc=registered_at,
+                    evaluation_cutoff_utc=population.evaluation_cutoff_utc,
+                    population_unit_ids=population.population_unit_ids,
+                    complete=True,
+                )
+        return population, outcomes
+
+
+def _qualified_inconclusive(
+    *,
+    target_component: str,
+    required_lower_bound: Decimal,
+    uncertainty_multiplier: Decimal,
+    reason: str,
+) -> AblationEvaluation:
+    return AblationEvaluation(
+        target_component=target_component,
+        pair_count=0,
+        mean_net_incremental_value=None,
+        sample_stddev=None,
+        lower_bound=None,
+        required_lower_bound=required_lower_bound,
+        uncertainty_multiplier=uncertainty_multiplier,
+        status="INCONCLUSIVE",
+        reason=reason,
+    )
+
+
+def evaluate_qualified_incremental_value(
+    target_component: str,
+    pairs: Iterable[AblationPair],
+    *,
+    minimum_pairs: int,
+    required_lower_bound: Decimal,
+    uncertainty_multiplier: Decimal = Decimal("2"),
+    authority: AblationQualificationAuthority | None = None,
+    outcome_refs: Iterable[AblationOutcomeArtifactRef] = (),
+    population: RegisteredAblationPopulation | None = None,
+    canonical_outcomes: Iterable[CanonicalAblationOutcomeEvidence] = (),
+) -> AblationEvaluation:
+    """Evaluate only evidence-bound, pre-registered, complete matched populations.
+
+    The existing evaluate_incremental_value() remains a descriptive/statistical
+    primitive. A terminal PASS/FAIL is available only when an
+    AblationQualificationAuthority resolves the frozen protocol, complete
+    ExperienceMemory population and immutable outcome artifacts. Caller-authored
+    dataclasses may still be inspected through this function for diagnostic
+    incompatibilities, but they can never produce a terminal qualification.
+    """
+
+    selected_input = tuple(pairs)
+    trusted = authority is not None
+    if trusted:
+        if not isinstance(authority, AblationQualificationAuthority):
+            raise TypeError("authority must be AblationQualificationAuthority or None")
+        if population is not None or tuple(canonical_outcomes):
+            raise ValueError(
+                "authority-backed qualification does not accept caller-authored population/outcomes"
+            )
+        population, trusted_outcomes = authority.resolve(
+            selected_input,
+            outcome_refs=tuple(outcome_refs),
+        )
+        canonical_outcomes = trusted_outcomes
+    else:
+        if tuple(outcome_refs):
+            raise ValueError("outcome_refs require AblationQualificationAuthority")
+        if not isinstance(population, RegisteredAblationPopulation):
+            raise TypeError(
+                "population must be RegisteredAblationPopulation for diagnostic evaluation"
+            )
+
+    required = _decimal(required_lower_bound, "required_lower_bound")
+    multiplier = _decimal(uncertainty_multiplier, "uncertainty_multiplier")
+    if multiplier < 0:
+        raise ValueError("uncertainty_multiplier must be non-negative")
+    target = target_component.strip() if isinstance(target_component, str) else target_component
+    selected = _validate_pairs(target, selected_input)
+
+    def inconclusive(reason: str) -> AblationEvaluation:
+        return _qualified_inconclusive(
+            target_component=target,
+            required_lower_bound=required,
+            uncertainty_multiplier=multiplier,
+            reason=reason,
+        )
+
+    if not population.complete:
+        return inconclusive("incomplete_registered_population")
+
+    selected_units = tuple(sorted(pair.full.population_unit_id for pair in selected))
+    if selected_units != population.population_unit_ids:
+        return inconclusive("incomplete_registered_population")
+
+    if selected:
+        earliest_cutoff = min(pair.full.input_cutoff_utc for pair in selected)
+        if population.registered_at_utc > earliest_cutoff:
+            return inconclusive("post_hoc_population_or_protocol_registration")
+
+    evidence_index: dict[tuple[str, str], CanonicalAblationOutcomeEvidence] = {}
+    for evidence in canonical_outcomes:
+        if not isinstance(evidence, CanonicalAblationOutcomeEvidence):
+            raise TypeError(
+                "canonical_outcomes must contain CanonicalAblationOutcomeEvidence"
+            )
+        key = (evidence.case_id, evidence.variant)
+        if key in evidence_index:
+            return inconclusive("duplicate_canonical_outcome_identity")
+        evidence_index[key] = evidence
+
+    has_immature_outcome = False
+    for pair in selected:
+        for item in (pair.full, pair.ablated):
+            evidence = evidence_index.get((item.case_id, item.variant))
+            if evidence is None:
+                return inconclusive("missing_canonical_outcome_evidence")
+            if (
+                evidence.population_unit_id != item.population_unit_id
+                or evidence.source_revision != population.source_revision
+            ):
+                return inconclusive("canonical_outcome_identity_mismatch")
+            if (
+                evidence.utility != item.utility
+                or evidence.cost != item.cost
+                or evidence.outcome_available_utc != item.outcome_available_utc
+            ):
+                return inconclusive("canonical_outcome_economic_mismatch")
+            if (
+                evidence.superseded_at_utc is not None
+                and evidence.superseded_at_utc <= population.evaluation_cutoff_utc
+            ):
+                return inconclusive("stale_canonical_outcome_revision")
+            if evidence.outcome_available_utc > population.evaluation_cutoff_utc:
+                has_immature_outcome = True
+
+    # Caller-authored outcome dataclasses are never qualification authority.
+    # Reject them before their maturity can influence the diagnostic result;
+    # maturity is meaningful only for evidence resolved by the canonical authority.
+    if not trusted:
+        return inconclusive("untrusted_caller_authored_qualification_evidence")
+    if has_immature_outcome:
+        return inconclusive("canonical_outcome_not_mature_at_cutoff")
+
+    base = evaluate_incremental_value(
+        target,
+        selected,
+        minimum_pairs=minimum_pairs,
+        required_lower_bound=required,
+        uncertainty_multiplier=multiplier,
+    )
+    if base.status == "INCONCLUSIVE":
+        return base
+    if not trusted:
+        return _qualified_inconclusive(
+            target_component=base.target_component,
+            required_lower_bound=base.required_lower_bound,
+            uncertainty_multiplier=base.uncertainty_multiplier,
+            reason="untrusted_caller_authored_qualification_evidence",
+        )
+    return AblationEvaluation(
+        target_component=base.target_component,
+        pair_count=base.pair_count,
+        mean_net_incremental_value=base.mean_net_incremental_value,
+        sample_stddev=base.sample_stddev,
+        lower_bound=base.lower_bound,
+        required_lower_bound=base.required_lower_bound,
+        uncertainty_multiplier=base.uncertainty_multiplier,
+        status=base.status,
+        reason="qualified_registered_canonical_ablation_net_of_cost",
+    )
 
 
 def build_ablation_evidence_bundle(

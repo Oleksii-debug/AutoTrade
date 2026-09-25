@@ -437,6 +437,33 @@ class ScientificRegistry:
             con.commit()
         return ProtocolRegistration(identifier, digest, created)
 
+    def protocol_registration(self, protocol_id: str) -> ProtocolRegistration:
+        """Load and integrity-check one append-only protocol registration."""
+
+        protocol = _id(protocol_id)
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT protocol_hash,payload_json,created_at FROM protocols WHERE protocol_id=?",
+                (protocol,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(protocol)
+        try:
+            payload = json.loads(row["payload_json"])
+        except json.JSONDecodeError as error:
+            raise ProtocolViolation("registered protocol payload is corrupt") from error
+        if (
+            not isinstance(payload, dict)
+            or _canonical(payload) != row["payload_json"]
+            or _hash(payload) != row["protocol_hash"]
+        ):
+            raise ProtocolViolation("registered protocol integrity mismatch")
+        return ProtocolRegistration(
+            protocol_id=protocol,
+            protocol_hash=row["protocol_hash"],
+            created_at=row["created_at"],
+        )
+
     def record_trial(
         self,
         protocol_id: str,

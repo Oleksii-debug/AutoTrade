@@ -705,6 +705,7 @@ class AuthoritativeRiskSnapshot:
     authority_policy_id: str
     authority_policy_version: int
     evaluated_at: str
+    valid_until: str
     evidence_refs: Mapping[str, str]
 
     def __post_init__(self) -> None:
@@ -734,7 +735,19 @@ class AuthoritativeRiskSnapshot:
         evaluated = _text(
             self.evaluated_at, name="authoritative risk evaluated_at"
         )
-        _instant(evaluated, name="authoritative risk evaluated_at")
+        evaluated_instant = _instant(
+            evaluated, name="authoritative risk evaluated_at"
+        )
+        valid_until = _text(
+            self.valid_until, name="authoritative risk valid_until"
+        )
+        valid_until_instant = _instant(
+            valid_until, name="authoritative risk valid_until"
+        )
+        if valid_until_instant <= evaluated_instant:
+            raise ValueError(
+                "authoritative risk valid_until must be after evaluated_at"
+            )
         if not isinstance(self.evidence_refs, Mapping):
             raise TypeError("authoritative risk evidence_refs must be a mapping")
         refs: dict[str, str] = {}
@@ -833,6 +846,7 @@ class AuthoritativeRiskSnapshot:
             ),
         )
         object.__setattr__(self, "evaluated_at", evaluated)
+        object.__setattr__(self, "valid_until", valid_until)
         object.__setattr__(
             self,
             "evidence_refs",
@@ -861,6 +875,7 @@ class AuthoritativeRiskSnapshot:
             "authority_policy_id": self.authority_policy_id,
             "authority_policy_version": self.authority_policy_version,
             "evaluated_at": self.evaluated_at,
+            "valid_until": self.valid_until,
             "evidence_refs": dict(self.evidence_refs),
         }
 
@@ -1401,6 +1416,8 @@ class AuthorityService:
                 != record.policy_version
                 or authoritative_snapshot.get("context_state_version")
                 != record.state_version
+                or authoritative_snapshot.get("valid_until")
+                != record.risk_valid_until
                 or not isinstance(instrument, Mapping)
                 or instrument.get("instrument_id")
                 != record.instrument_version.instrument_id
@@ -2338,7 +2355,9 @@ class AuthorityService:
             journal_sequence_cut = self.store.current_journal_sequence()
             reservation_version = reservation_book.version
             evaluated_at = _text(now, name="now")
-            valid_until = _text(risk_valid_until, name="risk_valid_until")
+            caller_valid_until = _text(
+                risk_valid_until, name="risk_valid_until"
+            )
             risk_authority_request = RiskAuthorityRequest(
                 risk_intent=risk_intent,
                 account_id=account_id,
@@ -2367,6 +2386,16 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "caller risk_policy does not match authoritative risk snapshot"
                 )
+            if _instant(
+                caller_valid_until, name="risk_valid_until"
+            ) != _instant(
+                risk_snapshot.valid_until,
+                name="authoritative risk valid_until",
+            ):
+                raise AuthorityConflict(
+                    "caller risk_valid_until does not match authoritative risk snapshot"
+                )
+            valid_until = risk_snapshot.valid_until
             effective_risk_context = risk_snapshot.context
             effective_risk_policy = risk_snapshot.risk_policy
             risk_snapshot_payload = risk_snapshot.evidence_payload()
@@ -2443,6 +2472,7 @@ class AuthorityService:
                 or durable_snapshot.get("authority_policy_id") != policy.policy_id
                 or durable_snapshot.get("authority_policy_version") != policy.version
                 or durable_snapshot.get("evaluated_at") != evaluated_at
+                or durable_snapshot.get("valid_until") != valid_until
                 or durable_instrument.get("instrument_id")
                 != snapshot_instrument.instrument_id
                 or durable_instrument.get("version")

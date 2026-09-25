@@ -276,7 +276,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
             )
 
     def test_direct_candidate_construction_cannot_bypass_source_validation(self):
-        with self.assertRaisesRegex(ReleaseCandidateError, "git SHA"):
+        with self.assertRaisesRegex(ReleaseCandidateError, "Git object id"):
             ReleaseCandidateInput(
                 release_id="unsafe-direct",
                 source_sha="main",
@@ -287,7 +287,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
             )
 
     def test_noncanonical_uppercase_evidence_identity_is_rejected(self):
-        with self.assertRaisesRegex(ReleaseCandidateError, "lowercase git SHA"):
+        with self.assertRaisesRegex(ReleaseCandidateError, "canonical lowercase"):
             artifact("HOST", source_sha=SOURCE.upper())
         with self.assertRaisesRegex(ReleaseCandidateError, "lowercase hex"):
             ReleaseArtifactEvidence.create(
@@ -298,6 +298,36 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 signature_status="NOT_APPLICABLE",
                 evidence_status="PASS",
             )
+
+    def test_release_evidence_accepts_git_sha256_but_rejects_identity_aliases(self):
+        git_sha256 = "d" * 64
+        item = artifact("HOST", source_sha=git_sha256)
+        self.assertEqual(item.source_sha, git_sha256)
+
+        for invalid in (" " + SOURCE, SOURCE + " ", "D" * 64):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ReleaseCandidateError,
+                "canonical lowercase",
+            ):
+                artifact("HOST", source_sha=invalid)
+
+        for invalid_id in (
+            " " + TEST_ARTIFACT_ID,
+            TEST_ARTIFACT_ID.upper(),
+            TEST_ARTIFACT_ID.replace("-", ""),
+        ):
+            with self.subTest(invalid_id=invalid_id), self.assertRaisesRegex(
+                ReleaseCandidateError,
+                "canonical UUID",
+            ):
+                ReleaseArtifactEvidence.create(
+                    role="SBOM",
+                    artifact_id=invalid_id,
+                    artifact_sha256="sha256:" + ("a" * 64),
+                    source_sha=SOURCE,
+                    signature_status="NOT_APPLICABLE",
+                    evidence_status="PASS",
+                )
 
     def test_changed_self_asserted_evidence_still_cannot_publish_manifest(self):
         original = freeze_with_integrity_store(self.candidate())

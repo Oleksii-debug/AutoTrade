@@ -1427,9 +1427,17 @@ class JournalStoreTests(unittest.TestCase):
                 ).fetchone()[0]
                 envelope = json.loads(raw)
                 envelope["aggregate_id"] = "other-account"
+                replacement = json.dumps(
+                    envelope, sort_keys=True, separators=(",", ":")
+                )
                 connection.execute(
-                    "UPDATE outbox SET payload_json = ? WHERE event_id = ?",
-                    (json.dumps(envelope, sort_keys=True, separators=(",", ":")), "evt-1"),
+                    "UPDATE outbox SET payload_json = ?, envelope_hash = ? "
+                    "WHERE event_id = ?",
+                    (
+                        replacement,
+                        _outbox_envelope_digest("events", replacement),
+                        "evt-1",
+                    ),
                 )
                 connection.commit()
             finally:

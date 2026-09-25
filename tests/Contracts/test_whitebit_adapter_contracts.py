@@ -142,7 +142,7 @@ class WhiteBitAdapterContractTests(unittest.TestCase):
     def test_transport_ambiguity_flag_must_be_boolean(self):
         with self.assertRaisesRegex(
             WhiteBitAdapterError,
-            "transport_ambiguous must be boolean",
+            "transport_ambiguous must be a boolean",
         ):
             parse_submission_result(
                 prepared("whitebit-ambiguous-int"),

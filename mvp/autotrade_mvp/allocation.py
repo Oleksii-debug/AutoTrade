@@ -752,15 +752,15 @@ def allocate_objective_targets(
     decision_time: str | None = None,
     max_candidate_sets: int = 64,
 ) -> ObjectiveAllocationResult:
-    """Select a deterministic feasible candidate prefix by expected net utility.
+    """Select the best deterministic feasible candidate subset by net utility.
 
-    Candidates are ranked by directional expected return less an explicit risk
-    penalty. Every tested prefix is then passed through the same hard allocation
-    constraints. Estimated execution cost is subtracted exactly once from the
-    objective. The search is intentionally transparent and bounded; it is not a
-    claim of globally optimal portfolio construction. If the search budget is
-    exceeded, evidence is incomplete, or no positive-utility feasible target is
-    found, the result is a no-increase cash fallback.
+    Candidates are ranked only to make enumeration and tie-breaking stable.
+    Every non-empty subset of positive objective-rate candidates is evaluated
+    through the same hard allocation constraints. Estimated execution cost is
+    subtracted exactly once from the objective. The search is exhaustive only
+    inside max_candidate_sets; if the complete subset space does not fit that
+    budget, the allocator fails closed to a no-increase cash fallback rather
+    than silently truncating instrument selection.
     """
 
     if not isinstance(max_candidate_sets, int) or isinstance(max_candidate_sets, bool):
@@ -780,7 +780,7 @@ def allocate_objective_targets(
             allocation=fallback,
             selected_symbols=(),
             expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v1",
+            objective_version="deterministic-net-utility-v2",
             reason="no objective candidates",
         )
 
@@ -801,23 +801,10 @@ def allocate_objective_targets(
                 allocation=fallback,
                 selected_symbols=(),
                 expected_net_utility=Decimal("0"),
-                objective_version="deterministic-net-utility-v1",
+                objective_version="deterministic-net-utility-v2",
                 reason=evidence_problem,
             )
         normalized_evidence = tuple(stress_evidence)
-
-    if len(candidates) > max_candidate_sets:
-        fallback = _cash_fallback(
-            allocation_candidates,
-            reason="objective search budget exceeded before evaluation",
-        )
-        return ObjectiveAllocationResult(
-            allocation=fallback,
-            selected_symbols=(),
-            expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v1",
-            reason="objective search budget exceeded before evaluation",
-        )
 
     ranked = sorted(
         (
@@ -837,8 +824,28 @@ def allocate_objective_targets(
             allocation=fallback,
             selected_symbols=(),
             expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v1",
+            objective_version="deterministic-net-utility-v2",
             reason="no candidate has positive expected return after risk penalty",
+        )
+
+    candidate_set_count = (1 << len(ranked)) - 1
+    if candidate_set_count > max_candidate_sets:
+        fallback = _cash_fallback(
+            allocation_candidates,
+            reason=(
+                "objective search budget exceeded before complete subset "
+                "evaluation"
+            ),
+        )
+        return ObjectiveAllocationResult(
+            allocation=fallback,
+            selected_symbols=(),
+            expected_net_utility=Decimal("0"),
+            objective_version="deterministic-net-utility-v2",
+            reason=(
+                "objective search budget exceeded before complete subset "
+                "evaluation"
+            ),
         )
 
     objective_by_symbol = {
@@ -849,20 +856,24 @@ def allocate_objective_targets(
     best_symbols: tuple[str, ...] = ()
     best_utility = Decimal("0")
 
-    for prefix_size in range(1, len(ranked) + 1):
-        prefix = ranked[:prefix_size]
-        prefix_symbols = tuple(item.candidate.symbol for item in prefix)
+    for subset_mask in range(1, candidate_set_count + 1):
+        subset = [
+            item
+            for index, item in enumerate(ranked)
+            if subset_mask & (1 << index)
+        ]
+        subset_symbols = tuple(item.candidate.symbol for item in subset)
         projected_stress = {
             scenario_name: {
                 symbol: scenario[symbol]
-                for symbol in prefix_symbols
+                for symbol in subset_symbols
             }
             for scenario_name, scenario in normalized_stress.items()
         }
         projected_evidence = tuple(
             StressScenarioEvidence.create(
                 name=item.name,
-                shocks={symbol: item.shocks[symbol] for symbol in prefix_symbols},
+                shocks={symbol: item.shocks[symbol] for symbol in subset_symbols},
                 observed_at=item.observed_at,
                 valid_until=item.valid_until,
                 source_ref=item.source_ref,
@@ -870,7 +881,7 @@ def allocate_objective_targets(
             for item in normalized_evidence
         )
         result = allocate_targets(
-            [item.candidate for item in prefix],
+            [item.candidate for item in subset],
             policy,
             stress_scenarios=projected_stress,
             stress_evidence=projected_evidence,
@@ -879,9 +890,37 @@ def allocate_objective_targets(
         if result.status != "ALLOCATED":
             continue
         utility = _expected_net_utility(result, objective_by_symbol)
-        if utility > best_utility:
+        if utility <= 0:
+            continue
+        active_symbols = tuple(
+            sorted(
+                target.symbol
+                for target in result.targets
+                if target.notional != 0
+            )
+        )
+        if not active_symbols:
+            continue
+        better = best_result is None or utility > best_utility
+        if (
+            not better
+            and best_result is not None
+            and utility == best_utility
+        ):
+            candidate_key = (
+                result.estimated_cost,
+                result.gross_notional,
+                active_symbols,
+            )
+            current_key = (
+                best_result.estimated_cost,
+                best_result.gross_notional,
+                best_symbols,
+            )
+            better = candidate_key < current_key
+        if better:
             best_result = result
-            best_symbols = prefix_symbols
+            best_symbols = active_symbols
             best_utility = utility
 
     if best_result is None:
@@ -896,7 +935,7 @@ def allocate_objective_targets(
             allocation=fallback,
             selected_symbols=(),
             expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v1",
+            objective_version="deterministic-net-utility-v2",
             reason=(
                 "no positive-utility feasible allocation survived hard "
                 "constraints and estimated costs"
@@ -907,21 +946,12 @@ def allocate_objective_targets(
         allocation=best_result,
         selected_symbols=best_symbols,
         expected_net_utility=best_utility,
-        objective_version="deterministic-net-utility-v1",
+        objective_version="deterministic-net-utility-v2",
         reason=(
             "selected the highest positive expected-net-utility deterministic "
-            "candidate prefix that passed all hard allocation constraints"
+            "candidate subset that passed all hard allocation constraints"
         ),
     )
-
-
-# Evidence-bound allocation convergence for WP-20/WP-32/WP-47.
-
-_ALLOWED_EVIDENCE_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
-_ALLOWED_ALLOCATION_EVIDENCE_KINDS = frozenset(
-    {"OBJECTIVE", "MARKET_CONSTRAINT", "CAPITAL_STATE", "STRESS_SCENARIO"}
-)
-
 
 def _canonical_evidence_value(value):
     if isinstance(value, Decimal):

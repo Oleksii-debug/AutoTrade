@@ -24,7 +24,9 @@ def _iso(value: datetime) -> str:
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be text")
+    if not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 

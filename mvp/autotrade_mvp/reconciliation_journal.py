@@ -133,6 +133,7 @@ def reconciliation_payload(
                 "outcome": item.outcome,
                 "evidence_reason": item.evidence_reason,
                 "provider_order_ids": list(item.provider_order_ids),
+                "provider_execution_ids": list(item.provider_execution_ids),
             }
             for item in result.submission_resolutions
         ],

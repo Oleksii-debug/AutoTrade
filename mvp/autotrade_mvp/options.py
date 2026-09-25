@@ -342,8 +342,10 @@ def book_physical_option_settlement(
     return transaction
 def _source_sha(value: str) -> str:
     text = _text(value, "source_sha")
-    if len(text) not in {40, 64} or any(ch not in "0123456789abcdef" for ch in text):
-        raise OptionError("source_sha must be a canonical lowercase Git digest")
+    if len(text) != 40 or any(ch not in "0123456789abcdef" for ch in text):
+        raise OptionError(
+            "source_sha must be a canonical lowercase 40-character Git SHA"
+        )
     return text
 
 

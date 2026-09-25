@@ -439,6 +439,14 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 parse_order_submission_response(
                     [{"id": unsafe_id, "message": ["Confirm"], "messageIds": ["o1"]}]
                 )
+        for invalid_reply_id in (None, True, 123):
+            with self.subTest(reply_id=invalid_reply_id), self.assertRaisesRegex(
+                IbkrWebAdapterError,
+                "reply id must be a string",
+            ):
+                parse_order_submission_response(
+                    [{"id": invalid_reply_id, "message": ["Confirm"], "messageIds": ["o1"]}]
+                )
 
         base = {
             "endpoint": "/iserver/reply/safe-reply-id",

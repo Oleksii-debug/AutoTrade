@@ -3,7 +3,7 @@
   "expected_state_version": "43",
   "idempotency_key": "user-77777777",
   "actor": "owner",
-  "session": "desktop-session-1",
+  "session": "sid-7777777777777777777777777777777777777777777777777777777777777777",
   "action": "REVOKE_AUTHORITY",
   "payload": {
     "policy_id": "policy-1"

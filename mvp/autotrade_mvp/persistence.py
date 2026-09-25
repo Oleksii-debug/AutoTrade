@@ -879,12 +879,15 @@ class JournalStore:
             ).fetchall()
         return [self._decode_event_row(row) for row in rows]
 
-    def load_events_by_type(self, aggregate_type: str) -> list[dict[str, Any]]:
-        """Load every integrity-verified event for one aggregate type.
+    def load_events_by_aggregate_type(
+        self, aggregate_type: str
+    ) -> list[dict[str, Any]]:
+        """Load one aggregate type in durable append order.
 
-        This is a read-only journal primitive. Callers remain responsible for
-        domain ordering semantics rather than treating SQL row order as
-        financial authority.
+        This is a read-only journal primitive for authorities that must detect
+        superseding facts across multiple aggregate identities. Event integrity
+        is still verified by _decode_event_row(); callers remain responsible for
+        validating semantic scope before treating any row as authority.
         """
 
         aggregate_type = self._require_text(aggregate_type, "aggregate_type")
@@ -899,7 +902,7 @@ class JournalStore:
                        {envelope_columns}
                 FROM events
                 WHERE aggregate_type = ?
-                ORDER BY aggregate_id, aggregate_version
+                ORDER BY rowid
                 """,
                 (aggregate_type,),
             ).fetchall()

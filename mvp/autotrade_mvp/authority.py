@@ -1031,7 +1031,6 @@ class AuthorityService:
                         "max_age_seconds"
                     ),
                     evidence_artifact_store=self.evidence_artifact_store,
-                    require_latest_scope=True,
                 )
             )
         except (KeyError, TypeError, ValueError) as error:
@@ -1047,6 +1046,50 @@ class AuthorityService:
                 )
             ),
         }
+        scope_latest_event_id = _text(
+            availability_evidence.get("scope_latest_checkpoint_event_id"),
+            name="scope_latest_checkpoint_event_id",
+        )
+        scope_latest_aggregate_id = _text(
+            availability_evidence.get("scope_latest_checkpoint_aggregate_id"),
+            name="scope_latest_checkpoint_aggregate_id",
+        )
+        scope_latest_version = availability_evidence.get(
+            "scope_latest_checkpoint_aggregate_version"
+        )
+        scope_latest_observed_at = _text(
+            availability_evidence.get("scope_latest_checkpoint_observed_at"),
+            name="scope_latest_checkpoint_observed_at",
+        )
+        if (
+            scope_latest_event_id
+            != regenerated_availability.get("checkpoint_event_id")
+            or scope_latest_aggregate_id
+            != regenerated_availability.get("checkpoint_aggregate_id")
+            or type(scope_latest_version) is not int
+            or scope_latest_version <= 0
+            or scope_latest_version
+            != regenerated_availability.get("checkpoint_aggregate_version")
+            or _instant(
+                scope_latest_observed_at,
+                name="scope_latest_checkpoint_observed_at",
+            )
+            != _instant(
+                regenerated_availability.get("observed_at"),
+                name="checkpoint.observed_at",
+            )
+        ):
+            raise AuthorityConflict(
+                "durable latest reconciliation binding is inconsistent"
+            )
+        expected_availability_evidence.update(
+            {
+                "scope_latest_checkpoint_event_id": scope_latest_event_id,
+                "scope_latest_checkpoint_aggregate_id": scope_latest_aggregate_id,
+                "scope_latest_checkpoint_aggregate_version": scope_latest_version,
+                "scope_latest_checkpoint_observed_at": scope_latest_observed_at,
+            }
+        )
         borrow_resources = tuple(
             sorted(
                 resource

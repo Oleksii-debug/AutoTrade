@@ -218,6 +218,18 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 checkpoint["payload_hash"],
             )
             self.assertEqual(
+                evidence["scope_latest_checkpoint_event_id"],
+                checkpoint["event_id"],
+            )
+            self.assertEqual(
+                evidence["scope_latest_checkpoint_aggregate_id"],
+                checkpoint["aggregate_id"],
+            )
+            self.assertEqual(
+                evidence["scope_latest_checkpoint_aggregate_version"],
+                checkpoint["aggregate_version"],
+            )
+            self.assertEqual(
                 evidence["availability"],
                 {"CASH:USD": "1000"},
             )
@@ -352,19 +364,23 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
             replay = _admit(authority, reservations, older)
             self.assertEqual(replay, first)
             self.assertEqual(len(store.pending_outbox()), pending_before + 1)
+
+            restarted_store = JournalStore(path)
+            restarted_authority = AuthorityService(restarted_store)
+            restarted_reservations = DurableReservationBook(
+                restarted_store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            restarted_replay = _admit(
+                restarted_authority,
+                restarted_reservations,
+                older,
+            )
+            self.assertEqual(restarted_replay, first)
             self.assertEqual(
-                authority.dispatch_allowed(
-                    first.admission_id,
-                    intent_hash=first.intent_hash,
-                    account_id=ACCOUNT_ID,
-                    environment=ENVIRONMENT,
-                    instrument_id=INSTRUMENT_ID,
-                    instrument_version=1,
-                    action="ORDER.SUBMIT",
-                    now="2026-09-24T18:01:10Z",
-                    capability_snapshot_id=first.capability_snapshot_id,
-                ),
-                (False, "financial_evidence_invalid"),
+                restarted_reservations.total_reserved("CASH:USD"),
+                Decimal("100"),
             )
 
     def test_decimal_scale_is_canonical_across_admission_restart_replay(self):

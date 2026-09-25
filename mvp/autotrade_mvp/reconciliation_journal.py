@@ -350,14 +350,13 @@ def load_latest_reconciliation_checkpoint_for_scope(
     account_id: str,
     environment: str,
 ) -> dict[str, Any] | None:
-    """Resolve the unique latest durable provider truth for one account scope.
+    """Return the latest durably appended reconciliation fact for one scope.
 
-    Reconciliation ids partition workflow attempts, not financial authority.
-    New financial work therefore resolves across every reconciliation aggregate
-    for the same provider/account/environment. Observation time defines the
-    provider-truth cut. Multiple reconciliation ids at the same latest cut are
-    ambiguous and fail closed; multiple versions of one aggregate at the same
-    cut use the greatest aggregate version (for example an owner transfer).
+    Reconciliation IDs are workflow identities, not financial authority. A new
+    admission must therefore not select an older still-fresh checkpoint merely
+    by naming an older reconciliation_id. Durable append order is the
+    conservative supersession boundary: later same-scope incomplete/blocking
+    truth prevents fallback to earlier capacity.
     """
 
     if not isinstance(store, JournalStore):
@@ -367,50 +366,20 @@ def load_latest_reconciliation_checkpoint_for_scope(
         account_id=account_id,
         environment=environment,
     )
-    candidates: list[tuple[datetime, dict[str, Any]]] = []
-    for event in store.load_events_by_type("account_reconciliation"):
+    latest: dict[str, Any] | None = None
+    for event in store.load_events_by_aggregate_type("account_reconciliation"):
+        if event.get("event_type") != "AccountReconciled":
+            continue
         payload = event.get("payload")
         if not isinstance(payload, Mapping):
-            raise ValueError("reconciliation checkpoint payload must be an object")
+            raise ValueError("reconciliation checkpoint payload is required")
         if (
-            payload.get("provider_id") != provider
-            or payload.get("account_id") != account
-            or payload.get("environment") != scope
+            payload.get("provider_id") == provider
+            and payload.get("account_id") == account
+            and payload.get("environment") == scope
         ):
-            continue
-        if event.get("event_type") != "AccountReconciled":
-            raise ValueError(
-                "account reconciliation aggregate contains unsupported event type"
-            )
-        observed_text = _instant(
-            payload.get("observed_at"),
-            name="reconciliation observed_at",
-        )
-        observed = datetime.fromisoformat(
-            observed_text.replace("Z", "+00:00")
-        )
-        candidates.append((observed, event))
-
-    if not candidates:
-        return None
-    latest_observed = max(observed for observed, _event in candidates)
-    latest = [
-        event
-        for observed, event in candidates
-        if observed == latest_observed
-    ]
-    aggregate_ids = {
-        _text(event.get("aggregate_id"), name="aggregate_id")
-        for event in latest
-    }
-    if len(aggregate_ids) != 1:
-        raise ValueError(
-            "latest reconciliation checkpoint is ambiguous across reconciliation ids"
-        )
-    return max(
-        latest,
-        key=lambda event: int(event.get("aggregate_version", 0)),
-    )
+            latest = event
+    return latest
 
 
 def require_current_reconciliation_checkpoint(
@@ -471,6 +440,19 @@ def load_reconciliation_checkpoint_for_readiness(
         account_id=account_id,
         environment=environment,
     )
+    latest_scope_checkpoint = load_latest_reconciliation_checkpoint_for_scope(
+        store,
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
+    if (
+        latest_scope_checkpoint is None
+        or latest_scope_checkpoint.get("event_id") != checkpoint.get("event_id")
+    ):
+        raise ValueError(
+            "readiness requires the latest reconciliation checkpoint for scope"
+        )
     checkpoint_host, checkpoint_epoch = _checkpoint_owner(payload)
     expected_host = _text(host_id, name="host_id")
     expected_epoch = _text(owner_epoch, name="owner_epoch")
@@ -916,20 +898,20 @@ def load_account_resource_availability_evidence(
             raise ValueError("current reconciliation scope head payload is malformed")
         evidence.update(
             {
-                "scope_head_event_id": _text(
+                "scope_latest_checkpoint_event_id": _text(
                     current_scope_head.get("event_id"),
-                    name="scope_head_event_id",
+                    name="scope_latest_checkpoint_event_id",
                 ),
-                "scope_head_aggregate_id": _text(
+                "scope_latest_checkpoint_aggregate_id": _text(
                     current_scope_head.get("aggregate_id"),
-                    name="scope_head_aggregate_id",
+                    name="scope_latest_checkpoint_aggregate_id",
                 ),
-                "scope_head_aggregate_version": current_scope_head.get(
+                "scope_latest_checkpoint_aggregate_version": current_scope_head.get(
                     "aggregate_version"
                 ),
-                "scope_head_observed_at": _instant(
+                "scope_latest_checkpoint_observed_at": _instant(
                     head_payload.get("observed_at"),
-                    name="scope_head_observed_at",
+                    name="scope_latest_checkpoint_observed_at",
                 ),
             }
         )

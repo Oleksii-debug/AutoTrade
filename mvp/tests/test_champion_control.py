@@ -211,5 +211,88 @@ class ChampionControlTests(unittest.TestCase):
             decision(result_refs=())
 
 
+    def test_promotion_retry_after_response_loss_is_idempotent(self):
+        generation = self.control.snapshot().generation
+        first = self.control.promote(
+            decision(),
+            expected_generation=generation,
+        )
+        retry = self.control.promote(
+            decision(),
+            expected_generation=generation,
+        )
+        self.assertEqual(retry, first)
+        self.assertEqual(retry.generation, 2)
+
+    def test_same_promotion_identity_with_changed_payload_conflicts(self):
+        generation = self.control.snapshot().generation
+        self.control.promote(
+            decision(),
+            expected_generation=generation,
+        )
+        with self.assertRaisesRegex(
+            ChampionConflict,
+            "identity conflicts",
+        ):
+            self.control.promote(
+                decision(envelope_digest="d" * 64),
+                expected_generation=generation,
+            )
+
+    def test_rollback_retry_after_response_loss_is_idempotent(self):
+        promoted = self.control.promote(
+            decision(),
+            expected_generation=self.control.snapshot().generation,
+        )
+        rolled = self.control.rollback(
+            rollback_id="rollback-retry",
+            target_version="champion-v1",
+            expected_generation=promoted.generation,
+            reason_ref="monitor:fail",
+        )
+        retry = self.control.rollback(
+            rollback_id="rollback-retry",
+            target_version="champion-v1",
+            expected_generation=promoted.generation,
+            reason_ref="monitor:fail",
+        )
+        self.assertEqual(retry, rolled)
+
+    def test_position_migration_retry_after_response_loss_is_idempotent(self):
+        promoted = self.control.promote(
+            decision(),
+            expected_generation=self.control.snapshot().generation,
+        )
+        first = self.control.migrate_existing_position_management(
+            migration_id="migration-retry",
+            target_version="candidate-v2",
+            expected_generation=promoted.generation,
+            compatibility_evidence_refs=("exit-policy:v2",),
+        )
+        retry = self.control.migrate_existing_position_management(
+            migration_id="migration-retry",
+            target_version="candidate-v2",
+            expected_generation=promoted.generation,
+            compatibility_evidence_refs=("exit-policy:v2",),
+        )
+        self.assertEqual(retry, first)
+
+    def test_restart_rejects_different_initial_champion_even_if_retained(self):
+        promoted = self.control.promote(
+            decision(),
+            expected_generation=self.control.snapshot().generation,
+        )
+        self.assertIn("candidate-v2", promoted.retained_versions)
+        with self.assertRaisesRegex(
+            ChampionControlError,
+            "initial champion conflicts",
+        ):
+            DurableChampionControl(
+                journal=JournalStore(self.path),
+                scope_id="strategy:alpha",
+                initial_champion_version="candidate-v2",
+                authority_policy_digest=POLICY,
+            )
+
 if __name__ == "__main__":
     unittest.main()

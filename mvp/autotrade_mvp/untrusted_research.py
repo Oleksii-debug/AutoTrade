@@ -7,11 +7,13 @@ mint credentials, tools, execution authority, or redistribution rights.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping as MappingABC
 from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
 import json
 from math import isfinite
+from types import MappingProxyType
 from typing import Iterable, Mapping
 
 
@@ -19,8 +21,26 @@ class ResearchBoundaryError(ValueError):
     pass
 
 
-class _FrozenDict(dict):
-    """JSON-compatible dict that cannot be mutated after construction."""
+class _FrozenDict(MappingABC[str, object]):
+    """Read-only mapping with no mutable dict base class."""
+
+    __slots__ = ("_values",)
+
+    def __init__(self, values: Mapping[str, object]) -> None:
+        object.__setattr__(
+            self,
+            "_values",
+            MappingProxyType(dict(values)),
+        )
+
+    def __getitem__(self, key: str) -> object:
+        return self._values[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
 
     @staticmethod
     def _blocked(*args, **kwargs):
@@ -28,6 +48,8 @@ class _FrozenDict(dict):
 
     __setitem__ = _blocked
     __delitem__ = _blocked
+    __setattr__ = _blocked
+    __delattr__ = _blocked
     clear = _blocked
     pop = _blocked
     popitem = _blocked
@@ -35,28 +57,40 @@ class _FrozenDict(dict):
     update = _blocked
 
 
-def _freeze_proposal(value: object, *, depth: int = 0) -> object:
+def _freeze_proposal(
+    value: object,
+    *,
+    depth: int = 0,
+    label: str = "model proposal",
+) -> object:
     if depth > 32:
-        raise ResearchBoundaryError("model proposal exceeds maximum nesting depth")
+        raise ResearchBoundaryError(f"{label} exceeds maximum nesting depth")
     if isinstance(value, Mapping):
-        frozen = _FrozenDict()
+        frozen: dict[str, object] = {}
         for key, nested in value.items():
             if not isinstance(key, str):
-                raise ResearchBoundaryError("model proposal object keys must be strings")
-            dict.__setitem__(frozen, key, _freeze_proposal(nested, depth=depth + 1))
-        return frozen
+                raise ResearchBoundaryError(f"{label} object keys must be strings")
+            frozen[key] = _freeze_proposal(
+                nested,
+                depth=depth + 1,
+                label=label,
+            )
+        return _FrozenDict(frozen)
     if isinstance(value, (list, tuple)):
-        return tuple(_freeze_proposal(item, depth=depth + 1) for item in value)
+        return tuple(
+            _freeze_proposal(item, depth=depth + 1, label=label)
+            for item in value
+        )
     if value is None or isinstance(value, (str, bool, int)):
         return value
     if isinstance(value, float):
         if not isfinite(value):
             raise ResearchBoundaryError(
-                "model proposal numbers must be finite JSON values"
+                f"{label} numbers must be finite JSON values"
             )
         return value
     raise ResearchBoundaryError(
-        "model proposal values must be JSON-compatible scalars, objects, or arrays"
+        f"{label} values must be JSON-compatible scalars, objects, or arrays"
     )
 
 
@@ -138,7 +172,11 @@ class ResearchToolRequest:
         object.__setattr__(self, "requested_capabilities", capabilities)
         if not isinstance(self.arguments, Mapping):
             raise ResearchBoundaryError("arguments must be an object")
-        object.__setattr__(self, "arguments", dict(self.arguments))
+        object.__setattr__(
+            self,
+            "arguments",
+            _freeze_proposal(self.arguments, label="research tool arguments"),
+        )
         refs = tuple(_text(item, name="evidence_ref") for item in self.evidence_refs)
         object.__setattr__(self, "evidence_refs", refs)
 
@@ -152,6 +190,57 @@ class AdmittedResearchToolRequest:
     evidence_refs: tuple[str, ...]
     permission_effect: str = "NONE"
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "request_id",
+            _text(self.request_id, name="request_id"),
+        )
+        object.__setattr__(
+            self,
+            "tool_name",
+            _text(self.tool_name, name="tool_name"),
+        )
+        if isinstance(self.capabilities, (str, bytes)):
+            raise ResearchBoundaryError("capabilities must be a collection")
+        capabilities = tuple(self.capabilities)
+        if not capabilities:
+            raise ResearchBoundaryError(
+                "admitted request requires at least one research capability"
+            )
+        if any(not isinstance(item, ResearchCapability) for item in capabilities):
+            raise ResearchBoundaryError(
+                "admitted capabilities must be ResearchCapability values"
+            )
+        if len(set(capabilities)) != len(capabilities):
+            raise ResearchBoundaryError("admitted capabilities must be unique")
+        if not set(capabilities) <= SAFE_RESEARCH_CAPABILITIES:
+            raise ResearchBoundaryError(
+                "admitted request contains a non-research capability"
+            )
+        object.__setattr__(self, "capabilities", capabilities)
+        if not isinstance(self.arguments, Mapping):
+            raise ResearchBoundaryError("arguments must be an object")
+        object.__setattr__(
+            self,
+            "arguments",
+            _freeze_proposal(
+                self.arguments,
+                label="admitted research tool arguments",
+            ),
+        )
+        refs = tuple(
+            _text(item, name="evidence_ref")
+            for item in self.evidence_refs
+        )
+        if len(set(refs)) != len(refs):
+            raise ResearchBoundaryError("evidence references must be unique")
+        object.__setattr__(self, "evidence_refs", refs)
+        if self.permission_effect != "NONE":
+            raise ResearchBoundaryError(
+                "admitted research request cannot grant authority"
+            )
+
 
 class ResearchToolBoundary:
     """Admit only host-configured research tools and non-escalating capabilities."""
@@ -162,9 +251,27 @@ class ResearchToolBoundary:
         normalized: dict[str, frozenset[ResearchCapability]] = {}
         for tool_name, capabilities in tool_capabilities.items():
             name = _text(tool_name, name="tool_name")
-            values = frozenset(capabilities)
-            if not values:
+            if name in normalized:
+                raise ResearchBoundaryError(
+                    "tool names must be unique after normalization"
+                )
+            if isinstance(capabilities, (str, bytes)):
+                raise ResearchBoundaryError(
+                    "tool capabilities must be ResearchCapability values"
+                )
+            materialized = tuple(capabilities)
+            if not materialized:
                 raise ResearchBoundaryError("tool capability set cannot be empty")
+            if any(
+                not isinstance(capability, ResearchCapability)
+                for capability in materialized
+            ):
+                raise ResearchBoundaryError(
+                    "tool capabilities must be ResearchCapability values"
+                )
+            values = frozenset(materialized)
+            if len(values) != len(materialized):
+                raise ResearchBoundaryError("tool capabilities must be unique")
             if not values <= SAFE_RESEARCH_CAPABILITIES:
                 raise ResearchBoundaryError("tool contains a non-research capability")
             normalized[name] = values
@@ -195,7 +302,7 @@ class ResearchToolBoundary:
             request_id=request.request_id,
             tool_name=request.tool_name,
             capabilities=tuple(requested),
-            arguments=dict(request.arguments),
+            arguments=request.arguments,
             evidence_refs=request.evidence_refs,
         )
 

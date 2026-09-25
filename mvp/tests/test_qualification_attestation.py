@@ -14,6 +14,9 @@ from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustPolicy,
     SignedQualificationAttestation,
     TrustRoot,
+    parse_qualification_trust_policy,
+    parse_signed_qualification_attestation,
+    qualification_trust_policy_payload,
     verify_qualification_attestation,
 )
 
@@ -177,6 +180,71 @@ class QualificationAttestationTests(unittest.TestCase):
         self.assertEqual(accepted.attestation_digest, value.content_digest)
         self.assertEqual(accepted.policy_id, trust_policy.policy_id)
         self.assertEqual(accepted.trust_root_id, trust_root.root_id)
+
+    def test_persisted_receipt_and_policy_round_trip_through_strict_ingress(self):
+        trust_root = root()
+        trust_policy = policy(trust_root)
+        value = attestation(trust_root)
+        serialized_receipt = {
+            "attestation": value.canonical_payload(),
+            "signature_b64": sign(value),
+        }
+        parsed_policy = parse_qualification_trust_policy(
+            qualification_trust_policy_payload(trust_policy)
+        )
+        parsed_receipt = parse_signed_qualification_attestation(
+            serialized_receipt
+        )
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            accepted = verify(
+                parsed_receipt,
+                store,
+                parsed_policy,
+            )
+        self.assertEqual(accepted.attestation_digest, value.content_digest)
+        self.assertEqual(parsed_policy.policy_id, trust_policy.policy_id)
+
+    def test_persisted_trust_ingress_rejects_unknown_fields_and_root_id_drift(self):
+        trust_root = root()
+        value = attestation(trust_root)
+        receipt = {
+            "attestation": {
+                **value.canonical_payload(),
+                "unexpected": "candidate-controlled",
+            },
+            "signature_b64": sign(value),
+        }
+        with self.assertRaisesRegex(
+            QualificationTrustError,
+            "fields mismatch",
+        ):
+            parse_signed_qualification_attestation(receipt)
+
+        policy_payload = qualification_trust_policy_payload(policy(trust_root))
+        policy_payload["roots"][0]["root_id"] = "sha256:" + "0" * 64
+        with self.assertRaisesRegex(
+            QualificationTrustError,
+            "root_id mismatch",
+        ):
+            parse_qualification_trust_policy(policy_payload)
+
+    def test_persisted_attestation_rejects_noncanonical_nested_evidence(self):
+        trust_root = root()
+        value = attestation(trust_root)
+        payload = value.canonical_payload()
+        payload["evidence_refs"][0]["extra"] = "not-signed-schema"
+        with self.assertRaisesRegex(
+            QualificationTrustError,
+            "fields mismatch",
+        ):
+            parse_signed_qualification_attestation(
+                {
+                    "attestation": payload,
+                    "signature_b64": sign(value),
+                }
+            )
 
     def test_self_published_pass_without_valid_signature_fails(self):
         trust_root = root()

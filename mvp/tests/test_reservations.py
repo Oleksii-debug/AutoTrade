@@ -219,5 +219,53 @@ class ReservationFoundationTests(unittest.TestCase):
 
 
 
+    def test_restart_preserves_unknown_reservation_and_exact_amounts(self):
+        book = ReservationBook()
+        book.reserve(
+            reservation_id="r1",
+            intent_id="i1",
+            requirements={"CASH:USD": "100.25", "FEE:USD": "1.50"},
+            available={"CASH:USD": "1000", "FEE:USD": "100"},
+        )
+        book.consume("r1", {"CASH:USD": "20.25"})
+        book.mark_unknown("r1")
+
+        payload = book.export_state()
+        self.assertEqual(payload["records"][0]["original"]["CASH:USD"], "100.25")
+        restored = ReservationBook.restore_state(payload)
+        self.assertEqual(restored.get("r1").state, "UNKNOWN")
+        self.assertEqual(restored.total_reserved("CASH:USD"), Decimal("80.00"))
+        self.assertEqual(restored.total_reserved("FEE:USD"), Decimal("1.50"))
+
+    def test_restart_rejects_amount_conservation_tampering(self):
+        book = ReservationBook()
+        book.reserve(
+            reservation_id="r1",
+            intent_id="i1",
+            requirements={"CASH:USD": "100"},
+            available={"CASH:USD": "1000"},
+        )
+        payload = book.export_state()
+        payload["records"][0]["remaining"]["CASH:USD"] = "90"
+        with self.assertRaisesRegex(ReservationConflict, "conservation"):
+            ReservationBook.restore_state(payload)
+
+    def test_restart_rejects_terminal_state_that_releases_unknown_without_evidence(self):
+        book = ReservationBook()
+        book.reserve(
+            reservation_id="r1",
+            intent_id="i1",
+            requirements={"CASH:USD": "100"},
+            available={"CASH:USD": "1000"},
+        )
+        payload = book.export_state()
+        row = payload["records"][0]
+        row["state"] = "PROVEN_ABSENT"
+        row["remaining"]["CASH:USD"] = "0"
+        row["resolution_evidence"] = None
+        with self.assertRaises(ValueError):
+            ReservationBook.restore_state(payload)
+
+
 if __name__ == "__main__":
     unittest.main()

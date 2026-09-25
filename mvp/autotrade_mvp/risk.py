@@ -1102,7 +1102,7 @@ class RiskDecision:
 
 def _fingerprint_value(value):
     if isinstance(value, Decimal):
-        return str(value)
+        return _canonical_decimal_text(value)
     if isinstance(value, datetime):
         return _utc_text(value)
     if hasattr(value, "__dataclass_fields__"):
@@ -1145,10 +1145,10 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
         raise TypeError("decision must be a RiskDecision")
     payload = {
         "admitted": decision.admitted,
-        "resulting_position": str(decision.resulting_position),
-        "gross_leverage": str(decision.gross_leverage),
-        "net_leverage": str(decision.net_leverage),
-        "worst_stress_loss": str(decision.worst_stress_loss),
+        "resulting_position": _canonical_decimal_text(decision.resulting_position),
+        "gross_leverage": _canonical_decimal_text(decision.gross_leverage),
+        "net_leverage": _canonical_decimal_text(decision.net_leverage),
+        "worst_stress_loss": _canonical_decimal_text(decision.worst_stress_loss),
         "input_fingerprint": decision.input_fingerprint,
         "rules": [
             {
@@ -1729,7 +1729,19 @@ def evaluate_risk(
     rules: list[RiskRuleResult] = []
 
     def add(rule: str, passed: bool, observed, limit, reason: str) -> None:
-        rules.append(RiskRuleResult(rule, passed, str(observed), str(limit), reason))
+        observed_text = (
+            _canonical_decimal_text(observed)
+            if isinstance(observed, Decimal)
+            else str(observed)
+        )
+        limit_text = (
+            _canonical_decimal_text(limit)
+            if isinstance(limit, Decimal)
+            else str(limit)
+        )
+        rules.append(
+            RiskRuleResult(rule, passed, observed_text, limit_text, reason)
+        )
 
     add(
         "state_version",
@@ -1826,12 +1838,16 @@ def evaluate_risk(
         policy.max_fx_age_seconds,
         "required FX inputs must be present and fresh enough for valuation",
     )
+    projected_abs_position = max(
+        (abs(quantity) for quantity in projected_positions.values()),
+        default=Decimal("0"),
+    )
     add(
         "position_limit",
-        abs(resulting) <= policy.max_abs_position or protective_reduction,
-        abs(resulting),
+        projected_abs_position <= policy.max_abs_position or protective_reduction,
+        projected_abs_position,
         policy.max_abs_position,
-        "resulting absolute position must stay within policy",
+        "every projected absolute position must stay within policy",
     )
     add(
         "single_notional",

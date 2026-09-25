@@ -74,6 +74,10 @@ class ComponentEvidence:
         if self.advisory_status == "ALLOWLISTED":
             if not isinstance(self.advisory_exception_id, str) or not self.advisory_exception_id.strip():
                 raise ValueError("ALLOWLISTED advisory status requires advisory_exception_id")
+            if self.advisory_exception_id != self.advisory_exception_id.strip():
+                raise ValueError(
+                    "advisory_exception_id must not contain surrounding whitespace"
+                )
             if self.advisory_exception_hash is None:
                 raise ValueError("ALLOWLISTED advisory status requires advisory_exception_hash")
             _sha256(self.advisory_exception_hash, "advisory_exception_hash")

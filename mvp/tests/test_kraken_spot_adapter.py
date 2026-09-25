@@ -50,6 +50,33 @@ def capability(*, order_types=("MARKET", "LIMIT"), tif=("GTC", "IOC")):
 
 
 class KrakenSpotAdapterTests(unittest.TestCase):
+    def test_direct_prepared_request_fails_closed_on_scope_and_provenance(self):
+        base = {
+            "endpoint": "/0/private/AddOrder",
+            "body": {
+                "pair": "XBTUSD",
+                "cl_ord_id": "at-direct",
+            },
+            "account_id": "spot-account",
+            "environment": "PAPER",
+            "capability_snapshot_id": "cap-1",
+            "documentation_refs": ("https://docs.kraken.com/order",),
+        }
+        request = KrakenSpotPreparedRequest(**base)
+        self.assertEqual(request.environment, "PAPER")
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "endpoint"):
+            KrakenSpotPreparedRequest(**{**base, "endpoint": "/0/private/Withdraw"})
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "environment"):
+            KrakenSpotPreparedRequest(**{**base, "environment": "STAGING"})
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "capability_snapshot_id"):
+            KrakenSpotPreparedRequest(**{**base, "capability_snapshot_id": " "})
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "documentation_refs"):
+            KrakenSpotPreparedRequest(**{**base, "documentation_refs": ()})
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "client_order_id"):
+            KrakenSpotPreparedRequest(
+                **{**base, "body": {"pair": "XBTUSD", "cl_ord_id": ""}}
+            )
+
     def test_limit_request_preserves_exact_decimal_and_has_no_nonce(self):
         intent = KrakenSpotOrderIntent.create(
             instrument_version="XBTUSD:v1",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timezone
 import hashlib
 import re
@@ -19,6 +19,7 @@ class CapabilityError(ValueError):
 SOURCES = frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"})
 ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 STATUSES = frozenset({"VERIFIED", "UNKNOWN", "CONFLICTED", "EXPIRED"})
+_DERIVED_SNAPSHOT_TOKEN = object()
 
 
 def _text(value: str, field: str) -> str:
@@ -305,8 +306,9 @@ class CapabilitySnapshot:
     evidence: tuple[Mapping[str, object], ...]
     status: str
     sources: frozenset[str]
+    _verification_token: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _verification_token: object | None) -> None:
         try:
             UUID(self.snapshot_id)
         except (ValueError, TypeError, AttributeError) as error:
@@ -345,7 +347,29 @@ class CapabilitySnapshot:
         if not sources.issubset(SOURCES):
             raise CapabilityError("snapshot sources contain unsupported source")
         object.__setattr__(self, "sources", sources)
-        object.__setattr__(self, "evidence", tuple(_freeze_evidence(item) for item in self.evidence))
+        evidence = tuple(_freeze_evidence(item) for item in self.evidence)
+        object.__setattr__(self, "evidence", evidence)
+        if status == "VERIFIED":
+            if _verification_token is not _DERIVED_SNAPSHOT_TOKEN:
+                raise CapabilityError(
+                    "VERIFIED capability snapshots must come from canonical evidence derivation"
+                )
+            if sources != SOURCES:
+                raise CapabilityError(
+                    "VERIFIED capability snapshots require all canonical sources"
+                )
+            if len(evidence) < len(SOURCES):
+                raise CapabilityError(
+                    "VERIFIED capability snapshots require evidence for every canonical source"
+                )
+            if (
+                not self.supported_order_types
+                or not self.time_in_force
+                or not self.permission_scopes
+            ):
+                raise CapabilityError(
+                    "VERIFIED capability snapshots require executable capability intersections"
+                )
 
     @property
     def identity(self) -> tuple[str, str, str, str, str]:
@@ -537,6 +561,7 @@ def derive_capability_snapshot(
         evidence=tuple(claim.evidence_ref for claim in verified_live),
         status=status,
         sources=verified_sources,
+        _verification_token=_DERIVED_SNAPSHOT_TOKEN,
     )
 
 

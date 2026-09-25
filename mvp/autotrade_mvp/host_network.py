@@ -56,6 +56,15 @@ _SNAPSHOT_FIELDS = {
 }
 _PERMISSION_SUMMARY_FIELDS = {"actor", "session", "role", "capabilities"}
 _PERMISSION_SUMMARY_REQUIRED_FIELDS = {"actor", "session", "role"}
+_SINGLETON_REQUEST_HEADERS = (
+    "Authorization",
+    "X-AutoTrade-Actor",
+    "Origin",
+    "Host",
+    "Content-Length",
+    "Content-Type",
+    "Accept",
+)
 
 
 def public_session_reference(token: str) -> str:
@@ -434,6 +443,10 @@ class AuthenticatedHostApplication:
                 return _error(400, "INVALID_REQUEST_TARGET")
             path = parsed.path
             query = parse_qs(parsed.query, keep_blank_values=True)
+            if path != "/api/v1/events" and parsed.query:
+                return _error(400, "INVALID_QUERY")
+            if method != "POST" and body:
+                return _error(400, "UNEXPECTED_REQUEST_BODY")
 
             if method == "GET" and path == "/api/v1/health":
                 now = (
@@ -564,14 +577,18 @@ class _HostRequestHandler(BaseHTTPRequestHandler):
             self.send_error(500)
             return
         try:
-            for name in (
-                "Authorization",
-                "X-AutoTrade-Actor",
-                "Origin",
-                "Content-Length",
-            ):
+            for name in _SINGLETON_REQUEST_HEADERS:
                 if len(self.headers.get_all(name, [])) > 1:
-                    raise ValueError("Duplicate sensitive request header")
+                    raise ValueError("Duplicate singleton request header")
+            host_values = self.headers.get_all("Host", [])
+            if len(host_values) != 1:
+                raise ValueError("Exactly one Host header is required")
+            scheme = urlsplit(server.application.public_origin).scheme
+            request_origin = _authenticated_origin(
+                f"{scheme}://{host_values[0]}"
+            )
+            if request_origin != server.application.public_origin:
+                raise PermissionError("Host header does not match public origin")
             if self.headers.get("Transfer-Encoding") is not None:
                 raise ValueError("Transfer-Encoding is not supported")
             length_text = self.headers.get("Content-Length", "0")
@@ -587,6 +604,8 @@ class _HostRequestHandler(BaseHTTPRequestHandler):
                     headers=header_map,
                     body=body,
                 )
+        except PermissionError:
+            response = _error(403, "AUTHENTICATION_OR_AUTHORIZATION_FAILED")
         except (ValueError, OverflowError):
             response = _error(400, "INVALID_REQUEST")
         self.send_response(response.status)

@@ -40,7 +40,12 @@
   const byId = (id) => document.getElementById(id);
   const RESTORABLE_FOCUS_IDS = new Set([
     "main",
+    "permissions-region",
+    "strategy-region",
+    "portfolio-region",
     "operations-region",
+    "risk-region",
+    "jobs-region",
     "host-action",
     "submit-command",
     "refresh-state",
@@ -322,6 +327,80 @@
     }
   }
 
+  function stableProjectionValue(value) {
+    if (Array.isArray(value)) {
+      return value.map((item) => stableProjectionValue(item));
+    }
+    if (value && typeof value === "object") {
+      const ordered = {};
+      for (const key of Object.keys(value).sort()) {
+        ordered[key] = stableProjectionValue(value[key]);
+      }
+      return ordered;
+    }
+    return value;
+  }
+
+  function projectionText(value) {
+    if (value === null) return "null";
+    if (value && typeof value === "object") {
+      return JSON.stringify(stableProjectionValue(value));
+    }
+    return String(value);
+  }
+
+  function renderProjection(bodyId, record, emptyMessage) {
+    const body = byId(bodyId);
+    if (!body) return;
+    body.replaceChildren();
+    const entries = Object.entries(record)
+      .sort(([left], [right]) => left.localeCompare(right));
+    if (entries.length === 0) {
+      const row = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.colSpan = 2;
+      cell.textContent = emptyMessage;
+      row.appendChild(cell);
+      body.appendChild(row);
+      return;
+    }
+    for (const [key, value] of entries) {
+      const row = document.createElement("tr");
+      const header = document.createElement("th");
+      header.scope = "row";
+      header.textContent = key;
+      const cell = document.createElement("td");
+      cell.textContent = projectionText(value);
+      row.append(header, cell);
+      body.appendChild(row);
+    }
+  }
+
+  function renderJobs(jobs) {
+    const body = byId("jobs-body");
+    if (!body) return;
+    body.replaceChildren();
+    if (jobs.length === 0) {
+      const row = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.colSpan = 2;
+      cell.textContent = "No background jobs reported by the host snapshot.";
+      row.appendChild(cell);
+      body.appendChild(row);
+      return;
+    }
+    jobs.forEach((job, index) => {
+      const row = document.createElement("tr");
+      const header = document.createElement("th");
+      header.scope = "row";
+      header.textContent = "Job " + String(index + 1);
+      const cell = document.createElement("td");
+      cell.textContent = projectionText(job);
+      row.append(header, cell);
+      body.appendChild(row);
+    });
+  }
+
   function announceLiveText(id, message) {
     const element = byId(id);
     if (!element) return;
@@ -455,6 +534,24 @@
       "Host: " + parsed.hostId + ". Account: " + parsed.accountId +
         ". Environment: " + parsed.environment + ".");
     text("freshness", freshnessText(parsed));
+    text("server-time", parsed.serverTime);
+    renderProjection(
+      "permissions-body",
+      parsed.permissionSummary,
+      "No permission or capability evidence reported by the host snapshot.");
+    renderProjection(
+      "portfolio-body",
+      parsed.portfolio,
+      "No portfolio projection reported by the host snapshot.");
+    renderProjection(
+      "risk-body",
+      parsed.risk,
+      "No risk projection reported by the host snapshot.");
+    renderProjection(
+      "strategy-body",
+      parsed.strategy,
+      "No strategy or decision projection reported by the host snapshot.");
+    renderJobs(parsed.jobs);
 
     const canSubmit = parsed.sessionIdentity !== null;
     setCommandAvailability(canSubmit);

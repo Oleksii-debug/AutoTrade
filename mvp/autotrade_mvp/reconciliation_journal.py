@@ -749,7 +749,9 @@ def load_account_resource_availability_evidence(
             name="resource_availability.snapshot_id",
         ),
         "resource_valid_until": valid_until_text,
-        "resource_evidence_refs": normalized_evidence_refs,
+        # JSON-canonical representation: this evidence is persisted inside
+        # risk/admission events and must compare identically after restart.
+        "resource_evidence_refs": list(normalized_evidence_refs),
         "observed_at": _instant(payload.get("observed_at"), name="observed_at"),
         "age_seconds": str(age_seconds),
         "availability": {

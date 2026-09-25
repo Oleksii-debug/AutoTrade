@@ -122,6 +122,82 @@ class ExecutionOracleTests(unittest.TestCase):
         with self.assertRaisesRegex(ExecutionOracleError, "same or earlier"):
             assert_conservative_execution(order=o, observation=q, model=m, result=forged)
 
+    def test_oracle_rejects_bar_interval_underway_at_arrival(self):
+        o = order(submitted_at="2026-09-24T10:00:00Z")
+        q = observation(
+            market_time="2026-09-24T10:01:00Z",
+            available_at="2026-09-24T10:01:01Z",
+            interval_start="2026-09-24T10:00:00Z",
+            bar_low="90",
+            bar_high="110",
+        )
+        m = model(data_fidelity="BAR", latency_ms=100)
+        waiting = simulate_execution(o, q, m)
+        forged = replace(
+            waiting,
+            status="FILLED",
+            filled_quantity=Decimal("1"),
+            fill_price=Decimal("110"),
+            fee=Decimal("0.110"),
+            trade_time=q.market_time,
+        )
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "before venue arrival",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=forged,
+            )
+
+    def test_oracle_rejects_bar_interval_start_one_tick_before_arrival(self):
+        o = order(submitted_at="2026-09-24T10:00:00Z")
+        q = observation(
+            market_time="2026-09-24T10:01:00Z",
+            available_at="2026-09-24T10:01:01Z",
+            interval_start="2026-09-24T10:00:00.099999Z",
+            bar_low="90",
+            bar_high="110",
+        )
+        m = model(data_fidelity="BAR", latency_ms=100)
+        waiting = simulate_execution(o, q, m)
+        forged = replace(
+            waiting,
+            status="FILLED",
+            filled_quantity=Decimal("1"),
+            fill_price=Decimal("110"),
+            fee=Decimal("0.110"),
+            trade_time=q.market_time,
+        )
+        with self.assertRaisesRegex(ExecutionOracleError, "before venue arrival"):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=forged,
+            )
+
+    def test_oracle_accepts_bar_interval_start_exactly_at_arrival(self):
+        o = order(submitted_at="2026-09-24T10:00:00Z")
+        q = observation(
+            market_time="2026-09-24T10:01:00Z",
+            available_at="2026-09-24T10:01:01Z",
+            interval_start="2026-09-24T10:00:00.100000Z",
+            bar_low="90",
+            bar_high="110",
+        )
+        m = model(data_fidelity="BAR", latency_ms=100)
+        result = simulate_execution(o, q, m)
+        self.assertIn(result.status, {"FILLED", "PARTIAL"})
+        assert_conservative_execution(
+            order=o,
+            observation=q,
+            model=m,
+            result=result,
+        )
+
     def test_oracle_rejects_zero_fill_with_economic_posting_fields(self):
         o = order(order_type="LIMIT", limit_price="90")
         q, m = observation(), model()

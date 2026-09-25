@@ -128,6 +128,8 @@ class DagPlan:
     scheduled_roles: tuple[str, ...]
     skipped_roles: tuple[tuple[str, str], ...]
     reserved_cost: Decimal
+    available_inputs: tuple[str, ...]
+    total_budget: Decimal
 
 
 @dataclass(frozen=True)
@@ -157,7 +159,7 @@ def plan_specialists(
     if len(by_id) != len(items):
         raise SpecialistDagError("specialist role ids must be unique")
 
-    available = set(available_inputs)
+    available = {_text(item, "available input") for item in available_inputs}
     scheduled: list[str] = []
     skipped: list[tuple[str, str]] = []
     reserved = Decimal("0")
@@ -194,7 +196,14 @@ def plan_specialists(
         if not progressed:
             raise SpecialistDagError("specialist dependency graph contains a cycle")
 
-    return DagPlan(snapshot_id, tuple(scheduled), tuple(skipped), reserved)
+    return DagPlan(
+        snapshot_id,
+        tuple(scheduled),
+        tuple(skipped),
+        reserved,
+        tuple(sorted(available)),
+        budget,
+    )
 
 
 def aggregate_specialists(
@@ -205,12 +214,7 @@ def aggregate_specialists(
     decision_deadline: datetime,
     blocking_critique_terms: Iterable[str] = (),
 ) -> AggregatedProposal:
-    """Aggregate only outputs admitted by the exact specialist plan.
-
-    The plan is an authority boundary for research compute: a known role that was
-    skipped for budget, missing inputs, dependencies, or non-positive measured
-    value cannot inject a result directly into aggregation.
-    """
+    """Aggregate only outputs admitted by the exact canonical specialist plan."""
 
     deadline = _utc(decision_deadline, "decision_deadline")
     spec_items = tuple(specs)
@@ -223,17 +227,17 @@ def aggregate_specialists(
         raise SpecialistDagError("plan must be a DagPlan")
 
     snapshot_id = _text(plan.input_snapshot_id, "plan.input_snapshot_id")
+    canonical_plan = plan_specialists(
+        spec_items,
+        input_snapshot_id=snapshot_id,
+        available_inputs=plan.available_inputs,
+        total_budget=plan.total_budget,
+    )
+    if plan != canonical_plan:
+        raise SpecialistDagError(
+            "DagPlan does not match canonical planner output for this context"
+        )
     scheduled = tuple(plan.scheduled_roles)
-    skipped_ids = tuple(role_id for role_id, _ in plan.skipped_roles)
-    if len(set(scheduled)) != len(scheduled) or len(set(skipped_ids)) != len(skipped_ids):
-        raise SpecialistDagError("plan role ids must be unique")
-    if set(scheduled) & set(skipped_ids):
-        raise SpecialistDagError("plan cannot both schedule and skip the same role")
-    if set(scheduled) | set(skipped_ids) != set(by_id):
-        raise SpecialistDagError("plan must cover exactly the supplied specialist specifications")
-    expected_reserved = sum((by_id[role_id].max_cost for role_id in scheduled), Decimal("0"))
-    if expected_reserved != plan.reserved_cost:
-        raise SpecialistDagError("plan reserved cost does not match scheduled roles")
     scheduled_set = set(scheduled)
 
     seen: set[str] = set()

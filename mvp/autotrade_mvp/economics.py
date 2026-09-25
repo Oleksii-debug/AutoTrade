@@ -13,9 +13,11 @@ from pathlib import Path
 from typing import Any
 
 
-def _decimal(value: Decimal | str | int | float, *, name: str) -> Decimal:
+def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
+    if isinstance(value, bool) or isinstance(value, float):
+        raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
-        result = Decimal(str(value))
+        result = value if isinstance(value, Decimal) else Decimal(value)
     except (InvalidOperation, ValueError, TypeError) as error:
         raise ValueError(f"{name} must be a finite decimal") from error
     if not result.is_finite():
@@ -23,14 +25,14 @@ def _decimal(value: Decimal | str | int | float, *, name: str) -> Decimal:
     return result
 
 
-def _non_negative(value: Decimal | str | int | float, *, name: str) -> Decimal:
+def _non_negative(value: Decimal | str | int, *, name: str) -> Decimal:
     result = _decimal(value, name=name)
     if result < 0:
         raise ValueError(f"{name} must be non-negative")
     return result
 
 
-def _positive(value: Decimal | str | int | float, *, name: str) -> Decimal:
+def _positive(value: Decimal | str | int, *, name: str) -> Decimal:
     result = _decimal(value, name=name)
     if result <= 0:
         raise ValueError(f"{name} must be positive")
@@ -50,14 +52,14 @@ class CashRoundTripResult:
 
 def cash_round_trip(
     *,
-    start_cash: Decimal | str | int | float,
-    buy_quantity: Decimal | str | int | float,
-    buy_price: Decimal | str | int | float,
-    buy_fee: Decimal | str | int | float,
-    sell_quantity: Decimal | str | int | float,
-    sell_price: Decimal | str | int | float,
-    sell_fee: Decimal | str | int | float,
-    mark_price: Decimal | str | int | float,
+    start_cash: Decimal | str | int,
+    buy_quantity: Decimal | str | int,
+    buy_price: Decimal | str | int,
+    buy_fee: Decimal | str | int,
+    sell_quantity: Decimal | str | int,
+    sell_price: Decimal | str | int,
+    sell_fee: Decimal | str | int,
+    mark_price: Decimal | str | int,
 ) -> CashRoundTripResult:
     """Calculate the document-04 cash-equity reference convention.
 
@@ -93,10 +95,10 @@ def cash_round_trip(
 
 
 def linear_futures_mark_pnl(
-    contracts: Decimal | str | int | float,
-    multiplier: Decimal | str | int | float,
-    entry_price: Decimal | str | int | float,
-    mark_price: Decimal | str | int | float,
+    contracts: Decimal | str | int,
+    multiplier: Decimal | str | int,
+    entry_price: Decimal | str | int,
+    mark_price: Decimal | str | int,
 ) -> Decimal:
     qty = _decimal(contracts, name="contracts")
     mult = _positive(multiplier, name="multiplier")
@@ -106,10 +108,10 @@ def linear_futures_mark_pnl(
 
 
 def inverse_futures_pnl(
-    contracts: Decimal | str | int | float,
-    contract_value: Decimal | str | int | float,
-    entry_price: Decimal | str | int | float,
-    exit_price: Decimal | str | int | float,
+    contracts: Decimal | str | int,
+    contract_value: Decimal | str | int,
+    entry_price: Decimal | str | int,
+    exit_price: Decimal | str | int,
 ) -> Decimal:
     """Return settlement-currency P&L using high-precision decimal arithmetic."""
 
@@ -123,8 +125,8 @@ def inverse_futures_pnl(
 
 
 def linear_funding_cashflow(
-    notional: Decimal | str | int | float,
-    funding_rate: Decimal | str | int | float,
+    notional: Decimal | str | int,
+    funding_rate: Decimal | str | int,
     *,
     side: str = "LONG",
 ) -> Decimal:
@@ -147,19 +149,23 @@ class SplitResult:
 
 
 def apply_split(
-    quantity: Decimal | str | int | float,
-    unit_basis: Decimal | str | int | float,
+    quantity: Decimal | str | int,
+    unit_basis: Decimal | str | int,
     *,
-    numerator: Decimal | str | int | float,
-    denominator: Decimal | str | int | float = 1,
+    numerator: Decimal | str | int,
+    denominator: Decimal | str | int = 1,
 ) -> SplitResult:
-    qty = _non_negative(quantity, name="quantity")
+    qty = _decimal(quantity, name="quantity")
     basis = _non_negative(unit_basis, name="unit_basis")
     num = _positive(numerator, name="numerator")
     den = _positive(denominator, name="denominator")
-    total_basis = qty * basis
+    total_basis = abs(qty) * basis
     new_quantity = qty * num / den
-    new_unit_basis = total_basis / new_quantity if new_quantity else Decimal("0")
+    new_unit_basis = (
+        total_basis / abs(new_quantity)
+        if new_quantity
+        else Decimal("0")
+    )
     return SplitResult(
         quantity=new_quantity,
         unit_basis=new_unit_basis,
@@ -168,9 +174,9 @@ def apply_split(
 
 
 def investment_pnl_excluding_external_flows(
-    previous_equity: Decimal | str | int | float,
-    current_equity: Decimal | str | int | float,
-    external_net_flow: Decimal | str | int | float,
+    previous_equity: Decimal | str | int,
+    current_equity: Decimal | str | int,
+    external_net_flow: Decimal | str | int,
 ) -> Decimal:
     previous = _decimal(previous_equity, name="previous_equity")
     current = _decimal(current_equity, name="current_equity")
@@ -179,9 +185,9 @@ def investment_pnl_excluding_external_flows(
 
 
 def corrected_fill_cash_difference(
-    quantity: Decimal | str | int | float,
-    original_price: Decimal | str | int | float,
-    corrected_price: Decimal | str | int | float,
+    quantity: Decimal | str | int,
+    original_price: Decimal | str | int,
+    corrected_price: Decimal | str | int,
     *,
     side: str = "BUY",
 ) -> Decimal:

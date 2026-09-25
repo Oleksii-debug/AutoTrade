@@ -134,6 +134,7 @@ class SnapshotConsistencyEvidence:
 class ProviderWorkingOrderEvidence:
     provider_id: str
     account_id: str
+    environment: str
     provider_order_id: str
     client_order_id: str | None
     instrument: str
@@ -145,6 +146,9 @@ class ProviderWorkingOrderEvidence:
         )
         object.__setattr__(
             self, "account_id", _text(self.account_id, name="account_id")
+        )
+        object.__setattr__(
+            self, "environment", _text(self.environment, name="environment").upper()
         )
         remaining = _decimal(self.remaining_quantity, name="remaining_quantity")
         if remaining <= 0:
@@ -176,6 +180,7 @@ class ProviderWorkingOrderEvidence:
         *,
         provider_id: str,
         account_id: str,
+        environment: str,
         provider_order_id: str,
         client_order_id: str | None,
         instrument: str,
@@ -187,6 +192,7 @@ class ProviderWorkingOrderEvidence:
         return cls(
             provider_id=_text(provider_id, name="provider_id").upper(),
             account_id=_text(account_id, name="account_id"),
+            environment=_text(environment, name="environment").upper(),
             provider_order_id=_text(provider_order_id, name="provider_order_id"),
             client_order_id=(
                 _text(client_order_id, name="client_order_id")
@@ -202,6 +208,7 @@ class ProviderWorkingOrderEvidence:
 class ProviderFillEvidence:
     provider_id: str
     account_id: str
+    environment: str
     provider_execution_id: str
     client_order_id: str | None
     instrument: str
@@ -217,6 +224,9 @@ class ProviderFillEvidence:
         )
         object.__setattr__(
             self, "account_id", _text(self.account_id, name="account_id")
+        )
+        object.__setattr__(
+            self, "environment", _text(self.environment, name="environment").upper()
         )
         quantity = _decimal(self.quantity, name="quantity")
         price = _decimal(self.price, name="price")
@@ -258,6 +268,7 @@ class ProviderFillEvidence:
         *,
         provider_id: str,
         account_id: str,
+        environment: str,
         provider_execution_id: str,
         client_order_id: str | None,
         instrument: str,
@@ -276,6 +287,7 @@ class ProviderFillEvidence:
         return cls(
             provider_id=_text(provider_id, name="provider_id").upper(),
             account_id=_text(account_id, name="account_id"),
+            environment=_text(environment, name="environment").upper(),
             provider_execution_id=_text(
                 provider_execution_id, name="provider_execution_id"
             ),
@@ -297,6 +309,7 @@ class ProviderFillEvidence:
 class ProviderActivityEvidence:
     provider_id: str
     account_id: str
+    environment: str
     activity_id: str
     activity_type: str
     origin: str
@@ -306,6 +319,7 @@ class ProviderActivityEvidence:
     client_order_id: str | None = None
     provider_order_id: str | None = None
     provider_execution_id: str | None = None
+    signed_amount: Decimal | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -317,6 +331,11 @@ class ProviderActivityEvidence:
             self,
             "account_id",
             _text(self.account_id, name="account_id"),
+        )
+        object.__setattr__(
+            self,
+            "environment",
+            _text(self.environment, name="environment").upper(),
         )
         object.__setattr__(
             self,
@@ -353,6 +372,12 @@ class ProviderActivityEvidence:
                 "currency",
                 _text(self.currency, name="currency").upper(),
             )
+        if self.signed_amount is not None:
+            object.__setattr__(
+                self,
+                "signed_amount",
+                _decimal(self.signed_amount, name="signed_amount"),
+            )
 
     @classmethod
     def create(
@@ -360,6 +385,7 @@ class ProviderActivityEvidence:
         *,
         provider_id: str,
         account_id: str,
+        environment: str,
         activity_id: str,
         activity_type: str,
         origin: str,
@@ -369,10 +395,12 @@ class ProviderActivityEvidence:
         client_order_id: str | None = None,
         provider_order_id: str | None = None,
         provider_execution_id: str | None = None,
+        signed_amount=None,
     ) -> "ProviderActivityEvidence":
         return cls(
             provider_id=provider_id,
             account_id=account_id,
+            environment=environment,
             activity_id=activity_id,
             activity_type=activity_type,
             origin=origin,
@@ -382,6 +410,11 @@ class ProviderActivityEvidence:
             client_order_id=client_order_id,
             provider_order_id=provider_order_id,
             provider_execution_id=provider_execution_id,
+            signed_amount=(
+                None
+                if signed_amount is None
+                else _decimal(signed_amount, name="signed_amount")
+            ),
         )
 
 

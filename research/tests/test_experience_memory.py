@@ -653,6 +653,50 @@ class ExperienceMemoryTests(unittest.TestCase):
                 ["loss", "no-trade"],
             )
 
+    def test_tombstone_access_flag_requires_real_boolean(self):
+        with TemporaryDirectory() as directory:
+            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload(),
+            )
+            store.tombstone(episode, reason="source rights revoked")
+
+            with self.assertRaisesRegex(TypeError, "include_tombstoned"):
+                store.retrieve(
+                    information_cutoff=BASE,
+                    granted_permissions={"research"},
+                    include_tombstoned="false",
+                )
+
+    def test_permission_context_rejects_noncanonical_tokens(self):
+        with TemporaryDirectory() as directory:
+            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload(),
+            )
+            with self.assertRaisesRegex(ValueError, "canonical text"):
+                store.retrieve(
+                    information_cutoff=BASE,
+                    granted_permissions={" research "},
+                )
+            with self.assertRaisesRegex(TypeError, "granted_permission"):
+                store.retrieve(
+                    information_cutoff=BASE,
+                    granted_permissions={1},
+                )
+
     def test_tombstone_hides_episode_but_keeps_auditable_record(self):
         with TemporaryDirectory() as directory:
             store = ExperienceMemory(Path(directory) / "memory.sqlite3")

@@ -377,6 +377,8 @@ class BybitV5AdapterTests(unittest.TestCase):
             "time": 1790280001000,
         }
         fills = parse_executions(
+            account_id="account-1",
+            environment="PAPER",
             response,
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
         )
@@ -414,11 +416,15 @@ class BybitV5AdapterTests(unittest.TestCase):
             "fee currency is unresolved",
         ):
             parse_executions(
+            account_id="account-1",
+            environment="PAPER",
                 response,
                 instrument_versions={"ETHPERP": "ETHPERP@v1"},
             )
 
         fills = parse_executions(
+            account_id="account-1",
+            environment="PAPER",
             response,
             instrument_versions={"ETHPERP": "ETHPERP@v1"},
             qualified_fee_currencies={"ETHPERP@v1": "USDT"},
@@ -452,6 +458,8 @@ class BybitV5AdapterTests(unittest.TestCase):
             "extraFees",
         ):
             parse_executions(
+            account_id="account-1",
+            environment="PAPER",
                 response,
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
             )
@@ -472,6 +480,8 @@ class BybitV5AdapterTests(unittest.TestCase):
                 if extra_fees is not None:
                     row["extraFees"] = extra_fees
                 fills = parse_executions(
+            account_id="account-1",
+            environment="PAPER",
                     {"retCode": 0, "result": {"list": [row]}},
                     instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
                 )
@@ -507,6 +517,8 @@ class BybitV5AdapterTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ProviderCoreError, "conflicting"):
             parse_executions(
+            account_id="account-1",
+            environment="PAPER",
                 conflict,
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
             )
@@ -529,7 +541,12 @@ class BybitV5AdapterTests(unittest.TestCase):
             },
         }
         with self.assertRaisesRegex(ProviderCoreError, "unmapped"):
-            parse_executions(unknown, instrument_versions={})
+            parse_executions(
+                unknown,
+                account_id="account-1",
+                environment="PAPER",
+                instrument_versions={},
+            )
 
     def test_auth_timestamp_window_matches_documented_boundaries(self):
         server = 1_000_000
@@ -570,6 +587,8 @@ class BybitV5AdapterTests(unittest.TestCase):
 
     def test_absence_semantics_are_fail_closed_until_explicitly_qualified(self):
         evidence = coverage_evidence(
+            account_id="account-1",
+            environment="PAPER",
             surface="EXECUTIONS",
             coverage_start="2026-09-24T19:00:00Z",
             coverage_end="2026-09-24T21:00:00Z",
@@ -584,6 +603,8 @@ class BybitV5AdapterTests(unittest.TestCase):
         )
 
         qualified = coverage_evidence(
+            account_id="account-1",
+            environment="PAPER",
             surface="EXECUTIONS",
             coverage_start="2026-09-24T19:00:00Z",
             coverage_end="2026-09-24T21:00:00Z",

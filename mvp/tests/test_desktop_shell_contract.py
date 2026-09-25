@@ -82,7 +82,8 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         )
         self.assertIn('value == "0"', client)
         self.assertIn("value[0] is >= '1' and <= '9'", client)
-        self.assertIn("value.All(static character => character is >= '0' and <= '9')", client)
+        self.assertIn("foreach (char character in value)", client)
+        self.assertIn("character is < '0' or > '9'", client)
 
     def test_emergency_control_is_named_keyboard_reachable_and_truthful(self):
         text = XAML.read_text(encoding="utf-8")

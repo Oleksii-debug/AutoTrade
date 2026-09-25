@@ -151,6 +151,29 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "immutable"):
             admitted.arguments["window"]["size"] = 30
 
+    def test_tool_arguments_reject_excessive_structural_node_count(self):
+        with self.assertRaisesRegex(
+            ResearchBoundaryError,
+            "maximum structural node budget",
+        ):
+            ResearchToolRequest(
+                request_id="oversized-args",
+                tool_name="statistics",
+                requested_capabilities=("COMPUTE_STATISTICS",),
+                arguments={"items": list(range(10_001))},
+            )
+
+    def test_model_result_rejects_oversized_text_leaf(self):
+        with self.assertRaisesRegex(
+            ResearchBoundaryError,
+            "maximum text size",
+        ):
+            ResearchModelResult(
+                result_id="oversized-model-text",
+                proposal={"analysis": "x" * 1_000_001},
+                evidence_refs=("evidence:1",),
+            )
+
     def test_tool_arguments_reject_opaque_or_nonfinite_nested_values(self):
         for value in (object(), {1, 2}, float("nan"), float("inf")):
             with self.subTest(value=repr(value)), self.assertRaisesRegex(

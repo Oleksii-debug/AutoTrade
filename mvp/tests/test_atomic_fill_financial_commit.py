@@ -19,10 +19,13 @@ from mvp.autotrade_mvp.durable_settlement import (
     settlement_rule_evidence_receipt,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+from mvp.autotrade_mvp.fill_accounting import ProjectedFillEvidence
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
     commit_economic_batch_with_reservation_consumption,
+    commit_provider_fill_with_reservation_consumption,
 )
+from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence
 from mvp.autotrade_mvp.reservations import ReservationConflict
 from research.autotrade_research.artifacts.store import ArtifactStore
 
@@ -589,6 +592,365 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
                 reservations.get("reservation-1").remaining["CASH:USD"],
                 Decimal("120"),
             )
+
+
+class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
+    def projected_fill(
+        self,
+        *,
+        side="BUY",
+        quantity="1",
+        price="100",
+        fill_id="fill-1",
+        provider_execution_id="provider-execution-1",
+    ):
+        return ProjectedFillEvidence.create(
+            fill_id=fill_id,
+            provider_execution_id=provider_execution_id,
+            intent_id="intent-1",
+            client_order_id="client-order-1",
+            side=side,
+            quantity=quantity,
+            price=price,
+        )
+
+    def provider_fill(
+        self,
+        *,
+        side="BUY",
+        quantity="1",
+        price="100",
+        fee_amount="0",
+        fee_currency="USD",
+        position_side=None,
+        provider_execution_id="provider-execution-1",
+    ):
+        return ProviderFillEvidence.create(
+            provider_id=PROVIDER,
+            account_id=ACCOUNT,
+            environment=ENVIRONMENT,
+            provider_execution_id=provider_execution_id,
+            client_order_id="client-order-1",
+            instrument="ABC",
+            quantity=quantity,
+            price=price,
+            fee_amount=fee_amount,
+            fee_currency=fee_currency,
+            trade_time="2026-09-25T09:00:00Z",
+            side=side,
+            position_side=position_side,
+            evidence_refs=("provider-fill:test",),
+        )
+
+    def commit_evidenced_fill(
+        self,
+        economics,
+        reservations,
+        *,
+        projected=None,
+        provider=None,
+        asset_family="CASH_EQUITY",
+        command_id="evidence-fill-command-1",
+        idempotency_key="evidence-fill-idempotency-1",
+    ):
+        return commit_provider_fill_with_reservation_consumption(
+            economics,
+            reservations,
+            command_id=command_id,
+            idempotency_key=idempotency_key,
+            reservation_id="reservation-1",
+            projected_fill=(
+                self.projected_fill() if projected is None else projected
+            ),
+            provider_fill=(
+                self.provider_fill() if provider is None else provider
+            ),
+            expected_instrument="ABC",
+            settlement_currency="USD",
+            asset_family=asset_family,
+            observed_at="2026-09-25T09:00:01Z",
+            committed_at="2026-09-25T09:00:02Z",
+        )
+
+    def test_usage_is_derived_from_provider_fill_not_caller_input(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            self.assertTrue(self.commit_evidenced_fill(economics, reservations))
+            snapshot = reservations.get("reservation-1")
+            self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("100"))
+            self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("20"))
+            self.assertEqual(economics.position("ABC"), Decimal("1"))
+
+    def test_two_partial_fills_accumulate_exact_reservation_consumption(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            first_projected = self.projected_fill(
+                quantity="0.4",
+                fill_id="fill-partial-1",
+                provider_execution_id="provider-execution-partial-1",
+            )
+            first_provider = self.provider_fill(
+                quantity="0.4",
+                provider_execution_id="provider-execution-partial-1",
+            )
+            second_projected = self.projected_fill(
+                quantity="0.6",
+                fill_id="fill-partial-2",
+                provider_execution_id="provider-execution-partial-2",
+            )
+            second_provider = self.provider_fill(
+                quantity="0.6",
+                provider_execution_id="provider-execution-partial-2",
+            )
+
+            self.assertTrue(
+                self.commit_evidenced_fill(
+                    economics,
+                    reservations,
+                    projected=first_projected,
+                    provider=first_provider,
+                    command_id="partial-command-1",
+                    idempotency_key="partial-idempotency-1",
+                )
+            )
+            self.assertTrue(
+                self.commit_evidenced_fill(
+                    economics,
+                    reservations,
+                    projected=second_projected,
+                    provider=second_provider,
+                    command_id="partial-command-2",
+                    idempotency_key="partial-idempotency-2",
+                )
+            )
+
+            snapshot = reservations.get("reservation-1")
+            self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("100.0"))
+            self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("20.0"))
+            self.assertEqual(economics.position("ABC"), Decimal("1.0"))
+            self.assertEqual(len(economics.transactions), 2)
+
+    def test_fill_cannot_consume_beyond_admitted_reservation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "exceeds admitted reservation",
+            ):
+                self.commit_evidenced_fill(
+                    economics,
+                    reservations,
+                    projected=self.projected_fill(quantity="2"),
+                    provider=self.provider_fill(quantity="2"),
+                )
+
+            self.assertEqual(economics.transactions, ())
+            snapshot = reservations.get("reservation-1")
+            self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("0"))
+            self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("120"))
+
+    def test_positive_settlement_fee_consumes_same_reserved_cash(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            self.assertTrue(
+                self.commit_evidenced_fill(
+                    economics,
+                    reservations,
+                    provider=self.provider_fill(fee_amount="1"),
+                )
+            )
+            snapshot = reservations.get("reservation-1")
+            self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("101"))
+            self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("19"))
+
+    def test_third_currency_fee_requires_admitted_resource(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "unreserved resource CASH:EUR",
+            ):
+                self.commit_evidenced_fill(
+                    economics,
+                    reservations,
+                    provider=self.provider_fill(
+                        fee_amount="1",
+                        fee_currency="EUR",
+                    ),
+                )
+            self.assertEqual(economics.transactions, ())
+            self.assertEqual(
+                reservations.get("reservation-1").consumed["CASH:USD"],
+                Decimal("0"),
+            )
+
+    def test_negative_fee_never_releases_or_creates_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            self.assertTrue(
+                self.commit_evidenced_fill(
+                    economics,
+                    reservations,
+                    provider=self.provider_fill(fee_amount="-2"),
+                )
+            )
+            snapshot = reservations.get("reservation-1")
+            self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("100"))
+            self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("20"))
+
+    def test_provider_side_mismatch_fails_before_any_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "side does not match projection",
+            ):
+                self.commit_evidenced_fill(
+                    economics,
+                    reservations,
+                    provider=self.provider_fill(side="SELL"),
+                )
+            self.assertEqual(economics.transactions, ())
+            self.assertEqual(
+                reservations.get("reservation-1").consumed["CASH:USD"],
+                Decimal("0"),
+            )
+
+    def test_unsupported_sell_and_derivative_mapping_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "qualified only for BUY",
+            ):
+                self.commit_evidenced_fill(
+                    economics,
+                    reservations,
+                    projected=self.projected_fill(side="SELL"),
+                    provider=self.provider_fill(side="SELL"),
+                )
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "not qualified for this asset family",
+            ):
+                self.commit_evidenced_fill(
+                    economics,
+                    reservations,
+                    asset_family="FUTURES",
+                )
+            self.assertEqual(economics.transactions, ())
+
+    def test_same_caller_idempotency_rejects_changed_fill_plan(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            first_projected = self.projected_fill(
+                quantity="0.4",
+                fill_id="fill-idempotency-1",
+                provider_execution_id="provider-execution-idempotency-1",
+            )
+            first_provider = self.provider_fill(
+                quantity="0.4",
+                provider_execution_id="provider-execution-idempotency-1",
+            )
+            self.assertTrue(
+                self.commit_evidenced_fill(
+                    economics,
+                    reservations,
+                    projected=first_projected,
+                    provider=first_provider,
+                    command_id="idempotency-command-1",
+                    idempotency_key="shared-fill-idempotency",
+                )
+            )
+
+            changed_projected = self.projected_fill(
+                quantity="0.5",
+                fill_id="fill-idempotency-2",
+                provider_execution_id="provider-execution-idempotency-2",
+            )
+            changed_provider = self.provider_fill(
+                quantity="0.5",
+                provider_execution_id="provider-execution-idempotency-2",
+            )
+            with self.assertRaisesRegex(
+                ReservationConflict,
+                "idempotency_key was already used for a different reservation request",
+            ):
+                self.commit_evidenced_fill(
+                    economics,
+                    reservations,
+                    projected=changed_projected,
+                    provider=changed_provider,
+                    command_id="idempotency-command-2",
+                    idempotency_key="shared-fill-idempotency",
+                )
+
+            snapshot = reservations.get("reservation-1")
+            self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("40.0"))
+            self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("80.0"))
+            self.assertEqual(economics.position("ABC"), Decimal("0.4"))
+            self.assertEqual(len(economics.transactions), 1)
+
+    def test_exact_retry_after_restart_is_idempotent_across_both_aggregates(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            self.assertTrue(self.commit_evidenced_fill(economics, reservations))
+
+            reopened = JournalStore(path)
+            reopened_reservations = reservation_book(reopened)
+            reopened_economics = economic_book(reopened)
+            self.assertFalse(
+                self.commit_evidenced_fill(
+                    reopened_economics,
+                    reopened_reservations,
+                )
+            )
+            snapshot = reopened_reservations.get("reservation-1")
+            self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("100"))
+            self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("20"))
+            self.assertEqual(len(reopened_economics.transactions), 1)
+
 
 
 if __name__ == "__main__":

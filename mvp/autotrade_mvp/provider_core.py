@@ -213,10 +213,10 @@ class QuotaBucket:
 
     def acquire(self, cost, *, purpose: Literal["RECOVERY", "TRADING", "RESEARCH"]) -> None:
         amount = _decimal(cost, "quota cost", non_negative=True)
-        if amount == 0:
-            return
         if purpose not in {"RECOVERY", "TRADING", "RESEARCH"}:
             raise ProviderCoreError("unknown quota purpose")
+        if amount == 0:
+            return
         remaining = self.available()
         if amount > remaining:
             raise ProviderCoreError("provider quota exhausted")

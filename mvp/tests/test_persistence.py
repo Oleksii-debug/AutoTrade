@@ -3,7 +3,11 @@ import json
 import sqlite3
 import unittest
 
-from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.persistence import (
+    JournalStore,
+    _outbox_envelope_digest,
+    payload_digest,
+)
 
 
 def event(event_id="evt-1", version=1, payload=None):
@@ -87,7 +91,10 @@ class JournalStoreTests(unittest.TestCase):
                     separators=(",", ":"),
                     ensure_ascii=False,
                 )
-                replacement_hash = payload_digest(payload)
+                replacement_hash = _outbox_envelope_digest(
+                    "events",
+                    payload_json,
+                )
                 connection.execute(
                     "UPDATE outbox SET payload_json = ?, envelope_hash = ? "
                     "WHERE outbox_id = ?",
@@ -117,6 +124,73 @@ class JournalStoreTests(unittest.TestCase):
             finally:
                 connection.close()
             self.assertIsNone(delivered_at)
+
+
+    def test_topic_only_tamper_fails_pending_read_and_stale_delivery_ack(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event(), outbox_topic="events")
+            pending = store.pending_outbox()[0]
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE outbox SET topic = ? WHERE outbox_id = ?",
+                    ("rerouted.events", pending["outbox_id"]),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = JournalStore(path)
+            with self.assertRaisesRegex(ValueError, "envelope hash"):
+                reopened.pending_outbox()
+            with self.assertRaisesRegex(ValueError, "envelope hash"):
+                reopened.mark_outbox_delivered(
+                    pending["outbox_id"],
+                    expected_envelope_hash=pending["envelope_hash"],
+                )
+
+    def test_current_v5_extra_envelope_field_fails_even_with_recomputed_hash(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event(), outbox_topic="events")
+            pending = store.pending_outbox()[0]
+
+            connection = sqlite3.connect(path)
+            try:
+                raw = connection.execute(
+                    "SELECT payload_json FROM outbox WHERE outbox_id = ?",
+                    (pending["outbox_id"],),
+                ).fetchone()[0]
+                payload = json.loads(raw)
+                payload["unexpected"] = "forged"
+                payload_json = json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                forged_hash = _outbox_envelope_digest("events", payload_json)
+                connection.execute(
+                    "UPDATE outbox SET payload_json = ?, envelope_hash = ? "
+                    "WHERE outbox_id = ?",
+                    (payload_json, forged_hash, pending["outbox_id"]),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = JournalStore(path)
+            with self.assertRaisesRegex(ValueError, "authoritative journal event"):
+                reopened.pending_outbox()
+            with self.assertRaisesRegex(ValueError, "authoritative journal event"):
+                reopened.mark_outbox_delivered(
+                    pending["outbox_id"],
+                    expected_envelope_hash=forged_hash,
+                )
 
     def test_delivery_ack_revalidates_authoritative_event(self):
         with TemporaryDirectory() as directory:
@@ -741,6 +815,48 @@ class JournalStoreTests(unittest.TestCase):
             self.assertFalse(inserted)
             self.assertEqual(replayed, {"status": "ACCEPTED"})
             self.assertEqual(upgraded.pending_outbox()[0]["event_id"], "evt-1")
+
+
+    def test_v4_non_null_payload_hash_upgrades_to_topic_bound_v5_hash(self):
+        class V4JournalStore(JournalStore):
+            SCHEMA_VERSION = 4
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            legacy = V4JournalStore(path)
+            legacy.append_event(event(), outbox_topic="events")
+
+            connection = sqlite3.connect(path)
+            try:
+                legacy_row = connection.execute(
+                    "SELECT topic, payload_json, envelope_hash FROM outbox "
+                    "WHERE event_id = ?",
+                    ("evt-1",),
+                ).fetchone()
+            finally:
+                connection.close()
+
+            legacy_payload = legacy_row[1]
+            legacy_hash = legacy_row[2]
+            self.assertEqual(
+                legacy_hash,
+                "sha256:"
+                + __import__("hashlib").sha256(
+                    legacy_payload.encode("utf-8")
+                ).hexdigest(),
+            )
+
+            upgraded = JournalStore(path)
+            pending = upgraded.pending_outbox()[0]
+            expected_v5 = _outbox_envelope_digest("events", legacy_payload)
+            self.assertEqual(pending["envelope_hash"], expected_v5)
+            self.assertNotEqual(pending["envelope_hash"], legacy_hash)
+            self.assertTrue(
+                upgraded.mark_outbox_delivered(
+                    pending["outbox_id"],
+                    expected_envelope_hash=expected_v5,
+                )
+            )
 
     def test_v4_upgrade_rejects_malformed_command_result_before_hash_backfill(self):
         class V4JournalStore(JournalStore):

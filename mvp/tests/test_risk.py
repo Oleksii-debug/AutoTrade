@@ -163,6 +163,7 @@ def context(**overrides):
         capability_allowed=True,
         borrow_available=True,
         stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.20"},),
+        equivalent_exposure_per_unit={"ABC": "100", "XYZ": "50"},
     )
     values.update(overrides)
     return RiskContext.create(**values)
@@ -982,6 +983,101 @@ class IndependentRiskTests(unittest.TestCase):
             context(option_deliverable_verified="true")
         with self.assertRaises(TypeError):
             policy(require_option_exercise_evidence="true")
+
+    def test_derivative_equivalent_exposure_blocks_missing_evidence_and_drives_leverage(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="5",
+            expected_state_version=7,
+            instrument_type="OPTION",
+        )
+
+        missing = evaluate_risk(
+            intent,
+            context(
+                positions={"ABC": "0"},
+                marks={"ABC": "5"},
+                equivalent_exposure_per_unit={},
+                stress_scenarios=({"ABC": "-0.10"},),
+            ),
+            policy(
+                max_single_notional="1000",
+                max_gross_leverage="1",
+                max_net_leverage="1",
+            ),
+        )
+        missing_rule = next(
+            item
+            for item in missing.rules
+            if item.rule == "derivative_equivalent_exposure"
+        )
+        self.assertFalse(missing_rule.passed)
+        self.assertEqual(missing_rule.observed, "UNKNOWN")
+        self.assertFalse(missing.admitted)
+
+        evidenced = evaluate_risk(
+            intent,
+            context(
+                equity="1000",
+                positions={"ABC": "0"},
+                marks={"ABC": "5"},
+                equivalent_exposure_per_unit={"ABC": "750"},
+                stress_scenarios=({"ABC": "-0.10"},),
+            ),
+            policy(
+                max_single_notional="1000",
+                max_gross_leverage="1",
+                max_net_leverage="1",
+            ),
+        )
+        self.assertTrue(
+            next(
+                item
+                for item in evidenced.rules
+                if item.rule == "derivative_equivalent_exposure"
+            ).passed
+        )
+        self.assertEqual(evidenced.gross_leverage, Decimal("0.75"))
+        self.assertEqual(evidenced.net_leverage, Decimal("0.75"))
+        self.assertEqual(evidenced.worst_stress_loss, Decimal("75"))
+        self.assertTrue(evidenced.admitted)
+
+    def test_derivative_equivalent_exposure_can_reverse_direction_for_put_delta(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="2",
+                price="4",
+                expected_state_version=7,
+                instrument_type="OPTION",
+            ),
+            context(
+                positions={"ABC": "0"},
+                marks={"ABC": "4"},
+                equivalent_exposure_per_unit={"ABC": "-300"},
+                stress_scenarios=({"ABC": "-0.10"},),
+            ),
+            policy(
+                max_single_notional="1000",
+                max_gross_leverage="1",
+                max_net_leverage="1",
+            ),
+        )
+        self.assertEqual(decision.gross_leverage, Decimal("0.6"))
+        self.assertEqual(decision.net_leverage, Decimal("0.6"))
+        # Signed equivalent exposure makes a negative underlying shock profitable
+        # for this simplified put-delta exposure, so worst loss is zero.
+        self.assertEqual(decision.worst_stress_loss, Decimal("0"))
+        self.assertTrue(decision.admitted)
+
+    def test_equivalent_exposure_rejects_float_and_zero(self):
+        with self.assertRaises(TypeError):
+            context(equivalent_exposure_per_unit={"ABC": 100.0})
+        with self.assertRaisesRegex(ValueError, "cannot be zero"):
+            context(equivalent_exposure_per_unit={"ABC": "0"})
 
     def test_future_new_risk_requires_delivery_headroom_evidence(self):
         intent = RiskIntent.create(

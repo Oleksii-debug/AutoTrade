@@ -409,6 +409,7 @@ class ProviderFillEvidence:
     fee_amount: Decimal
     fee_currency: str
     trade_time: str
+    provider_environment: str | None = None
     side: str | None = None
     position_side: str | None = None
     position_effect: str | None = None
@@ -421,8 +422,20 @@ class ProviderFillEvidence:
         object.__setattr__(
             self, "account_id", _text(self.account_id, name="account_id")
         )
+        runtime_environment = _environment(self.environment)
+        object.__setattr__(self, "environment", runtime_environment)
+        provider_environment = (
+            runtime_environment
+            if self.provider_environment is None
+            else _text(
+                self.provider_environment,
+                name="provider_environment",
+            ).upper()
+        )
         object.__setattr__(
-            self, "environment", _environment(self.environment)
+            self,
+            "provider_environment",
+            provider_environment,
         )
         quantity = _decimal(self.quantity, name="quantity")
         price = _decimal(self.price, name="price")
@@ -503,6 +516,7 @@ class ProviderFillEvidence:
         fee_amount=0,
         fee_currency: str,
         trade_time: str,
+        provider_environment: str | None = None,
         side: str | None = None,
         position_side: str | None = None,
         position_effect: str | None = None,
@@ -532,6 +546,7 @@ class ProviderFillEvidence:
             fee_amount=fee,
             fee_currency=_text(fee_currency, name="fee_currency").upper(),
             trade_time=trade_time,
+            provider_environment=provider_environment,
             side=(_text(side, name="side").upper() if side is not None else None),
             position_side=(
                 _text(position_side, name="position_side").upper()
@@ -842,6 +857,7 @@ def reconcile_account(
     provider_positions: Mapping[str, object],
     local_execution_ids: Sequence[str],
     provider_fills: Sequence[ProviderFillEvidence],
+    provider_environment: str | None = None,
     local_working_client_order_ids: Sequence[str] = (),
     provider_working_orders: Sequence[ProviderWorkingOrderEvidence] = (),
     snapshot_consistency: SnapshotConsistencyEvidence | None = None,
@@ -884,6 +900,14 @@ def reconcile_account(
     provider_scope = _text(provider_id, name="provider_id").upper()
     account_scope = _text(account_id, name="account_id")
     environment_scope = _environment(environment)
+    provider_environment_scope = (
+        environment_scope
+        if provider_environment is None
+        else _text(
+            provider_environment,
+            name="provider_environment",
+        ).upper()
+    )
     if not isinstance(pagination_complete, bool):
         raise TypeError("pagination_complete must be boolean")
     if not isinstance(require_activity_reconciliation, bool):
@@ -925,6 +949,10 @@ def reconcile_account(
             raise ValueError("provider fill evidence account_id mismatch")
         if fill.environment != environment_scope:
             raise ValueError("provider fill evidence environment mismatch")
+        if fill.provider_environment != provider_environment_scope:
+            raise ValueError(
+                "provider fill evidence provider_environment mismatch"
+            )
         if fill.provider_execution_id in provider_by_id:
             if provider_by_id[fill.provider_execution_id] != fill:
                 raise ValueError("provider execution id has conflicting observations")

@@ -797,6 +797,7 @@ def parse_submission_response(
 def parse_executions(
     observation: ProviderResponseObservation,
     *,
+    provider_environment: str | None = None,
     instrument_versions: Mapping[str, str],
     qualified_fee_currencies: Mapping[str, str] | None = None,
 ) -> tuple[ProviderFillEvidence, ...]:
@@ -804,10 +805,23 @@ def parse_executions(
 
     if not isinstance(observation, ProviderResponseObservation):
         raise TypeError("observation must be ProviderResponseObservation")
+    if provider_environment is None:
+        raise ProviderCoreError(
+            "Bybit execution parsing requires expected provider_environment"
+        )
+    provider_environment_scope = _text(
+        provider_environment,
+        name="provider_environment",
+    ).upper()
+    if provider_environment_scope not in _REST_BASE_BY_ENVIRONMENT:
+        raise ProviderCoreError(
+            "Bybit provider_environment must be MAINNET, TESTNET or DEMO"
+        )
     observation.require_scope(
         provider_id="BYBIT",
         surface=Surface.AUTHENTICATED_READ,
         endpoint=BYBIT_DOCUMENTED_ENDPOINTS["EXECUTIONS"],
+        provider_environment=provider_environment_scope,
     )
     response = observation.payload
     account_id = observation.account_id
@@ -878,6 +892,7 @@ def parse_executions(
             provider_id="BYBIT",
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment_scope,
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=instrument,

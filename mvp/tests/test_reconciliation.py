@@ -19,6 +19,7 @@ def fill(
     instrument="ABC",
     fee_amount="0",
     environment="PAPER",
+    provider_environment=None,
     trade_time="2026-09-24T18:00:00Z",
     side=None,
     position_side=None,
@@ -29,6 +30,7 @@ def fill(
         provider_id="TEST_PROVIDER",
         account_id="test-account",
         environment=environment,
+        provider_environment=provider_environment,
         provider_execution_id=execution_id,
         client_order_id=client_order_id,
         instrument=instrument,
@@ -1071,6 +1073,24 @@ class ReconciliationTests(unittest.TestCase):
                 activity_coverage=self.activity_coverage(environment="LIVE"),
                 require_activity_reconciliation=True,
             )
+
+    def test_provider_environment_scope_is_enforced_for_financial_truth(self):
+        scoped = fill(provider_environment="TESTNET")
+        self.assertEqual(scoped.provider_environment, "TESTNET")
+        self.assertEqual(fill().provider_environment, "PAPER")
+        with self.assertRaisesRegex(
+            ValueError,
+            "provider_environment mismatch",
+        ):
+            self.base(
+                provider_environment="DEMO",
+                provider_fills=[scoped],
+            )
+        result = self.base(
+            provider_environment="TESTNET",
+            provider_fills=[scoped],
+        )
+        self.assertTrue(result.complete)
 
     def test_environment_scope_is_enforced_before_reconciliation(self):
         with self.assertRaisesRegex(ValueError, "fill evidence environment mismatch"):

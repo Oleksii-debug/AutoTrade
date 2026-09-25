@@ -201,7 +201,57 @@ def bound_execution_response(
     )
 
 
+def parse_test_executions(observation, **kwargs):
+    return parse_executions(
+        observation,
+        provider_environment="TESTNET",
+        **kwargs,
+    )
+
+
 class BybitV5AdapterTests(unittest.TestCase):
+    def test_execution_parser_requires_exact_provider_environment_scope(self):
+        response = {
+            "retCode": 0,
+            "result": {
+                "list": [{
+                    "execId": "scope-provider-env",
+                    "orderLinkId": "",
+                    "symbol": "BTCUSDT",
+                    "side": "Buy",
+                    "execQty": "1",
+                    "execPrice": "10",
+                    "execFee": "0",
+                    "feeCurrency": "USDT",
+                    "execTime": "1790280000000",
+                }]
+            },
+        }
+        observation = bound_execution_response(response)
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "requires expected provider_environment",
+        ):
+            parse_executions(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "provider-environment mismatch",
+        ):
+            parse_executions(
+                observation,
+                provider_environment="DEMO",
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+        fill = parse_executions(
+            observation,
+            provider_environment="TESTNET",
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )[0]
+        self.assertEqual(fill.provider_environment, "TESTNET")
+
     def test_authenticated_read_requires_explicit_provider_environment(self):
         capability = read_capability()
         query = prepare_authenticated_read_query(
@@ -891,7 +941,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "time": 1790280001000,
         }
         observation = bound_execution_response(response)
-        fills = parse_executions(
+        fills = parse_test_executions(
             observation,
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
         )
@@ -920,7 +970,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "execTime": "1790280000000",
         }
         with self.assertRaisesRegex(ProviderCoreError, "side"):
-            parse_executions(
+            parse_test_executions(
                 bound_execution_response(
                     {"retCode": 0, "result": {"list": [base]}}
                 ),
@@ -931,7 +981,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         observation = bound_execution_response(
             {"retCode": 0, "result": {"list": [documented]}}
         )
-        fill = parse_executions(
+        fill = parse_test_executions(
             observation,
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
         )[0]
@@ -947,7 +997,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "feeCurrency": "USDT", "execTime": "1790280000000",
         }]}}
         observation = bound_execution_response(response, account_id="account-a")
-        fills = parse_executions(
+        fills = parse_test_executions(
             observation,
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
         )
@@ -963,8 +1013,8 @@ class BybitV5AdapterTests(unittest.TestCase):
         }]}}
         evidence = bound_execution_response(response, instrument_version="ETHPERP@v1")
         with self.assertRaisesRegex(ProviderCoreError, "fee currency is unresolved"):
-            parse_executions(evidence, instrument_versions={"ETHPERP": "ETHPERP@v1"})
-        fills = parse_executions(
+            parse_test_executions(evidence, instrument_versions={"ETHPERP": "ETHPERP@v1"})
+        fills = parse_test_executions(
             evidence,
             instrument_versions={"ETHPERP": "ETHPERP@v1"},
             qualified_fee_currencies={"ETHPERP@v1": "USDT"},
@@ -982,7 +1032,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "execTime": "1790280000000",
         }]}}
         with self.assertRaisesRegex(ProviderCoreError, "extraFees"):
-            parse_executions(
+            parse_test_executions(
                 bound_execution_response(response),
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
             )
@@ -997,7 +1047,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 }
                 if extra_fees is not None:
                     row["extraFees"] = extra_fees
-                fills = parse_executions(
+                fills = parse_test_executions(
                     bound_execution_response({"retCode": 0, "result": {"list": [row]}}),
                     instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
                 )
@@ -1009,7 +1059,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             {"execId": "same", "orderLinkId": "", "symbol": "BTCUSDT", "side": "Buy", "execQty": "2", "execPrice": "10", "execFee": "0", "feeCurrency": "USDT", "execTime": "1790280000000"},
         ]}}
         with self.assertRaisesRegex(ProviderCoreError, "conflicting"):
-            parse_executions(
+            parse_test_executions(
                 bound_execution_response(conflict),
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
             )
@@ -1019,7 +1069,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "execTime": "1790280000000",
         }]}}
         with self.assertRaisesRegex(ProviderCoreError, "unmapped"):
-            parse_executions(bound_execution_response(unknown), instrument_versions={})
+            parse_test_executions(bound_execution_response(unknown), instrument_versions={})
 
     def test_auth_timestamp_window_matches_documented_boundaries(self):
         server = 1_000_000

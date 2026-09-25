@@ -239,6 +239,70 @@ class BorrowLocateEvidence:
 
 
 @dataclass(frozen=True)
+class BorrowLoanEvidence:
+    """Provider truth for the currently outstanding borrowed share quantity.
+
+    This is distinct from locate availability: a provider may report remaining
+    capacity for new borrow while an existing loan is already outstanding.
+    """
+
+    resource: BorrowResourceIdentity
+    provider_revision: str
+    borrowed_quantity: Decimal
+    observed_at: str
+    effective_at: str
+    valid_until: str
+    evidence_refs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.resource, BorrowResourceIdentity):
+            raise TypeError("resource must be BorrowResourceIdentity")
+        object.__setattr__(
+            self,
+            "provider_revision",
+            _text(self.provider_revision, name="provider_revision"),
+        )
+        object.__setattr__(
+            self,
+            "borrowed_quantity",
+            _decimal(self.borrowed_quantity, name="borrowed_quantity"),
+        )
+        observed = _instant(self.observed_at, name="observed_at")
+        effective = _instant(self.effective_at, name="effective_at")
+        valid = _instant(self.valid_until, name="valid_until")
+        if _instant_value(effective, name="effective_at") > _instant_value(
+            observed, name="observed_at"
+        ):
+            raise ValueError("loan effective_at cannot be after observed_at")
+        if _instant_value(valid, name="valid_until") <= _instant_value(
+            observed, name="observed_at"
+        ):
+            raise ValueError("loan valid_until must be after observed_at")
+        object.__setattr__(self, "observed_at", observed)
+        object.__setattr__(self, "effective_at", effective)
+        object.__setattr__(self, "valid_until", valid)
+        object.__setattr__(self, "evidence_refs", _refs(self.evidence_refs))
+
+    def assert_fresh(self, *, now: str) -> None:
+        current = _instant_value(now, name="now")
+        if current < _instant_value(self.effective_at, name="effective_at"):
+            raise ValueError("borrow loan evidence is not yet effective")
+        if current >= _instant_value(self.valid_until, name="valid_until"):
+            raise ValueError("borrow loan evidence is expired")
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "resource": self.resource.payload(),
+            "provider_revision": self.provider_revision,
+            "borrowed_quantity": _decimal_text(self.borrowed_quantity),
+            "observed_at": self.observed_at,
+            "effective_at": self.effective_at,
+            "valid_until": self.valid_until,
+            "evidence_refs": list(self.evidence_refs),
+        }
+
+
+@dataclass(frozen=True)
 class BorrowRecallEvidence:
     resource: BorrowResourceIdentity
     recall_id: str
@@ -336,6 +400,7 @@ class BorrowRecallResolutionEvidence:
 class BorrowLifecycleState:
     resource: BorrowResourceIdentity
     latest_locate: BorrowLocateEvidence | None
+    latest_loan: BorrowLoanEvidence | None
     active_recalls: Mapping[str, Decimal]
 
     @property
@@ -369,6 +434,44 @@ def incremental_short_borrow_quantity(
     return max(short_after - short_before, Decimal("0"))
 
 
+def local_short_quantity(context: RiskContext, *, symbol: str) -> Decimal:
+    if not isinstance(context, RiskContext):
+        raise TypeError("context must be RiskContext")
+    name = _text(symbol, name="symbol")
+    return max(-context.positions.get(name, Decimal("0")), Decimal("0"))
+
+
+def validate_borrow_account_truth(
+    state: BorrowLifecycleState,
+    context: RiskContext,
+    *,
+    symbol: str,
+    now: str,
+) -> Decimal:
+    """Verify provider loan truth against the current filled local short.
+
+    WORKING/UNKNOWN future short exposure is not part of provider loan quantity
+    yet; it remains conservatively consumed by DurableReservationBook.
+    """
+
+    if not isinstance(state, BorrowLifecycleState):
+        raise TypeError("state must be BorrowLifecycleState")
+    current_short = local_short_quantity(context, symbol=symbol)
+    loan = state.latest_loan
+    if loan is None:
+        if current_short != 0:
+            raise ValueError(
+                "provider borrow loan evidence is required for an existing short"
+            )
+        return current_short
+    loan.assert_fresh(now=now)
+    if loan.borrowed_quantity != current_short:
+        raise ValueError(
+            "provider borrowed quantity does not match current local short exposure"
+        )
+    return current_short
+
+
 def borrow_reservation_requirement(
     resource: BorrowResourceIdentity,
     intent: RiskIntent,
@@ -394,6 +497,25 @@ def locate_capacity(
     recalled = _decimal(active_recall_quantity, name="active_recall_quantity")
     available = max(evidence.available_quantity - recalled, Decimal("0"))
     return {evidence.resource.resource_key: _decimal_text(available)}
+
+
+def validated_borrow_capacity(
+    state: BorrowLifecycleState,
+    context: RiskContext,
+    *,
+    symbol: str,
+    now: str,
+) -> dict[str, str]:
+    """Return remaining new-borrow capacity only after account truth validates."""
+
+    if not isinstance(state, BorrowLifecycleState):
+        raise TypeError("state must be BorrowLifecycleState")
+    if state.latest_locate is None:
+        raise ValueError("fresh provider borrow locate evidence is required")
+    validate_borrow_account_truth(state, context, symbol=symbol, now=now)
+    if state.blocks_new_short:
+        raise ValueError("active provider borrow recall blocks new short exposure")
+    return locate_capacity(state.latest_locate, now=now)
 
 
 class BorrowLifecycleJournal:
@@ -448,6 +570,18 @@ class BorrowLifecycleJournal:
             rate_unit=payload.get("rate_unit"),
         )
 
+    def _loan_from_payload(self, payload: Mapping[str, object]) -> BorrowLoanEvidence:
+        resource = self._resource_from_payload(payload)
+        return BorrowLoanEvidence(
+            resource=resource,
+            provider_revision=payload.get("provider_revision"),
+            borrowed_quantity=payload.get("borrowed_quantity"),
+            observed_at=payload.get("observed_at"),
+            effective_at=payload.get("effective_at"),
+            valid_until=payload.get("valid_until"),
+            evidence_refs=tuple(payload.get("evidence_refs") or ()),
+        )
+
     def _recall_from_payload(self, payload: Mapping[str, object]) -> BorrowRecallEvidence:
         resource = self._resource_from_payload(payload)
         return BorrowRecallEvidence(
@@ -476,9 +610,11 @@ class BorrowLifecycleJournal:
 
     def state(self) -> BorrowLifecycleState:
         latest_locate: BorrowLocateEvidence | None = None
+        latest_loan: BorrowLoanEvidence | None = None
         recalls: dict[str, Decimal] = {}
         identities: dict[tuple[str, str, str], str] = {}
         locate_observed: datetime | None = None
+        loan_observed: datetime | None = None
         recall_observed: dict[str, datetime] = {}
 
         for event in self._events():
@@ -499,6 +635,17 @@ class BorrowLifecycleJournal:
                 if locate_observed is None or observed >= locate_observed:
                     latest_locate = item
                     locate_observed = observed
+            elif kind == "BorrowLoanObserved":
+                item = self._loan_from_payload(payload)
+                key = (kind, self.resource.resource_key, item.provider_revision)
+                digest = payload_digest(payload)
+                if key in identities and identities[key] != digest:
+                    raise ValueError("conflicting borrow loan revision")
+                identities[key] = digest
+                observed = _instant_value(item.observed_at, name="observed_at")
+                if loan_observed is None or observed >= loan_observed:
+                    latest_loan = item
+                    loan_observed = observed
             elif kind == "BorrowRecallObserved":
                 item = self._recall_from_payload(payload)
                 key = (kind, item.recall_id, item.provider_revision)
@@ -533,6 +680,7 @@ class BorrowLifecycleJournal:
         return BorrowLifecycleState(
             resource=self.resource,
             latest_locate=latest_locate,
+            latest_loan=latest_loan,
             active_recalls=dict(sorted(recalls.items())),
         )
 
@@ -540,6 +688,7 @@ class BorrowLifecycleJournal:
         digest = payload_digest(payload)
         identity_fields = {
             "BorrowLocateObserved": ("locate_id", "provider_revision"),
+            "BorrowLoanObserved": ("provider_revision",),
             "BorrowRecallObserved": ("recall_id", "provider_revision"),
             "BorrowRecallReduced": ("recall_id", "provider_revision"),
         }[event_type]
@@ -610,6 +759,17 @@ class BorrowLifecycleJournal:
             raise ValueError("borrow locate resource scope mismatch")
         return self._append(
             event_type="BorrowLocateObserved",
+            payload=evidence.payload(),
+            observed_at=evidence.observed_at,
+        )
+
+    def record_loan(self, evidence: BorrowLoanEvidence):
+        if not isinstance(evidence, BorrowLoanEvidence):
+            raise TypeError("evidence must be BorrowLoanEvidence")
+        if evidence.resource != self.resource:
+            raise ValueError("borrow loan resource scope mismatch")
+        return self._append(
+            event_type="BorrowLoanObserved",
             payload=evidence.payload(),
             observed_at=evidence.observed_at,
         )

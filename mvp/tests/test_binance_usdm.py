@@ -330,6 +330,43 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
         self.assertEqual(fill.fee_amount, Decimal("0.07819010"))
         self.assertEqual(fill.fee_currency, "USDT")
 
+    def test_client_order_identity_map_is_validated_before_fill_mapping(self):
+        row = {
+            "commission": "0.01",
+            "commissionAsset": "USDT",
+            "id": 7,
+            "orderId": 42,
+            "price": "100",
+            "qty": "0.2",
+            "positionSide": "BOTH",
+            "symbol": "BTCUSDT",
+            "time": 1790272800123,
+        }
+        for bad_map in (
+            {"42": "at-usdm-fill"},
+            {True: "at-usdm-fill"},
+            {-1: "at-usdm-fill"},
+        ):
+            with self.subTest(bad_map=bad_map), self.assertRaisesRegex(
+                BinanceUsdmAdapterError,
+                "non-negative integer order ids",
+            ):
+                parse_account_trades(
+                    [row],
+                    instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
+                    client_ids_by_order_id=bad_map,
+                )
+
+        with self.assertRaisesRegex(
+            BinanceUsdmAdapterError,
+            "client_order_id",
+        ):
+            parse_account_trades(
+                [row],
+                instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
+                client_ids_by_order_id={42: "bad client id with spaces"},
+            )
+
     def test_conflicting_trade_identity_fails_closed(self):
         first = {
             "commission": "0.01",

@@ -8,6 +8,8 @@ from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
+from .securities_borrow import BorrowAvailabilityEvidence
+
 
 _REQUIRED_ABSENCE_SURFACES = frozenset(
     {"OPEN_ORDERS", "ORDER_HISTORY", "EXECUTIONS", "ACTIVITIES"}
@@ -184,6 +186,7 @@ class ResourceAvailabilityEvidence:
     available_resources: Mapping[str, Decimal]
     provider_as_of: str | None = None
     evidence_refs: tuple[str, ...] = ()
+    resource_details: Mapping[str, Mapping[str, str]] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -227,6 +230,82 @@ class ResourceAvailabilityEvidence:
             "available_resources",
             MappingProxyType(dict(sorted(normalized.items()))),
         )
+
+        raw_details = {} if self.resource_details is None else self.resource_details
+        if not isinstance(raw_details, Mapping):
+            raise TypeError("resource_details must be a mapping")
+        normalized_details: dict[str, Mapping[str, str]] = {}
+        for raw_resource, raw_detail in raw_details.items():
+            resource = _text(raw_resource, name="resource_details key")
+            if resource not in normalized:
+                raise ValueError(
+                    "resource_details may only describe available_resources"
+                )
+            if not isinstance(raw_detail, Mapping):
+                raise TypeError("resource detail must be a mapping")
+            detail: dict[str, str] = {}
+            for raw_key, raw_value in raw_detail.items():
+                key = _text(raw_key, name="resource detail key")
+                if not isinstance(raw_value, str):
+                    raise TypeError("resource detail values must be strings")
+                if key in detail:
+                    raise ValueError(
+                        "resource detail keys must be unique after normalization"
+                    )
+                detail[key] = raw_value
+
+            if resource.startswith("BORROW:"):
+                borrow = BorrowAvailabilityEvidence.from_resource_detail(detail)
+                if borrow.resource_key != resource:
+                    raise ValueError(
+                        "borrow resource identity does not match evidence scope"
+                    )
+                if (
+                    borrow.provider_id != self.provider_id
+                    or borrow.account_id != self.account_id
+                    or borrow.environment != self.environment
+                ):
+                    raise ValueError("borrow availability scope mismatch")
+                if borrow.capacity_quantity != normalized[resource]:
+                    raise ValueError(
+                        "borrow capacity differs from available resource amount"
+                    )
+                observed = _instant(
+                    borrow.observed_at,
+                    name="borrow_availability.observed_at",
+                )
+                expires = _instant(
+                    borrow.expires_at,
+                    name="borrow_availability.expires_at",
+                )
+                if observed < started or observed > completed:
+                    raise ValueError(
+                        "borrow availability observation is outside snapshot cut"
+                    )
+                if valid > expires:
+                    raise ValueError(
+                        "resource availability outlives borrow evidence"
+                    )
+            normalized_details[resource] = MappingProxyType(
+                dict(sorted(detail.items()))
+            )
+
+        missing_borrow_details = [
+            resource
+            for resource in normalized
+            if resource.startswith("BORROW:")
+            and resource not in normalized_details
+        ]
+        if missing_borrow_details:
+            raise ValueError(
+                "BORROW resources require typed securities-borrow evidence"
+            )
+        object.__setattr__(
+            self,
+            "resource_details",
+            MappingProxyType(dict(sorted(normalized_details.items()))),
+        )
+
         if not isinstance(self.evidence_refs, tuple):
             raise TypeError("evidence_refs must be a tuple of strings")
         if not self.evidence_refs:
@@ -632,6 +711,7 @@ class ReconciliationResult:
     manual_or_external_activity_ids: tuple[str, ...] = ()
     activity_coverage_complete: bool = True
     resource_availability: ResourceAvailabilityEvidence | None = None
+    borrow_differences: Mapping[str, Decimal] | None = None
 
     @property
     def blocks_new_risk(self) -> bool:
@@ -728,6 +808,9 @@ def reconcile_account(
     cash_tolerance: Mapping[str, object] | None = None,
     position_tolerance: Mapping[str, object] | None = None,
     resource_availability: ResourceAvailabilityEvidence | None = None,
+    local_borrowed_resources: Mapping[str, object] | None = None,
+    provider_borrowed_resources: Mapping[str, object] | None = None,
+    active_borrow_recall_resources: Sequence[str] = (),
 ) -> ReconciliationResult:
     """Compare local and provider truth without inventing absence evidence.
 
@@ -923,6 +1006,54 @@ def reconcile_account(
             raise ValueError(
                 "resource availability snapshot cut differs from reconciliation"
             )
+
+    local_borrowed = _amount_map(
+        local_borrowed_resources or {},
+        name="local_borrowed_resources",
+    )
+    provider_borrowed = _amount_map(
+        provider_borrowed_resources or {},
+        name="provider_borrowed_resources",
+    )
+    active_recalls = tuple(
+        _text(value, name="active_borrow_recall_resource")
+        for value in active_borrow_recall_resources
+    )
+    if len(active_recalls) != len(set(active_recalls)):
+        raise ValueError("active_borrow_recall_resources must be unique")
+
+    borrow_resources = (
+        set(local_borrowed)
+        | set(provider_borrowed)
+        | set(active_recalls)
+    )
+    borrow_details = (
+        {}
+        if resource_availability is None
+        else resource_availability.resource_details
+    )
+    for resource in sorted(borrow_resources):
+        if not resource.startswith("BORROW:"):
+            raise ValueError(
+                "borrow reconciliation resources must use canonical BORROW identity"
+            )
+        detail = borrow_details.get(resource)
+        if (
+            not isinstance(detail, Mapping)
+            or detail.get("resource_type") != "SECURITIES_BORROW"
+        ):
+            raise ValueError(
+                "borrow reconciliation requires typed availability evidence"
+            )
+
+    borrow_differences: dict[str, Decimal] = {}
+    for resource in sorted(set(local_borrowed) | set(provider_borrowed)):
+        difference = provider_borrowed.get(
+            resource,
+            Decimal("0"),
+        ) - local_borrowed.get(resource, Decimal("0"))
+        if difference != 0:
+            borrow_differences[resource] = difference
 
     cash_differences: dict[str, Decimal] = {}
     for currency in sorted(set(local_cash_map) | set(provider_cash_map)):
@@ -1164,6 +1295,18 @@ def reconcile_account(
 
     blocking: set[str] = set()
     reasons: list[str] = []
+    for resource in borrow_differences:
+        blocking.add(resource)
+    if borrow_differences:
+        reasons.append(
+            "provider/local securities-borrow obligation differs"
+        )
+    for resource in active_recalls:
+        blocking.add(resource)
+    if active_recalls:
+        reasons.append(
+            "active provider securities-borrow recall blocks increased short risk"
+        )
     if not snapshot_is_consistent:
         blocking.add("ACCOUNT")
         if snapshot_consistency is None:
@@ -1300,4 +1443,5 @@ def reconcile_account(
         manual_or_external_activity_ids=manual_or_external_activities,
         activity_coverage_complete=activity_coverage_complete,
         resource_availability=resource_availability,
+        borrow_differences=MappingProxyType(borrow_differences),
     )

@@ -14,6 +14,7 @@ from uuid import NAMESPACE_URL, uuid5
 from .dispatch import submission_attempt_aggregate_id
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reconciliation import ReconciliationResult, UnknownSubmission
+from .securities_borrow import BorrowAvailabilityEvidence
 
 
 def _text(value: str, *, name: str) -> str:
@@ -149,6 +150,9 @@ def reconciliation_payload(
         ),
         "cash_differences": _decimal_map(result.cash_differences),
         "position_differences": _decimal_map(result.position_differences),
+        "borrow_differences": _decimal_map(
+            result.borrow_differences or {}
+        ),
         "submission_resolutions": [
             {
                 "attempt_id": item.attempt_id,
@@ -190,6 +194,18 @@ def reconciliation_payload(
                     result.resource_availability.available_resources
                 ),
                 "evidence_refs": list(result.resource_availability.evidence_refs),
+                **(
+                    {
+                        "resource_details": {
+                            resource: dict(detail)
+                            for resource, detail in sorted(
+                                result.resource_availability.resource_details.items()
+                            )
+                        }
+                    }
+                    if result.resource_availability.resource_details
+                    else {}
+                ),
             }
         ),
         "blocking_resources": list(result.blocking_resources),
@@ -473,12 +489,12 @@ def load_account_resource_availability_evidence(
     now: str,
     max_age_seconds: Decimal | str | int,
 ) -> dict[str, Any]:
-    """Return exact cash availability from one fresh, complete provider snapshot.
+    """Return exact reservable availability from a fresh provider snapshot.
 
-    The reconciliation checkpoint is the authority. Callers may choose which
-    resource keys they need, but may not supply the numeric availability. Only
-    CASH resources are exposed until canonical provider semantics exist for
-    margin, borrow and position-availability resources.
+    CASH is supported directly. Securities-borrow resources are supported only
+    when typed BorrowAvailabilityEvidence in the checkpoint proves exact
+    provider/account/environment/instrument/version identity and freshness.
+    Caller-supplied numeric availability is never authority.
     """
 
     if not isinstance(store, JournalStore):
@@ -502,11 +518,19 @@ def load_account_resource_availability_evidence(
     if (
         payload.get("complete") is not True
         or payload.get("snapshot_consistent") is not True
-        or payload.get("blocking_resources") != []
     ):
         raise ValueError(
-            "availability evidence requires complete non-blocking reconciliation"
+            "availability evidence requires complete consistent reconciliation"
         )
+    raw_blocking = payload.get("blocking_resources")
+    if not isinstance(raw_blocking, list):
+        raise ValueError("checkpoint blocking_resources must be a list")
+    blocking_resources = tuple(
+        _text(value, name="blocking_resource")
+        for value in raw_blocking
+    )
+    if len(blocking_resources) != len(set(blocking_resources)):
+        raise ValueError("checkpoint blocking_resources must be unique")
 
     snapshot = payload.get("snapshot")
     if not isinstance(snapshot, Mapping):
@@ -623,27 +647,81 @@ def load_account_resource_availability_evidence(
     requested = tuple(_text(value, name="resource") for value in resources)
     if not requested or len(requested) != len(set(requested)):
         raise ValueError("resources must be non-empty and unique")
+    if "ACCOUNT" in blocking_resources or any(
+        resource in blocking_resources for resource in requested
+    ):
+        raise ValueError(
+            "requested reservation resource is blocked by reconciliation"
+        )
+
+    raw_details = resource_evidence.get("resource_details", {})
+    if not isinstance(raw_details, Mapping):
+        raise ValueError("resource availability details must be an object")
+
     availability: dict[str, Decimal] = {}
+    selected_details: dict[str, dict[str, str]] = {}
+    snapshot_started = datetime.fromisoformat(
+        snapshot_started_text.replace("Z", "+00:00")
+    )
     for resource in requested:
-        if not resource.startswith("CASH:"):
-            raise ValueError(
-                "resource availability semantics are not canonically supported"
-            )
         if resource not in canonical_available:
             raise ValueError(
                 "provider snapshot does not contain requested available resource"
             )
+        if resource.startswith("CASH:"):
+            availability[resource] = canonical_available[resource]
+            continue
+        if not resource.startswith("BORROW:"):
+            raise ValueError(
+                "resource availability semantics are not canonically supported"
+            )
+        detail = raw_details.get(resource)
+        if not isinstance(detail, Mapping):
+            raise ValueError(
+                "BORROW resource lacks typed securities-borrow evidence"
+            )
+        borrow = BorrowAvailabilityEvidence.from_resource_detail(detail)
+        if (
+            borrow.resource_key != resource
+            or borrow.provider_id != provider
+            or borrow.account_id != account
+            or borrow.environment != scope
+        ):
+            raise ValueError("borrow availability evidence scope mismatch")
+        if borrow.capacity_quantity != canonical_available[resource]:
+            raise ValueError(
+                "borrow capacity differs from available resource amount"
+            )
+        observed = datetime.fromisoformat(
+            borrow.observed_at.replace("Z", "+00:00")
+        )
+        expires = datetime.fromisoformat(
+            borrow.expires_at.replace("Z", "+00:00")
+        )
+        if observed < snapshot_started or observed > completed:
+            raise ValueError(
+                "borrow availability observation is outside snapshot cut"
+            )
+        if valid_until > expires or current >= expires:
+            raise ValueError("borrow availability evidence is expired")
         availability[resource] = canonical_available[resource]
+        selected_details[resource] = {
+            _text(key, name="borrow detail key"): _text(
+                value,
+                name=f"borrow detail {key}",
+            )
+            for key, value in detail.items()
+        }
 
     raw_evidence_refs = resource_evidence.get("evidence_refs")
     if not isinstance(raw_evidence_refs, list) or not raw_evidence_refs:
         raise ValueError(
             "resource availability evidence_refs must be a non-empty list"
         )
-    normalized_evidence_refs = [
+    normalized_evidence_refs = tuple(
         _text(value, name="resource_availability.evidence_ref")
         for value in raw_evidence_refs
-    ]
+    )
     if len(normalized_evidence_refs) != len(set(normalized_evidence_refs)):
         raise ValueError("resource availability evidence_refs must be unique")
 
@@ -677,6 +755,10 @@ def load_account_resource_availability_evidence(
         "availability": {
             resource: str(amount)
             for resource, amount in sorted(availability.items())
+        },
+        "resource_details": {
+            resource: dict(sorted(detail.items()))
+            for resource, detail in sorted(selected_details.items())
         },
     }
 

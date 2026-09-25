@@ -13,6 +13,10 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from .durable_reservations import DurableReservationBook
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reconciliation_journal import load_account_resource_availability_evidence
+from .securities_borrow import (
+    borrow_resource_key,
+    incremental_short_borrow_quantity,
+)
 from .risk import (
     RiskContext,
     RiskDecision,
@@ -1281,6 +1285,63 @@ class AuthorityService:
             valid_until=valid_until,
         )
 
+        normalized_requirements = normalize_reservation_requirements(
+            reservation_requirements
+        )
+        requirement_map = dict(normalized_requirements)
+        borrow_resources = tuple(
+            resource
+            for resource, _amount in normalized_requirements
+            if resource.startswith("BORROW:")
+        )
+        required_borrow_resource: str | None = None
+        required_borrow_quantity = Decimal("0")
+        current_borrowed_quantity = Decimal("0")
+        if decision.admitted:
+            if risk_intent.instrument_type == "EQUITY":
+                current_position = risk_context.positions.get(
+                    risk_intent.symbol,
+                    Decimal("0"),
+                )
+                reserved_delta = risk_context.reserved_position_delta.get(
+                    risk_intent.symbol,
+                    Decimal("0"),
+                )
+                required_borrow_quantity = incremental_short_borrow_quantity(
+                    side=risk_intent.side,
+                    quantity=risk_intent.quantity,
+                    current_position=current_position,
+                    reserved_position_delta=reserved_delta,
+                )
+                current_borrowed_quantity = max(
+                    Decimal("0"),
+                    -current_position,
+                )
+                if required_borrow_quantity > 0:
+                    required_borrow_resource = borrow_resource_key(
+                        provider_id=reservation_provider_id,
+                        account_id=account_id,
+                        environment=environment,
+                        instrument_id=instrument_id,
+                        instrument_version=instrument_version,
+                    )
+                    if (
+                        borrow_resources != (required_borrow_resource,)
+                        or requirement_map.get(required_borrow_resource)
+                        != required_borrow_quantity
+                    ):
+                        raise AuthorityConflict(
+                            "increased equity short requires exact scoped borrow reservation"
+                        )
+                elif borrow_resources:
+                    raise AuthorityConflict(
+                        "non-increasing equity short must not reserve new borrow capacity"
+                    )
+            elif borrow_resources:
+                raise AuthorityConflict(
+                    "securities-borrow reservation is valid only for equity short risk"
+                )
+
         availability_evidence: Mapping[str, Any] | None = None
         authoritative_available = reservation_available
         if decision.admitted:
@@ -1334,9 +1395,6 @@ class AuthorityService:
                     )
                 availability_evidence = dict(durable_evidence)
             else:
-                normalized_requirements = normalize_reservation_requirements(
-                    reservation_requirements
-                )
                 loaded = load_account_resource_availability_evidence(
                     self.store,
                     checkpoint_event_id=checkpoint_event_id,
@@ -1397,6 +1455,37 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "reservation_available does not match authoritative reconciliation checkpoint"
                 )
+
+            authoritative_available = dict(canonical_available)
+            if required_borrow_resource is not None:
+                total_capacity = canonical_available.get(required_borrow_resource)
+                if total_capacity is None:
+                    raise AuthorityConflict(
+                        "authoritative checkpoint lacks required borrow capacity"
+                    )
+                if total_capacity < current_borrowed_quantity:
+                    raise AuthorityConflict(
+                        "provider borrow capacity is below current local borrow"
+                    )
+                reservable_capacity = total_capacity - current_borrowed_quantity
+                authoritative_available[required_borrow_resource] = (
+                    reservable_capacity
+                )
+                availability_evidence = {
+                    **availability_evidence,
+                    "borrow_capacity_adjustments": {
+                        required_borrow_resource: {
+                            "total_capacity": str(total_capacity),
+                            "current_borrowed_quantity": str(
+                                current_borrowed_quantity
+                            ),
+                            "reservable_capacity": str(reservable_capacity),
+                            "required_increment": str(
+                                required_borrow_quantity
+                            ),
+                        }
+                    },
+                }
 
         return self._admit_bound_risk(
             command_id=command_id,

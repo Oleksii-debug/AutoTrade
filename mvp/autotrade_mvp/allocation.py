@@ -890,6 +890,15 @@ def allocate_objective_targets(
         utility = _expected_net_utility(result, objective_by_symbol)
         if utility <= 0:
             continue
+        active_symbols = tuple(
+            sorted(
+                target.symbol
+                for target in result.targets
+                if target.notional != 0
+            )
+        )
+        if not active_symbols:
+            continue
         better = best_result is None or utility > best_utility
         if (
             not better
@@ -899,7 +908,7 @@ def allocate_objective_targets(
             candidate_key = (
                 result.estimated_cost,
                 result.gross_notional,
-                subset_symbols,
+                active_symbols,
             )
             current_key = (
                 best_result.estimated_cost,
@@ -909,7 +918,7 @@ def allocate_objective_targets(
             better = candidate_key < current_key
         if better:
             best_result = result
-            best_symbols = subset_symbols
+            best_symbols = active_symbols
             best_utility = utility
 
     if best_result is None:

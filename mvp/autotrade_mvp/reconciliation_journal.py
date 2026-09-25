@@ -519,6 +519,7 @@ def load_account_resource_availability_evidence(
     now: str,
     max_age_seconds: Decimal | str | int,
     evidence_artifact_store: ArtifactStore | None = None,
+    require_latest: bool = False,
 ) -> dict[str, Any]:
     """Return exact reservable availability from a fresh provider snapshot.
 
@@ -530,6 +531,8 @@ def load_account_resource_availability_evidence(
 
     if not isinstance(store, JournalStore):
         raise TypeError("store must be JournalStore")
+    if type(require_latest) is not bool:
+        raise TypeError("require_latest must be boolean")
     event_id = _text(checkpoint_event_id, name="checkpoint_event_id")
     checkpoint = store.get_event(event_id)
     if checkpoint is None:
@@ -546,6 +549,27 @@ def load_account_resource_availability_evidence(
         account_id=account_id,
         environment=environment,
     )
+    if require_latest:
+        aggregate_id = _text(
+            checkpoint.get("aggregate_id"),
+            name="checkpoint aggregate_id",
+        )
+        events = store.load_events("account_reconciliation", aggregate_id)
+        if not events:
+            raise ValueError(
+                "availability evidence requires latest reconciliation checkpoint"
+            )
+        latest = events[-1]
+        _require_checkpoint_scope(
+            latest,
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+        )
+        if latest.get("event_id") != event_id:
+            raise ValueError(
+                "availability evidence requires latest reconciliation checkpoint"
+            )
     if (
         payload.get("complete") is not True
         or payload.get("snapshot_consistent") is not True

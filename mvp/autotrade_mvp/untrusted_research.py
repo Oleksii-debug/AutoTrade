@@ -168,6 +168,57 @@ class AdmittedResearchToolRequest:
     evidence_refs: tuple[str, ...]
     permission_effect: str = "NONE"
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "request_id",
+            _text(self.request_id, name="request_id"),
+        )
+        object.__setattr__(
+            self,
+            "tool_name",
+            _text(self.tool_name, name="tool_name"),
+        )
+        if isinstance(self.capabilities, (str, bytes)):
+            raise ResearchBoundaryError("capabilities must be a collection")
+        capabilities = tuple(self.capabilities)
+        if not capabilities:
+            raise ResearchBoundaryError(
+                "admitted request requires at least one research capability"
+            )
+        if any(not isinstance(item, ResearchCapability) for item in capabilities):
+            raise ResearchBoundaryError(
+                "admitted capabilities must be ResearchCapability values"
+            )
+        if len(set(capabilities)) != len(capabilities):
+            raise ResearchBoundaryError("admitted capabilities must be unique")
+        if not set(capabilities) <= SAFE_RESEARCH_CAPABILITIES:
+            raise ResearchBoundaryError(
+                "admitted request contains a non-research capability"
+            )
+        object.__setattr__(self, "capabilities", capabilities)
+        if not isinstance(self.arguments, Mapping):
+            raise ResearchBoundaryError("arguments must be an object")
+        object.__setattr__(
+            self,
+            "arguments",
+            _freeze_proposal(
+                self.arguments,
+                label="admitted research tool arguments",
+            ),
+        )
+        refs = tuple(
+            _text(item, name="evidence_ref")
+            for item in self.evidence_refs
+        )
+        if len(set(refs)) != len(refs):
+            raise ResearchBoundaryError("evidence references must be unique")
+        object.__setattr__(self, "evidence_refs", refs)
+        if self.permission_effect != "NONE":
+            raise ResearchBoundaryError(
+                "admitted research request cannot grant authority"
+            )
+
 
 class ResearchToolBoundary:
     """Admit only host-configured research tools and non-escalating capabilities."""

@@ -12,8 +12,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Callable, Mapping
+from typing import Mapping
 from uuid import UUID, NAMESPACE_URL, uuid5
+
+from research.autotrade_research.artifacts.store import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+)
+from research.autotrade_research.io.strict_json import strict_json_loads
 
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reservations import (
@@ -26,6 +32,9 @@ from .reservations import (
 _AGGREGATE_TYPE = "reservation_book"
 _EVENT_TYPE = "ReservationMutationCommitted"
 _COMMAND_ACTOR = "autotrade-reservation-authority"
+_RESOLUTION_MEDIA_TYPE = "application/vnd.autotrade.reservation-resolution+json"
+_RESOLUTION_EVIDENCE_TYPE = "AUTOTRADE_RESERVATION_RESOLUTION"
+_RESOLUTION_SCHEMA_VERSION = 1
 
 
 def _text(value: str, *, name: str) -> str:
@@ -35,7 +44,7 @@ def _text(value: str, *, name: str) -> str:
 
 
 
-def _immutable_evidence_ref(value: str) -> str:
+def _immutable_evidence_ref(value: str) -> tuple[str, str, str]:
     reference = _text(value, name="resolution_evidence")
     marker = "@sha256:"
     if not reference.startswith("artifact:") or marker not in reference:
@@ -55,7 +64,7 @@ def _immutable_evidence_ref(value: str) -> str:
         raise ValueError(
             "resolution_evidence must use canonical lowercase SHA-256"
         )
-    return f"artifact:{artifact_id}@sha256:{digest}"
+    return artifact_id, digest, f"artifact:{artifact_id}@sha256:{digest}"
 
 def _decimal(value, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
@@ -152,7 +161,7 @@ class DurableReservationBook:
         *,
         environment: str,
         account_id: str,
-        resolution_evidence_verifier: Callable[[str], bool] | None = None,
+        resolution_artifact_store: ArtifactStore | None = None,
     ):
         if not isinstance(store, JournalStore):
             raise TypeError("store must be JournalStore")
@@ -160,11 +169,11 @@ class DurableReservationBook:
         self.environment = _environment(environment)
         self.account_id = _text(account_id, name="account_id")
         if (
-            resolution_evidence_verifier is not None
-            and not callable(resolution_evidence_verifier)
+            resolution_artifact_store is not None
+            and not isinstance(resolution_artifact_store, ArtifactStore)
         ):
-            raise TypeError("resolution_evidence_verifier must be callable or None")
-        self.resolution_evidence_verifier = resolution_evidence_verifier
+            raise TypeError("resolution_artifact_store must be ArtifactStore or None")
+        self.resolution_artifact_store = resolution_artifact_store
         self.scope_id = _journal_identity(
             self.environment,
             self.account_id,
@@ -232,6 +241,14 @@ class DurableReservationBook:
                 )
 
             try:
+                if operation == "MARK_TERMINAL":
+                    self._verify_resolution_evidence(
+                        reservation_id=request.get("reservation_id"),
+                        outcome=request.get("outcome"),
+                        provider=request.get("provider"),
+                        attempt_id=request.get("attempt_id"),
+                        resolution_evidence=request.get("resolution_evidence"),
+                    )
                 snapshot = self._apply(book, operation, request)
             except Exception as error:
                 raise ReservationConflict(
@@ -479,6 +496,74 @@ class DurableReservationBook:
             request=request,
         )
 
+    def _verify_resolution_evidence(
+        self,
+        *,
+        reservation_id: object,
+        outcome: object,
+        provider: object,
+        attempt_id: object,
+        resolution_evidence: object,
+    ) -> str:
+        rid = _text(reservation_id, name="reservation_id")
+        terminal_outcome = _text(outcome, name="outcome").upper()
+        provider_name = _text(provider, name="provider").upper()
+        attempt = _text(attempt_id, name="attempt_id")
+        artifact_id, digest, evidence = _immutable_evidence_ref(
+            resolution_evidence
+        )
+        if self.resolution_artifact_store is None:
+            raise ReservationConflict(
+                "terminal release requires the trusted resolution artifact store"
+            )
+        try:
+            manifest = self.resolution_artifact_store.load_manifest(artifact_id)
+            if manifest.get("sha256") != f"sha256:{digest}":
+                raise ArtifactIntegrityError(
+                    "resolution evidence reference digest does not match manifest"
+                )
+            if manifest.get("media_type") != _RESOLUTION_MEDIA_TYPE:
+                raise ArtifactIntegrityError(
+                    "resolution evidence has an unsupported media type"
+                )
+            raw = self.resolution_artifact_store.read_bytes(artifact_id)
+            text = raw.decode("utf-8")
+            receipt = strict_json_loads(text)
+        except (
+            ArtifactIntegrityError,
+            FileNotFoundError,
+            UnicodeError,
+            ValueError,
+            TypeError,
+        ) as error:
+            raise ReservationConflict(
+                "resolution evidence verification failed"
+            ) from error
+        if type(receipt) is not dict:
+            raise ReservationConflict(
+                "resolution evidence receipt must be a JSON object"
+            )
+        expected = {
+            "schema_version": _RESOLUTION_SCHEMA_VERSION,
+            "evidence_type": _RESOLUTION_EVIDENCE_TYPE,
+            "environment": self.environment,
+            "account_id": self.account_id,
+            "reservation_id": rid,
+            "provider": provider_name,
+            "attempt_id": attempt,
+            "outcome": terminal_outcome,
+            "reconciliation_complete": True,
+        }
+        if receipt != expected:
+            raise ReservationConflict(
+                "resolution evidence receipt does not match reservation scope"
+            )
+        if raw != canonical_json(receipt).encode("utf-8"):
+            raise ReservationConflict(
+                "resolution evidence receipt must use canonical JSON bytes"
+            )
+        return evidence
+
     def mark_terminal(
         self,
         *,
@@ -486,26 +571,26 @@ class DurableReservationBook:
         idempotency_key: str,
         reservation_id: str,
         outcome: str,
+        provider: str,
+        attempt_id: str,
         resolution_evidence: str,
     ) -> ReservationSnapshot:
-        evidence = _immutable_evidence_ref(resolution_evidence)
-        if self.resolution_evidence_verifier is None:
-            raise ReservationConflict(
-                "terminal release requires an authoritative resolution evidence verifier"
-            )
-        try:
-            verified = self.resolution_evidence_verifier(evidence)
-        except Exception as error:
-            raise ReservationConflict(
-                "resolution evidence verification failed"
-            ) from error
-        if verified is not True:
-            raise ReservationConflict(
-                "resolution evidence was not verified by artifact authority"
-            )
+        rid = _text(reservation_id, name="reservation_id")
+        terminal_outcome = _text(outcome, name="outcome").upper()
+        provider_name = _text(provider, name="provider").upper()
+        attempt = _text(attempt_id, name="attempt_id")
+        evidence = self._verify_resolution_evidence(
+            reservation_id=rid,
+            outcome=terminal_outcome,
+            provider=provider_name,
+            attempt_id=attempt,
+            resolution_evidence=resolution_evidence,
+        )
         request = {
-            "reservation_id": _text(reservation_id, name="reservation_id"),
-            "outcome": _text(outcome, name="outcome").upper(),
+            "reservation_id": rid,
+            "outcome": terminal_outcome,
+            "provider": provider_name,
+            "attempt_id": attempt,
             "resolution_evidence": evidence,
         }
         return self._commit(

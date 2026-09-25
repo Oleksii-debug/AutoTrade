@@ -621,8 +621,8 @@ def load_account_resource_availability_evidence(
         canonical_available[resource] = amount
 
     requested = tuple(_text(value, name="resource") for value in resources)
-    if not requested or len(requested) != len(set(requested)):
-        raise ValueError("resources must be non-empty and unique")
+    if len(requested) != len(set(requested)):
+        raise ValueError("resources must be unique")
     availability: dict[str, Decimal] = {}
     for resource in requested:
         if not resource.startswith("CASH:"):

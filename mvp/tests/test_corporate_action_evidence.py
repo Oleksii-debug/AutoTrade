@@ -1,0 +1,291 @@
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+import json
+import unittest
+
+from mvp.autotrade_mvp.corporate_action_evidence import (
+    CorporateActionEvidenceError,
+    CorporateActionObservation,
+    resolve_authoritative_corporate_action,
+)
+from mvp.autotrade_mvp.corporate_actions import CorporateEvent
+from mvp.autotrade_mvp.provider_core import (
+    Surface,
+    observe_authenticated_json_response,
+    prepare_authenticated_read_query,
+)
+from mvp.tests.test_provider_transport import READ_NOW, verified_read_capability
+
+
+ENDPOINT = "/sapi/v1/asset/corporate-action"
+
+
+def _instant(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(
+        timezone.utc
+    )
+
+
+def sealed_dividend(
+    *,
+    external_event_id="corp-1",
+    revision="1",
+    observed_offset=2,
+    effective_offset=1,
+):
+    binding = prepare_authenticated_read_query(
+        capability=verified_read_capability(),
+        surface=Surface.ACTIVITIES,
+        endpoint=ENDPOINT,
+        query={"symbol": "BTCUSDT"},
+        at=READ_NOW,
+        permission_scope="ORDER.READ",
+    )
+    payload = {
+        "external_event_id": external_event_id,
+        "provider_revision": revision,
+        "instrument_id": "BTCUSDT",
+        "instrument_version": 1,
+        "effective_at": (
+            READ_NOW + timedelta(seconds=effective_offset)
+        ).isoformat().replace("+00:00", "Z"),
+        "kind": "CASH_DIVIDEND",
+        "per_share": "1.25",
+        "currency": "USDT",
+        "source_sequence": 7,
+        "complete": True,
+    }
+    return observe_authenticated_json_response(
+        query_binding=binding,
+        http_status=200,
+        response_bytes=json.dumps(
+            payload, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8"),
+        observed_at=READ_NOW + timedelta(seconds=observed_offset),
+    )
+
+
+def normalize(source):
+    payload = source.payload
+    return CorporateActionObservation(
+        provider_id=source.provider_id,
+        account_id=source.account_id,
+        environment=source.environment,
+        provider_instrument_version=source.query_binding.instrument_version,
+        instrument_id=payload["instrument_id"],
+        instrument_version=payload["instrument_version"],
+        external_event_id=payload["external_event_id"],
+        provider_revision=payload["provider_revision"],
+        kind=payload["kind"],
+        effective_at=_instant(payload["effective_at"]),
+        observed_at=_instant(source.observed_at),
+        raw_evidence_digest=source.response_sha256,
+        payload={
+            "per_share": payload["per_share"],
+            "currency": payload["currency"],
+        },
+        complete=payload["complete"],
+        source_sequence=payload["source_sequence"],
+    )
+
+
+def resolve(source, *, normalizer=normalize, permission_scope="ORDER.READ"):
+    return resolve_authoritative_corporate_action(
+        source.evidence_ref,
+        evidence_resolver={source.evidence_ref: source}.__getitem__,
+        normalizer=normalizer,
+        allowed_endpoints=frozenset({ENDPOINT}),
+        permission_scope=permission_scope,
+    )
+
+
+class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
+    def test_sealed_provider_evidence_creates_bound_corporate_event(self):
+        source = sealed_dividend()
+        accepted = resolve(source)
+
+        self.assertEqual(accepted.provider_id, "BINANCE")
+        self.assertEqual(accepted.account_id, "acct-1")
+        self.assertEqual(accepted.environment, "PAPER")
+        self.assertEqual(
+            accepted.provider_instrument_version,
+            source.query_binding.instrument_version,
+        )
+        self.assertEqual(accepted.raw_evidence_digest, source.response_sha256)
+        self.assertEqual(accepted.evidence_ref, source.evidence_ref)
+        self.assertEqual(accepted.query_digest, source.query_binding.query_digest)
+        self.assertEqual(
+            accepted.capability_snapshot_id,
+            source.query_binding.capability_snapshot_id,
+        )
+        self.assertTrue(accepted.provenance_digest.startswith("sha256:"))
+        self.assertEqual(len(accepted.provenance_digest), 71)
+
+        event = accepted.event
+        self.assertIsInstance(event, CorporateEvent)
+        self.assertEqual(event.event_id, "corp-1")
+        self.assertEqual(event.instrument_id, "BTCUSDT")
+        self.assertEqual(event.instrument_version, 1)
+        self.assertEqual(event.kind, "CASH_DIVIDEND")
+        self.assertEqual(event.source_sequence, 7)
+        self.assertEqual(
+            event.payload,
+            {"per_share": "1.25", "currency": "USDT"},
+        )
+        self.assertIn(accepted.provenance_digest, event.source_revision)
+
+    def test_resolution_is_deterministic_for_same_sealed_evidence(self):
+        source = sealed_dividend()
+        first = resolve(source)
+        second = resolve(source)
+        self.assertEqual(first, second)
+        self.assertEqual(first.event, second.event)
+
+    def test_locally_constructed_event_is_not_provider_evidence(self):
+        local = CorporateEvent.create(
+            event_id="local-1",
+            instrument_id="BTCUSDT",
+            instrument_version=1,
+            kind="CASH_DIVIDEND",
+            effective_date=(READ_NOW + timedelta(seconds=1)).date(),
+            effective_at=READ_NOW + timedelta(seconds=1),
+            source_revision="caller-says-valid",
+            payload={"per_share": "1.25", "currency": "USDT"},
+        )
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError, "sealed ProviderResponseObservation"
+        ):
+            resolve_authoritative_corporate_action(
+                "provider-read:sha256:" + "a" * 64,
+                evidence_resolver=lambda _ref: local,
+                normalizer=lambda _source: None,
+                allowed_endpoints=frozenset({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
+
+    def test_changed_provider_scope_from_normalizer_fails_closed(self):
+        source = sealed_dividend()
+
+        def wrong_account(value):
+            item = normalize(value)
+            return CorporateActionObservation(
+                **{**item.__dict__, "account_id": "other-account"}
+            )
+
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError, "does not match sealed provider evidence"
+        ):
+            resolve(source, normalizer=wrong_account)
+
+    def test_changed_raw_digest_from_normalizer_fails_closed(self):
+        source = sealed_dividend()
+
+        def wrong_digest(value):
+            item = normalize(value)
+            return CorporateActionObservation(
+                **{
+                    **item.__dict__,
+                    "raw_evidence_digest": "sha256:" + "0" * 64,
+                }
+            )
+
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError, "does not match sealed provider evidence"
+        ):
+            resolve(source, normalizer=wrong_digest)
+
+    def test_incomplete_provider_fact_cannot_authorize_event(self):
+        source = sealed_dividend()
+
+        def incomplete(value):
+            item = normalize(value)
+            return CorporateActionObservation(
+                **{**item.__dict__, "complete": False}
+            )
+
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError, "incomplete"
+        ):
+            resolve(source, normalizer=incomplete)
+
+    def test_future_effect_cannot_be_applied_from_earlier_observation(self):
+        source = sealed_dividend(observed_offset=2, effective_offset=1)
+
+        def future_effect(value):
+            item = normalize(value)
+            return CorporateActionObservation(
+                **{
+                    **item.__dict__,
+                    "effective_at": item.observed_at + timedelta(seconds=1),
+                }
+            )
+
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError, "normalization failed"
+        ):
+            resolve(source, normalizer=future_effect)
+
+    def test_wrong_endpoint_is_rejected_before_normalization(self):
+        source = sealed_dividend()
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError, "endpoint is not allowed"
+        ):
+            resolve_authoritative_corporate_action(
+                source.evidence_ref,
+                evidence_resolver={source.evidence_ref: source}.__getitem__,
+                normalizer=normalize,
+                allowed_endpoints=frozenset({"/different/activity"}),
+                permission_scope="ORDER.READ",
+            )
+
+    def test_wrong_permission_scope_is_rejected(self):
+        source = sealed_dividend()
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError, "permission scope mismatch"
+        ):
+            resolve(source, permission_scope="CORPORATE.READ")
+
+    def test_binary_float_in_normalized_financial_payload_is_rejected(self):
+        source = sealed_dividend()
+
+        def binary_float(value):
+            item = normalize(value)
+            return CorporateActionObservation(
+                **{
+                    **item.__dict__,
+                    "payload": {
+                        "per_share": 1.25,
+                        "currency": "USDT",
+                    },
+                }
+            )
+
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError, "normalization failed"
+        ):
+            resolve(source, normalizer=binary_float)
+
+    def test_observation_carries_optional_lifecycle_and_correction_identity(self):
+        source = sealed_dividend(revision="2")
+
+        def lifecycle(value):
+            item = normalize(value)
+            return CorporateActionObservation(
+                **{
+                    **item.__dict__,
+                    "announcement_at": READ_NOW - timedelta(days=3),
+                    "record_at": READ_NOW - timedelta(days=1),
+                    "ex_at": item.effective_at,
+                    "pay_at": item.effective_at + timedelta(days=2),
+                    "corrects_external_event_id": "corp-old",
+                }
+            )
+
+        accepted = resolve(source, normalizer=lifecycle)
+        self.assertEqual(accepted.corrects_external_event_id, "corp-old")
+        self.assertEqual(accepted.provider_revision, "2")
+        self.assertIn(accepted.provenance_digest, accepted.event.source_revision)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -620,8 +620,28 @@ class ExperienceMemory:
         results.sort(key=lambda item: (item["decision_time"], item["episode_id"]))
         return tuple(results)
 
-    def source_episode(self, episode_id: str) -> dict[str, Any]:
+    def source_episode(
+        self,
+        episode_id: str,
+        *,
+        information_cutoff: datetime,
+        granted_permissions: set[str],
+        include_tombstoned: bool = False,
+    ) -> dict[str, Any]:
+        """Read one immutable source episode without bypassing retrieval authority."""
         identifier = _identifier(episode_id)
+        cutoff = _time(information_cutoff, name="information_cutoff")
+        if not isinstance(granted_permissions, set):
+            raise TypeError("granted_permissions must be a set")
+        if type(include_tombstoned) is not bool:
+            raise TypeError("include_tombstoned must be boolean")
+        normalized_permissions: set[str] = set()
+        for permission in granted_permissions:
+            normalized = _text(permission, name="granted_permission")
+            if normalized != permission:
+                raise ValueError("granted_permissions must contain canonical text")
+            normalized_permissions.add(normalized)
+
         with self._connect() as con:
             row = con.execute(
                 "SELECT * FROM episodes WHERE episode_id=?",
@@ -630,9 +650,30 @@ class ExperienceMemory:
             if row is None:
                 raise KeyError(identifier)
             verified = self._verified_episode(row)
+            if verified["cutoff"] > cutoff or verified["decision"] > cutoff:
+                raise PermissionError("episode is not causally available at information_cutoff")
+            if not self._permission_allowed(
+                verified["permission_class"],
+                normalized_permissions,
+            ):
+                raise PermissionError("episode permission is not granted")
+
+            tombstone_rows = con.execute(
+                "SELECT * FROM tombstones WHERE episode_id=? ORDER BY created_at,tombstone_id",
+                (identifier,),
+            ).fetchall()
+            tombstones = [
+                self._verified_tombstone(item, episode_id=identifier)
+                for item in tombstone_rows
+            ]
+            if tombstones and not include_tombstoned:
+                raise PermissionError("episode is tombstoned")
+
             return {
                 "episode_id": row["episode_id"],
                 "episode_hash": row["episode_hash"],
                 "payload": verified["payload"],
                 "information_cutoff": row["information_cutoff"],
+                "permission_class": verified["permission_class"],
+                "tombstones": tombstones,
             }

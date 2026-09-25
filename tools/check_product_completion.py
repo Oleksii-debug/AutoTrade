@@ -210,6 +210,10 @@ def evaluate_completion(
     }
 
     source_sha = _exact_source(exact_source_sha)
+    qualification_source_sha = _exact_source(qualification.get("source_sha"))
+    qualification_source_matches = (
+        source_sha is not None and qualification_source_sha == source_sha
+    )
     missing_sections, missing_evidence_packages, nonpassing_evidence = _evidence_matrix(
         qualification,
         exact_source_sha=source_sha,
@@ -223,6 +227,10 @@ def evaluate_completion(
     blockers: list[str] = []
     if source_sha is None:
         blockers.append("exact source SHA is missing or non-canonical")
+    if not qualification_source_matches:
+        blockers.append(
+            "qualification source SHA is missing, non-canonical, or not the exact source SHA"
+        )
     if len(sections) != 40:
         blockers.append("canonical product section count is not 40")
     if incomplete_packages:
@@ -260,6 +268,8 @@ def evaluate_completion(
         "schema_version": "2.0.0",
         "complete": not blockers,
         "exact_source_sha": source_sha,
+        "qualification_source_sha": qualification_source_sha,
+        "qualification_source_matches": qualification_source_matches,
         "product_section_count": len(sections),
         "package_count": len(by_id),
         "terminal_package_status": TERMINAL_PACKAGE_STATUS,
@@ -294,7 +304,9 @@ def main() -> int:
             qualification,
             _load(args.nvda_status, name="NVDA status"),
             spec_text=_load_text(args.spec, name="canonical product spec"),
-            exact_source_sha=args.source_sha or qualification.get("source_sha"),
+            # Exact source must come from the invoking checkout/workflow boundary.
+            # qualification.json cannot self-assert the revision it qualifies.
+            exact_source_sha=args.source_sha,
         )
     except ProductCompletionError as error:
         print(str(error), file=sys.stderr)

@@ -18,6 +18,7 @@ import json
 import re
 
 from .capabilities import CapabilitySnapshot
+from .provider_core import ProviderResponseObservation, Surface
 from .reconciliation import ProviderFillEvidence
 
 
@@ -881,29 +882,36 @@ def prepare_reply_confirmation(
 
 
 def parse_web_api_trades(
-    payload: object,
+    observation: ProviderResponseObservation,
     *,
-    environment: str,
-    expected_account_id: str,
     instrument_versions_by_conid: Mapping[int, str],
     fee_currency_by_execution_id: Mapping[str, str],
 ) -> tuple[ProviderFillEvidence, ...]:
-    """Normalize the documented Web API trades surface into unique fill evidence.
+    """Normalize one capability-bound exact-byte IBKR trades read into fills.
 
-    Numeric JSON values must arrive as Decimal/string values from a qualified
-    transport decoder; binary floats are rejected by _decimal. IBKR's trade row
-    exposes commission but not a canonical commission currency, so that currency
-    remains separate observed evidence rather than being guessed from account or
-    instrument currency.
+    Account and environment are inherited from the pre-I/O VERIFIED capability
+    binding. They are deliberately not caller parameters, so reconciliation
+    evidence cannot be relabelled after the provider response is observed.
+    Numeric JSON floats remain rejected by _decimal; fee currency is separate
+    explicit evidence because the trades row does not canonically carry it.
     """
 
+    if not isinstance(observation, ProviderResponseObservation):
+        raise TypeError("observation must be ProviderResponseObservation")
+    observation.require_scope(
+        provider_id="IBKR",
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint="/iserver/account/trades",
+    )
+    payload = observation.payload
     if not isinstance(payload, (list, tuple)):
         raise IbkrWebAdapterError("trades response must be an array")
     if not isinstance(instrument_versions_by_conid, Mapping):
         raise TypeError("instrument_versions_by_conid must be a mapping")
     if not isinstance(fee_currency_by_execution_id, Mapping):
         raise TypeError("fee_currency_by_execution_id must be a mapping")
-    account = _text(expected_account_id, name="expected_account_id")
+    account = observation.account_id
+    environment = observation.environment
     by_execution: dict[str, ProviderFillEvidence] = {}
 
     for index, raw in enumerate(payload):

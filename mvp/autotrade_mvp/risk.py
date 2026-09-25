@@ -542,6 +542,7 @@ class RiskDecision:
     intent_hash: str | None = None
     state_version: int | None = None
     policy_version: int | None = None
+    reservation_version: int | None = None
     capability_snapshot_id: str | None = None
     evaluated_at: str | None = None
     valid_until: str | None = None
@@ -589,6 +590,7 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
         decision.intent_hash,
         decision.state_version,
         decision.policy_version,
+        decision.reservation_version,
         decision.capability_snapshot_id,
         decision.evaluated_at,
         decision.valid_until,
@@ -600,6 +602,7 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
             "intent_hash": decision.intent_hash,
             "state_version": decision.state_version,
             "policy_version": decision.policy_version,
+            "reservation_version": decision.reservation_version,
             "capability_snapshot_id": decision.capability_snapshot_id,
             "evaluated_at": decision.evaluated_at,
             "valid_until": decision.valid_until,
@@ -619,6 +622,7 @@ def bind_risk_decision(
     intent_hash: str,
     state_version: int,
     policy_version: int,
+    reservation_version: int,
     capability_snapshot_id: str,
     evaluated_at: str,
     valid_until: str,
@@ -648,6 +652,12 @@ def bind_risk_decision(
         or policy_version < 1
     ):
         raise ValueError("policy_version must be a positive integer")
+    if (
+        not isinstance(reservation_version, int)
+        or isinstance(reservation_version, bool)
+        or reservation_version < 0
+    ):
+        raise ValueError("reservation_version must be a non-negative integer")
     evaluated = _risk_binding_text(evaluated_at, name="evaluated_at")
     valid = _risk_binding_text(valid_until, name="valid_until")
     if _risk_binding_instant(evaluated, name="evaluated_at") >= _risk_binding_instant(
@@ -661,6 +671,7 @@ def bind_risk_decision(
         intent_hash=ihash,
         state_version=state_version,
         policy_version=policy_version,
+        reservation_version=reservation_version,
         capability_snapshot_id=capability,
         evaluated_at=evaluated,
         valid_until=valid,
@@ -693,6 +704,7 @@ def evaluate_bound_risk(
     *,
     intent_hash: str,
     policy_version: int,
+    reservation_version: int,
     capability_snapshot_id: str,
     evaluated_at: str,
     valid_until: str,
@@ -703,6 +715,7 @@ def evaluate_bound_risk(
         intent_hash=intent_hash,
         state_version=context.state_version,
         policy_version=policy_version,
+        reservation_version=reservation_version,
         capability_snapshot_id=capability_snapshot_id,
         evaluated_at=evaluated_at,
         valid_until=valid_until,

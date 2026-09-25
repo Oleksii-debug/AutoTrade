@@ -977,5 +977,35 @@ class ReconciliationTests(unittest.TestCase):
         self.assertFalse(result.complete)
 
 
+    def test_reconciliation_environment_is_canonical_contract_enum(self):
+        with self.assertRaisesRegex(ValueError, "environment must be one of"):
+            ProviderFillEvidence.create(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PROD",
+                provider_execution_id="e-invalid-env",
+                client_order_id="c-invalid-env",
+                instrument="ABC",
+                quantity="1",
+                price="100",
+                fee_currency="USD",
+                trade_time="2026-09-24T18:00:00Z",
+            )
+
+        with self.assertRaisesRegex(ValueError, "environment must be one of"):
+            UnknownSubmission.create(
+                attempt_id="a-invalid-env",
+                intent_id="intent-invalid-env",
+                client_order_id="c-invalid-env",
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="SANDBOX",
+                started_at="2026-09-24T18:00:00Z",
+            )
+
+        with self.assertRaisesRegex(ValueError, "environment must be one of"):
+            self.base(environment="PRODUCTION")
+
+
 if __name__ == "__main__":
     unittest.main()

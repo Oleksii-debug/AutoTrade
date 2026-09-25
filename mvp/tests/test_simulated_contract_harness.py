@@ -232,6 +232,24 @@ class SimulatedProviderContractHarnessTests(unittest.TestCase):
                 now="2026-09-24T18:04:00Z",
             )
 
+    def test_zero_cost_request_cannot_bypass_quota_purpose_validation(self):
+        provider = SimulatedProvider()
+        harness = SimulatedProviderContractHarness(provider)
+        guard_calls = []
+
+        with self.assertRaisesRegex(ProviderCoreError, "unknown quota purpose"):
+            harness.transport_send(
+                "invalid-purpose",
+                request(),
+                lambda: guard_calls.append("called"),
+                purpose="MAINTENANCE",
+                quota_cost="0",
+            )
+
+        self.assertEqual(guard_calls, [])
+        self.assertEqual(provider.outbound_request_count, 0)
+        self.assertEqual(harness.quota.used, Decimal("0"))
+
     def test_quota_is_reserved_for_recovery_and_blocks_before_send(self):
         provider = SimulatedProvider()
         harness = SimulatedProviderContractHarness(

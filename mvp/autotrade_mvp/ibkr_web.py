@@ -516,7 +516,10 @@ def _reply_id(value: object) -> str:
     if not isinstance(value, str):
         raise IbkrWebAdapterError("reply id must be a string")
     reply_id = _text(value, name="reply id")
-    if re.fullmatch(r"[A-Za-z0-9._~-]+", reply_id) is None:
+    if (
+        re.fullmatch(r"[A-Za-z0-9._~-]+", reply_id) is None
+        or reply_id in {".", ".."}
+    ):
         raise IbkrWebAdapterError("reply id must be a canonical URI path segment")
     return reply_id
 

@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using AutoTrade.Desktop;
@@ -21,7 +22,7 @@ internal static class Program
             "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'",
             System.Globalization.CultureInfo.InvariantCulture);
     
-    static object Snapshot(string token, string version = "0") => new
+    static object Snapshot(string version = "0") => new
     {
         state_version = version,
         event_cursor = version,
@@ -29,7 +30,12 @@ internal static class Program
         host_id = "host-local-1",
         account_id = "paper-account-1",
         environment = "PAPER",
-        permission_summary = new { actor = "owner", session = token, role = "OWNER" },
+        permission_summary = new
+        {
+            actor = "owner",
+            role = "OWNER",
+            session_id = "non-secret-session-reference",
+        },
         connection_freshness = new { host = "CURRENT", as_of = NowUtc() },
         portfolio = new { },
         risk = new { },
@@ -63,7 +69,7 @@ internal static class Program
             if (request.Method == HttpMethod.Get
                 && request.RequestUri!.AbsolutePath == "/api/v1/state")
             {
-                return Json(HttpStatusCode.OK, Snapshot(token, "7"));
+                return Json(HttpStatusCode.OK, Snapshot("7"));
             }
     
             if (request.Method == HttpMethod.Get
@@ -127,7 +133,7 @@ internal static class Program
             if (request.Method == HttpMethod.Get
                 && request.RequestUri!.AbsolutePath == "/api/v1/state")
             {
-                return Json(HttpStatusCode.OK, Snapshot(token));
+                return Json(HttpStatusCode.OK, Snapshot());
             }
     
             if (request.Method == HttpMethod.Post
@@ -226,7 +232,7 @@ internal static class Program
             if (request.Method == HttpMethod.Get)
             {
                 AssertAuth(request, originalToken);
-                return Json(HttpStatusCode.OK, Snapshot(originalToken));
+                return Json(HttpStatusCode.OK, Snapshot());
             }
     
             posts++;
@@ -253,6 +259,57 @@ internal static class Program
             "client sent unresolved command with a different session instead of failing closed");
     }
     
+    static async Task SnapshotBearerEchoFailsClosedTest()
+    {
+        const string token = "session-token-secret-must-never-echo";
+        MutableSessionProvider sessions =
+            new(new EmergencyHostSession("owner", token));
+        DelegateHandler handler = new((request, _, _) =>
+        {
+            AssertAuth(request, token);
+            return Task.FromResult(
+                Json(
+                    HttpStatusCode.OK,
+                    new
+                    {
+                        state_version = "0",
+                        event_cursor = "0",
+                        server_time = NowUtc(),
+                        host_id = "host-local-1",
+                        account_id = "paper-account-1",
+                        environment = "PAPER",
+                        permission_summary = new
+                        {
+                            actor = "owner",
+                            role = "OWNER",
+                            session = token,
+                        },
+                        connection_freshness = new { host = "CURRENT" },
+                        portfolio = new { },
+                        risk = new { },
+                        strategy = new { },
+                        jobs = Array.Empty<object>(),
+                        reason_codes = Array.Empty<string>(),
+                    }));
+        });
+        AuthenticatedEmergencyHostClient client = new(
+            new HttpClient(handler),
+            new Uri("http://127.0.0.1:8765/"),
+            sessions);
+
+        await Check.ThrowsAsync<InvalidOperationException>(
+            () => client.GetStatusAsync(CancellationToken.None),
+            "snapshot that echoes the bearer credential must fail closed");
+
+        string safeState = JsonSerializer.Serialize(Snapshot());
+        Check.True(
+            !safeState.Contains(token, StringComparison.Ordinal),
+            "canonical snapshot fixture leaked the bearer credential");
+        Check.True(
+            !safeState.Contains("\"session\":", StringComparison.Ordinal),
+            "canonical permission metadata must not expose a session credential field");
+    }
+
     static async Task ScopeAndCanonicalResponseFailureTest()
     {
         const string token = "session-token-d";
@@ -272,7 +329,7 @@ internal static class Program
                         host_id = "host-local-1",
                         account_id = "paper-account-1",
                         environment = "PAPER",
-                        permission_summary = new { actor = "owner", session = token },
+                        permission_summary = new { actor = "owner", role = "OWNER" },
                         connection_freshness = new { host = "CURRENT" },
                         portfolio = new { },
                         risk = new { },
@@ -297,6 +354,7 @@ internal static class Program
         await AmbiguousPostExactRetryTest();
         await UncertainCommandCannotRetargetSessionTest();
         await ScopeAndCanonicalResponseFailureTest();
+        await SnapshotBearerEchoFailsClosedTest();
         Console.WriteLine("Desktop authenticated host-client contract tests passed.");
     }
 }

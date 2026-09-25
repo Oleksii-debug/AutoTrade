@@ -41,9 +41,6 @@ _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 _EVENT_KINDS = frozenset({"EXERCISE", "ASSIGNMENT", "EXPIRY"})
 
 OptionLifecycleEvidenceResolver = Callable[[str], ProviderResponseObservation]
-OptionLifecycleNormalizer = Callable[
-    [ProviderResponseObservation], "OptionLifecycleObservation"
-]
 
 
 class OptionLifecycleError(ValueError):
@@ -52,6 +49,97 @@ class OptionLifecycleError(ValueError):
 
 class OptionLifecycleConflict(OptionLifecycleError):
     """Immutable lifecycle identity was reused with incompatible evidence."""
+
+
+def _canonical_observation_from_sealed_response(
+    source: ProviderResponseObservation,
+) -> "OptionLifecycleObservation":
+    """Parse the only admitted canonical lifecycle response shape.
+
+    This parser is part of the financial authority. Callers may resolve sealed
+    provider evidence but cannot inject executable normalization logic that
+    invents lifecycle economics.
+    """
+
+    payload = source.payload
+    if not isinstance(payload, Mapping):
+        raise OptionLifecycleError(
+            "provider lifecycle payload must be a canonical object"
+        )
+    required = {
+        "venue_id",
+        "external_event_id",
+        "event_kind",
+        "signed_contracts",
+        "effective_at",
+        "provider_revision",
+        "underlying_price",
+        "corrects_external_event_id",
+    }
+    if set(payload) != required:
+        raise OptionLifecycleError(
+            "provider lifecycle payload shape is not canonical"
+        )
+
+    def instant(value: object, name: str) -> datetime:
+        if not isinstance(value, str) or not value.endswith("Z"):
+            raise OptionLifecycleError(
+                f"{name} must be canonical UTC text"
+            )
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise OptionLifecycleError(
+                f"{name} must be canonical UTC text"
+            ) from error
+        return _utc(parsed, name)
+
+    try:
+        observed_at = instant(source.observed_at, "observed_at")
+        effective_at = instant(payload["effective_at"], "effective_at")
+        signed_contracts = _decimal(
+            payload["signed_contracts"],
+            "signed_contracts",
+        )
+        underlying_price = (
+            None
+            if payload["underlying_price"] is None
+            else _decimal(payload["underlying_price"], "underlying_price")
+        )
+    except (InvalidOperation, TypeError, ValueError) as error:
+        raise OptionLifecycleError(
+            "provider lifecycle payload contains invalid financial values"
+        ) from error
+
+    return OptionLifecycleObservation(
+        provider_id=source.provider_id,
+        account_id=source.account_id,
+        environment=source.environment,
+        venue_id=_text(payload["venue_id"], "venue_id"),
+        instrument_version=source.query_binding.instrument_version,
+        external_event_id=_text(
+            payload["external_event_id"],
+            "external_event_id",
+        ),
+        event_kind=_text(payload["event_kind"], "event_kind"),
+        signed_contracts=signed_contracts,
+        effective_at=effective_at,
+        observed_at=observed_at,
+        raw_evidence_digest=source.response_sha256,
+        provider_revision=_text(
+            payload["provider_revision"],
+            "provider_revision",
+        ),
+        underlying_price=underlying_price,
+        corrects_external_event_id=(
+            None
+            if payload["corrects_external_event_id"] is None
+            else _text(
+                payload["corrects_external_event_id"],
+                "corrects_external_event_id",
+            )
+        ),
+    )
 
 
 def _text(value: str, name: str) -> str:
@@ -437,7 +525,6 @@ class DurableOptionLifecycleAuthority:
         registry: InstrumentRegistry,
         economic_book: DurableProviderEconomicBook,
         evidence_resolver: OptionLifecycleEvidenceResolver,
-        normalizer: OptionLifecycleNormalizer,
         lifecycle_endpoints: frozenset[str],
         permission_scope: str,
     ) -> None:
@@ -451,8 +538,6 @@ class DurableOptionLifecycleAuthority:
             raise ValueError("lifecycle and economic authorities must share one JournalStore")
         if not callable(evidence_resolver):
             raise TypeError("evidence_resolver must be callable")
-        if not callable(normalizer):
-            raise TypeError("normalizer must be callable")
         if not isinstance(lifecycle_endpoints, frozenset) or not lifecycle_endpoints:
             raise TypeError("lifecycle_endpoints must be a non-empty frozenset")
         endpoints = frozenset(
@@ -468,7 +553,6 @@ class DurableOptionLifecycleAuthority:
         self.registry = registry
         self.economic_book = economic_book
         self.evidence_resolver = evidence_resolver
-        self.normalizer = normalizer
         self.lifecycle_endpoints = endpoints
         self.permission_scope = scope
         self.aggregate_id = _identity(
@@ -528,16 +612,7 @@ class DurableOptionLifecycleAuthority:
             raise OptionLifecycleError(
                 "provider lifecycle evidence permission scope mismatch"
             )
-        try:
-            observation = self.normalizer(source)
-        except Exception as error:
-            raise OptionLifecycleError(
-                "provider lifecycle evidence normalization failed"
-            ) from error
-        if not isinstance(observation, OptionLifecycleObservation):
-            raise OptionLifecycleError(
-                "lifecycle normalizer must return OptionLifecycleObservation"
-            )
+        observation = _canonical_observation_from_sealed_response(source)
         observed_at = datetime.fromisoformat(
             source.observed_at.replace("Z", "+00:00")
         ).astimezone(timezone.utc)

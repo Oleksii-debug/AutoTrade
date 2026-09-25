@@ -5,6 +5,11 @@ from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
+from mvp.autotrade_mvp.qualification_attestation import (
+    EvidenceArtifactRef,
+    QualificationScope,
+    SignedQualificationAttestation,
+)
 from mvp.autotrade_mvp.recovery_qualification import (
     RecoveryEvidenceStatus,
     RecoveryQualificationDecision,
@@ -13,6 +18,12 @@ from mvp.autotrade_mvp.recovery_qualification import (
     RecoveryScenarioEvidence,
     qualify_recovery_release,
     recovery_evidence_receipt_metadata,
+)
+from mvp.tests.test_qualification_attestation import (
+    attestation,
+    policy as attestation_policy,
+    root as attestation_root,
+    sign,
 )
 
 
@@ -132,6 +143,8 @@ def qualify(
     omit_evidence_ids=(),
     corrupt_evidence_id=None,
     omit_release_artifact=False,
+    trusted=False,
+    omit_attestation_scenarios=(),
 ):
     with TemporaryDirectory() as directory:
         store = ArtifactStore(directory)
@@ -162,10 +175,50 @@ def qualify(
             manifest = store.load_manifest(corrupt_evidence_id)
             digest = manifest["sha256"].removeprefix("sha256:")
             (store.objects / digest[:2] / digest).write_bytes(b"corrupt")
+        trust_kwargs = {}
+        if trusted:
+            trust_root = attestation_root(
+                scopes=(QualificationScope("RECOVERY", "RELEASE"),)
+            )
+            trust_policy = attestation_policy(trust_root)
+            attested_refs = tuple(
+                EvidenceArtifactRef(
+                    artifact_id=item.evidence_artifact_id,
+                    sha256=item.evidence_artifact_sha256,
+                    media_type="application/vnd.autotrade.recovery-evidence",
+                    evidence_kind="RECOVERY_SCENARIO_EVIDENCE",
+                    source_sha=item.source_sha,
+                )
+                for item in evidence
+                if item.scenario not in set(omit_attestation_scenarios)
+            )
+            signed = attestation(
+                trust_root,
+                source_sha=policy.source_sha,
+                domain="RECOVERY",
+                gate="RELEASE",
+                package_id="WP-59",
+                protocol_id=policy.protocol_id,
+                protocol_version=policy.evidence_schema_version,
+                requirement_ids=("recovery-release-qualification",),
+                evidence_refs=attested_refs,
+                release_artifact_id=policy.release_artifact_id,
+                release_artifact_sha256=policy.release_artifact_sha256,
+                result="PASS",
+            )
+            trust_kwargs = {
+                "qualification_receipt": SignedQualificationAttestation(
+                    signed, sign(signed)
+                ),
+                "qualification_policy": trust_policy,
+                "expected_policy_id": trust_policy.policy_id,
+                "expected_policy_version": trust_policy.policy_version,
+            }
         return qualify_recovery_release(
             policy=policy,
             evidence=evidence,
             evidence_store=store,
+            **trust_kwargs,
         )
 
 
@@ -249,6 +302,37 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
         self.assertEqual(
             set(decision.measured_downtime_ms),
             set(RecoveryScenario),
+        )
+
+    def test_signed_attestation_allows_terminal_recovery_pass(self):
+        decision = qualify(
+            policy=policy(),
+            evidence=complete_evidence(),
+            trusted=True,
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.PASS)
+        self.assertEqual(decision.blockers, ())
+        self.assertIsNotNone(decision.qualification_attestation_id)
+        self.assertTrue(
+            decision.qualification_attestation_digest.startswith("sha256:")
+        )
+        self.assertTrue(decision.qualification_policy_id.startswith("sha256:"))
+        self.assertTrue(
+            decision.qualification_trust_root_id.startswith("sha256:")
+        )
+        self.assertFalse(decision.authorizes_trading)
+
+    def test_signed_attestation_must_cover_exact_scenario_evidence_set(self):
+        decision = qualify(
+            policy=policy(),
+            evidence=complete_evidence(),
+            trusted=True,
+            omit_attestation_scenarios=(RecoveryScenario.NETWORK_LOSS,),
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.FAIL)
+        self.assertIn(
+            "independent_evidence_set_mismatch",
+            decision.blockers,
         )
 
     def test_missing_scenario_is_inconclusive_not_silently_passed(self):

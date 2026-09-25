@@ -85,6 +85,28 @@ def _text(value: Any, name: str) -> str:
     return value.strip()
 
 
+def _immutable_artifact_ref(value: Any, name: str) -> str:
+    reference = _text(value, name)
+    prefix = "artifact:"
+    marker = "@sha256:"
+    if not reference.startswith(prefix) or marker not in reference:
+        raise ValueError(
+            f"{name} must bind an immutable artifact and SHA-256 digest"
+        )
+    artifact_id, digest = reference[len(prefix):].split(marker, 1)
+    try:
+        canonical_id = str(UUID(artifact_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise ValueError(f"{name} artifact id must be a UUID") from error
+    if artifact_id != canonical_id:
+        raise ValueError(f"{name} artifact id must use canonical UUID text")
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        raise ValueError(
+            f"{name} must use a canonical lowercase SHA-256 digest"
+        )
+    return reference
+
+
 def _period(payload: Any, name: str) -> tuple[date, date]:
     if not isinstance(payload, dict) or set(payload) != {"start", "end"}:
         raise ProtocolViolation(f"{name} must contain exactly start and end")
@@ -229,6 +251,20 @@ def _holdout_identity(payload: Any) -> tuple[str, str]:
 class ProtocolRegistration:
     protocol_id: str
     protocol_hash: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class LockedEvaluationEvidence:
+    evaluation_id: str
+    protocol_id: str
+    holdout_id: str
+    holdout_identity_hash: str
+    protocol_hash: str
+    result_hash: str
+    prior_access_count: int
+    untouched: bool
+    result: dict[str, Any]
     created_at: str
 
 
@@ -425,7 +461,12 @@ class ScientificRegistry:
                 raise KeyError(protocol)
             existing = con.execute("SELECT * FROM trials WHERE trial_id=?", (identifier,)).fetchone()
             if existing is not None:
-                if existing["protocol_id"] != protocol or existing["status"] != normalized or existing["payload_hash"] != digest:
+                if (
+                    existing["protocol_id"] != protocol
+                    or existing["status"] != normalized
+                    or existing["payload_hash"] != digest
+                    or existing["payload_json"] != canonical
+                ):
                     raise ProtocolConflict("trial identity was reused inconsistently")
                 return identifier
             budget = json.loads(owner["payload_json"])["trial_budget"]
@@ -528,6 +569,16 @@ class ScientificRegistry:
         holdout = _text(holdout_id, "holdout_id")
         if not isinstance(result, dict) or not result:
             raise ProtocolViolation("evaluation result must be a non-empty object")
+        if result.get("stopping_rule_triggered") is True:
+            try:
+                _immutable_artifact_ref(
+                    result.get("stopping_evidence_ref"),
+                    "stopping_evidence_ref",
+                )
+            except ValueError as error:
+                raise ProtocolViolation(
+                    "triggered stopping rule requires immutable artifact evidence"
+                ) from error
         identifier = _id(evaluation_id)
         canonical = _canonical(result)
         result_hash = _hash(result)
@@ -613,23 +664,243 @@ class ScientificRegistry:
             row = con.execute("SELECT * FROM evaluations WHERE evaluation_id=?", (identifier,)).fetchone()
             return dict(row)
 
+    def locked_evaluation(self, evaluation_id: str) -> LockedEvaluationEvidence:
+        identifier = _id(evaluation_id)
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT * FROM evaluations WHERE evaluation_id=?",
+                (identifier,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(identifier)
+        try:
+            result = json.loads(row["result_json"])
+        except json.JSONDecodeError as error:
+            raise ProtocolViolation("locked evaluation result is corrupt") from error
+        if not isinstance(result, dict) or not result:
+            raise ProtocolViolation("locked evaluation result is invalid")
+        if _canonical(result) != row["result_json"] or _hash(result) != row["result_hash"]:
+            raise ProtocolViolation("locked evaluation result hash mismatch")
+        identity_hash = row["holdout_identity_hash"]
+        if not isinstance(identity_hash, str) or _SHA256_RE.fullmatch(identity_hash) is None:
+            raise ProtocolViolation("locked evaluation holdout identity is invalid")
+        return LockedEvaluationEvidence(
+            evaluation_id=row["evaluation_id"],
+            protocol_id=row["protocol_id"],
+            holdout_id=row["holdout_id"],
+            holdout_identity_hash=identity_hash,
+            protocol_hash=row["protocol_hash"],
+            result_hash=row["result_hash"],
+            prior_access_count=int(row["prior_access_count"]),
+            untouched=bool(row["untouched"]),
+            result=result,
+            created_at=row["created_at"],
+        )
+
+    def verify_candidate_promotion_evidence(
+        self,
+        *,
+        evaluation_id: str,
+        protocol_id: str,
+        protocol_hash: str,
+        result_hash: str,
+        candidate_id: str,
+        artifact_hash: str,
+        evaluation_status: str,
+        retention_passed: bool,
+        risk_passed: bool,
+        authority_scope_id: str,
+        evidence_valid_until: str,
+    ) -> LockedEvaluationEvidence:
+        evidence = self.locked_evaluation(evaluation_id)
+        expected_protocol = _id(protocol_id)
+        if evidence.protocol_id != expected_protocol:
+            raise ProtocolViolation(
+                "candidate approval protocol_id does not match locked evaluation"
+            )
+        if evidence.protocol_hash != _text(protocol_hash, "protocol_hash"):
+            raise ProtocolViolation(
+                "candidate approval protocol_hash does not match locked evaluation"
+            )
+        if evidence.result_hash != _text(result_hash, "result_hash"):
+            raise ProtocolViolation(
+                "candidate approval result_hash does not match locked evaluation"
+            )
+        if not evidence.untouched or evidence.prior_access_count != 0:
+            raise ProtocolViolation(
+                "candidate promotion requires an untouched locked holdout evaluation"
+            )
+        with self._connect() as con:
+            current_access_count = int(
+                con.execute(
+                    "SELECT COUNT(*) FROM holdout_access "
+                    "WHERE holdout_identity_hash=? "
+                    "OR (holdout_identity_hash IS NULL AND holdout_id=?)",
+                    (evidence.holdout_identity_hash, evidence.holdout_id),
+                ).fetchone()[0]
+            )
+        if current_access_count != 1:
+            raise ProtocolViolation(
+                "candidate promotion requires holdout to remain untouched "
+                "after locked evaluation"
+            )
+
+        trial_state = self.completeness(expected_protocol)
+        if trial_state["recorded_trials"] < 1:
+            raise ProtocolViolation(
+                "candidate promotion requires at least one registered trial"
+            )
+        with self._connect() as con:
+            trial_rows = con.execute(
+                "SELECT status,payload_hash,payload_json "
+                "FROM trials WHERE protocol_id=?",
+                (expected_protocol,),
+            ).fetchall()
+        candidate_trial_found = False
+        for row in trial_rows:
+            if row["status"] != "COMPLETED":
+                continue
+            try:
+                payload = json.loads(row["payload_json"])
+            except json.JSONDecodeError as error:
+                raise ProtocolViolation("registered trial payload is corrupt") from error
+            if not isinstance(payload, dict):
+                raise ProtocolViolation("registered trial payload is invalid")
+            if (
+                _canonical(payload) != row["payload_json"]
+                or _hash(payload) != row["payload_hash"]
+            ):
+                raise ProtocolViolation(
+                    "registered trial payload integrity mismatch"
+                )
+            if (
+                payload.get("candidate_id") == candidate_id
+                and payload.get("artifact_hash") == artifact_hash
+            ):
+                candidate_trial_found = True
+        if not candidate_trial_found:
+            raise ProtocolViolation(
+                "candidate promotion requires a completed registered trial "
+                "bound to candidate_id and artifact_hash"
+            )
+
+        result = evidence.result
+        required = {
+            "candidate_id": _text(candidate_id, "candidate_id"),
+            "artifact_hash": _text(artifact_hash, "artifact_hash"),
+            "evaluation_status": _text(
+                evaluation_status, "evaluation_status"
+            ).upper(),
+            "retention_passed": retention_passed,
+            "risk_passed": risk_passed,
+            "authority_scope_id": _text(
+                authority_scope_id, "authority_scope_id"
+            ),
+            "evidence_valid_until": _text(
+                evidence_valid_until, "evidence_valid_until"
+            ),
+            "recorded_trial_count": trial_state["recorded_trials"],
+            "trial_budget": trial_state["trial_budget"],
+            "trial_log_hash": trial_state["trial_log_hash"],
+        }
+        for field in ("retention_passed", "risk_passed"):
+            if not isinstance(required[field], bool):
+                raise TypeError(f"{field} must be boolean")
+
+        for field, expected in required.items():
+            observed = result.get(field)
+            if field == "evaluation_status" and isinstance(observed, str):
+                observed = observed.upper()
+            if observed != expected:
+                raise ProtocolViolation(
+                    f"candidate approval {field} does not match "
+                    "locked evaluation result"
+                )
+
+        for required_true in (
+            "reproducible",
+            "causal_audit_passed",
+            "financial_invariants_passed",
+            "trial_log_complete",
+        ):
+            if result.get(required_true) is not True:
+                raise ProtocolViolation(
+                    f"locked evaluation does not prove {required_true}"
+                )
+        if trial_state["remaining_trial_budget"] > 0:
+            if result.get("stopping_rule_triggered") is not True:
+                raise ProtocolViolation(
+                    "candidate promotion before trial-budget exhaustion requires "
+                    "an explicitly triggered registered stopping rule"
+                )
+            if result.get("stopping_rules_hash") != trial_state["stopping_rules_hash"]:
+                raise ProtocolViolation(
+                    "early-stop evidence is not bound to the registered stopping rules"
+                )
+            try:
+                _immutable_artifact_ref(
+                    result.get("stopping_evidence_ref"),
+                    "stopping_evidence_ref",
+                )
+            except ValueError as error:
+                raise ProtocolViolation(
+                    "early-stop promotion requires immutable stopping evidence"
+                ) from error
+        return evidence
+
     def completeness(self, protocol_id: str) -> dict[str, Any]:
         protocol = _id(protocol_id)
         with self._connect() as con:
-            p = con.execute("SELECT payload_json FROM protocols WHERE protocol_id=?", (protocol,)).fetchone()
+            p = con.execute(
+                "SELECT payload_json FROM protocols WHERE protocol_id=?",
+                (protocol,),
+            ).fetchone()
             if p is None:
                 raise KeyError(protocol)
-            budget = json.loads(p["payload_json"])["trial_budget"]
-            rows = con.execute(
-                "SELECT status, COUNT(*) AS n FROM trials WHERE protocol_id=? GROUP BY status",
+            protocol_payload = json.loads(p["payload_json"])
+            budget = protocol_payload["trial_budget"]
+            trial_rows = con.execute(
+                """
+                SELECT trial_id,status,payload_hash,payload_json
+                FROM trials
+                WHERE protocol_id=?
+                ORDER BY trial_id
+                """,
                 (protocol,),
             ).fetchall()
-        counts = {row["status"]: int(row["n"]) for row in rows}
-        total = sum(counts.values())
+        log = []
+        counts: dict[str, int] = {}
+        for row in trial_rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except json.JSONDecodeError as error:
+                raise ProtocolViolation("registered trial payload is corrupt") from error
+            if (
+                not isinstance(payload, dict)
+                or _canonical(payload) != row["payload_json"]
+                or _hash(payload) != row["payload_hash"]
+            ):
+                raise ProtocolViolation(
+                    "registered trial payload integrity mismatch"
+                )
+            log.append(
+                {
+                    "trial_id": row["trial_id"],
+                    "status": row["status"],
+                    "payload_hash": row["payload_hash"],
+                }
+            )
+            counts[row["status"]] = counts.get(row["status"], 0) + 1
+        total = len(trial_rows)
         return {
             "trial_budget": budget,
             "recorded_trials": total,
             "remaining_trial_budget": budget - total,
+            "trial_log_hash": _hash(log),
+            "stopping_rules_hash": _hash(protocol_payload["stopping_rules"]),
             "statuses": counts,
-            "includes_non_successes": any(counts.get(x, 0) for x in ("FAILED", "DISCARDED", "CANCELLED")),
+            "includes_non_successes": any(
+                counts.get(x, 0)
+                for x in ("FAILED", "DISCARDED", "CANCELLED")
+            ),
         }

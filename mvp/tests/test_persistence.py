@@ -318,22 +318,13 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(len(pending), 1)
             connection = sqlite3.connect(path)
             try:
-                envelope_hash = connection.execute(
-                    "SELECT envelope_hash FROM outbox WHERE event_id = ?",
+                payload_json, envelope_hash = connection.execute(
+                    "SELECT payload_json, envelope_hash FROM outbox WHERE event_id = ?",
                     ("evt-1",),
-                ).fetchone()[0]
+                ).fetchone()
             finally:
                 connection.close()
             self.assertIsNotNone(envelope_hash)
-            payload_json = connection = None
-            read_connection = sqlite3.connect(path)
-            try:
-                payload_json = read_connection.execute(
-                    "SELECT payload_json FROM outbox WHERE event_id = ?",
-                    ("evt-1",),
-                ).fetchone()[0]
-            finally:
-                read_connection.close()
             self.assertEqual(
                 envelope_hash,
                 "sha256:" + sha256(payload_json.encode("utf-8")).hexdigest(),

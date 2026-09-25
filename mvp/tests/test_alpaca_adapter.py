@@ -20,7 +20,13 @@ from mvp.autotrade_mvp.capabilities import CapabilitySnapshot
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
-def capability(*, order_types=("MARKET", "LIMIT", "STOP", "STOP_LIMIT"), tif=("DAY", "GTC", "IOC")):
+def capability(
+    *,
+    order_types=("MARKET", "LIMIT", "STOP", "STOP_LIMIT"),
+    tif=("DAY", "GTC", "IOC"),
+    account_id="paper-account",
+    environment="PAPER",
+):
     evidence = {
         "artifact_id": str(uuid4()),
         "sha256": "sha256:" + "d" * 64,
@@ -30,9 +36,9 @@ def capability(*, order_types=("MARKET", "LIMIT", "STOP", "STOP_LIMIT"), tif=("D
     return CapabilitySnapshot(
         snapshot_id=str(uuid4()),
         provider_id="ALPACA",
-        account_id="paper-account",
+        account_id=account_id,
         entity_id="alpaca",
-        environment="PAPER",
+        environment=environment,
         instrument_version="AAPL:v1",
         observed_at=NOW - timedelta(hours=1),
         expires_at=NOW + timedelta(hours=1),
@@ -64,13 +70,46 @@ class AlpacaAdapterTests(unittest.TestCase):
         request = prepare_order_request(
             intent,
             client_order_id="at-equity-1",
+            account_id="paper-account",
+            environment="PAPER",
             capability=capability(),
             at=NOW,
         )
         self.assertEqual(request.endpoint, "/v2/orders")
+        self.assertEqual(request.account_id, "paper-account")
+        self.assertEqual(request.environment, "PAPER")
         self.assertEqual(request.body["qty"], "1.25")
         self.assertEqual(request.body["limit_price"], "220.10")
         self.assertNotIn("notional", request.body)
+
+    def test_order_preparation_is_bound_to_exact_account_and_environment(self):
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        with self.assertRaisesRegex(AlpacaAdapterError, "account"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-wrong-account",
+                account_id="other-account",
+                environment="PAPER",
+                capability=capability(),
+                at=NOW,
+            )
+        with self.assertRaisesRegex(AlpacaAdapterError, "environment"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-wrong-env",
+                account_id="paper-account",
+                environment="LIVE",
+                capability=capability(environment="PAPER"),
+                at=NOW,
+            )
 
     def test_crypto_notional_uses_native_crypto_tif(self):
         intent = AlpacaOrderIntent.create(
@@ -223,6 +262,8 @@ class AlpacaAdapterTests(unittest.TestCase):
             prepare_order_request(
                 intent,
                 client_order_id="at-order-1",
+                account_id="paper-account",
+                environment="PAPER",
                 capability=capability(order_types=("MARKET",)),
                 at=NOW,
             )

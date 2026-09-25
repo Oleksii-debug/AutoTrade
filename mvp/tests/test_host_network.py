@@ -151,6 +151,24 @@ class HostNetworkTests(unittest.TestCase):
             body=json.dumps(command).encode("utf-8"),
         )
 
+    def test_openapi_binds_authenticated_routes_to_canonical_headers(self):
+        contract = (
+            Path(__file__).resolve().parents[2]
+            / "contracts"
+            / "openapi"
+            / "host-api.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("AutoTradeSession:", contract)
+        self.assertIn("name: Authorization", contract)
+        self.assertIn("AutoTradeActor:", contract)
+        self.assertIn("name: X-AutoTrade-Actor", contract)
+        self.assertIn(
+            "  - AutoTradeSession: []\n    AutoTradeActor: []",
+            contract,
+        )
+        health = contract.split("  /api/v1/health:", 1)[1]
+        self.assertIn("security: []", health)
+
     def test_health_is_nonsensitive_and_does_not_require_session(self):
         response = self.app.dispatch(
             method="GET",

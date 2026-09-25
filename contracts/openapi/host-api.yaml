@@ -1,10 +1,13 @@
 openapi: 3.1.0
 info:
   title: AutoTrade Host API
-  version: 2.0.0
+  version: 3.0.0
   description: Canonical UI/host boundary. Accepted commands are not financial-completion claims.
 servers:
   - url: https://localhost
+security:
+  - AutoTradeSession: []
+    AutoTradeActor: []
 paths:
   /api/v1/state:
     get:
@@ -74,6 +77,7 @@ paths:
   /api/v1/health:
     get:
       operationId: getHealth
+      security: []
       responses:
         "200":
           description: Component readiness/degradation status
@@ -81,3 +85,16 @@ paths:
             application/json:
               schema:
                 $ref: ../jsonschema/provider.schema.json#/$defs/HealthResult
+
+components:
+  securitySchemes:
+    AutoTradeSession:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: Reusable high-entropy credential sent only as "AutoTrade-Session <token>"; never serialized into UI snapshots, commands, events, logs, or durable state.
+    AutoTradeActor:
+      type: apiKey
+      in: header
+      name: X-AutoTrade-Actor
+      description: Authenticated actor identity bound by the host SecurityBoundary to the AutoTrade session and accepted origin/channel.

@@ -64,6 +64,32 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertTrue(payload["reduceOnly"])
         self.assertEqual(payload["positionIdx"], 2)
 
+    def test_derivative_order_requires_explicit_evidenced_position_index(self):
+        with self.assertRaisesRegex(ProviderCoreError, "explicit position_idx"):
+            build_order_payload(
+                product_family="LINEAR_DERIVATIVES",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="1",
+                price="70000",
+                client_order_id="mode-required",
+                time_in_force="GTC",
+            )
+
+        one_way = build_order_payload(
+            product_family="INVERSE_DERIVATIVES",
+            symbol="BTCUSD",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="1",
+            price="70000",
+            client_order_id="mode-one-way",
+            time_in_force="GTC",
+            position_idx=0,
+        )
+        self.assertEqual(one_way["positionIdx"], 0)
+
     def test_unsafe_or_ambiguous_request_shapes_fail_closed(self):
         common = dict(
             product_family="SPOT",

@@ -139,6 +139,15 @@ class CausalReplayTests(unittest.TestCase):
         values.update(overrides)
         return values
 
+    @staticmethod
+    def _component_resolver(values):
+        snapshot = dict(values)
+
+        def resolve(name):
+            return snapshot[name]
+
+        return resolve
+
     def test_composite_checkpoint_rejects_changed_rng_before_next_event(self):
         events = [
             event(1, "2026-09-24T10:00:00Z", 1),
@@ -148,7 +157,7 @@ class CausalReplayTests(unittest.TestCase):
         replay.advance_to("2026-09-24T10:00:00Z")
         components = self._runtime_components()
         checkpoint = replay.composite_checkpoint(
-            runtime_components=components,
+            runtime_component_resolver=self._component_resolver(components),
             build_sha="a" * 64,
             protocol_ref="protocol:walk-forward-v1",
         )
@@ -160,7 +169,7 @@ class CausalReplayTests(unittest.TestCase):
                 events,
                 start_at="2026-09-24T09:59:00Z",
                 checkpoint=checkpoint,
-                runtime_components=changed,
+                runtime_component_resolver=self._component_resolver(changed),
                 build_sha="a" * 64,
                 protocol_ref="protocol:walk-forward-v1",
             )
@@ -172,9 +181,28 @@ class CausalReplayTests(unittest.TestCase):
         )
         incomplete = self._runtime_components()
         del incomplete["execution_state"]
-        with self.assertRaisesRegex(ReplayError, "missing required runtime components"):
+        with self.assertRaisesRegex(ReplayError, "runtime component authority failed for execution_state"):
             replay.composite_checkpoint(
-                runtime_components=incomplete,
+                runtime_component_resolver=self._component_resolver(incomplete),
+                build_sha="a" * 64,
+                protocol_ref="protocol:walk-forward-v1",
+            )
+
+    def test_resume_does_not_accept_caller_supplied_component_digest_mapping(self):
+        events = [event(1, "2026-09-24T10:00:00Z", 1)]
+        replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
+        components = self._runtime_components()
+        checkpoint = replay.composite_checkpoint(
+            runtime_component_resolver=self._component_resolver(components),
+            build_sha="a" * 64,
+            protocol_ref="protocol:walk-forward-v1",
+        )
+        with self.assertRaisesRegex(TypeError, "runtime_components"):
+            resume_from_composite_checkpoint(
+                events,
+                start_at="2026-09-24T09:59:00Z",
+                checkpoint=checkpoint,
+                runtime_components=dict(checkpoint.runtime_components),
                 build_sha="a" * 64,
                 protocol_ref="protocol:walk-forward-v1",
             )
@@ -189,7 +217,7 @@ class CausalReplayTests(unittest.TestCase):
         uninterrupted.advance_to("2026-09-24T10:00:00Z")
         components = self._runtime_components()
         checkpoint = uninterrupted.composite_checkpoint(
-            runtime_components=components,
+            runtime_component_resolver=self._component_resolver(components),
             build_sha="b" * 64,
             protocol_ref="protocol:walk-forward-v1",
         )
@@ -207,7 +235,7 @@ class CausalReplayTests(unittest.TestCase):
             events,
             start_at="2026-09-24T09:59:00Z",
             checkpoint=checkpoint,
-            runtime_components=components,
+            runtime_component_resolver=self._component_resolver(components),
             build_sha="b" * 64,
             protocol_ref="protocol:walk-forward-v1",
         )
@@ -223,7 +251,7 @@ class CausalReplayTests(unittest.TestCase):
         replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
         components = self._runtime_components()
         checkpoint = replay.composite_checkpoint(
-            runtime_components=components,
+            runtime_component_resolver=self._component_resolver(components),
             build_sha="c" * 64,
             protocol_ref="protocol:registered-v1",
         )
@@ -237,7 +265,7 @@ class CausalReplayTests(unittest.TestCase):
                         events,
                         start_at="2026-09-24T09:59:00Z",
                         checkpoint=checkpoint,
-                        runtime_components=components,
+                        runtime_component_resolver=self._component_resolver(components),
                         build_sha=build_sha,
                         protocol_ref=protocol_ref,
                     )

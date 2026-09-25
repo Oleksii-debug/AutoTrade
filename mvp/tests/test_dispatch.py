@@ -785,6 +785,23 @@ class DispatchTests(unittest.TestCase):
                     attempt_id="legacy-response-a1",
                 )
 
+    def test_exact_response_preserves_and_validates_http_status(self):
+        response = ExactJsonTransportResponse(
+            b'{"accepted":false}',
+            http_status=422,
+        )
+        self.assertEqual(response.http_status, 422)
+        with self.assertRaisesRegex(ValueError, "100..599"):
+            ExactJsonTransportResponse(
+                b'{"accepted":false}',
+                http_status=99,
+            )
+        with self.assertRaisesRegex(ValueError, "100..599"):
+            ExactJsonTransportResponse(
+                b'{"accepted":false}',
+                http_status=True,
+            )
+
     def test_exact_response_identity_preserves_wire_whitespace(self):
         first = ExactJsonTransportResponse(b'{"ok":true}')
         second = ExactJsonTransportResponse(b'{ "ok" : true }')

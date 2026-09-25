@@ -43,6 +43,7 @@ class KrakenSpotContractTests(unittest.TestCase):
             source_uri=SOURCE,
             payload={"error": [], "result": {"txid": ["OABC-D123-E456"]}},
         )
+        self.assertNotIn("provider_received_at", acknowledged)
         self.validate_submission(acknowledged)
 
         rejected = parse_spot_submission_response(
@@ -53,6 +54,7 @@ class KrakenSpotContractTests(unittest.TestCase):
             source_uri=SOURCE,
             payload={"error": ["EOrder:Insufficient funds"], "result": None},
         )
+        self.assertNotIn("provider_received_at", rejected)
         self.validate_submission(rejected)
 
         unknown = parse_spot_submission_response(

@@ -1,4 +1,5 @@
 from decimal import Decimal
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from uuid import uuid4
@@ -11,11 +12,12 @@ from mvp.autotrade_mvp.accounting import (
 from mvp.autotrade_mvp.authority import AuthorityPolicy, AuthorityService
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence, reconcile_account
 from mvp.autotrade_mvp.reservations import ReservationBook
 from mvp.autotrade_mvp.risk import RiskContext, RiskIntent, RiskPolicy
 from mvp.autotrade_mvp.simulated_provider import SimulatedProvider
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 
 NOW = "2026-09-24T18:00:00Z"
@@ -97,11 +99,12 @@ class WholeSimulatorFlowTests(unittest.TestCase):
 
             journal = JournalStore(f"{directory}/journal.sqlite3")
             authority = authority_service(journal)
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
             reservations = DurableReservationBook(
                 journal,
                 environment="SIMULATION",
                 account_id="sim-account",
-                resolution_evidence_verifier=lambda _reference: True,
+                resolution_artifact_store=artifacts,
             )
             intent = RiskIntent.create(
                 symbol=INSTRUMENT,
@@ -190,14 +193,34 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 reservation_id="reservation-1",
                 usage={"CASH:USD": "200.2"},
             )
+            resolution_artifact_id = "44444444-4444-4444-8444-444444444444"
+            resolution_receipt = {
+                "schema_version": 1,
+                "evidence_type": "AUTOTRADE_RESERVATION_RESOLUTION",
+                "environment": "SIMULATION",
+                "account_id": "sim-account",
+                "reservation_id": "reservation-1",
+                "intent_id": "intent-1",
+                "provider": "SIMULATED",
+                "attempt_id": attempt_id,
+                "outcome": "FILLED",
+                "reconciliation_complete": True,
+            }
+            resolution_manifest = artifacts.publish_bytes(
+                artifact_id=resolution_artifact_id,
+                data=canonical_json(resolution_receipt).encode("utf-8"),
+                media_type="application/vnd.autotrade.reservation-resolution+json",
+                rights={"storage": True, "export": False},
+            )
             terminal = reservations.mark_terminal(
                 command_id="reservation-terminal-1",
                 idempotency_key="reservation-terminal-1",
                 reservation_id="reservation-1",
                 outcome="FILLED",
+                provider="SIMULATED",
+                attempt_id=attempt_id,
                 resolution_evidence=(
-                    "artifact:44444444-4444-4444-8444-444444444444@sha256:"
-                    + "f" * 64
+                    f"artifact:{resolution_artifact_id}@{resolution_manifest['sha256']}"
                 ),
             )
             self.assertEqual(terminal.state, "FILLED")
@@ -385,6 +408,8 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             attempt_id = str(uuid4())
             dispatcher = GuardedDispatcher(
                 JournalStore(f"{directory}/journal.sqlite3"),
+                environment="SIMULATION",
+                account_id="sim-account",
                 owner_token="sim-owner",
             )
 
@@ -536,7 +561,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
 
             events = JournalStore(journal_path).load_events(
                 "submission_attempt",
-                attempt_id,
+                restarted._aggregate_id(attempt_id),
             )
             self.assertEqual(
                 [event["event_type"] for event in events],

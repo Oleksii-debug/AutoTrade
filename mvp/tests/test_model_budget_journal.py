@@ -61,6 +61,18 @@ class DurableModelBudgetTests(unittest.TestCase):
             self.assertEqual(actor, "autotrade-model-budget")
             self.assertEqual(environment, "PAPER")
 
+    def test_exact_retry_cannot_change_command_environment(self):
+        with TemporaryDirectory() as directory:
+            _, simulation = open_budget(directory, environment="SIMULATION")
+            self.assertTrue(simulation.reserve("req-scope", "0.4"))
+            _, paper = open_budget(directory, environment="PAPER")
+            with self.assertRaisesRegex(
+                ValueError,
+                "command_id already exists",
+            ):
+                paper.reserve("req-scope", "0.4")
+            self.assertEqual(paper.snapshot().reserved, Decimal("0.4"))
+
     def test_changed_economics_cannot_escape_through_different_environment(self):
         with TemporaryDirectory() as directory:
             _, first = open_budget(directory, environment="SIMULATION")

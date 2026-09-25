@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, localcontext
+from hashlib import sha256
 import unittest
 
 from autotrade_research.evaluation.ablation import (
@@ -93,26 +94,38 @@ def pair(
     full_cost="0",
     ablated_cost="0",
     population_unit=None,
+    fingerprint=None,
+    full_decision=None,
+    ablated_decision=None,
 ):
+    case_fingerprint = (
+        "sha256:" + sha256(case_id.encode("utf-8")).hexdigest()
+        if fingerprint is None
+        else fingerprint
+    )
     return AblationPair(
         "agent",
         outcome(
             case_id=case_id,
+            fingerprint=case_fingerprint,
             variant="FULL",
             utility=full_utility,
             cost=full_cost,
             elapsed=50,
             components=("base", "agent"),
             population_unit=population_unit,
+            decision=full_decision,
         ),
         outcome(
             case_id=case_id,
+            fingerprint=case_fingerprint,
             variant="ABLATED",
             utility=ablated_utility,
             cost=ablated_cost,
             elapsed=50,
             components=("base",),
             population_unit=population_unit,
+            decision=ablated_decision,
         ),
     )
 
@@ -195,6 +208,30 @@ class AblationTests(unittest.TestCase):
                 cost=1,
                 elapsed=10,
                 components=("wire-story-group-7", "wire-story-group-7"),
+            )
+
+    def test_case_id_cannot_be_reused_with_changed_input_fingerprint(self):
+        first = pair("case-reused", "0.8", fingerprint=FINGERPRINT_A)
+        second = pair("case-reused", "0.9", fingerprint=FINGERPRINT_B)
+        with self.assertRaisesRegex(ValueError, "duplicate matched ablation case_id"):
+            summarize_ablation("agent", [first, second])
+
+    def test_identical_input_cannot_be_recounted_under_case_alias(self):
+        first = pair("case-alias-a", "0.8", fingerprint=FINGERPRINT_A)
+        second = pair("case-alias-b", "0.9", fingerprint=FINGERPRINT_A)
+        with self.assertRaisesRegex(
+            ValueError,
+            "duplicate matched ablation input_fingerprint",
+        ):
+            summarize_ablation("agent", [first, second])
+
+    def test_matched_pair_requires_same_decision_time(self):
+        with self.assertRaisesRegex(ValueError, "exact decision time"):
+            pair(
+                "decision-mismatch",
+                "0.8",
+                full_decision=CUT,
+                ablated_decision=CUT + timedelta(milliseconds=1),
             )
 
     def test_causal_input_after_cutoff_is_rejected(self):

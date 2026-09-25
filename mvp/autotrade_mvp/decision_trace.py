@@ -126,9 +126,25 @@ class DecisionTraceStore:
             value = trace[field]
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field} must be a non-empty string")
+        input_hash = trace["input_hash"]
+        if (
+            len(input_hash) != 64
+            or input_hash != input_hash.lower()
+            or any(ch not in "0123456789abcdef" for ch in input_hash)
+        ):
+            raise ValueError("input_hash must be a lowercase SHA-256 hex digest")
+
         refs = trace["evidence_refs"]
-        if not isinstance(refs, list) or any(not isinstance(item, str) or not item for item in refs):
-            raise ValueError("evidence_refs must be a list of non-empty strings")
+        if (
+            not isinstance(refs, list)
+            or any(
+                not isinstance(item, str)
+                or not item.strip()
+                or item != item.strip()
+                for item in refs
+            )
+        ):
+            raise ValueError("evidence_refs must contain canonical non-empty strings")
         if len(refs) != len(set(refs)):
             raise ValueError("evidence_refs must not contain duplicates")
 
@@ -143,9 +159,14 @@ class DecisionTraceStore:
             if (
                 not isinstance(event_ids, list)
                 or not event_ids
-                or any(not isinstance(item, str) or not item.strip() for item in event_ids)
+                or any(
+                    not isinstance(item, str)
+                    or not item.strip()
+                    or item != item.strip()
+                    for item in event_ids
+                )
             ):
-                raise ValueError("event_ids must be a non-empty list of non-empty strings")
+                raise ValueError("event_ids must contain canonical non-empty strings")
             if len(event_ids) != len(set(event_ids)):
                 raise ValueError("event_ids must not contain duplicates")
 
@@ -159,15 +180,17 @@ class DecisionTraceStore:
         prepared = _redact(trace)
         self._validate_input(prepared)
         records = self._load()
+        # Integrity verification must precede idempotency handling. Otherwise an
+        # identical retry could silently succeed against a tampered hash chain.
+        if records and not self.verify():
+            raise ValueError("Existing decision trace chain is corrupt")
+
         trace_id = prepared["trace_id"]
         for existing in records:
             if existing.get("trace_id") == trace_id:
                 if _semantic_payload(existing) != prepared:
                     raise ValueError("trace_id already exists with different decision content")
                 return False
-
-        if records and not self.verify():
-            raise ValueError("Existing decision trace chain is corrupt")
 
         previous_hash = records[-1]["record_hash"] if records else GENESIS_HASH
         record = dict(prepared)

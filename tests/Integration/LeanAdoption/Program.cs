@@ -32,6 +32,101 @@ Require(
     "The probe is not bound to the approved LEAN revision.");
 
 var instant = new DateTime(2026, 9, 24, 20, 0, 0, DateTimeKind.Utc);
+
+if (args.Length > 0)
+{
+    Require(args.Length == 2, "Restart probe requires exactly one state-file path.");
+    var restartStatePath = args[1];
+    var restartSymbol = new Symbol(
+        SecurityIdentifier.GenerateEquity("SPY", Market.USA, mapSymbol: false),
+        "SPY");
+
+    if (args[0] == "--write-restart-state")
+    {
+        var checkpointCallbacks = new LeanCallbackCharacterizer();
+        checkpointCallbacks.Observe(new OrderEvent
+        {
+            OrderId = 84,
+            Id = 1,
+            Symbol = restartSymbol,
+            UtcTime = instant,
+            Status = OrderStatus.Submitted,
+            FillQuantity = decimal.Zero,
+            FillPrice = decimal.Zero
+        });
+        checkpointCallbacks.Observe(new OrderEvent
+        {
+            OrderId = 84,
+            Id = 2,
+            Symbol = restartSymbol,
+            UtcTime = instant.AddMilliseconds(1),
+            Status = OrderStatus.PartiallyFilled,
+            FillQuantity = 0.25m,
+            FillPrice = 451.125m
+        });
+        File.WriteAllText(
+            restartStatePath,
+            checkpointCallbacks.ExportRestartState());
+        Console.WriteLine("WP02_LEAN_RESTART_CHECKPOINT_WRITTEN");
+        return;
+    }
+
+    if (args[0] == "--resume-restart-state")
+    {
+        var resumedCallbacks = LeanCallbackCharacterizer.RestoreRestartState(
+            File.ReadAllText(restartStatePath));
+
+        var repeated = resumedCallbacks.Observe(new OrderEvent
+        {
+            OrderId = 84,
+            Id = 2,
+            Symbol = restartSymbol,
+            UtcTime = instant.AddMilliseconds(1),
+            Status = OrderStatus.PartiallyFilled,
+            FillQuantity = 0.25m,
+            FillPrice = 451.125m
+        });
+        Require(
+            repeated.DuplicateIdentity && !repeated.IdentityConflict,
+            "Restart lost an identical callback identity.");
+
+        var conflicting = resumedCallbacks.Observe(new OrderEvent
+        {
+            OrderId = 84,
+            Id = 2,
+            Symbol = restartSymbol,
+            UtcTime = instant.AddMilliseconds(1),
+            Status = OrderStatus.PartiallyFilled,
+            FillQuantity = 0.25m,
+            FillPrice = 451.500m
+        });
+        Require(
+            conflicting.DuplicateIdentity && conflicting.IdentityConflict,
+            "Restart hid conflicting economics for the same callback identity.");
+
+        var regressedAfterRestart = resumedCallbacks.Observe(new OrderEvent
+        {
+            OrderId = 84,
+            Id = 3,
+            Symbol = restartSymbol,
+            UtcTime = instant,
+            Status = OrderStatus.Filled,
+            FillQuantity = 0.75m,
+            FillPrice = 451.125m
+        });
+        Require(
+            regressedAfterRestart.TimeRegressed,
+            "Restart lost the previous arrival-time boundary.");
+        Require(
+            regressedAfterRestart.HasEconomicFill,
+            "Restart characterization lost the economic fill.");
+
+        Console.WriteLine("WP02_LEAN_RESTART_RESUME_PASS");
+        return;
+    }
+
+    throw new InvalidOperationException($"Unknown restart probe mode: {args[0]}");
+}
 var buy = LeanBoundaryProbe.CreateOrderProjection(
     "SPY",
     "usa",
@@ -73,7 +168,9 @@ ExpectFailure<ArgumentException>(
         DateTime.SpecifyKind(instant, DateTimeKind.Unspecified)),
     "ambiguous wall-clock time must be rejected");
 
-var symbol = Symbol.Create("SPY", SecurityType.Equity, Market.USA);
+var symbol = new Symbol(
+    SecurityIdentifier.GenerateEquity("SPY", Market.USA, mapSymbol: false),
+    "SPY");
 var callbacks = new LeanCallbackCharacterizer();
 
 var submitted = callbacks.Observe(new OrderEvent

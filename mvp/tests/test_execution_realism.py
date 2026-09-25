@@ -406,6 +406,40 @@ class ExecutionRealismTests(unittest.TestCase):
         self.assertEqual(result.filled_quantity, Decimal("0"))
         self.assertIn("before venue arrival", result.reason)
 
+    def test_bar_interval_start_one_tick_before_arrival_is_ambiguous(self):
+        result = simulate_execution(
+            order(submitted_at="2026-09-24T10:00:00Z"),
+            LiquidityObservation.create(
+                instrument_version="ABC@v1",
+                market_time="2026-09-24T10:01:00Z",
+                available_at="2026-09-24T10:01:01Z",
+                available_volume="1000",
+                interval_start="2026-09-24T10:00:00.099999Z",
+                bar_low="90",
+                bar_high="110",
+            ),
+            model(data_fidelity="BAR", latency_ms=100),
+        )
+        self.assertEqual(result.status, "AMBIGUOUS_NO_FILL")
+        self.assertEqual(result.filled_quantity, Decimal("0"))
+
+    def test_bar_interval_start_exactly_at_arrival_is_causally_eligible(self):
+        result = simulate_execution(
+            order(submitted_at="2026-09-24T10:00:00Z"),
+            LiquidityObservation.create(
+                instrument_version="ABC@v1",
+                market_time="2026-09-24T10:01:00Z",
+                available_at="2026-09-24T10:01:01Z",
+                available_volume="1000",
+                interval_start="2026-09-24T10:00:00.100000Z",
+                bar_low="90",
+                bar_high="110",
+            ),
+            model(data_fidelity="BAR", latency_ms=100),
+        )
+        self.assertIn(result.status, {"FILLED", "PARTIAL"})
+        self.assertGreater(result.filled_quantity, Decimal("0"))
+
     def test_bar_requires_interval_start_to_bound_causal_volume(self):
         with self.assertRaisesRegex(
             ExecutionRealismError, "requires interval_start"

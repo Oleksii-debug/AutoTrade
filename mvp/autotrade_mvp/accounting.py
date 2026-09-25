@@ -7,6 +7,7 @@ transactions and projections, but does not authorize or send orders.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Iterable
 
@@ -35,6 +36,25 @@ def _name(value: str, *, field: str) -> str:
     return value.strip()
 
 
+def _instant(value: str | None, *, field: str) -> str | None:
+    if value is None:
+        return None
+    text = _name(value, field=field)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{field} must be an ISO timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field} must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _instant_value(value: str, *, field: str) -> datetime:
+    canonical = _instant(value, field=field)
+    assert canonical is not None
+    return datetime.fromisoformat(canonical.replace("Z", "+00:00"))
+
+
 def _canonical_decimal(value: Decimal) -> str:
     amount = _decimal(value, name="signed_amount")
     if amount == 0:
@@ -58,6 +78,10 @@ class JournalTransaction:
     cause_event_id: str
     postings: tuple[Posting, ...]
     reverses_transaction_id: str | None = None
+    economic_effective_at: str | None = None
+    economic_order_key: str | None = None
+    observed_at: str | None = None
+    corrects_transaction_id: str | None = None
 
 
 def _normalized_transaction(transaction: JournalTransaction) -> JournalTransaction:
@@ -82,6 +106,21 @@ def _normalized_transaction(transaction: JournalTransaction) -> JournalTransacti
             if transaction.reverses_transaction_id is not None
             else None
         ),
+        economic_effective_at=_instant(
+            transaction.economic_effective_at,
+            field="economic_effective_at",
+        ),
+        economic_order_key=(
+            _name(transaction.economic_order_key, field="economic_order_key")
+            if transaction.economic_order_key is not None
+            else None
+        ),
+        observed_at=_instant(transaction.observed_at, field="observed_at"),
+        corrects_transaction_id=(
+            _name(transaction.corrects_transaction_id, field="corrects_transaction_id")
+            if transaction.corrects_transaction_id is not None
+            else None
+        ),
     )
 
 
@@ -97,10 +136,14 @@ def canonical_transaction(transaction: JournalTransaction) -> dict[str, object]:
     normalized = _normalized_transaction(transaction)
     validate_transaction(normalized)
     return {
-        "schema_version": "1.0.0",
+        "schema_version": "1.2.0",
         "transaction_id": normalized.transaction_id,
         "cause_event_id": normalized.cause_event_id,
         "reverses_transaction_id": normalized.reverses_transaction_id,
+        "economic_effective_at": normalized.economic_effective_at,
+        "economic_order_key": normalized.economic_order_key,
+        "observed_at": normalized.observed_at,
+        "corrects_transaction_id": normalized.corrects_transaction_id,
         "postings": [
             {
                 "ledger_account": item.ledger_account,
@@ -119,6 +162,41 @@ def transaction_digest(transaction: JournalTransaction) -> str:
 def validate_transaction(transaction: JournalTransaction) -> None:
     _name(transaction.transaction_id, field="transaction_id")
     _name(transaction.cause_event_id, field="cause_event_id")
+    effective = _instant(
+        transaction.economic_effective_at,
+        field="economic_effective_at",
+    )
+    order_key = (
+        _name(transaction.economic_order_key, field="economic_order_key")
+        if transaction.economic_order_key is not None
+        else None
+    )
+    if (effective is None) != (order_key is None):
+        raise ValueError(
+            "economic_effective_at and economic_order_key must be supplied together"
+        )
+    observed = _instant(transaction.observed_at, field="observed_at")
+    if effective is not None and observed is not None:
+        if _instant_value(observed, field="observed_at") < _instant_value(
+            effective,
+            field="economic_effective_at",
+        ):
+            raise ValueError("observed_at cannot precede economic_effective_at")
+    if transaction.corrects_transaction_id is not None:
+        corrected_id = _name(
+            transaction.corrects_transaction_id,
+            field="corrects_transaction_id",
+        )
+        if corrected_id == transaction.transaction_id:
+            raise ValueError("transaction cannot correct itself")
+        if transaction.reverses_transaction_id is not None:
+            raise ValueError(
+                "transaction cannot both reverse and replace corrected economics"
+            )
+        if effective is None or order_key is None or observed is None:
+            raise ValueError(
+                "correction replacement requires economic ordering and observation evidence"
+            )
     if len(transaction.postings) < 2:
         raise ValueError("A journal transaction requires at least two postings")
     totals: dict[str, Decimal] = {}
@@ -140,6 +218,7 @@ class EconomicBook:
         self._by_id: dict[str, JournalTransaction] = {}
         self._by_cause_event_id: dict[str, JournalTransaction] = {}
         self._reversed_transaction_ids: set[str] = set()
+        self._replacement_by_corrected_id: dict[str, str] = {}
         for transaction in transactions:
             self.append(transaction)
 
@@ -179,11 +258,80 @@ class EconomicBook:
             )
             if normalized.postings != expected:
                 raise AccountingConflict("A reversal must exactly negate the original postings")
+
+        if normalized.corrects_transaction_id is not None:
+            corrected_id = normalized.corrects_transaction_id
+            corrected = self._by_id.get(corrected_id)
+            if corrected is None:
+                raise AccountingConflict("Cannot correct an unknown transaction")
+            if corrected_id not in self._reversed_transaction_ids:
+                raise AccountingConflict(
+                    "Correction replacement requires an explicit prior reversal"
+                )
+            existing_replacement = self._replacement_by_corrected_id.get(corrected_id)
+            if existing_replacement not in {None, transaction_id}:
+                raise AccountingConflict(
+                    "Corrected transaction already has a different replacement"
+                )
+            if (
+                corrected.economic_effective_at != normalized.economic_effective_at
+                or corrected.economic_order_key != normalized.economic_order_key
+            ):
+                raise AccountingConflict(
+                    "Correction replacement must preserve economic ordering identity"
+                )
+            reversal = next(
+                (
+                    item
+                    for item in self._transactions
+                    if item.reverses_transaction_id == corrected_id
+                ),
+                None,
+            )
+            if reversal is None or reversal.observed_at != normalized.observed_at:
+                raise AccountingConflict(
+                    "Correction reversal/replacement observation evidence does not match"
+                )
+
         self._by_id[transaction_id] = normalized
         self._by_cause_event_id[cause_event_id] = normalized
         self._transactions.append(normalized)
         if normalized.reverses_transaction_id is not None:
             self._reversed_transaction_ids.add(normalized.reverses_transaction_id)
+        if normalized.corrects_transaction_id is not None:
+            self._replacement_by_corrected_id[
+                normalized.corrects_transaction_id
+            ] = transaction_id
+        return True
+
+    def append_batch(self, transactions: Iterable[JournalTransaction]) -> bool:
+        """Atomically append an immutable batch or leave the live book unchanged.
+
+        Exact replay of a fully committed batch is idempotent. A mixed state where
+        only part of the batch already exists fails closed rather than silently
+        completing a transaction group whose original atomicity cannot be proven.
+        """
+
+        batch = tuple(transactions)
+        if not batch:
+            raise ValueError("atomic transaction batch must not be empty")
+
+        candidate = EconomicBook(self._transactions)
+        outcomes = tuple(candidate.append(transaction) for transaction in batch)
+        if any(outcomes) and not all(outcomes):
+            raise AccountingConflict(
+                "atomic transaction batch is only partially committed"
+            )
+        if not any(outcomes):
+            return False
+
+        self._transactions = candidate._transactions.copy()
+        self._by_id = candidate._by_id.copy()
+        self._by_cause_event_id = candidate._by_cause_event_id.copy()
+        self._reversed_transaction_ids = candidate._reversed_transaction_ids.copy()
+        self._replacement_by_corrected_id = (
+            candidate._replacement_by_corrected_id.copy()
+        )
         return True
 
     def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
@@ -255,6 +403,9 @@ class ScopedEconomicBook:
     def append(self, transaction: JournalTransaction) -> bool:
         return self._book.append(transaction)
 
+    def append_batch(self, transactions: Iterable[JournalTransaction]) -> bool:
+        return self._book.append_batch(transactions)
+
     def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
         return self._book.balance(ledger_account, asset_or_currency)
 
@@ -312,6 +463,10 @@ def book_equity_fill(
     price: Decimal | str | int,
     fee: Decimal | str | int = Decimal("0"),
     fee_currency: str | None = None,
+    economic_effective_at: str | None = None,
+    economic_order_key: str | None = None,
+    observed_at: str | None = None,
+    corrects_transaction_id: str | None = None,
 ) -> JournalTransaction:
     symbol = _name(instrument, field="instrument")
     settlement = _name(settlement_currency, field="settlement_currency")
@@ -344,6 +499,10 @@ def book_equity_fill(
         transaction_id=_name(transaction_id, field="transaction_id"),
         cause_event_id=_name(cause_event_id, field="cause_event_id"),
         postings=tuple(items),
+        economic_effective_at=economic_effective_at,
+        economic_order_key=economic_order_key,
+        observed_at=observed_at,
+        corrects_transaction_id=corrects_transaction_id,
     )
     validate_transaction(transaction)
     return transaction
@@ -385,6 +544,7 @@ def reverse_transaction(
     *,
     transaction_id: str,
     cause_event_id: str,
+    observed_at: str | None = None,
 ) -> JournalTransaction:
     validate_transaction(original)
     transaction = JournalTransaction(
@@ -395,6 +555,351 @@ def reverse_transaction(
             for item in original.postings
         ),
         reverses_transaction_id=original.transaction_id,
+        economic_effective_at=original.economic_effective_at,
+        economic_order_key=original.economic_order_key,
+        observed_at=observed_at,
     )
     validate_transaction(transaction)
     return transaction
+
+
+@dataclass(frozen=True)
+class EquityLot:
+    """One open FIFO lot derived from canonical equity-fill postings."""
+
+    quantity: Decimal
+    unit_price: Decimal
+    transaction_id: str
+
+
+@dataclass(frozen=True)
+class EquityPositionProjection:
+    """Derived gross position economics; never an execution or accounting authority."""
+
+    instrument: str
+    settlement_currency: str
+    quantity: Decimal
+    open_cost_basis: Decimal
+    realized_pnl: Decimal
+    unrealized_pnl: Decimal | None
+    mark_price: Decimal | None
+    lots: tuple[EquityLot, ...]
+    policy_version: str = "FIFO_GROSS_V1"
+
+
+def _canonical_equity_fill_terms(
+    transaction: JournalTransaction,
+    *,
+    instrument: str,
+    settlement_currency: str,
+) -> tuple[Decimal, Decimal] | None:
+    """Extract quantity and unit price only from canonical book_equity_fill shape."""
+
+    symbol = _name(instrument, field="instrument")
+    settlement = _name(settlement_currency, field="settlement_currency")
+    if symbol == settlement:
+        raise ValueError("instrument and settlement_currency must be distinct")
+
+    normalized = _normalized_transaction(transaction)
+    position_postings = [
+        item
+        for item in normalized.postings
+        if item.ledger_account == f"POSITION:{symbol}"
+        and item.asset_or_currency == symbol
+    ]
+    if not position_postings:
+        return None
+    if len(position_postings) != 1:
+        raise AccountingConflict(
+            "Position projection requires exactly one canonical position posting"
+        )
+
+    quantity = position_postings[0].signed_amount
+    if quantity == 0:
+        raise AccountingConflict("Position projection cannot infer a zero-quantity fill")
+
+    instrument_clearing = [
+        item
+        for item in normalized.postings
+        if item.ledger_account == f"CLEARING:{symbol}"
+        and item.asset_or_currency == symbol
+    ]
+    settlement_clearing = [
+        item
+        for item in normalized.postings
+        if item.ledger_account == f"CLEARING:{settlement}"
+        and item.asset_or_currency == settlement
+    ]
+    if (
+        len(instrument_clearing) != 1
+        or instrument_clearing[0].signed_amount != -quantity
+        or len(settlement_clearing) != 1
+    ):
+        raise AccountingConflict(
+            "Position projection requires canonical equity-fill clearing postings"
+        )
+
+    trade_cash = -settlement_clearing[0].signed_amount
+    if trade_cash == 0 or (trade_cash > 0) == (quantity > 0):
+        raise AccountingConflict(
+            "Position projection requires cash direction opposite to quantity"
+        )
+    unit_price = abs(trade_cash / quantity)
+    if unit_price <= 0 or not unit_price.is_finite():
+        raise AccountingConflict("Position projection requires a finite positive price")
+
+    # Clearing legs alone are not evidence that this transaction came from the
+    # canonical equity-fill booking path. Reconstruct the only allowed posting
+    # shape from the inferred economic terms and compare the complete ordered
+    # postings, including trade cash and the optional single fee/rebate pair.
+    # This prevents an arbitrary balanced SUSPENSE/ADJUSTMENT leg from being
+    # interpreted as fill cash merely because it happened to carry matching
+    # clearing amounts.
+    fee_postings = [
+        item
+        for item in normalized.postings
+        if item.ledger_account.startswith("FEE_EXPENSE:")
+    ]
+    if len(fee_postings) > 1:
+        raise AccountingConflict(
+            "Position projection requires canonical equity-fill fee postings"
+        )
+    fee_amount = Decimal("0")
+    fee_currency: str | None = None
+    if fee_postings:
+        fee_posting = fee_postings[0]
+        fee_currency = fee_posting.asset_or_currency
+        if fee_posting.ledger_account != f"FEE_EXPENSE:{fee_currency}":
+            raise AccountingConflict(
+                "Position projection requires canonical equity-fill fee postings"
+            )
+        fee_amount = fee_posting.signed_amount
+
+    expected = book_equity_fill(
+        transaction_id=normalized.transaction_id,
+        cause_event_id=normalized.cause_event_id,
+        instrument=symbol,
+        settlement_currency=settlement,
+        side="BUY" if quantity > 0 else "SELL",
+        quantity=abs(quantity),
+        price=unit_price,
+        fee=fee_amount,
+        fee_currency=fee_currency,
+    )
+    if normalized.postings != expected.postings:
+        raise AccountingConflict(
+            "Position projection requires complete canonical equity-fill posting shape"
+        )
+    return quantity, unit_price
+
+
+def project_equity_position(
+    book: EconomicBook,
+    *,
+    instrument: str,
+    settlement_currency: str,
+    mark_price: Decimal | str | int | None = None,
+) -> EquityPositionProjection:
+    """Project FIFO gross basis/P&L from immutable economic history.
+
+    Fees remain separately expensed by the accounting book. When position-fill
+    corrections exist, reversed facts are excluded and active fills are replayed
+    by explicit economic effective time plus immutable order key. Missing or
+    ambiguous ordering evidence fails closed instead of falling back to append
+    order and leaking correction-observation timing into economic chronology.
+    """
+
+    if not isinstance(book, EconomicBook):
+        raise TypeError("book must be an EconomicBook")
+    symbol = _name(instrument, field="instrument")
+    settlement = _name(settlement_currency, field="settlement_currency")
+    mark = (
+        None
+        if mark_price is None
+        else _decimal(mark_price, name="mark_price")
+    )
+    if mark is not None and mark <= 0:
+        raise ValueError("mark_price must be positive")
+
+    transactions = tuple(book.transactions)
+    by_id = {transaction.transaction_id: transaction for transaction in transactions}
+    reversed_ids = {
+        transaction.reverses_transaction_id
+        for transaction in transactions
+        if transaction.reverses_transaction_id is not None
+    }
+    reversal_ids = {
+        transaction.transaction_id
+        for transaction in transactions
+        if transaction.reverses_transaction_id is not None
+    }
+    position_corrections = [
+        transaction
+        for transaction in transactions
+        if transaction.reverses_transaction_id is not None
+        and _canonical_equity_fill_terms(
+            by_id[transaction.reverses_transaction_id],
+            instrument=symbol,
+            settlement_currency=settlement,
+        )
+        is not None
+    ]
+    has_position_correction = bool(position_corrections)
+    if has_position_correction:
+        for reversal in position_corrections:
+            corrected_id = reversal.reverses_transaction_id
+            assert corrected_id is not None
+            corrected = by_id[corrected_id]
+            replacements = [
+                item
+                for item in transactions
+                if item.corrects_transaction_id == corrected_id
+            ]
+            if len(replacements) != 1:
+                raise AccountingConflict(
+                    "Corrected FIFO history requires exactly one explicit replacement lineage"
+                )
+            replacement = replacements[0]
+            if (
+                replacement.economic_effective_at
+                != corrected.economic_effective_at
+                or replacement.economic_order_key
+                != corrected.economic_order_key
+                or replacement.observed_at != reversal.observed_at
+            ):
+                raise AccountingConflict(
+                    "Corrected FIFO lineage changed economic identity or observation evidence"
+                )
+
+    active_fills: list[tuple[JournalTransaction, Decimal, Decimal]] = []
+    for transaction in transactions:
+        if (
+            transaction.transaction_id in reversed_ids
+            or transaction.transaction_id in reversal_ids
+        ):
+            continue
+        terms = _canonical_equity_fill_terms(
+            transaction,
+            instrument=symbol,
+            settlement_currency=settlement,
+        )
+        if terms is None:
+            continue
+        active_fills.append((transaction, terms[0], terms[1]))
+
+    if has_position_correction:
+        ordering: set[tuple[datetime, str]] = set()
+        for transaction, _quantity, _unit_price in active_fills:
+            if (
+                transaction.economic_effective_at is None
+                or transaction.economic_order_key is None
+            ):
+                raise AccountingConflict(
+                    "Corrected FIFO history requires economic effective-time "
+                    "and immutable order evidence for every active fill"
+                )
+            key = (
+                _instant_value(
+                    transaction.economic_effective_at,
+                    field="economic_effective_at",
+                ),
+                transaction.economic_order_key,
+            )
+            if key in ordering:
+                raise AccountingConflict(
+                    "Corrected FIFO history has ambiguous economic ordering"
+                )
+            ordering.add(key)
+        active_fills.sort(
+            key=lambda item: (
+                _instant_value(
+                    item[0].economic_effective_at,
+                    field="economic_effective_at",
+                ),
+                item[0].economic_order_key,
+                item[0].transaction_id,
+            )
+        )
+
+    mutable_lots: list[list[Decimal | str]] = []
+    realized = Decimal("0")
+
+    for transaction, quantity, unit_price in active_fills:
+        remaining = quantity
+
+        while (
+            remaining != 0
+            and mutable_lots
+            and (mutable_lots[0][0] > 0) != (remaining > 0)
+        ):
+            lot_quantity = mutable_lots[0][0]
+            lot_price = mutable_lots[0][1]
+            assert isinstance(lot_quantity, Decimal)
+            assert isinstance(lot_price, Decimal)
+            close_quantity = min(abs(remaining), abs(lot_quantity))
+
+            if lot_quantity > 0:
+                realized += close_quantity * (unit_price - lot_price)
+                lot_quantity -= close_quantity
+                remaining += close_quantity
+            else:
+                realized += close_quantity * (lot_price - unit_price)
+                lot_quantity += close_quantity
+                remaining -= close_quantity
+
+            if lot_quantity == 0:
+                mutable_lots.pop(0)
+            else:
+                mutable_lots[0][0] = lot_quantity
+
+        if remaining != 0:
+            mutable_lots.append(
+                [remaining, unit_price, transaction.transaction_id]
+            )
+
+    lots = tuple(
+        EquityLot(
+            quantity=lot[0],
+            unit_price=lot[1],
+            transaction_id=lot[2],
+        )
+        for lot in mutable_lots
+    )
+    quantity = sum((lot.quantity for lot in lots), Decimal("0"))
+    open_cost_basis = sum(
+        (abs(lot.quantity) * lot.unit_price for lot in lots),
+        Decimal("0"),
+    )
+
+    unrealized: Decimal | None
+    if mark is None:
+        unrealized = None
+    else:
+        unrealized = sum(
+            (
+                abs(lot.quantity)
+                * (
+                    (mark - lot.unit_price)
+                    if lot.quantity > 0
+                    else (lot.unit_price - mark)
+                )
+                for lot in lots
+            ),
+            Decimal("0"),
+        )
+
+    return EquityPositionProjection(
+        instrument=symbol,
+        settlement_currency=settlement,
+        quantity=quantity,
+        open_cost_basis=open_cost_basis,
+        realized_pnl=realized,
+        unrealized_pnl=unrealized,
+        mark_price=mark,
+        lots=lots,
+        policy_version=(
+            "FIFO_GROSS_EFFECTIVE_V2"
+            if has_position_correction
+            else "FIFO_GROSS_V1"
+        ),
+    )

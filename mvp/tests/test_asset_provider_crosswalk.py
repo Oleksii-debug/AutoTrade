@@ -17,6 +17,7 @@ from mvp.autotrade_mvp.corporate_actions import (
     EquityState,
 )
 from mvp.autotrade_mvp.futures import linear_futures_pnl
+from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.options import (
     OptionContract,
     expiration_cash_settlement,
@@ -209,14 +210,42 @@ class AssetProviderCrosswalkTests(unittest.TestCase):
             settled_cash="500",
             currency="USD",
         )
+        instrument_id = "11111111-1111-4111-8111-111111111111"
+        version = InstrumentVersion(
+            instrument_id=instrument_id,
+            version=1,
+            provider_id="simulated",
+            venue_id="simulated-venue",
+            provider_symbol="ABC",
+            asset_class="CASH_EQUITY",
+            base_currency="ABC",
+            quote_currency="USD",
+            settlement_currency="USD",
+            quantity_unit="ABC",
+            contract_multiplier=Decimal("1"),
+            price_tick=Decimal("0.01"),
+            quantity_step=Decimal("1"),
+            minimum_quantity=Decimal("1"),
+            calendar_id="CONTINUOUS_24_7",
+            timezone_id="UTC",
+            effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            status="ACTIVE",
+        )
+        registry = InstrumentRegistry(versions=(version,))
         event = CorporateEvent.create(
             event_id="split-1",
+            instrument_id=instrument_id,
+            instrument_version=1,
             kind="SPLIT",
             effective_date=date(2026, 9, 25),
             source_revision="official-v1",
             payload={"numerator": "2", "denominator": "1"},
         )
-        book = CorporateActionBook(state)
+        book = CorporateActionBook(
+            state,
+            instrument_version=version,
+            registry=registry,
+        )
         first = book.apply(event)
         second = book.apply(event)
         self.assertEqual(first, second)

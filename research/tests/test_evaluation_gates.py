@@ -1,10 +1,17 @@
+from dataclasses import replace
+import json
+from tempfile import TemporaryDirectory
 import unittest
+from uuid import uuid4
 
+from research.autotrade_research.artifacts.store import ArtifactStore
 from research.autotrade_research.evaluation.gates import (
     EvaluationEvidence,
+    GateEvidenceRef,
     GateDecision,
     GateProfile,
     evaluate_gates,
+    gate_report_payload,
 )
 
 
@@ -48,6 +55,61 @@ def evidence(**overrides):
     )
     values.update(overrides)
     return EvaluationEvidence.create(**values)
+
+
+EVIDENCE_KINDS = (
+    "profile",
+    "code",
+    "data",
+    "model",
+    "config",
+    "cost",
+    "rights",
+    "environment",
+    "trial_log",
+    "causal_audit",
+    "financial_invariants",
+    "retention",
+    "metrics",
+    "independent_review",
+)
+
+
+def evaluate_with_verified_bundle(gate_profile, evaluation_evidence):
+    with TemporaryDirectory() as directory:
+        store = ArtifactStore(directory)
+        refs = {}
+        for kind in EVIDENCE_KINDS:
+            artifact_id = str(uuid4())
+            is_report = kind in {
+                "profile",
+                "trial_log",
+                "causal_audit",
+                "financial_invariants",
+                "retention",
+                "metrics",
+                "independent_review",
+            }
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=(
+                    gate_report_payload(kind, gate_profile, evaluation_evidence)
+                    if is_report
+                    else f"{gate_profile.profile_id}:{kind}".encode("utf-8")
+                ),
+                media_type=("application/json" if is_report else "application/octet-stream"),
+                rights={"storage": True, "export": False},
+                metadata={
+                    "evidence_kind": kind,
+                    "profile_id": gate_profile.profile_id,
+                },
+            )
+            refs[kind] = GateEvidenceRef(
+                artifact_id=artifact_id,
+                sha256=manifest["sha256"],
+            )
+        bound = replace(evaluation_evidence, evidence_refs=refs)
+        return evaluate_gates(gate_profile, bound, artifact_store=store)
 
 
 class EvaluationGateTests(unittest.TestCase):
@@ -96,7 +158,219 @@ class EvaluationGateTests(unittest.TestCase):
             EvaluationEvidence(**{**base, "regime_coverage": frozenset({"normal", 7})})
 
     def test_complete_registered_evidence_can_pass(self):
-        self.assertEqual(evaluate_gates(profile(), evidence()).status, "PASS")
+        self.assertEqual(
+            evaluate_with_verified_bundle(profile(), evidence()).status,
+            "PASS",
+        )
+
+
+    def test_all_true_metrics_without_resolvable_evidence_cannot_pass(self):
+        decision = evaluate_gates(profile(), evidence())
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertEqual(decision.checks["evidence_bundle"], "INCONCLUSIVE")
+
+    def test_incomplete_or_mismatched_evidence_bundle_fails_closed(self):
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"wrong-kind",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                metadata={
+                    "evidence_kind": "code",
+                    "profile_id": gate_profile.profile_id,
+                },
+            )
+            bound = replace(
+                evidence(),
+                evidence_refs={
+                    "code": GateEvidenceRef(
+                        artifact_id=artifact_id,
+                        sha256=manifest["sha256"],
+                    )
+                },
+            )
+            decision = evaluate_gates(
+                gate_profile,
+                bound,
+                artifact_store=store,
+            )
+            self.assertEqual(decision.status, "FAIL")
+            self.assertEqual(decision.checks["evidence_bundle"], "FAIL")
+
+    def test_verified_bundle_requires_independent_review_artifact(self):
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            refs = {}
+            base_evidence = evidence()
+            for kind in EVIDENCE_KINDS:
+                if kind == "independent_review":
+                    continue
+                artifact_id = str(uuid4())
+                is_report = kind in {
+                    "profile",
+                    "trial_log",
+                    "causal_audit",
+                    "financial_invariants",
+                    "retention",
+                    "metrics",
+                }
+                manifest = store.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=(
+                        gate_report_payload(kind, gate_profile, base_evidence)
+                        if is_report
+                        else kind.encode("utf-8")
+                    ),
+                    media_type=("application/json" if is_report else "application/octet-stream"),
+                    rights={"storage": True, "export": False},
+                    metadata={
+                        "evidence_kind": kind,
+                        "profile_id": gate_profile.profile_id,
+                    },
+                )
+                refs[kind] = GateEvidenceRef(
+                    artifact_id=artifact_id,
+                    sha256=manifest["sha256"],
+                )
+
+            decision = evaluate_gates(
+                gate_profile,
+                replace(evidence(), evidence_refs=refs),
+                artifact_store=store,
+            )
+            self.assertEqual(decision.status, "FAIL")
+            self.assertEqual(decision.checks["evidence_bundle"], "FAIL")
+
+    def test_evidence_digest_and_profile_binding_are_verified(self):
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            refs = {}
+            base_evidence = evidence()
+            for kind in EVIDENCE_KINDS:
+                artifact_id = str(uuid4())
+                is_report = kind in {
+                    "profile",
+                    "trial_log",
+                    "causal_audit",
+                    "financial_invariants",
+                    "retention",
+                    "metrics",
+                    "independent_review",
+                }
+                manifest = store.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=(
+                        gate_report_payload(kind, gate_profile, base_evidence)
+                        if is_report
+                        else kind.encode("utf-8")
+                    ),
+                    media_type=("application/json" if is_report else "application/octet-stream"),
+                    rights={"storage": True, "export": False},
+                    metadata={
+                        "evidence_kind": kind,
+                        "profile_id": (
+                            "other-profile"
+                            if kind == "metrics"
+                            else gate_profile.profile_id
+                        ),
+                    },
+                )
+                refs[kind] = GateEvidenceRef(
+                    artifact_id=artifact_id,
+                    sha256=manifest["sha256"],
+                )
+            decision = evaluate_gates(
+                gate_profile,
+                replace(evidence(), evidence_refs=refs),
+                artifact_store=store,
+            )
+            self.assertEqual(decision.status, "FAIL")
+            self.assertEqual(decision.checks["evidence_bundle"], "FAIL")
+
+    def test_metrics_artifact_must_exactly_bind_reported_gate_values(self):
+        gate_profile = profile()
+        base_evidence = evidence()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            refs = {}
+            for kind in EVIDENCE_KINDS:
+                artifact_id = str(uuid4())
+                if kind in {
+                    "profile",
+                    "trial_log",
+                    "causal_audit",
+                    "financial_invariants",
+                    "retention",
+                    "metrics",
+                    "independent_review",
+                }:
+                    payload = gate_report_payload(kind, gate_profile, base_evidence)
+                    media_type = "application/json"
+                    if kind == "metrics":
+                        decoded = json.loads(payload.decode("utf-8"))
+                        decoded["net_advantage"] = "0.30"
+                        payload = json.dumps(
+                            decoded,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                else:
+                    payload = kind.encode("utf-8")
+                    media_type = "application/octet-stream"
+                manifest = store.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=payload,
+                    media_type=media_type,
+                    rights={"storage": True, "export": False},
+                    metadata={
+                        "evidence_kind": kind,
+                        "profile_id": gate_profile.profile_id,
+                    },
+                )
+                refs[kind] = GateEvidenceRef(
+                    artifact_id=artifact_id,
+                    sha256=manifest["sha256"],
+                )
+
+            decision = evaluate_gates(
+                gate_profile,
+                replace(base_evidence, evidence_refs=refs),
+                artifact_store=store,
+            )
+            self.assertEqual(decision.status, "FAIL")
+            self.assertEqual(decision.checks["evidence_bundle"], "FAIL")
+
+    def test_lower_bound_cannot_exceed_reported_point_estimate(self):
+        decision = evaluate_gates(
+            profile(),
+            evidence(
+                dependence_aware_lower_bound="999",
+                net_advantage="0.03",
+            ),
+        )
+        self.assertEqual(decision.status, "FAIL")
+        self.assertEqual(decision.checks["uncertainty_consistency"], "FAIL")
+        self.assertIn(
+            "lower bound exceeds",
+            " ".join(decision.reasons),
+        )
+
+    def test_consistent_lower_bound_and_point_estimate_can_pass(self):
+        decision = evaluate_with_verified_bundle(
+            profile(),
+            evidence(
+                dependence_aware_lower_bound="0.02",
+                net_advantage="0.03",
+            ),
+        )
+        self.assertEqual(decision.checks["uncertainty_consistency"], "PASS")
+        self.assertEqual(decision.status, "PASS")
 
     def test_missing_uncertainty_is_inconclusive_not_pass(self):
         self.assertEqual(
@@ -245,7 +519,7 @@ class EvaluationGateTests(unittest.TestCase):
         self.assertEqual(decision.checks["primary_baseline"], "FAIL")
 
     def test_gate_decision_checks_are_immutable_after_evaluation(self):
-        decision = evaluate_gates(profile(), evidence())
+        decision = evaluate_with_verified_bundle(profile(), evidence())
         self.assertEqual(decision.status, "PASS")
         with self.assertRaises(TypeError):
             decision.checks["net_advantage"] = "FAIL"
@@ -302,6 +576,56 @@ class EvaluationGateTests(unittest.TestCase):
                 max_trials=10,
                 required_regimes=("normal",),
             )
+
+
+    def test_multi_trial_protocol_cannot_register_noop_multiplicity_treatment(self):
+        for correction in ("none", "UNADJUSTED", "disabled", "n/a"):
+            with self.subTest(correction=correction):
+                with self.assertRaisesRegex(ValueError, "multiplicity treatment"):
+                    GateProfile.create(
+                        profile_id="bad-multiplicity",
+                        minimum_net_advantage="0.01",
+                        max_drawdown="0.10",
+                        max_adverse_cost_loss="0.03",
+                        min_power="0.80",
+                        primary_baseline_id="champion",
+                        baseline_ids=("champion",),
+                        selection_correction=correction,
+                        max_trials=2,
+                        required_regimes=("normal",),
+                    )
+
+        with self.assertRaisesRegex(ValueError, "multiplicity treatment"):
+            GateProfile(
+                profile_id="direct-bad-multiplicity",
+                minimum_net_advantage="0.01",
+                max_drawdown="0.10",
+                max_adverse_cost_loss="0.03",
+                min_power="0.80",
+                primary_baseline_id="champion",
+                baseline_ids=("champion",),
+                selection_correction="none",
+                max_trials=2,
+                required_regimes=("normal",),
+                require_complete_trials=True,
+                require_causal_audit=True,
+                require_financial_invariants=True,
+            )
+
+    def test_single_trial_protocol_may_explicitly_register_no_adjustment(self):
+        single = GateProfile.create(
+            profile_id="single-trial",
+            minimum_net_advantage="0.01",
+            max_drawdown="0.10",
+            max_adverse_cost_loss="0.03",
+            min_power="0.80",
+            primary_baseline_id="champion",
+            baseline_ids=("champion",),
+            selection_correction="none",
+            max_trials=1,
+            required_regimes=("normal",),
+        )
+        self.assertEqual(single.selection_correction, "none")
 
 
 if __name__ == "__main__":

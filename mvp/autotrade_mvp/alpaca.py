@@ -8,7 +8,7 @@ network requests or granting financial authority.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
@@ -19,6 +19,11 @@ from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .capabilities import CapabilitySnapshot
+from .provider_core import (
+    ProviderResponseObservation,
+    ProviderSubmissionObservation,
+    Surface,
+)
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
@@ -195,21 +200,112 @@ class AlpacaOrderIntent:
         )
 
 
+_ALPACA_PREPARED_REQUEST_FACTORY_TOKEN = object()
+
+
 @dataclass(frozen=True)
 class AlpacaPreparedRequest:
     endpoint: str
     body: Mapping[str, object]
+    account_id: str
+    environment: str
     capability_snapshot_id: str
     documentation_refs: tuple[str, ...]
+    instrument_versions: tuple[str, ...] = ()
+    capability_snapshot_ids: tuple[str, ...] = ()
+    body_sha256: str = field(init=False)
+    _factory_token: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
+        if self._factory_token is not _ALPACA_PREPARED_REQUEST_FACTORY_TOKEN:
+            raise AlpacaAdapterError(
+                "AlpacaPreparedRequest must be created by a canonical preparation factory"
+            )
+        endpoint = _text(self.endpoint, name="endpoint")
+        if endpoint != "/v2/orders":
+            raise AlpacaAdapterError("prepared order endpoint must be /v2/orders")
+        if not isinstance(self.body, Mapping):
+            raise TypeError("body must be a mapping")
+        body = dict(self.body)
+        body["client_order_id"] = validate_client_order_id(body.get("client_order_id"))
+        try:
+            rendered_body = json.dumps(
+                body,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as error:
+            raise AlpacaAdapterError(
+                "prepared order body must be canonical JSON"
+            ) from error
+        account = _text(self.account_id, name="account_id")
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"PAPER", "LIVE"}:
+            raise AlpacaAdapterError("environment must be PAPER or LIVE")
+        capability_snapshot_id = _text(
+            self.capability_snapshot_id,
+            name="capability_snapshot_id",
+        )
+        refs = tuple(
+            _text(value, name="documentation_ref")
+            for value in self.documentation_refs
+        )
+        if not refs:
+            raise AlpacaAdapterError("documentation_refs must not be empty")
+        if not isinstance(self.instrument_versions, tuple):
+            raise TypeError("instrument_versions must be a tuple")
+        instrument_versions = tuple(
+            _text(value, name="instrument_version")
+            for value in self.instrument_versions
+        )
+        if not instrument_versions:
+            raise AlpacaAdapterError("instrument_versions must not be empty")
+        if len(instrument_versions) != len(set(instrument_versions)):
+            raise AlpacaAdapterError("instrument_versions must be unique")
+        raw_snapshot_ids = (
+            self.capability_snapshot_ids
+            if self.capability_snapshot_ids
+            else (capability_snapshot_id,)
+        )
+        if not isinstance(raw_snapshot_ids, tuple):
+            raise TypeError("capability_snapshot_ids must be a tuple")
+        snapshot_ids = tuple(
+            _text(value, name="capability_snapshot_id")
+            for value in raw_snapshot_ids
+        )
+        if len(snapshot_ids) != len(set(snapshot_ids)):
+            raise AlpacaAdapterError("capability_snapshot_ids must be unique")
+        if capability_snapshot_id not in snapshot_ids:
+            raise AlpacaAdapterError(
+                "primary capability_snapshot_id must be included in capability_snapshot_ids"
+            )
+        if len(snapshot_ids) != len(instrument_versions):
+            raise AlpacaAdapterError(
+                "capability snapshot identities must match instrument versions one-for-one"
+            )
+        object.__setattr__(self, "endpoint", endpoint)
+        object.__setattr__(self, "body", MappingProxyType(body))
+        object.__setattr__(
+            self,
+            "body_sha256",
+            "sha256:" + sha256(rendered_body.encode("utf-8")).hexdigest(),
+        )
+        object.__setattr__(self, "account_id", account)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "capability_snapshot_id", capability_snapshot_id)
+        object.__setattr__(self, "documentation_refs", refs)
+        object.__setattr__(self, "instrument_versions", instrument_versions)
+        object.__setattr__(self, "capability_snapshot_ids", snapshot_ids)
 
 
 def prepare_order_request(
     intent: AlpacaOrderIntent,
     *,
     client_order_id: str,
+    account_id: str,
+    environment: str,
     capability: CapabilitySnapshot,
     at: datetime,
 ) -> AlpacaPreparedRequest:
@@ -219,8 +315,16 @@ def prepare_order_request(
         raise TypeError("capability must be CapabilitySnapshot")
     point = _instant(at, name="at")
     client_id = validate_client_order_id(client_order_id)
+    account = _text(account_id, name="account_id")
+    environment_value = _text(environment, name="environment").upper()
+    if environment_value not in {"PAPER", "LIVE"}:
+        raise AlpacaAdapterError("environment must be PAPER or LIVE")
     if capability.provider_id.upper() != "ALPACA":
         raise AlpacaAdapterError("capability belongs to another provider")
+    if capability.account_id != account:
+        raise AlpacaAdapterError("capability account does not match target account")
+    if capability.environment.upper() != environment_value:
+        raise AlpacaAdapterError("capability environment does not match target environment")
     if capability.instrument_version != intent.instrument_version:
         raise AlpacaAdapterError("capability instrument version does not match intent")
     if not capability.admits(
@@ -253,8 +357,12 @@ def prepare_order_request(
     return AlpacaPreparedRequest(
         endpoint="/v2/orders",
         body=body,
+        account_id=account,
+        environment=environment_value,
         capability_snapshot_id=capability.snapshot_id,
         documentation_refs=tuple(ALPACA_DOCS.values()),
+        instrument_versions=(intent.instrument_version,),
+        _factory_token=_ALPACA_PREPARED_REQUEST_FACTORY_TOKEN,
     )
 
 
@@ -374,36 +482,48 @@ def _uuid_text(value: object, *, name: str) -> str:
 
 
 def _response_evidence(
-    response: Mapping[str, object],
+    observation: ProviderSubmissionObservation,
     *,
-    observed_at: str,
-    environment: str,
+    prepared_request: AlpacaPreparedRequest,
 ) -> dict[str, str]:
-    encoded = json.dumps(
-        response,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
-    digest = sha256(encoded).hexdigest()
-    env = _text(environment, name="environment").upper()
+    if not isinstance(observation, ProviderSubmissionObservation):
+        raise TypeError("observation must be ProviderSubmissionObservation")
+    if not isinstance(prepared_request, AlpacaPreparedRequest):
+        raise TypeError("prepared_request must be AlpacaPreparedRequest")
+    cid = validate_client_order_id(
+        _text(
+            prepared_request.body.get("client_order_id"),
+            name="prepared_request.client_order_id",
+        )
+    )
+    observation.require_scope(
+        provider_id="ALPACA",
+        endpoint=prepared_request.endpoint,
+        prepared_request_sha256=prepared_request.body_sha256,
+        capability_snapshot_ids=prepared_request.capability_snapshot_ids,
+        instrument_versions=prepared_request.instrument_versions,
+        account_id=prepared_request.account_id,
+        environment=prepared_request.environment,
+        client_order_id=cid,
+    )
+    env = prepared_request.environment
     if env == "PAPER":
         host = "paper-api.alpaca.markets"
     elif env == "LIVE":
         host = "api.alpaca.markets"
     else:
         raise AlpacaAdapterError("response environment must be PAPER or LIVE")
+    source = f"https://{host}/v2/orders"
     return {
         "artifact_id": str(
             uuid5(
                 NAMESPACE_URL,
-                f"https://{host}/v2/orders#sha256:{digest}",
+                f"{source}#{observation.evidence_ref}",
             )
         ),
-        "sha256": "sha256:" + digest,
-        "source_uri": f"https://{host}/v2/orders",
-        "observed_at": _utc_text(observed_at, name="observed_at"),
+        "sha256": observation.response_sha256,
+        "source_uri": source,
+        "observed_at": observation.observed_at,
         "rights_id": "provider-observation-alpaca",
     }
 
@@ -411,28 +531,30 @@ def _response_evidence(
 def parse_submission_response(
     *,
     attempt_id: str,
-    client_order_id: str,
-    response: Mapping[str, object] | None,
-    observed_at: str,
-    environment: str,
+    prepared_request: AlpacaPreparedRequest,
+    observation: ProviderSubmissionObservation | None = None,
     transport_ambiguous: bool = False,
 ) -> dict[str, object]:
-    """Map a recorded successful create-order response to SubmissionResult.
+    """Map one durable exact create-order response to SubmissionResult.
 
-    A returned Order object is acknowledgement only. Even if its status says
-    filled, unique execution economics must come from activity evidence.
+    Acknowledgement/rejection authority comes only from exact response bytes
+    already bound to the canonical guarded SubmissionSent journal event. A
+    decoded mapping supplied by a caller is never a write-evidence authority.
     """
 
     aid = _uuid_text(attempt_id, name="attempt_id")
-    cid = validate_client_order_id(client_order_id)
-    when = _utc_text(observed_at, name="observed_at")
-    env = _text(environment, name="environment").upper()
-    if env not in {"PAPER", "LIVE"}:
-        raise AlpacaAdapterError("response environment must be PAPER or LIVE")
+    if not isinstance(prepared_request, AlpacaPreparedRequest):
+        raise TypeError("prepared_request must be AlpacaPreparedRequest")
+    cid = validate_client_order_id(
+        _text(
+            prepared_request.body.get("client_order_id"),
+            name="prepared_request.client_order_id",
+        )
+    )
     if type(transport_ambiguous) is not bool:
         raise TypeError("transport_ambiguous must be boolean")
     if transport_ambiguous:
-        if response is not None:
+        if observation is not None:
             raise AlpacaAdapterError(
                 "ambiguous transport must not fabricate a provider response"
             )
@@ -440,15 +562,23 @@ def parse_submission_response(
             "attempt_id": aid,
             "outcome": "UNKNOWN",
             "client_order_id": cid,
-            "provider_received_at": None,
-            "observed_at": when,
-            "provider_environment": env,
             "reason_code": "ALPACA_TRANSPORT_AMBIGUOUS",
             "evidence": [],
             "retry_disposition": "RECONCILE_FIRST",
         }
+    if not isinstance(observation, ProviderSubmissionObservation):
+        raise TypeError(
+            "observation must be durable ProviderSubmissionObservation"
+        )
+    if observation.response_binding.attempt_id != aid:
+        raise AlpacaAdapterError("submission observation attempt_id mismatch")
+    evidence = _response_evidence(
+        observation,
+        prepared_request=prepared_request,
+    )
+    response = observation.payload
     if not isinstance(response, Mapping):
-        raise TypeError("response must be a mapping")
+        raise AlpacaAdapterError("provider response payload must be an object")
     provider_order_id = _uuid_text(response.get("id"), name="response.id")
     echoed = validate_client_order_id(
         _text(response.get("client_order_id"), name="response.client_order_id")
@@ -462,33 +592,36 @@ def parse_submission_response(
         "outcome": "ACKNOWLEDGED",
         "provider_order_id": provider_order_id,
         "client_order_id": cid,
-        "provider_received_at": when,
-        "evidence": [
-            _response_evidence(
-                response,
-                observed_at=when,
-                environment=env,
-            )
-        ],
+        "evidence": [evidence],
         "retry_disposition": "NEVER",
     }
 
 
 def parse_trade_activities(
-    activities: object,
+    observation: ProviderResponseObservation,
     *,
     instrument_versions: Mapping[str, str],
     client_ids_by_order_id: Mapping[str, str | None],
     fees_by_activity_id: Mapping[str, tuple[object, str]],
 ) -> tuple[ProviderFillEvidence, ...]:
-    """Map FILL activities only when separate fee evidence is bound.
+    """Map one authenticated, exact-byte Alpaca FILL activity read into fills.
 
     The documented trade-activity row contains execution quantity/price and
     order identity but not canonical per-fill fee amount/currency. AutoTrade
-    refuses to invent zero fees.
+    refuses to invent zero fees or caller-authored account/environment labels.
     """
 
-    if not isinstance(activities, list):
+    if not isinstance(observation, ProviderResponseObservation):
+        raise TypeError("observation must be ProviderResponseObservation")
+    observation.require_scope(
+        provider_id="ALPACA",
+        surface=Surface.ACTIVITIES,
+        endpoint="/v2/account/activities/FILL",
+    )
+    activities = observation.payload
+    account_id = observation.account_id
+    environment = observation.environment
+    if not isinstance(activities, (list, tuple)):
         raise AlpacaAdapterError("activities must be an array")
     for name, mapping in (
         ("instrument_versions", instrument_versions),
@@ -527,6 +660,9 @@ def parse_trade_activities(
             )
         fee_amount, fee_currency = fees_by_activity_id[activity_id]
         fill = ProviderFillEvidence.create(
+            provider_id="ALPACA",
+            account_id=account_id,
+            environment=environment,
             provider_execution_id=activity_id,
             client_order_id=client_id,
             instrument=instrument,
@@ -549,6 +685,8 @@ def parse_trade_activities(
 
 def coverage_evidence(
     *,
+    account_id: str,
+    environment: str,
     surface: str,
     coverage_start: str,
     coverage_end: str,
@@ -574,6 +712,9 @@ def coverage_evidence(
         if type(value) is not bool:
             raise AlpacaAdapterError(f"{name} must be boolean")
     return CoverageSurfaceEvidence(
+        provider_id="ALPACA",
+        account_id=account_id,
+        environment=environment,
         surface=normalized,
         coverage_start=coverage_start,
         coverage_end=coverage_end,
@@ -814,6 +955,14 @@ def prepare_mleg_order_request(
     return AlpacaPreparedRequest(
         endpoint="/v2/orders",
         body=body,
+        account_id=first_capability.account_id,
+        environment=first_capability.environment,
         capability_snapshot_id=first_capability.snapshot_id,
         documentation_refs=tuple(ALPACA_DOCS.values()) + (_ALPACA_MLEG_DOC,),
+        instrument_versions=tuple(leg.instrument_version for leg in intent.legs),
+        capability_snapshot_ids=tuple(
+            capabilities[leg.instrument_version].snapshot_id
+            for leg in intent.legs
+        ),
+        _factory_token=_ALPACA_PREPARED_REQUEST_FACTORY_TOKEN,
     )

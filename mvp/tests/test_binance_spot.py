@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import json
 import unittest
 from uuid import uuid4
 
@@ -11,38 +12,94 @@ from mvp.autotrade_mvp.binance_spot import (
     parse_order_ack,
     prepare_order_request,
 )
-from mvp.autotrade_mvp.capabilities import CapabilitySnapshot
+from mvp.autotrade_mvp.provider_core import (
+    Surface,
+    observe_authenticated_json_response,
+    prepare_authenticated_read_query,
+)
+from mvp.autotrade_mvp.capabilities import (
+    CapabilityClaim,
+    EvidenceVerification,
+    derive_capability_snapshot,
+)
 
 
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
-def capability(*, order_types=("LIMIT", "MARKET"), tif=("GTC", "IOC", "FOK", "NONE")):
-    evidence = {
-        "artifact_id": str(uuid4()),
-        "sha256": "sha256:" + "b" * 64,
-        "observed_at": "2026-09-24T19:00:00Z",
-        "source_uri": "https://developers.binance.com/en/docs/products/spot",
-    }
-    return CapabilitySnapshot(
+def execution_observation(
+    rows,
+    *,
+    account_id="paper-1",
+    environment="PAPER",
+    instrument_version="BTCUSDT:v1",
+    surface=Surface.AUTHENTICATED_READ,
+):
+    query = prepare_authenticated_read_query(
+        capability=capability(
+            account_id=account_id,
+            environment=environment,
+            instrument_version=instrument_version,
+        ),
+        surface=surface,
+        endpoint="/api/v3/myTrades",
+        query={"symbol": "BTCUSDT"},
+        at=NOW,
+        permission_scope="ORDER.READ",
+    )
+    raw = json.dumps(
+        rows,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return observe_authenticated_json_response(
+        query_binding=query,
+        response_bytes=raw,
+        observed_at=NOW,
+    )
+
+def capability(
+    *,
+    order_types=("LIMIT", "MARKET"),
+    tif=("GTC", "IOC", "FOK", "NONE"),
+    account_id="account-1",
+    environment="PAPER",
+    instrument_version="BTCUSDT:v1",
+):
+    observed_at = NOW - timedelta(hours=1)
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            provider_id="BINANCE",
+            account_id=account_id,
+            entity_id="global",
+            environment=environment,
+            instrument_version="BTCUSDT:v1",
+            observed_at=observed_at,
+            expires_at=NOW + timedelta(hours=1),
+            supported_order_types=frozenset(order_types),
+            time_in_force=frozenset(tif),
+            permission_scopes=frozenset({"ORDER_WRITE", "ORDER.READ"}),
+            position_mode="NET",
+            native_protection=frozenset(),
+            rate_limit_policy_id="binance-spot-foundation",
+            data_entitlements=frozenset({"ORDERS", "TRADES"}),
+            evidence_ref={
+                "artifact_id": str(uuid4()),
+                "sha256": "sha256:" + "b" * 64,
+                "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+                "source_uri": "https://developers.binance.com/en/docs/products/spot",
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    return derive_capability_snapshot(
         snapshot_id=str(uuid4()),
-        provider_id="BINANCE",
-        account_id="account-1",
-        entity_id="global",
-        environment="TEST",
-        instrument_version="BTCUSDT:v1",
-        observed_at=NOW - timedelta(hours=1),
-        expires_at=NOW + timedelta(hours=1),
-        supported_order_types=frozenset(order_types),
-        time_in_force=frozenset(tif),
-        permission_scopes=frozenset({"ORDER_WRITE"}),
-        position_mode="NET",
-        native_protection=frozenset(),
-        rate_limit_policy_id="binance-spot-foundation",
-        data_entitlements=frozenset({"ORDERS", "TRADES"}),
-        evidence=(evidence,),
-        status="VERIFIED",
-        sources=frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}),
+        claims=claims,
+        observed_at=observed_at,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
     )
 
 
@@ -154,14 +211,18 @@ class BinanceSpotFoundationTests(unittest.TestCase):
                 "time": 1790272800123,
             }
         ]
+        observation = execution_observation([rows[0], dict(rows[0])])
         fills = parse_account_trades(
-            [rows[0], dict(rows[0])],
+            observation,
             instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
             client_ids_by_order_id={42: "at-ack-1"},
         )
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].provider_execution_id, "BINANCE-SPOT:BTCUSDT:7")
         self.assertEqual(fills[0].client_order_id, "at-ack-1")
+        self.assertEqual(fills[0].account_id, "paper-1")
+        self.assertEqual(fills[0].environment, "PAPER")
+        self.assertEqual(fills[0].evidence_refs, (observation.evidence_ref,))
         self.assertEqual(fills[0].quantity, Decimal("0.2"))
         self.assertEqual(fills[0].fee_currency, "BNB")
 
@@ -179,12 +240,14 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         changed = dict(first, qty="0.3")
         with self.assertRaisesRegex(BinanceSpotAdapterError, "conflicting"):
             parse_account_trades(
-                [first, changed],
+                execution_observation([first, changed]),
                 instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
             )
 
     def test_absence_semantics_are_never_assumed_from_empty_surface(self):
         evidence = coverage_evidence(
+            account_id="paper-1",
+            environment="PAPER",
             surface="ORDER_HISTORY",
             coverage_start="2026-09-24T17:00:00Z",
             coverage_end="2026-09-24T19:00:00Z",
@@ -193,6 +256,8 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         )
         self.assertFalse(evidence.provider_semantics_exclude_execution)
         qualified = coverage_evidence(
+            account_id="paper-1",
+            environment="PAPER",
             surface="ORDER_HISTORY",
             coverage_start="2026-09-24T17:00:00Z",
             coverage_end="2026-09-24T19:00:00Z",

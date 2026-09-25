@@ -678,7 +678,7 @@ def simulate_execution(
             observation.interval_start,
             name="interval_start",
         )
-        if arrival >= interval_start:
+        if interval_start < arrival:
             return SimulatedExecution(
                 status="AMBIGUOUS_NO_FILL",
                 filled_quantity=Decimal("0"),

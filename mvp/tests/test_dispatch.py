@@ -1,8 +1,17 @@
 from tempfile import TemporaryDirectory
 import unittest
+from uuid import UUID
 
-from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id
+from mvp.autotrade_mvp.dispatch import (
+    DispatchBlocked,
+    ExactJsonTransportResponse,
+    GuardedDispatcher,
+    SubmissionResponseBinding,
+    load_submission_response_binding,
+    stable_client_order_id,
+)
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.recovery import RecoveryController
 
 
 class SimulatedProcessDeath(BaseException):
@@ -34,6 +43,52 @@ class DispatchTests(unittest.TestCase):
         )
         self.assertNotEqual(paper, live)
         self.assertNotEqual(paper, other_account)
+
+    def test_uuid_client_order_id_is_deterministic_scope_bound_and_not_truncated(self):
+        first = stable_client_order_id(
+            "KRAKEN",
+            "intent-uuid",
+            environment="LIVE",
+            account_id="spot-account",
+            max_length=36,
+            client_id_format="UUID",
+        )
+        repeated = stable_client_order_id(
+            "KRAKEN",
+            "intent-uuid",
+            environment="LIVE",
+            account_id="spot-account",
+            max_length=36,
+            client_id_format="uuid",
+        )
+        other_scope = stable_client_order_id(
+            "KRAKEN",
+            "intent-uuid",
+            environment="LIVE",
+            account_id="other-account",
+            max_length=36,
+            client_id_format="UUID",
+        )
+        self.assertEqual(str(UUID(first)), first)
+        self.assertEqual(first, repeated)
+        self.assertNotEqual(first, other_scope)
+        with self.assertRaisesRegex(ValueError, "at least 36"):
+            stable_client_order_id(
+                "KRAKEN",
+                "intent-uuid",
+                environment="LIVE",
+                account_id="spot-account",
+                max_length=32,
+                client_id_format="UUID",
+            )
+        with self.assertRaisesRegex(ValueError, "TOKEN or UUID"):
+            stable_client_order_id(
+                "KRAKEN",
+                "intent-uuid",
+                environment="LIVE",
+                account_id="spot-account",
+                client_id_format="provider-magic",
+            )
 
     def test_delimiters_inside_external_ids_cannot_alias_client_identity(self):
         first = stable_client_order_id(
@@ -99,6 +154,7 @@ class DispatchTests(unittest.TestCase):
                     now="2026-09-24T18:00:00Z",
                     authority_check=authority,
                     transport_send=transport,
+                    sender_check=lambda _owner, _epoch: None,
                 )
                 self.assertEqual(outcome.status, "SENT")
 
@@ -112,8 +168,14 @@ class DispatchTests(unittest.TestCase):
             )
             self.assertEqual(len(paper_events), 3)
             self.assertEqual(len(live_events), 3)
-            self.assertTrue(all(event["environment"] == "PAPER" for event in paper_events))
-            self.assertTrue(all(event["environment"] == "LIVE" for event in live_events))
+            self.assertEqual(paper_events[0]["payload"]["environment"], "PAPER")
+            self.assertEqual(paper_events[0]["payload"]["account_id"], "acct")
+            self.assertEqual(live_events[0]["payload"]["environment"], "LIVE")
+            self.assertEqual(live_events[0]["payload"]["account_id"], "acct")
+            self.assertNotEqual(
+                paper_events[0]["aggregate_id"],
+                live_events[0]["aggregate_id"],
+            )
 
     def test_success_uses_final_barrier_and_persists_three_states(self):
         with TemporaryDirectory() as directory:
@@ -603,6 +665,171 @@ class DispatchTests(unittest.TestCase):
                 ["SubmissionPrepared", "SubmissionBlocked"],
             )
 
+    def test_exact_provider_response_bytes_are_durable_and_restart_stable(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            raw = b'{ "provider_order_id" : "p-1", "ok" : true }'
+
+            result = dispatcher.dispatch(
+                attempt_id="exact-response-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(raw),
+                )[1],
+                submission_scope={
+                    "endpoint": "/orders",
+                    "capability_snapshot_ids": ["cap-1"],
+                    "instrument_versions": ["BTCUSD:v1"],
+                },
+            )
+            self.assertEqual(result.status, "SENT")
+            self.assertEqual(result.response["provider_order_id"], "p-1")
+
+            binding = load_submission_response_binding(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="exact-response-a1",
+            )
+            self.assertIsInstance(binding, SubmissionResponseBinding)
+            self.assertEqual(binding.response_bytes, raw)
+            self.assertEqual(
+                binding.response_sha256,
+                "sha256:" + __import__("hashlib").sha256(raw).hexdigest(),
+            )
+            self.assertEqual(binding.payload["provider_order_id"], "p-1")
+            self.assertEqual(binding.submission_scope["endpoint"], "/orders")
+
+            reopened = JournalStore(f"{directory}/journal.sqlite3")
+            after_restart = load_submission_response_binding(
+                reopened,
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="exact-response-a1",
+            )
+            self.assertEqual(after_restart.response_bytes, binding.response_bytes)
+            self.assertEqual(after_restart.response_sha256, binding.response_sha256)
+            self.assertEqual(
+                after_restart.submission_scope_hash,
+                binding.submission_scope_hash,
+            )
+
+    def test_mapping_response_cannot_mint_exact_durable_response_provenance(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            result = dispatcher.dispatch(
+                attempt_id="legacy-response-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="provider",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    {"provider_order_id": "p-1"},
+                )[1],
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(result.status, "SENT")
+            with self.assertRaisesRegex(
+                ValueError,
+                "exact provider response bytes are unavailable",
+            ):
+                load_submission_response_binding(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    attempt_id="legacy-response-a1",
+                )
+
+    def test_exact_response_identity_preserves_wire_whitespace(self):
+        first = ExactJsonTransportResponse(b'{"ok":true}')
+        second = ExactJsonTransportResponse(b'{ "ok" : true }')
+        self.assertEqual(first.payload, second.payload)
+        self.assertNotEqual(first.response_sha256, second.response_sha256)
+
+    def test_exact_transport_response_rejects_duplicate_keys_and_non_json(self):
+        for raw in (
+            b'{"ok":true,"ok":false}',
+            b'{"value":NaN}',
+            b'not-json',
+            b"",
+        ):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                ExactJsonTransportResponse(raw)
+
+    def test_submission_scope_is_part_of_attempt_idempotency_contract(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+
+            def transport(_cid, _request, guard):
+                guard()
+                return ExactJsonTransportResponse(b'{"ok":true}')
+
+            common = dict(
+                attempt_id="scope-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="provider",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=transport,
+            )
+            first = dispatcher.dispatch(
+                **common,
+                submission_scope={"capability_snapshot_ids": ["cap-1"]},
+            )
+            self.assertEqual(first.status, "SENT")
+            with self.assertRaisesRegex(ValueError, "conflicts"):
+                dispatcher.dispatch(
+                    **common,
+                    submission_scope={"capability_snapshot_ids": ["cap-2"]},
+                )
+
+    def test_exact_binding_cannot_be_forged_or_relabelled_to_other_scope(self):
+        with self.assertRaisesRegex(ValueError, "loaded from the durable journal"):
+            SubmissionResponseBinding(
+                attempt_id="a",
+                aggregate_id="agg",
+                provider="provider",
+                request_hash="sha256:" + "1" * 64,
+                client_order_id="client",
+                environment="SIMULATION",
+                account_id="acct",
+                prepared_at="2026-09-24T18:00:00Z",
+                sent_at="2026-09-24T18:00:01Z",
+                submission_scope={},
+                submission_scope_hash="sha256:" + "2" * 64,
+                response_bytes=b'{"ok":true}',
+                response_sha256="sha256:" + "3" * 64,
+            )
+
     def test_unserializable_provider_response_after_send_becomes_unknown(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)
@@ -731,6 +958,344 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(
                 [event["event_type"] for event in events],
                 ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+
+
+    def test_strict_authority_contract_blocks_truthy_string_before_transport(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            outbound = 0
+
+            def transport(*_args):
+                nonlocal outbound
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            result = dispatcher.dispatch(
+                attempt_id="bad-authority-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _hash, _now: ("false", "malformed"),
+                transport_send=transport,
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "authority_check_invalid_allowed")
+            self.assertEqual(outbound, 0)
+
+    def test_malformed_final_authority_result_blocks_before_outbound(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            calls = 0
+            outbound = 0
+
+            def authority(_hash, _now):
+                nonlocal calls
+                calls += 1
+                return (True, "allowed") if calls == 1 else (True, "")
+
+            def transport(_client_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            result = dispatcher.dispatch(
+                attempt_id="bad-final-authority-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "authority_check_invalid_reason")
+            self.assertEqual(outbound, 0)
+
+    def test_paper_and_live_require_sender_fence_before_outbound(self):
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment), TemporaryDirectory() as directory:
+                store = self.store(directory)
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment=environment,
+                    account_id="acct",
+                    owner_token="owner",
+                    owner_epoch=1,
+                )
+                outbound = 0
+
+                def transport(_client_id, _request, final_guard):
+                    nonlocal outbound
+                    final_guard()
+                    outbound += 1
+                    return {"provider_order_id": "must-not-happen"}
+
+                result = dispatcher.dispatch(
+                    attempt_id="fence-required",
+                    intent_id="i1",
+                    intent_hash="h1",
+                    provider="sim",
+                    request={},
+                    now="2026-09-24T18:00:00Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                )
+                self.assertEqual(result.status, "BLOCKED")
+                self.assertEqual(result.reason, "sender_fence_required")
+                self.assertEqual(outbound, 0)
+                events = store.load_events(
+                    "submission_attempt",
+                    dispatcher._aggregate_id("fence-required"),
+                )
+                self.assertEqual(
+                    [event["event_type"] for event in events],
+                    ["SubmissionPrepared", "SubmissionBlocked"],
+                )
+
+    def test_owner_transfer_during_provider_wait_blocks_stale_sender(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            recovery = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:acct",
+            )
+            owner = recovery.start("host-a")
+            recovery.record_reconciliation(consistent=True)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="acct",
+                owner_token=owner.owner_id,
+                owner_epoch=owner.epoch,
+            )
+            outbound = 0
+
+            def transport(_client_id, _request, final_guard):
+                nonlocal outbound
+                recovery.transfer_owner(
+                    new_owner_id="host-b",
+                    old_sender_fenced=True,
+                    reconciled=True,
+                )
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            result = dispatcher.dispatch(
+                attempt_id="fenced-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=transport,
+                sender_check=recovery.validate_sender,
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "sender_fence_rejected:PermissionError")
+            self.assertEqual(outbound, 0)
+
+    def test_paper_send_succeeds_only_with_current_durable_sender(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            recovery = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:acct",
+            )
+            owner = recovery.start("host-a")
+            recovery.record_reconciliation(consistent=True)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="acct",
+                owner_token=owner.owner_id,
+                owner_epoch=owner.epoch,
+            )
+            outbound = 0
+
+            def transport(_client_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "p-1"}
+
+            result = dispatcher.dispatch(
+                attempt_id="paper-current-owner",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=transport,
+                sender_check=recovery.validate_sender,
+            )
+            self.assertEqual(result.status, "SENT")
+            self.assertEqual(outbound, 1)
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("paper-current-owner"),
+            )
+            self.assertEqual(
+                [event["owner_epoch"] for event in events],
+                [str(owner.epoch), str(owner.epoch), str(owner.epoch)],
+            )
+            self.assertEqual(events[0]["payload"]["owner_epoch"], owner.epoch)
+
+    def test_owner_epoch_must_be_positive_integer(self):
+        with TemporaryDirectory() as directory:
+            for invalid in (0, -1, True):
+                with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                    ValueError, "positive integer"
+                ):
+                    GuardedDispatcher(
+                        self.store(directory),
+                        environment="SIMULATION",
+                        account_id="acct",
+                        owner_token="host-a",
+                        owner_epoch=invalid,
+                    )
+
+
+    def test_masked_final_guard_block_exception_becomes_unknown(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            calls = 0
+            outbound_after_block = 0
+
+            def authority(intent_hash, current_time):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return True, "allowed"
+                return False, "revoked_at_final_barrier"
+
+            def broken_transport(client_id, request, final_guard):
+                nonlocal outbound_after_block
+                try:
+                    final_guard()
+                except DispatchBlocked:
+                    # The wrapper violates the barrier, may perform an outbound
+                    # side effect, and then masks the original rejection with a
+                    # different transport error.
+                    outbound_after_block += 1
+                    raise OSError("provider failed after ignored guard")
+                raise AssertionError("final guard should have blocked")
+
+            result = dispatcher.dispatch(
+                attempt_id="masked-guard-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=broken_transport,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "provider_guard_contract_violation")
+            self.assertEqual(outbound_after_block, 1)
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("masked-guard-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionBlocked",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "provider_wrapper_masked_final_guard_failure:OSError",
+            )
+
+    def test_swallowed_final_guard_block_becomes_unknown(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            calls = 0
+            outbound_after_block = 0
+
+            def authority(intent_hash, current_time):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return True, "allowed"
+                return False, "revoked_at_final_barrier"
+
+            def broken_transport(client_id, request, final_guard):
+                nonlocal outbound_after_block
+                try:
+                    final_guard()
+                except DispatchBlocked:
+                    # Simulate a provider wrapper bug: it ignores the barrier
+                    # and proceeds as if a send could still have happened.
+                    outbound_after_block += 1
+                    return {"provider_order_id": "unsafe-wrapper-result"}
+                raise AssertionError("final guard should have blocked")
+
+            result = dispatcher.dispatch(
+                attempt_id="swallowed-guard-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=broken_transport,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "provider_guard_contract_violation")
+            self.assertEqual(outbound_after_block, 1)
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("swallowed-guard-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionBlocked",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "provider_wrapper_swallowed_final_guard_failure",
             )
 
 

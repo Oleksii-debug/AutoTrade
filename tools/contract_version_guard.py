@@ -36,6 +36,49 @@ def schema_definitions(root: Path, names: list[str]) -> dict[str, set[str]]:
     return result
 
 
+def schema_required_members(
+    root: Path,
+    names: list[str],
+) -> dict[str, dict[str, set[str]]]:
+    """Return required-member sets keyed by stable JSON-tree path.
+
+    Only paths present in both contract revisions are compared. A newly added
+    definition/object may introduce its own required fields without breaking
+    existing instances, while adding a required member to an existing object
+    makes previously valid payloads invalid and therefore requires a major bump.
+    """
+
+    result: dict[str, dict[str, set[str]]] = {}
+    for name in names:
+        payload = json.loads(
+            (root / "contracts" / "jsonschema" / name).read_text(encoding="utf-8")
+        )
+        paths: dict[str, set[str]] = {}
+
+        def visit(value: object, path: str) -> None:
+            if isinstance(value, dict):
+                required = value.get("required", [])
+                if (
+                    not isinstance(required, list)
+                    or any(not isinstance(item, str) or not item for item in required)
+                ):
+                    raise ValueError(f"{name} has invalid required array at {path}")
+                # Record the object path even when required is absent. This
+                # compares an existing empty required-set with the same object
+                # after a member becomes required. Truly new paths remain
+                # excluded by the base/current path intersection below.
+                paths[path] = set(required)
+                for key, child in value.items():
+                    visit(child, f"{path}/{key}")
+            elif isinstance(value, list):
+                for index, child in enumerate(value):
+                    visit(child, f"{path}/{index}")
+
+        visit(payload, "$")
+        result[name] = paths
+    return result
+
+
 def contract_bytes(root: Path) -> dict[str, bytes]:
     base = root / "contracts"
     files: dict[str, bytes] = {}
@@ -72,14 +115,32 @@ def evaluate(base_root: Path, current_root: Path) -> list[str]:
         if base_defs[name] - current_defs[name]
     }
 
-    breaking_removal = bool(removed_schemas or removed_defs)
-    if breaking_removal and current_version[0] <= base_version[0]:
+    base_required = schema_required_members(base_root, common)
+    current_required = schema_required_members(current_root, common)
+    added_required: dict[str, dict[str, list[str]]] = {}
+    for name in common:
+        common_paths = set(base_required[name]) & set(current_required[name])
+        additions = {
+            path: sorted(current_required[name][path] - base_required[name][path])
+            for path in sorted(common_paths)
+            if current_required[name][path] - base_required[name][path]
+        }
+        if additions:
+            added_required[name] = additions
+
+    breaking_change = bool(removed_schemas or removed_defs or added_required)
+    if breaking_change and current_version[0] <= base_version[0]:
         details = []
         if removed_schemas:
             details.append("removed schemas: " + ", ".join(removed_schemas))
         for name, defs in removed_defs.items():
             details.append(f"removed definitions from {name}: " + ", ".join(defs))
-        errors.append("breaking contract removal requires a new major version; " + "; ".join(details))
+        for name, paths in added_required.items():
+            for path, members in paths.items():
+                details.append(
+                    f"new required members in {name} at {path}: " + ", ".join(members)
+                )
+        errors.append("breaking contract change requires a new major version; " + "; ".join(details))
 
     return errors
 
@@ -96,12 +157,19 @@ def export_ref(ref: str) -> Path:
     return temporary
 
 
+def evaluate_refs(base_ref: str, current_ref: str = "HEAD") -> list[str]:
+    """Compare committed contract trees, never test-mutated working-tree bytes."""
+    base = export_ref(base_ref)
+    current = export_ref(current_ref)
+    return evaluate(base, current)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-ref", required=True)
+    parser.add_argument("--current-ref", default="HEAD")
     args = parser.parse_args()
-    base = export_ref(args.base_ref)
-    errors = evaluate(base, Path.cwd())
+    errors = evaluate_refs(args.base_ref, args.current_ref)
     if errors:
         for error in errors:
             print(f"ERROR: {error}")

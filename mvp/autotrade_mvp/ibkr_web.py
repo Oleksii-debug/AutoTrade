@@ -18,6 +18,7 @@ import json
 import re
 
 from .capabilities import CapabilitySnapshot
+from .provider_core import ProviderResponseObservation, Surface
 from .reconciliation import ProviderFillEvidence
 
 
@@ -512,6 +513,18 @@ def parse_cancel_response(
     )
 
 
+def _reply_id(value: object) -> str:
+    if not isinstance(value, str):
+        raise IbkrWebAdapterError("reply id must be a string")
+    reply_id = _text(value, name="reply id")
+    if (
+        re.fullmatch(r"[A-Za-z0-9._~-]+", reply_id) is None
+        or reply_id in {".", ".."}
+    ):
+        raise IbkrWebAdapterError("reply id must be a canonical URI path segment")
+    return reply_id
+
+
 @dataclass(frozen=True)
 class IbkrSubmissionOutcome:
     """Provider response classification; acknowledgement is never a fill."""
@@ -579,12 +592,9 @@ def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
     message_value = item.get("message")
     error_value = item.get("error")
     has_order = order_value is not None and order_value != ""
-    has_reply = (
-        reply_value is not None
-        and reply_value != ""
-        and message_value is not None
-        and message_value != ""
-    )
+    has_reply_shape = "id" in item and message_value is not None and message_value != ""
+    validated_reply_id = _reply_id(reply_value) if has_reply_shape else None
+    has_reply = has_reply_shape
     has_error = error_value is not None and error_value != ""
 
     if sum(bool(value) for value in (has_order, has_reply, has_error)) != 1:
@@ -614,7 +624,7 @@ def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
             raise IbkrWebAdapterError("isSuppressed must be boolean when present")
         return IbkrSubmissionOutcome(
             status="REPLY_REQUIRED",
-            reply_id=_text(str(item["id"]), name="reply id"),
+            reply_id=validated_reply_id,
             messages=messages,
             message_ids=message_ids,
         )
@@ -679,8 +689,10 @@ class IbkrRecordedSubmission:
                 raise IbkrWebAdapterError(
                     "recorded acknowledgement requires provider order identity and status"
                 )
-        if outcome == "REPLY_REQUIRED" and self.reply_id is None:
-            raise IbkrWebAdapterError("recorded reply-required outcome needs reply id")
+        if outcome == "REPLY_REQUIRED":
+            if self.reply_id is None:
+                raise IbkrWebAdapterError("recorded reply-required outcome needs reply id")
+            object.__setattr__(self, "reply_id", _reply_id(self.reply_id))
         if outcome == "REJECTED" and self.rejection_reason is None:
             raise IbkrWebAdapterError("recorded rejection needs provider reason")
         if outcome == "UNKNOWN":
@@ -800,59 +812,106 @@ def record_order_submission_result(
 class IbkrReplyRequest:
     endpoint: str
     body: Mapping[str, object]
+    attempt_id: str
+    account_id: str
+    client_order_id: str
+    response_sha256: str
 
     def __post_init__(self) -> None:
+        endpoint = _text(self.endpoint, name="endpoint")
+        prefix = "/iserver/reply/"
+        if not endpoint.startswith(prefix):
+            raise IbkrWebAdapterError("reply endpoint must use /iserver/reply/<reply-id>")
+        _reply_id(endpoint[len(prefix):])
+        if not isinstance(self.body, Mapping) or dict(self.body) != {"confirmed": True}:
+            raise IbkrWebAdapterError("reply request body must be exactly confirmed=true")
+        object.__setattr__(self, "endpoint", endpoint)
         object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
+        object.__setattr__(self, "attempt_id", _text(self.attempt_id, name="attempt_id"))
+        object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
+        object.__setattr__(
+            self,
+            "client_order_id",
+            validate_coid(self.client_order_id),
+        )
+        digest = _text(self.response_sha256, name="response_sha256")
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+            raise IbkrWebAdapterError("response_sha256 must be canonical SHA-256")
+        object.__setattr__(self, "response_sha256", digest)
 
 
 def prepare_reply_confirmation(
-    outcome: IbkrSubmissionOutcome,
+    recorded: IbkrRecordedSubmission,
     *,
+    expected_attempt_id: str,
+    expected_account_id: str,
+    expected_client_order_id: str,
     explicit_authorization: bool,
 ) -> IbkrReplyRequest:
-    """Prepare, but never send, the economically consequential second request.
+    """Prepare a reply only from the durable, exact guarded attempt observation.
 
-    The returned request must still cross the normal durable GuardedDispatcher
-    final barrier. This adapter never enables provider-wide warning suppression.
+    The returned request is bound to the attempt/account/cOID/response digest
+    that produced the reply id and must still cross GuardedDispatcher.
     """
 
-    if not isinstance(outcome, IbkrSubmissionOutcome):
-        raise TypeError("outcome must be IbkrSubmissionOutcome")
+    if not isinstance(recorded, IbkrRecordedSubmission):
+        raise TypeError("recorded must be IbkrRecordedSubmission")
     if type(explicit_authorization) is not bool:
         raise TypeError("explicit_authorization must be boolean")
-    if outcome.status != "REPLY_REQUIRED":
-        raise IbkrWebAdapterError("only a reply-required outcome can be confirmed")
+    if recorded.outcome != "REPLY_REQUIRED":
+        raise IbkrWebAdapterError("only a recorded reply-required outcome can be confirmed")
+    if recorded.response_sha256 is None:
+        raise IbkrWebAdapterError("IBKR reply requires durable provider response evidence")
+    if recorded.attempt_id != _text(expected_attempt_id, name="expected_attempt_id"):
+        raise IbkrWebAdapterError("reply attempt does not match guarded attempt")
+    if recorded.account_id != _text(expected_account_id, name="expected_account_id"):
+        raise IbkrWebAdapterError("reply account does not match guarded account")
+    expected_coid = validate_coid(expected_client_order_id)
+    if recorded.client_order_id != expected_coid:
+        raise IbkrWebAdapterError("reply cOID does not match guarded client order")
     if not explicit_authorization:
         raise IbkrWebAdapterError("IBKR reply requires explicit authorization")
     return IbkrReplyRequest(
-        endpoint=f"/iserver/reply/{outcome.reply_id}",
+        endpoint=f"/iserver/reply/{recorded.reply_id}",
         body={"confirmed": True},
+        attempt_id=recorded.attempt_id,
+        account_id=recorded.account_id,
+        client_order_id=recorded.client_order_id,
+        response_sha256=recorded.response_sha256,
     )
 
 
 def parse_web_api_trades(
-    payload: object,
+    observation: ProviderResponseObservation,
     *,
-    expected_account_id: str,
     instrument_versions_by_conid: Mapping[int, str],
     fee_currency_by_execution_id: Mapping[str, str],
 ) -> tuple[ProviderFillEvidence, ...]:
-    """Normalize the documented Web API trades surface into unique fill evidence.
+    """Normalize one capability-bound exact-byte IBKR trades read into fills.
 
-    Numeric JSON values must arrive as Decimal/string values from a qualified
-    transport decoder; binary floats are rejected by _decimal. IBKR's trade row
-    exposes commission but not a canonical commission currency, so that currency
-    remains separate observed evidence rather than being guessed from account or
-    instrument currency.
+    Account and environment are inherited from the pre-I/O VERIFIED capability
+    binding. They are deliberately not caller parameters, so reconciliation
+    evidence cannot be relabelled after the provider response is observed.
+    Numeric JSON floats remain rejected by _decimal; fee currency is separate
+    explicit evidence because the trades row does not canonically carry it.
     """
 
+    if not isinstance(observation, ProviderResponseObservation):
+        raise TypeError("observation must be ProviderResponseObservation")
+    observation.require_scope(
+        provider_id="IBKR",
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint="/iserver/account/trades",
+    )
+    payload = observation.payload
     if not isinstance(payload, (list, tuple)):
         raise IbkrWebAdapterError("trades response must be an array")
     if not isinstance(instrument_versions_by_conid, Mapping):
         raise TypeError("instrument_versions_by_conid must be a mapping")
     if not isinstance(fee_currency_by_execution_id, Mapping):
         raise TypeError("fee_currency_by_execution_id must be a mapping")
-    account = _text(expected_account_id, name="expected_account_id")
+    account = observation.account_id
+    environment = observation.environment
     by_execution: dict[str, ProviderFillEvidence] = {}
 
     for index, raw in enumerate(payload):
@@ -887,6 +946,9 @@ def parse_web_api_trades(
         )
         trade_time = _text(raw.get("trade_time"), name="trade_time")
         fill = ProviderFillEvidence.create(
+            provider_id="IBKR",
+            account_id=account,
+            environment=environment,
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=instrument,
@@ -909,6 +971,7 @@ def parse_web_api_trades(
 def execution_to_reconciliation_fill(
     execution: IbkrExecutionEvidence,
     *,
+    environment: str,
     client_order_id: str | None,
     expected_account_id: str,
     instrument: str,
@@ -929,6 +992,9 @@ def execution_to_reconciliation_fill(
         raise IbkrWebAdapterError("execution account does not match reconciliation account")
     client_id = None if client_order_id is None else validate_coid(client_order_id)
     return ProviderFillEvidence.create(
+        provider_id="IBKR",
+        account_id=account,
+        environment=environment,
         provider_execution_id=execution.execution_id,
         client_order_id=client_id,
         instrument=_text(instrument, name="instrument"),

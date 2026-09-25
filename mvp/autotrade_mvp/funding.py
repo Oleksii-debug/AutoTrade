@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Literal
+from typing import Iterable, Literal
 
 from .accounting import JournalTransaction, posting, validate_transaction
 
@@ -90,7 +90,7 @@ class FundingEvent:
         object.__setattr__(
             self,
             "settlement_currency",
-            _text(self.settlement_currency, "settlement_currency"),
+            _text(self.settlement_currency, "settlement_currency").upper(),
         )
         object.__setattr__(
             self,
@@ -126,14 +126,25 @@ class FundingUpdate:
 class FundingRevisionBook:
     """Append-only logical revision book with delta-only economic corrections."""
 
-    def __init__(self) -> None:
+    def __init__(self, history: Iterable[FundingEvent] = ()) -> None:
         self._latest: dict[str, FundingEvent] = {}
         self._final_cash_flow: dict[str, Decimal] = {}
+        self._history: list[FundingEvent] = []
+        for event in history:
+            self.record(event)
+
+    @property
+    def events(self) -> tuple[FundingEvent, ...]:
+        """Immutable accepted revision history for durable replay after restart."""
+
+        return tuple(self._history)
 
     def latest(self, funding_id: str) -> FundingEvent | None:
         return self._latest.get(_text(funding_id, "funding_id"))
 
     def record(self, event: FundingEvent) -> FundingUpdate:
+        if not isinstance(event, FundingEvent):
+            raise TypeError("event must be FundingEvent")
         previous = self._latest.get(event.funding_id)
         if previous is not None:
             if event.revision < previous.revision:
@@ -167,6 +178,7 @@ class FundingRevisionBook:
         self._latest[event.funding_id] = event
         if event.kind == "FINAL":
             self._final_cash_flow[event.funding_id] = new_final
+        self._history.append(event)
         delta = new_final - old_final
         return FundingUpdate(
             accepted=True,
@@ -186,7 +198,7 @@ def book_funding_delta(
     amount = _decimal(economic_delta, "economic_delta")
     if amount == 0:
         raise FundingError("zero funding delta has no economic posting")
-    currency = _text(settlement_currency, "settlement_currency")
+    currency = _text(settlement_currency, "settlement_currency").upper()
     transaction = JournalTransaction(
         transaction_id=_text(transaction_id, "transaction_id"),
         cause_event_id=_text(cause_event_id, "cause_event_id"),

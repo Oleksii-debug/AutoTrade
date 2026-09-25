@@ -187,5 +187,100 @@ class FinancingTests(unittest.TestCase):
             )
 
 
+    def test_restart_rehydrates_final_before_later_correction(self):
+        first_event = event(
+            revision=1,
+            kind="FINAL",
+            amount="1.2",
+            available_at=BASE + timedelta(minutes=1),
+        )
+        first_book = FinancingRevisionBook()
+        first = first_book.record(first_event)
+        economic = EconomicBook(
+            [
+                book_financing_delta(
+                    transaction_id="financing-r1",
+                    cause_event_id="provider-financing-r1",
+                    unit="BTC",
+                    source_account="BORROW_LIABILITY:BTC",
+                    economic_delta=first.economic_delta,
+                )
+            ]
+        )
+
+        restarted = FinancingRevisionBook(first_book.events)
+        correction_event = event(
+            revision=2,
+            kind="FINAL",
+            amount="1.1",
+            available_at=BASE + timedelta(minutes=2),
+        )
+        correction = restarted.record(correction_event)
+        self.assertEqual(correction.economic_delta, Decimal("-0.1"))
+        self.assertEqual(
+            restarted.events,
+            (first_event, correction_event),
+        )
+
+        economic.append(
+            book_financing_delta(
+                transaction_id="financing-r2",
+                cause_event_id="provider-financing-r2",
+                unit="BTC",
+                source_account="BORROW_LIABILITY:BTC",
+                economic_delta=correction.economic_delta,
+            )
+        )
+        self.assertEqual(
+            economic.balance("FINANCING_EXPENSE:BTC", "BTC"),
+            Decimal("1.1"),
+        )
+
+    def test_restart_history_fails_closed_when_revisions_move_backwards(self):
+        with self.assertRaisesRegex(FinancingConflict, "cannot move backwards"):
+            FinancingRevisionBook(
+                (
+                    event(
+                        revision=2,
+                        kind="FINAL",
+                        amount="1.2",
+                        available_at=BASE + timedelta(minutes=2),
+                    ),
+                    event(
+                        revision=1,
+                        kind="FINAL",
+                        amount="1.1",
+                        available_at=BASE + timedelta(minutes=2),
+                    ),
+                )
+            )
+
+    def test_financing_unit_is_canonical_across_event_and_posting(self):
+        observed = FinancingEvent.create(
+            charge_id="fee-usd",
+            revision=1,
+            kind="FINAL",
+            effective_at=BASE,
+            available_at=BASE,
+            unit=" usd ",
+            amount="1.25",
+            source_account="CASH:USD",
+            evidence_ref="artifact:fee-usd",
+        )
+        self.assertEqual(observed.unit, "USD")
+        transaction = book_financing_delta(
+            transaction_id="fee-usd-tx",
+            cause_event_id="fee-usd-r1",
+            unit=" usd ",
+            source_account="CASH:USD",
+            economic_delta="1.25",
+        )
+        self.assertEqual(transaction.postings[0].asset_or_currency, "USD")
+        self.assertEqual(
+            transaction.postings[1].ledger_account,
+            "FINANCING_EXPENSE:USD",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

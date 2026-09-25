@@ -46,7 +46,11 @@ public static class LeanBoundaryProbe
             throw new ArgumentOutOfRangeException(nameof(priceText), "Price must be positive.");
         }
 
-        var symbol = Symbol.Create(ticker, SecurityType.Equity, market);
+        // The adoption probe must not depend on LEAN data/map-file configuration.
+        // We still exercise the exact SecurityIdentifier/Symbol/Order types, but
+        // deliberately disable equity ticker mapping for this non-sending boundary.
+        var sid = SecurityIdentifier.GenerateEquity(ticker, market, mapSymbol: false);
+        var symbol = new Symbol(sid, ticker);
         var order = new MarketOrder(
             symbol,
             quantity,

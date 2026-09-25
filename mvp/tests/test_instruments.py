@@ -22,6 +22,7 @@ from mvp.autotrade_mvp.instruments import (
 
 A = "11111111-1111-4111-8111-111111111111"
 B = "22222222-2222-4222-8222-222222222222"
+C = "33333333-3333-4333-8333-333333333333"
 
 
 def when(month: int, day: int = 1, hour: int = 0, minute: int = 0) -> datetime:
@@ -38,12 +39,13 @@ def spot(
     calendar_id: str = "CONTINUOUS_24_7",
     timezone_id: str = "UTC",
     metadata_evidence=(),
+    venue_id: str = "simulated-venue",
 ) -> InstrumentVersion:
     return InstrumentVersion(
         instrument_id=instrument_id,
         version=version,
         provider_id="simulated",
-        venue_id="simulated-venue",
+        venue_id=venue_id,
         provider_symbol=symbol,
         asset_class="CASH_EQUITY",
         base_currency="ABC",
@@ -89,8 +91,10 @@ def option(
         effective_from=effective_from,
         status="ACTIVE",
         payoff="OPTION",
-        underlying_id="ABC",
+        underlying_id=f"{B}@1",
         expiry=when(12, 18, 21),
+        settlement_method="PHYSICAL",
+        margin_model_id="option-margin-v1",
         strike=Decimal("100"),
         option_right="CALL",
         exercise_style="AMERICAN",
@@ -113,6 +117,20 @@ class InstrumentRegistryTests(unittest.TestCase):
         self.assertEqual(after.version, 2)
         with self.assertRaises(InstrumentNotFound):
             registry.resolve("simulated", "simulated-venue", "OLD", when(7))
+
+    def test_uuid_identity_aliases_are_canonicalized_before_registry_use(self):
+        braced = spot(instrument_id="{" + A + "}")
+        uppercase = spot(instrument_id=A.upper())
+        self.assertEqual(braced.instrument_id, A)
+        self.assertEqual(uppercase.instrument_id, A)
+
+        registry = InstrumentRegistry()
+        registry.add(braced)
+        # The alternate UUID spelling is the same immutable identity/version,
+        # not a second instrument history.
+        registry.add(uppercase)
+        self.assertEqual(registry.exact(f"{A}@1").instrument_id, A)
+        self.assertEqual(len(registry.versions(A)), 1)
 
     def test_retired_symbol_can_be_reused_only_after_nonoverlap(self):
         registry = InstrumentRegistry()
@@ -276,6 +294,255 @@ class InstrumentRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(InstrumentRegistryError, "observed_at"):
             spot(metadata_evidence=({**evidence, "observed_at": "2026-01-01T00:00:00+00:00"},))
 
+    def test_metadata_artifact_uuid_alias_is_canonicalized(self):
+        evidence = {
+            "artifact_id": "{" + B + "}",
+            "sha256": "sha256:" + "a" * 64,
+            "observed_at": "2026-01-01T00:00:00Z",
+        }
+        instrument = spot(metadata_evidence=(evidence,))
+        self.assertEqual(instrument.metadata_evidence[0]["artifact_id"], B)
+
+    def test_future_cannot_use_option_payoff(self):
+        with self.assertRaisesRegex(
+            InstrumentRegistryError,
+            "future/perpetual payoff must be LINEAR or INVERSE",
+        ):
+            InstrumentVersion(
+                instrument_id=A,
+                version=1,
+                provider_id="simulated",
+                venue_id="futures",
+                provider_symbol="ABC-FUT",
+                asset_class="FUTURE",
+                base_currency="ABC",
+                quote_currency="USD",
+                settlement_currency="USD",
+                quantity_unit="contract",
+                contract_multiplier="1",
+                price_tick="0.01",
+                quantity_step="1",
+                minimum_quantity="1",
+                calendar_id="CONTINUOUS_24_7",
+                timezone_id="UTC",
+                effective_from=when(1),
+                payoff="OPTION",
+                underlying_id=f"{B}@1",
+                expiry=when(12),
+                settlement_method="CASH",
+                margin_model_id="future-margin-v1",
+            )
+
+    def test_perpetual_requires_funding_and_cannot_invent_expiry(self):
+        with self.assertRaisesRegex(InstrumentRegistryError, "funding_schedule"):
+            InstrumentVersion(
+                instrument_id=A,
+                version=1,
+                provider_id="simulated",
+                venue_id="perpetuals",
+                provider_symbol="ABC-PERP",
+                asset_class="PERPETUAL",
+                base_currency="ABC",
+                quote_currency="USD",
+                settlement_currency="USD",
+                quantity_unit="contract",
+                contract_multiplier="1",
+                price_tick="0.01",
+                quantity_step="1",
+                minimum_quantity="1",
+                calendar_id="CONTINUOUS_24_7",
+                timezone_id="UTC",
+                effective_from=when(1),
+                payoff="LINEAR",
+                underlying_id=f"{B}@1",
+                settlement_method="CASH",
+                margin_model_id="perp-margin-v1",
+            )
+
+        with self.assertRaisesRegex(InstrumentRegistryError, "must not invent an expiry"):
+            InstrumentVersion(
+                instrument_id=A,
+                version=1,
+                provider_id="simulated",
+                venue_id="perpetuals",
+                provider_symbol="ABC-PERP",
+                asset_class="PERPETUAL",
+                base_currency="ABC",
+                quote_currency="USD",
+                settlement_currency="USD",
+                quantity_unit="contract",
+                contract_multiplier="1",
+                price_tick="0.01",
+                quantity_step="1",
+                minimum_quantity="1",
+                calendar_id="CONTINUOUS_24_7",
+                timezone_id="UTC",
+                effective_from=when(1),
+                payoff="LINEAR",
+                underlying_id=f"{B}@1",
+                settlement_method="CASH",
+                funding_schedule={"interval": "8h", "source": "provider"},
+                margin_model_id="perp-margin-v1",
+                expiry=when(12),
+            )
+
+        perpetual = InstrumentVersion(
+            instrument_id=A,
+            version=1,
+            provider_id="simulated",
+            venue_id="perpetuals",
+            provider_symbol="ABC-PERP",
+            asset_class="PERPETUAL",
+            base_currency="ABC",
+            quote_currency="USD",
+            settlement_currency="USD",
+            quantity_unit="contract",
+            contract_multiplier="1",
+            price_tick="0.01",
+            quantity_step="1",
+            minimum_quantity="1",
+            calendar_id="CONTINUOUS_24_7",
+            timezone_id="UTC",
+            effective_from=when(1),
+            payoff="LINEAR",
+            underlying_id=f"{B}@1",
+            settlement_method="CASH",
+            funding_schedule={
+                "interval": "8h",
+                "source": {"provider": "simulated", "ids": ["primary"]},
+            },
+            margin_model_id="perp-margin-v1",
+        )
+        self.assertEqual(
+            perpetual.to_contract_dict()["funding_schedule"],
+            {
+                "interval": "8h",
+                "source": {"provider": "simulated", "ids": ["primary"]},
+            },
+        )
+        with self.assertRaises(TypeError):
+            perpetual.funding_schedule["interval"] = "1h"
+        with self.assertRaises(TypeError):
+            perpetual.funding_schedule["source"]["provider"] = "changed"
+        with self.assertRaises(TypeError):
+            perpetual.funding_schedule["source"]["ids"][0] = "changed"
+
+    def test_price_bands_are_exact_enforced_and_schema_shaped(self):
+        instrument = InstrumentVersion(
+            **{
+                **spot().__dict__,
+                "price_band_low": Decimal("90"),
+                "price_band_high": Decimal("110"),
+            }
+        )
+        self.assertEqual(instrument.validate_price("90"), Decimal("90"))
+        self.assertEqual(instrument.validate_price("110"), Decimal("110"))
+        with self.assertRaisesRegex(InstrumentRegistryError, "below price_band_low"):
+            instrument.validate_price("89.99")
+        with self.assertRaisesRegex(InstrumentRegistryError, "above price_band_high"):
+            instrument.validate_price("110.01")
+        projected = instrument.to_contract_dict()
+        self.assertEqual(projected["price_bands"], {"low": "90", "high": "110"})
+
+        root = Path(__file__).resolve().parents[2]
+        schema_dir = root / "contracts" / "jsonschema"
+        schemas = {
+            path.name: json.loads(path.read_text(encoding="utf-8"))
+            for path in schema_dir.glob("*.json")
+        }
+        registry = Registry().with_resources(
+            [(schema["$id"], Resource.from_contents(schema)) for schema in schemas.values()]
+        )
+        market = schemas["market.schema.json"]
+        Draft202012Validator(
+            {"$ref": f"{market['$id']}#/$defs/InstrumentVersion"},
+            registry=registry,
+            format_checker=FormatChecker(),
+        ).validate(projected)
+
+    def test_derivative_underlying_uses_exact_versioned_identity(self):
+        with self.assertRaisesRegex(InstrumentRegistryError, "instrument_id@version"):
+            InstrumentVersion(
+                instrument_id=A,
+                version=1,
+                provider_id="simulated",
+                venue_id="futures",
+                provider_symbol="ABC-FUT",
+                asset_class="FUTURE",
+                base_currency="ABC",
+                quote_currency="USD",
+                settlement_currency="USD",
+                quantity_unit="contract",
+                contract_multiplier="1",
+                price_tick="0.01",
+                quantity_step="1",
+                minimum_quantity="1",
+                calendar_id="CONTINUOUS_24_7",
+                timezone_id="UTC",
+                effective_from=when(1),
+                payoff="LINEAR",
+                underlying_id="ABC",
+                expiry=when(12),
+                settlement_method="CASH",
+                margin_model_id="future-margin-v1",
+            )
+
+        with self.assertRaisesRegex(InstrumentRegistryError, "instrument_id@version"):
+            InstrumentVersion(
+                instrument_id=A,
+                version=1,
+                provider_id="simulated",
+                venue_id="futures",
+                provider_symbol="ABC-FUT",
+                asset_class="FUTURE",
+                base_currency="ABC",
+                quote_currency="USD",
+                settlement_currency="USD",
+                quantity_unit="contract",
+                contract_multiplier="1",
+                price_tick="0.01",
+                quantity_step="1",
+                minimum_quantity="1",
+                calendar_id="CONTINUOUS_24_7",
+                timezone_id="UTC",
+                effective_from=when(1),
+                payoff="LINEAR",
+                underlying_id=f"{B}@01",
+                expiry=when(12),
+                settlement_method="CASH",
+                margin_model_id="future-margin-v1",
+            )
+
+    def test_exact_underlying_reference_is_unambiguous_across_venues(self):
+        registry = InstrumentRegistry()
+        registry.add(spot(instrument_id=B, symbol="ABC", venue_id="venue-one"))
+        registry.add(spot(instrument_id=C, symbol="ABC", venue_id="venue-two"))
+
+        first = registry.exact(f"{B}@1")
+        second = registry.exact(f"{C}@1")
+
+        self.assertEqual(first.instrument_id, B)
+        self.assertEqual(second.instrument_id, C)
+        self.assertNotEqual(first.venue_id, second.venue_id)
+        with self.assertRaisesRegex(InstrumentNotFound, "instrument_version"):
+            registry.exact(f"{B}@2")
+
+    def test_non_derivative_rejects_all_derivative_only_fields(self):
+        with self.assertRaisesRegex(InstrumentRegistryError, "derivative fields"):
+            InstrumentVersion(
+                **{
+                    **spot().__dict__,
+                    "settlement_method": "CASH",
+                }
+            )
+        with self.assertRaisesRegex(InstrumentRegistryError, "derivative fields"):
+            InstrumentVersion(
+                **{
+                    **spot().__dict__,
+                    "margin_model_id": "wrong",
+                }
+            )
+
     def test_invalid_version_calendar_and_derivative_shape_fail_closed(self):
         registry = InstrumentRegistry()
         with self.assertRaisesRegex(InstrumentConflict, "first instrument version"):
@@ -302,7 +569,9 @@ class InstrumentRegistryTests(unittest.TestCase):
                 timezone_id="UTC",
                 effective_from=when(1),
                 payoff="LINEAR",
-                underlying_id="ABC",
+                underlying_id=f"{B}@1",
+                settlement_method="CASH",
+                margin_model_id="future-margin-v1",
             )
 
 

@@ -67,8 +67,16 @@ public partial class MainWindow : Window
 
     private void ApplyHostStatus(EmergencyHostStatus status, bool announce)
     {
+        status = (status ?? throw new InvalidOperationException(
+            "Host status response was null.")).Validated();
+
         if (status.Connected)
         {
+            if (_lastKnownConnectedStatus is { } previous)
+            {
+                status = status.ValidateSuccessorOf(previous);
+            }
+
             _lastKnownConnectedStatus = status;
             HostValue.Text = status.HostId;
             AccountValue.Text = status.AccountId;
@@ -85,13 +93,13 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_lastKnownConnectedStatus is { } previous)
+        if (_lastKnownConnectedStatus is { } lastConnected)
         {
-            HostValue.Text = $"{previous.HostId} (stale)";
-            AccountValue.Text = $"{previous.AccountId} (stale)";
-            EnvironmentValue.Text = $"{previous.Environment} (stale)";
-            StateVersionValue.Text = $"{previous.StateVersion} (stale)";
-            LastEvidenceValue.Text = $"{previous.ObservedAtUtc:O} (stale)";
+            HostValue.Text = $"{lastConnected.HostId} (stale)";
+            AccountValue.Text = $"{lastConnected.AccountId} (stale)";
+            EnvironmentValue.Text = $"{lastConnected.Environment} (stale)";
+            StateVersionValue.Text = $"{lastConnected.StateVersion} (stale)";
+            LastEvidenceValue.Text = $"{lastConnected.ObservedAtUtc:O} (stale)";
             ConnectionStatus.Text =
                 $"{status.Message} Last known host values are stale and are not current evidence.";
         }
@@ -112,18 +120,108 @@ public partial class MainWindow : Window
         }
     }
 
+    private static string DescribeInFlightActions(InFlightActionState value) =>
+        value switch
+        {
+            InFlightActionState.None => "none reported",
+            InFlightActionState.Present => "present",
+            _ => "unknown",
+        };
+
+    private void ApplyEmergencyCommandResult(EmergencyCommandResult result)
+    {
+        EmergencyOperationValue.Text = result.OperationId;
+        string inFlight = DescribeInFlightActions(result.InFlightActions);
+        EmergencyResult.Text = result switch
+        {
+            { Accepted: false } =>
+                result.Message
+                + " No durable block has been confirmed. Outstanding in-flight actions: "
+                + inFlight + ".",
+            { DurableBlockConfirmed: true } =>
+                result.Message
+                + " Durable block confirmed by the host. Outstanding in-flight actions: "
+                + inFlight + ".",
+            _ =>
+                result.Message
+                + " Request accepted, but the durable block is not yet confirmed. "
+                + "Outstanding in-flight actions: " + inFlight
+                + ". The same operation identity will be used for recovery; do not resubmit with a new idempotency identity.",
+        };
+    }
+
+    private async Task RecoverEmergencyOperationAsync(string operationId)
+    {
+        try
+        {
+            EmergencyOperationStatus recovered =
+                await _hostClient.GetOperationAsync(operationId, _lifetime.Token);
+
+            if (!string.Equals(
+                    recovered.OperationId,
+                    operationId,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Recovered emergency operation identity does not match the accepted operation.");
+            }
+
+            EmergencyOperationValue.Text = recovered.OperationId;
+            string inFlight = DescribeInFlightActions(recovered.InFlightActions);
+            string suffix =
+                " Outstanding in-flight actions: " + inFlight
+                + ". Remaining uncertainty: " + recovered.RemainingUncertainty + ".";
+
+            EmergencyResult.Text = recovered.State switch
+            {
+                EmergencyOperationState.Succeeded =>
+                    recovered.Message + " Durable block confirmed by the host." + suffix,
+                EmergencyOperationState.Failed =>
+                    recovered.Message + " The accepted operation failed; no durable block is confirmed." + suffix,
+                EmergencyOperationState.Unknown =>
+                    recovered.Message
+                    + " The accepted operation outcome is unknown; no durable block is confirmed."
+                    + suffix
+                    + " Do not resubmit with a new idempotency identity; recover this same operation.",
+                _ =>
+                    recovered.Message
+                    + " The accepted operation is still in progress; the durable block is not yet confirmed."
+                    + suffix
+                    + " Recover this same operation identity rather than creating a new command.",
+            };
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            EmergencyOperationValue.Text = operationId;
+            EmergencyResult.Text =
+                "The emergency request was accepted as operation "
+                + operationId
+                + ", but the same operation could not be recovered. "
+                + "Its durable block outcome and outstanding in-flight actions are unknown. "
+                + "Do not resubmit with a new idempotency identity; recover this same operation.";
+        }
+    }
+
     private async void BlockNewExposure_Click(object sender, RoutedEventArgs e)
     {
         BlockNewExposureButton.IsEnabled = false;
+        EmergencyOperationValue.Text = "Unavailable";
         EmergencyResult.Text = "Requesting a durable block of new exposure from the host.";
 
         try
         {
             EmergencyCommandResult result =
                 await _hostClient.BlockNewExposureAsync(_lifetime.Token);
-            EmergencyResult.Text = result.Accepted
-                ? result.Message + " The request was accepted; provider and financial outcomes remain separately tracked."
-                : result.Message;
+            ApplyEmergencyCommandResult(result);
+
+            if (result.Accepted && !result.DurableBlockConfirmed)
+            {
+                await RecoverEmergencyOperationAsync(result.OperationId);
+            }
 
             await RefreshHostStatusAsync(announce: false, returnFocus: false);
         }
@@ -133,11 +231,13 @@ public partial class MainWindow : Window
         }
         catch (OperationCanceledException)
         {
-            EmergencyResult.Text = "The request was cancelled. No durable block has been confirmed.";
+            EmergencyOperationValue.Text = "Unavailable";
+            EmergencyResult.Text = "The request was cancelled. No durable block has been confirmed. Outstanding in-flight actions are unknown.";
         }
         catch (Exception)
         {
-            EmergencyResult.Text = "The host request failed. No durable block has been confirmed.";
+            EmergencyOperationValue.Text = "Unavailable";
+            EmergencyResult.Text = "The host request failed. No durable block has been confirmed. Outstanding in-flight actions are unknown.";
         }
         finally
         {

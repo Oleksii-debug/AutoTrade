@@ -8,6 +8,11 @@ from mvp.autotrade_mvp.capabilities import (
     EvidenceVerification,
     derive_capability_snapshot,
 )
+from mvp.autotrade_mvp.provider_core import (
+    ProviderCoreError,
+    ProviderReadObservation,
+    ProviderReadQuery,
+)
 from mvp.autotrade_mvp.kraken_spot import (
     KrakenSpotAbsenceEvidence,
     KrakenSpotAdapterError,
@@ -23,6 +28,30 @@ from mvp.autotrade_mvp.kraken_spot import (
 
 
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
+
+
+def trade_history_observation(
+    response,
+    *,
+    account_id="paper-1",
+    environment="PAPER",
+    surface="EXECUTIONS",
+):
+    query = ProviderReadQuery.prepare(
+        provider_id="KRAKEN",
+        account_id=account_id,
+        environment=environment,
+        surface=surface,
+        endpoint="/0/private/TradesHistory",
+        query={"ofs": 0},
+        prepared_at=NOW,
+    )
+    return ProviderReadObservation.capture(
+        query=query,
+        response=response,
+        observed_at=NOW + timedelta(seconds=1),
+        source_uri="https://api.kraken.com/0/private/TradesHistory",
+    )
 
 
 def capability(
@@ -344,29 +373,28 @@ class KrakenSpotAdapterTests(unittest.TestCase):
 
 
     def test_trade_history_uses_trade_id_as_unique_fill_identity(self):
-        fills = parse_trade_history(
-            {
-                "error": [],
-                "result": {
-                    "count": 1,
-                    "trades": {
-                        "T-EXEC-1": {
-                            "ordertxid": "OABC-D123-E456",
-                            "pair": "XXBTZUSD",
-                            "time": "1790280001.123456",
-                            "price": "60000.25",
-                            "vol": "0.0100",
-                            "fee": "0.20",
-                        }
-                    },
+        response = {
+            "error": [],
+            "result": {
+                "count": 1,
+                "trades": {
+                    "T-EXEC-1": {
+                        "ordertxid": "OABC-D123-E456",
+                        "pair": "XXBTZUSD",
+                        "time": "1790280001.123456",
+                        "price": "60000.25",
+                        "vol": "0.0100",
+                        "fee": "0.20",
+                    }
                 },
             },
+        }
+        fills = parse_trade_history(
+            trade_history_observation(response),
             instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
             client_ids_by_provider_order={"OABC-D123-E456": "at-order-1"},
             fee_currency_by_pair={"XXBTZUSD": "USD"},
-        
-            account_id="paper-1",
-            environment="PAPER",)
+        )
         self.assertEqual(len(fills), 1)
         fill = fills[0]
         self.assertEqual(fill.provider_execution_id, "T-EXEC-1")
@@ -391,8 +419,6 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             "result": {"trades": {"T-EXEC-1": dict(base_trade)}},
         }
         kwargs = {
-            "account_id": "paper-1",
-            "environment": "PAPER",
             "instrument_versions": {"XXBTZUSD": "XBTUSD:v1"},
             "client_ids_by_provider_order": {
                 "OABC-D123-E456": "at-order-1"
@@ -400,14 +426,14 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             "fee_currency_by_pair": {"XXBTZUSD": "USD"},
         }
         with self.assertRaisesRegex(KrakenSpotAdapterError, "fee amount"):
-            parse_trade_history(response, **kwargs)
+            parse_trade_history(trade_history_observation(response), **kwargs)
 
         response["result"]["trades"]["T-EXEC-1"]["fee"] = "0"
-        fills = parse_trade_history(response, **kwargs)
+        fills = parse_trade_history(trade_history_observation(response), **kwargs)
         self.assertEqual(fills[0].fee_amount, Decimal("0"))
 
         response["result"]["trades"]["T-EXEC-1"]["fee"] = "0.25"
-        fills = parse_trade_history(response, **kwargs)
+        fills = parse_trade_history(trade_history_observation(response), **kwargs)
         self.assertEqual(fills[0].fee_amount, Decimal("0.25"))
 
     def test_trade_history_refuses_to_guess_instrument_or_fee_currency(self):
@@ -428,22 +454,18 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(KrakenSpotAdapterError, "unmapped Kraken pair"):
             parse_trade_history(
-                response,
+                trade_history_observation(response),
                 instrument_versions={},
                 client_ids_by_provider_order={},
                 fee_currency_by_pair={"XXBTZUSD": "USD"},
-            
-                account_id="paper-1",
-                environment="PAPER",)
+            )
         with self.assertRaisesRegex(KrakenSpotAdapterError, "fee currency"):
             parse_trade_history(
-                response,
+                trade_history_observation(response),
                 instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
                 client_ids_by_provider_order={},
                 fee_currency_by_pair={},
-            
-                account_id="paper-1",
-                environment="PAPER",)
+            )
 
     def test_trade_timestamp_rejects_binary_float_and_sub_microsecond_precision(self):
         base = {
@@ -461,25 +483,62 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 }
             },
         }
-        with self.assertRaisesRegex(KrakenSpotAdapterError, "exact decimal"):
-            parse_trade_history(
-                base,
-                instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
-                client_ids_by_provider_order={},
-                fee_currency_by_pair={"XXBTZUSD": "USD"},
-            
-                account_id="paper-1",
-                environment="PAPER",)
+        with self.assertRaisesRegex(ProviderCoreError, "binary float"):
+            trade_history_observation(base)
         base["result"]["trades"]["T-EXEC-1"]["time"] = "1790280001.1234567"
         with self.assertRaisesRegex(KrakenSpotAdapterError, "microsecond"):
             parse_trade_history(
-                base,
+                trade_history_observation(base),
                 instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
                 client_ids_by_provider_order={},
                 fee_currency_by_pair={"XXBTZUSD": "USD"},
-            
-                account_id="paper-1",
-                environment="PAPER",)
+            )
+
+
+    def test_trade_history_scope_comes_only_from_pre_io_observation(self):
+        response = {
+            "error": [],
+            "result": {
+                "trades": {
+                    "T-SCOPE-1": {
+                        "ordertxid": "O-SCOPE-1",
+                        "pair": "XXBTZUSD",
+                        "time": "1790280001",
+                        "price": "60000",
+                        "vol": "0.01",
+                        "fee": "0.2",
+                    }
+                }
+            },
+        }
+        observation = trade_history_observation(
+            response,
+            account_id="bound-account",
+            environment="PAPER",
+        )
+        fill = parse_trade_history(
+            observation,
+            instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
+            client_ids_by_provider_order={"O-SCOPE-1": "at-order-1"},
+            fee_currency_by_pair={"XXBTZUSD": "USD"},
+        )[0]
+        self.assertEqual(fill.account_id, "bound-account")
+        self.assertEqual(fill.environment, "PAPER")
+        self.assertEqual(fill.evidence_refs, (observation.evidence_reference,))
+
+        wrong_surface = trade_history_observation(
+            response,
+            account_id="bound-account",
+            environment="PAPER",
+            surface="ORDER_HISTORY",
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "surface mismatch"):
+            parse_trade_history(
+                wrong_surface,
+                instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
+                client_ids_by_provider_order={"O-SCOPE-1": "at-order-1"},
+                fee_currency_by_pair={"XXBTZUSD": "USD"},
+            )
 
     def test_coverage_defaults_to_non_authoritative_absence(self):
         coverage = coverage_evidence(

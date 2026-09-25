@@ -8,7 +8,7 @@ prices as live corporate actions.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Iterable, Mapping
 
@@ -38,6 +38,12 @@ def _text(value: str, *, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
+
+
+def _utc_instant(value: datetime, *, name: str) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise ValueError(f"{name} must be a timezone-aware datetime")
+    return value.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -153,6 +159,7 @@ class CorporateEvent:
     source_revision: str
     payload: Mapping[str, str]
     source_sequence: int | None = None
+    effective_at: datetime | None = None
 
     def __post_init__(self) -> None:
         kind = _text(self.kind, name="kind").upper()
@@ -173,6 +180,13 @@ class CorporateEvent:
             raise ValueError("instrument_version must be a positive integer")
         if not isinstance(self.effective_date, date):
             raise ValueError("effective_date is required")
+        if self.effective_at is not None:
+            effective_at = _utc_instant(self.effective_at, name="effective_at")
+            if effective_at.date() != self.effective_date:
+                raise ValueError(
+                    "effective_at UTC date must match effective_date"
+                )
+            object.__setattr__(self, "effective_at", effective_at)
         if not isinstance(self.payload, Mapping):
             raise ValueError("payload must be a mapping")
 
@@ -221,6 +235,7 @@ class CorporateEvent:
         source_revision: str,
         payload: Mapping[str, object],
         source_sequence: int | None = None,
+        effective_at: datetime | None = None,
     ) -> "CorporateEvent":
         normalized_kind = _text(kind, name="kind").upper()
         allowed = {
@@ -257,6 +272,7 @@ class CorporateEvent:
             source_revision=_text(source_revision, name="source_revision"),
             payload=normalized_payload,
             source_sequence=source_sequence,
+            effective_at=effective_at,
         )
 
 
@@ -681,9 +697,13 @@ class CorporateActionBook:
             raise ValueError(
                 "symbol change cannot change immutable instrument_id"
             )
-        if successor.effective_from.date() != event.effective_date:
+        if event.effective_at is None:
             raise ValueError(
-                "symbol change effective date does not match successor version"
+                "symbol change requires exact timezone-aware effective_at"
+            )
+        if event.effective_at != successor.effective_from:
+            raise ValueError(
+                "symbol change effective_at does not match successor effective_from"
             )
         if (
             successor.provider_id != current.provider_id

@@ -256,6 +256,7 @@ def openapi_security_surface(
         requirements: list[str] = []
         current: list[tuple[str, list[str] | None]] | None = None
         current_scope_index: int | None = None
+        block_scope_indices: set[int] = set()
 
         def finish_requirement() -> None:
             nonlocal current, current_scope_index
@@ -283,6 +284,7 @@ def openapi_security_surface(
             )
             current = None
             current_scope_index = None
+            block_scope_indices.clear()
 
         for nested in lines[index + 1 :]:
             if nested and not nested.startswith(" ") and not nested.lstrip().startswith("#"):
@@ -319,12 +321,14 @@ def openapi_security_surface(
                         "OpenAPI security scope appeared before a scheme"
                     )
                 scheme, scopes = current[current_scope_index]
-                if scopes is not None:
+                if scopes is None:
+                    scopes = []
+                    current[current_scope_index] = (scheme, scopes)
+                    block_scope_indices.add(current_scope_index)
+                elif current_scope_index not in block_scope_indices:
                     raise ValueError(
                         f"OpenAPI security requirement {scheme} mixes inline and block scopes"
                     )
-                scopes = []
-                current[current_scope_index] = (scheme, scopes)
                 scopes.append(normalize_scope(scope_item.group(1)))
                 continue
             raise ValueError(

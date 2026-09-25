@@ -14,6 +14,11 @@ import json
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
+from .allocation_valuation import (
+    AllocationValuationError,
+    normalize_allocation_valuation,
+)
+
 
 def _decimal(value, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
@@ -957,7 +962,13 @@ def allocate_objective_targets(
 
 _ALLOWED_EVIDENCE_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 _ALLOWED_ALLOCATION_EVIDENCE_KINDS = frozenset(
-    {"OBJECTIVE", "MARKET_CONSTRAINT", "CAPITAL_STATE", "STRESS_SCENARIO"}
+    {
+        "OBJECTIVE",
+        "MARKET_CONSTRAINT",
+        "CAPITAL_STATE",
+        "STRESS_SCENARIO",
+        "VALUATION",
+    }
 )
 
 
@@ -1171,6 +1182,7 @@ class EvidenceBoundObjectiveAllocationResult:
     account_state_version: int
     reservation_state_version: int
     reservation_state_digest: str
+    base_currency: str
 
 
 def _payload_text(evidence: ImmutableAllocationEvidence, key: str) -> str:
@@ -1334,6 +1346,7 @@ def _allocation_decision_digest(
     account_state_version: int,
     reservation_state_version: int,
     reservation_state_digest: str,
+    base_currency: str,
 ) -> str:
     payload = {
         "environment": environment,
@@ -1354,6 +1367,7 @@ def _allocation_decision_digest(
         "account_state_version": account_state_version,
         "reservation_state_version": reservation_state_version,
         "reservation_state_digest": reservation_state_digest,
+        "base_currency": base_currency,
         "objective_version": result.objective_version,
         "selected_symbols": list(result.selected_symbols),
         "expected_net_utility": str(result.expected_net_utility),
@@ -1389,6 +1403,7 @@ def allocate_evidence_bound_objective_targets(
     *,
     objective_evidence: Mapping[str, ImmutableAllocationEvidence],
     market_evidence: Mapping[str, ImmutableAllocationEvidence],
+    valuation_evidence: Mapping[str, ImmutableAllocationEvidence],
     capital_evidence: ImmutableAllocationEvidence,
     stress_source_evidence: Sequence[ImmutableAllocationEvidence],
     resolved_evidence: Mapping[str, ImmutableAllocationEvidence],
@@ -1424,6 +1439,8 @@ def allocate_evidence_bound_objective_targets(
         raise ValueError("objective evidence must exactly cover candidate symbols")
     if set(market_evidence) != set(symbols):
         raise ValueError("market evidence must exactly cover candidate symbols")
+    if set(valuation_evidence) != set(symbols):
+        raise ValueError("valuation evidence must exactly cover candidate symbols")
 
     resolved_objective = {}
     resolved_market = {}
@@ -1510,6 +1527,55 @@ def allocate_evidence_bound_objective_targets(
         resolved_capital,
         "reservation_state_version",
     )
+    base_currency = _payload_text(resolved_capital, "base_currency").upper()
+
+    resolved_valuation = {}
+    normalized_candidates = []
+    for item in materialized:
+        symbol = item.candidate.symbol
+        valuation = _resolve_allocation_evidence(
+            valuation_evidence[symbol],
+            resolved_evidence,
+            expected_kind="VALUATION",
+            expected_environment=normalized_environment,
+            at=normalized_decision_time,
+        )
+        try:
+            normalized = normalize_allocation_valuation(
+                symbol=symbol,
+                market_payload=resolved_market[symbol].payload,
+                valuation_payload=valuation.payload,
+                source_price=item.candidate.price,
+                expected_cost_rate=item.candidate.cost_rate,
+                expected_capital_requirement_rate=item.candidate.capital_requirement_rate,
+                expected_min_notional_base=item.candidate.min_notional,
+                expected_fee_floor_base=item.candidate.fee_floor,
+                expected_max_executable_notional_base=item.candidate.max_executable_notional,
+                decision_time=normalized_decision_time,
+                portfolio_base_currency=base_currency,
+            )
+        except AllocationValuationError as error:
+            raise ValueError(
+                f"allocation valuation evidence is unusable for {symbol}: {error}"
+            ) from error
+        resolved_valuation[symbol] = valuation
+        normalized_candidates.append(
+            ObjectiveCandidate(
+                candidate=AllocationCandidate(
+                    symbol=symbol,
+                    desired_notional=item.candidate.desired_notional,
+                    price=normalized.unit_base_notional,
+                    lot_size=item.candidate.lot_size,
+                    cost_rate=item.candidate.cost_rate,
+                    capital_requirement_rate=item.candidate.capital_requirement_rate,
+                    min_notional=item.candidate.min_notional,
+                    fee_floor=item.candidate.fee_floor,
+                    max_executable_notional=item.candidate.max_executable_notional,
+                ),
+                expected_return_rate=item.expected_return_rate,
+                risk_penalty_rate=item.risk_penalty_rate,
+            )
+        )
 
     stress_items = tuple(stress_source_evidence)
     if policy.require_adverse_stress_evidence and not stress_items:
@@ -1558,7 +1624,7 @@ def allocate_evidence_bound_objective_targets(
         resolved_stress.append(resolved)
 
     objective_result = allocate_objective_targets(
-        materialized,
+        tuple(normalized_candidates),
         policy,
         stress_evidence=tuple(strict_stress),
         decision_time=normalized_decision_time,
@@ -1567,6 +1633,7 @@ def allocate_evidence_bound_objective_targets(
     all_evidence = [
         *(resolved_objective[symbol] for symbol in sorted(resolved_objective)),
         *(resolved_market[symbol] for symbol in sorted(resolved_market)),
+        *(resolved_valuation[symbol] for symbol in sorted(resolved_valuation)),
         resolved_capital,
         *sorted(resolved_stress, key=lambda evidence: evidence.evidence_id),
     ]
@@ -1591,6 +1658,7 @@ def allocate_evidence_bound_objective_targets(
         account_state_version=account_state_version,
         reservation_state_version=reservation_state_version,
         reservation_state_digest=reservation_state_digest,
+        base_currency=base_currency,
     )
     return EvidenceBoundObjectiveAllocationResult(
         objective=objective_result,
@@ -1608,6 +1676,7 @@ def allocate_evidence_bound_objective_targets(
         account_state_version=account_state_version,
         reservation_state_version=reservation_state_version,
         reservation_state_digest=reservation_state_digest,
+        base_currency=base_currency,
     )
 
 
@@ -1733,6 +1802,7 @@ def revalidate_evidence_bound_allocation(
         account_state_version=result.account_state_version,
         reservation_state_version=result.reservation_state_version,
         reservation_state_digest=result.reservation_state_digest,
+        base_currency=result.base_currency,
     )
     if expected_digest != result.decision_digest:
         raise ValueError("allocation decision digest does not match result content")

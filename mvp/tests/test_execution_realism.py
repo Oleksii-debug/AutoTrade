@@ -199,6 +199,7 @@ class ExecutionRealismTests(unittest.TestCase):
                 market_time="2026-09-24T10:01:00Z",
                 available_at="2026-09-24T10:01:01Z",
                 available_volume="100",
+                interval_start="2026-09-24T10:00:30Z",
                 bar_low="100",
                 bar_high="110",
             ),
@@ -255,6 +256,7 @@ class ExecutionRealismTests(unittest.TestCase):
                 market_time="2026-09-24T10:02:00Z",
                 available_at="2026-09-24T10:02:01Z",
                 available_volume="100",
+                interval_start="2026-09-24T10:01:00Z",
                 bar_low="101",
                 bar_high="104",
             ),
@@ -271,6 +273,7 @@ class ExecutionRealismTests(unittest.TestCase):
                 market_time="2026-09-24T10:01:00Z",
                 available_at="2026-09-24T10:01:01Z",
                 available_volume="100",
+                interval_start="2026-09-24T10:00:30Z",
                 bar_low="90",
                 bar_high="110",
             ),
@@ -382,6 +385,42 @@ class ExecutionRealismTests(unittest.TestCase):
                     available_volume="100",
                 ),
                 model(),
+            )
+
+
+    def test_bar_cannot_use_volume_from_interval_already_underway_at_arrival(self):
+        result = simulate_execution(
+            order(submitted_at="2026-09-24T10:00:30Z"),
+            LiquidityObservation.create(
+                instrument_version="ABC@v1",
+                market_time="2026-09-24T10:01:00Z",
+                available_at="2026-09-24T10:01:01Z",
+                available_volume="1000",
+                interval_start="2026-09-24T10:00:00Z",
+                bar_low="90",
+                bar_high="110",
+            ),
+            model(data_fidelity="BAR", latency_ms=100),
+        )
+        self.assertEqual(result.status, "AMBIGUOUS_NO_FILL")
+        self.assertEqual(result.filled_quantity, Decimal("0"))
+        self.assertIn("before venue arrival", result.reason)
+
+    def test_bar_requires_interval_start_to_bound_causal_volume(self):
+        with self.assertRaisesRegex(
+            ExecutionRealismError, "requires interval_start"
+        ):
+            simulate_execution(
+                order(),
+                LiquidityObservation.create(
+                    instrument_version="ABC@v1",
+                    market_time="2026-09-24T10:01:00Z",
+                    available_at="2026-09-24T10:01:01Z",
+                    available_volume="100",
+                    bar_low="90",
+                    bar_high="110",
+                ),
+                model(data_fidelity="BAR", latency_ms=0),
             )
 
 

@@ -125,12 +125,49 @@ class MarketNormalizationTests(unittest.TestCase):
         self.assertNotIn("DUPLICATE", first.quality_flags)
         self.assertIn("DUPLICATE", second.quality_flags)
 
-        with self.assertRaisesRegex(SequenceConflict, "different normalized content"):
+        with self.assertRaisesRegex(SequenceConflict, "different causal content"):
             normalizer.normalize(
                 raw(
                     "TRADE",
                     {"price": "101", "quantity": "1"},
                     ingested=at() + timedelta(seconds=2),
+                )
+            )
+
+    def test_same_sequence_cannot_change_causal_identity_with_same_payload(self):
+        normalizer = MarketNormalizer(registry())
+        normalizer.normalize(
+            raw(
+                "TRADE",
+                {"price": "100", "quantity": "1"},
+                source=at(),
+                revision=0,
+            )
+        )
+        with self.assertRaisesRegex(SequenceConflict, "different causal content"):
+            normalizer.normalize(
+                raw(
+                    "TRADE",
+                    {"price": "100", "quantity": "1"},
+                    source=at() + timedelta(milliseconds=1),
+                    revision=0,
+                )
+            )
+
+        other = MarketNormalizer(registry())
+        other.normalize(
+            raw(
+                "TRADE",
+                {"price": "100", "quantity": "1"},
+                revision=0,
+            )
+        )
+        with self.assertRaisesRegex(SequenceConflict, "different causal content"):
+            other.normalize(
+                raw(
+                    "TRADE",
+                    {"price": "100", "quantity": "1"},
+                    revision=1,
                 )
             )
 
@@ -278,6 +315,24 @@ class MarketNormalizationTests(unittest.TestCase):
                 )
             )
 
+    def test_funding_string_timestamp_must_be_a_real_utc_instant(self):
+        normalizer = MarketNormalizer(registry())
+        with self.assertRaisesRegex(MarketDataError, "UTC instant"):
+            normalizer.normalize(
+                raw(
+                    "FUNDING",
+                    {"rate": "0.001", "next_funding_at": "garbageZ"},
+                )
+            )
+
+        with self.assertRaisesRegex(MarketDataError, "UTC instant"):
+            normalizer.normalize(
+                raw(
+                    "FUNDING",
+                    {"rate": "0.001", "next_funding_at": "2026-09-25Z"},
+                )
+            )
+
     def test_funding_rate_can_be_negative_without_float_coercion(self):
         normalizer = MarketNormalizer(registry())
         event = normalizer.normalize(
@@ -288,6 +343,96 @@ class MarketNormalizationTests(unittest.TestCase):
         )
         self.assertEqual(event.payload["rate"], "-0.000125")
         self.assertTrue(event.payload["next_funding_at"].endswith("Z"))
+
+
+    def test_book_gap_stays_unverified_until_new_snapshot(self):
+        normalizer = MarketNormalizer(registry())
+        normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=1,
+                stream="book",
+            )
+        )
+        gap = normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [["99.99", "2"]], "asks": []},
+                sequence=3,
+                stream="book",
+            )
+        )
+        self.assertIn("SEQUENCE_GAP", gap.quality_flags)
+        self.assertIn("UNVERIFIED_BOOK_STATE", gap.quality_flags)
+
+        later_delta = normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [], "asks": [["100.01", "2"]]},
+                sequence=4,
+                stream="book",
+            )
+        )
+        self.assertIn("UNVERIFIED_BOOK_STATE", later_delta.quality_flags)
+
+        snapshot = normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.98", "1"]], "asks": [["100.02", "1"]]},
+                sequence=5,
+                stream="book",
+            )
+        )
+        self.assertNotIn("UNVERIFIED_BOOK_STATE", snapshot.quality_flags)
+
+        recovered = normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [["99.98", "2"]], "asks": []},
+                sequence=6,
+                stream="book",
+            )
+        )
+        self.assertNotIn("UNVERIFIED_BOOK_STATE", recovered.quality_flags)
+
+    def test_out_of_order_snapshot_cannot_clear_unverified_book_state(self):
+        normalizer = MarketNormalizer(registry())
+        normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=1,
+                stream="book",
+            )
+        )
+        normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [["99.99", "2"]], "asks": []},
+                sequence=3,
+                stream="book",
+            )
+        )
+        stale_snapshot = normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.97", "1"]], "asks": [["100.03", "1"]]},
+                sequence=2,
+                stream="book",
+            )
+        )
+        self.assertIn("OUT_OF_ORDER", stale_snapshot.quality_flags)
+
+        next_delta = normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [], "asks": [["100.03", "2"]]},
+                sequence=4,
+                stream="book",
+            )
+        )
+        self.assertIn("UNVERIFIED_BOOK_STATE", next_delta.quality_flags)
 
 
 if __name__ == "__main__":

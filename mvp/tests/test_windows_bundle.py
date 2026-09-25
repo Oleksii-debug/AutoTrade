@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 import zipfile
 
-from tools.build_windows_bundle import BundleError, build_bundle
+from tools.build_windows_bundle import BundleError, _windows_path_key, build_bundle
 
 
 SOURCE_SHA = "a" * 40
@@ -255,6 +255,19 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             )
         secret.unlink()
 
+        env_variant = self.staging / ".env.production"
+        env_variant.write_text("API_TOKEN=must-not-ship\n", encoding="utf-8")
+        with self.assertRaisesRegex(BundleError, "sensitive"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "bad-env-variant.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+        env_variant.unlink()
+
         target = self.staging / "AutoTrade.exe"
         link = self.staging / "linked.exe"
         try:
@@ -271,6 +284,25 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
                 provenance_path=self.provenance(eligible=False),
             )
 
+    def test_hash_sidecar_publish_removes_stale_temporary_file(self):
+        provenance = self.provenance(eligible=False)
+        output = self.root / "atomic-hash.zip"
+        stale = output.with_suffix(".zip.sha256.tmp")
+        stale.write_text("stale partial digest", encoding="utf-8")
+        result = build_bundle(
+            staging=self.staging,
+            output=output,
+            version="0.1.0-dev",
+            source_sha=SOURCE_SHA,
+            mode="diagnostics",
+            provenance_path=provenance,
+        )
+        self.assertFalse(stale.exists())
+        self.assertEqual(
+            output.with_suffix(".zip.sha256").read_text(encoding="utf-8").split()[0],
+            result["sha256"],
+        )
+
     def test_output_and_hash_must_be_outside_staging(self):
         provenance = self.provenance(eligible=False)
         output = self.staging / "diagnostics.zip"
@@ -285,6 +317,38 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             )
         self.assertFalse(output.exists())
         self.assertFalse(output.with_suffix(".zip.sha256").exists())
+
+    def test_windows_case_insensitive_path_collisions_are_rejected(self):
+        upper = self.staging / "CaseCollision.dll"
+        lower = self.staging / "casecollision.dll"
+        upper.write_bytes(b"one")
+        try:
+            lower.write_bytes(b"two")
+        except OSError:
+            self.skipTest("filesystem is case-insensitive")
+        if upper.resolve() == lower.resolve():
+            self.skipTest("filesystem is case-insensitive")
+        with self.assertRaisesRegex(BundleError, "Windows path collision"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "collision.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
+    def test_windows_reserved_and_trailing_dot_paths_are_rejected(self):
+        with self.assertRaisesRegex(BundleError, "reserved device name"):
+            _windows_path_key("CON.txt")
+        with self.assertRaisesRegex(BundleError, "reserved device name"):
+            _windows_path_key("nested/LPT9.log")
+        with self.assertRaisesRegex(BundleError, "trailing space/dot"):
+            _windows_path_key("nested/report.")
+        with self.assertRaisesRegex(BundleError, "trailing space/dot"):
+            _windows_path_key("nested/report ")
+        with self.assertRaisesRegex(BundleError, "alternate-data-stream"):
+            _windows_path_key("nested/report.txt:payload")
 
     def test_source_sha_and_empty_staging_are_rejected(self):
         with self.assertRaisesRegex(BundleError, "source_sha"):

@@ -184,6 +184,7 @@ class JournalStore:
         if version == 5:
             return (
                 "ALTER TABLE command_dedupe ADD COLUMN result_hash TEXT",
+                "ALTER TABLE events ADD COLUMN envelope_json TEXT",
             )
         raise ValueError(f"Unsupported journal migration version: {version}")
 
@@ -202,7 +203,7 @@ class JournalStore:
             "events": frozenset({
                 "event_id", "event_type", "aggregate_type", "aggregate_id",
                 "aggregate_version", "payload_json", "payload_hash", "committed_at",
-            }),
+            } | ({"envelope_json"} if cls.SCHEMA_VERSION >= 5 else set())),
             "outbox": frozenset({
                 "outbox_id", "event_id", "topic", "payload_json",
                 "created_at", "delivered_at"
@@ -364,12 +365,17 @@ class JournalStore:
                                 "WHERE command_id = ?",
                                 (result_hash, row["command_id"]),
                             )
-                        # Schema v4 authenticated only the envelope JSON bytes.
-                        # Schema v5 strengthens that persisted meaning by binding
-                        # routing topic + exact canonical envelope bytes. Validate
-                        # every legacy row under the old v4 rule (when a hash is
-                        # present), prove the bytes exactly reconstruct from the
-                        # authoritative journal event, then rewrite every hash.
+                        # Schema v4 authenticated only the exact outbox
+                        # envelope bytes. Schema v5 persists those canonical bytes
+                        # in the journal as durable event-envelope authority and
+                        # strengthens publication identity to bind routing topic.
+                        #
+                        # A non-null v4 hash authenticates legitimate canonical
+                        # fields that the legacy core event columns did not store.
+                        # A hashless legacy row has no such authority, so it is
+                        # accepted only when the full envelope is reconstructable
+                        # from the core journal row.
+                        migrated_event_ids: set[str] = set()
                         for row in connection.execute(
                             """
                             SELECT
@@ -412,7 +418,7 @@ class JournalStore:
                                     "committed_at": row["committed_at"],
                                 }
                             )
-                            expected_envelope = {
+                            core_envelope = {
                                 "event_id": event["event_id"],
                                 "event_type": event["event_type"],
                                 "aggregate_type": event["aggregate_type"],
@@ -422,28 +428,37 @@ class JournalStore:
                                 "payload_hash": event["payload_hash"],
                                 "committed_at": event["committed_at"],
                             }
-                            # A hashless legacy row has no durable integrity
-                            # identity for fields that are not represented by the
-                            # authoritative journal table. Never bless unknown or
-                            # extra bytes by hashing them during migration.
-                            if outbox_payload != expected_envelope:
-                                raise ValueError(
-                                    "legacy outbox payload is not exactly reconstructable "
-                                    "from authoritative journal event"
-                                )
                             legacy_hash = row["legacy_envelope_hash"]
-                            expected_v4_hash = (
-                                "sha256:"
-                                + sha256(raw_outbox_payload.encode("utf-8")).hexdigest()
-                            )
-                            if (
-                                legacy_hash is not None
-                                and legacy_hash != expected_v4_hash
-                            ):
-                                raise ValueError(
-                                    "legacy outbox envelope hash does not match "
-                                    "the schema-v4 payload-only digest"
+                            if legacy_hash is None:
+                                if outbox_payload != core_envelope:
+                                    raise ValueError(
+                                        "legacy outbox payload is not exactly reconstructable "
+                                        "from authoritative journal event"
+                                    )
+                            else:
+                                expected_v4_hash = (
+                                    "sha256:"
+                                    + sha256(
+                                        raw_outbox_payload.encode("utf-8")
+                                    ).hexdigest()
                                 )
+                                if legacy_hash != expected_v4_hash:
+                                    raise ValueError(
+                                        "legacy outbox envelope hash does not match "
+                                        "the schema-v4 payload-only digest"
+                                    )
+                                for key, expected in core_envelope.items():
+                                    if outbox_payload.get(key) != expected:
+                                        raise ValueError(
+                                            "legacy outbox payload conflicts with "
+                                            "authoritative journal event"
+                                        )
+                            connection.execute(
+                                "UPDATE events SET envelope_json = ? "
+                                "WHERE event_id = ?",
+                                (raw_outbox_payload, row["event_id"]),
+                            )
+                            migrated_event_ids.add(str(row["event_id"]))
                             envelope_hash = _outbox_envelope_digest(
                                 str(row["topic"]),
                                 raw_outbox_payload,
@@ -452,6 +467,38 @@ class JournalStore:
                                 "UPDATE outbox SET envelope_hash = ? "
                                 "WHERE outbox_id = ?",
                                 (envelope_hash, row["outbox_id"]),
+                            )
+
+                        # Events with no publication intent have no legacy full
+                        # envelope bytes to preserve. Persist the exact canonical
+                        # core envelope that can be proven from the journal.
+                        for row in connection.execute(
+                            """
+                            SELECT event_id, event_type, aggregate_type, aggregate_id,
+                                   aggregate_version, payload_json, payload_hash,
+                                   committed_at
+                            FROM events
+                            WHERE envelope_json IS NULL
+                            """
+                        ):
+                            event = self._decode_event_row(row)
+                            core_envelope = {
+                                "event_id": event["event_id"],
+                                "event_type": event["event_type"],
+                                "aggregate_type": event["aggregate_type"],
+                                "aggregate_id": event["aggregate_id"],
+                                "aggregate_version": str(event["aggregate_version"]),
+                                "payload": event["payload"],
+                                "payload_hash": event["payload_hash"],
+                                "committed_at": event["committed_at"],
+                            }
+                            connection.execute(
+                                "UPDATE events SET envelope_json = ? "
+                                "WHERE event_id = ?",
+                                (
+                                    canonical_json(core_envelope),
+                                    row["event_id"],
+                                ),
                             )
                     connection.execute(
                         "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",

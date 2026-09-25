@@ -15,6 +15,7 @@ from typing import Iterable
 from uuid import NAMESPACE_URL, uuid5
 
 from .persistence import JournalStore, payload_digest
+from .reconciliation_journal import load_reconciliation_checkpoint_for_readiness
 
 
 class HostState(str, Enum):
@@ -285,10 +286,122 @@ class RecoveryController:
         self.reason_codes = {"startup_reconciliation_required"}
         return self.owner
 
+    def record_reconciliation_checkpoint(
+        self,
+        *,
+        reconciliation_id: str,
+        provider_id: str,
+        account_id: str,
+        environment: str,
+    ) -> dict[str, object]:
+        """Derive durable readiness only from current owner-bound provider truth.
+
+        Callers identify the reconciliation scope.  They do not supply a
+        consistency boolean, uncertainty list, or copied result.  The canonical
+        reconciliation journal remains the authority and must contain the latest
+        scope checkpoint for this exact recovery owner epoch.
+        """
+
+        if self.owner is None:
+            raise RuntimeError("No active owner")
+        if self._owner_store is None:
+            raise PermissionError(
+                "Journal-issued reconciliation requires a durable owner store"
+            )
+        self._require_current_durable_owner()
+        if not self.storage_writable:
+            raise PermissionError(
+                "Reconciliation cannot establish readiness without durable journal"
+            )
+
+        checkpoint = load_reconciliation_checkpoint_for_readiness(
+            self._owner_store,
+            reconciliation_id=reconciliation_id,
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+            host_id=self.owner.owner_id,
+            owner_epoch=str(self.owner.epoch),
+        )
+        if checkpoint is None:
+            self.provider_reconciled = False
+            self.reason_codes.add("startup_reconciliation_required")
+            self.reason_codes.add("provider_uncertainty")
+            self._recompute_state()
+            raise PermissionError(
+                "No current reconciliation checkpoint is bound to this recovery owner"
+            )
+
+        payload = checkpoint.get("payload")
+        if not isinstance(payload, dict):
+            raise RuntimeError("Reconciliation checkpoint payload is invalid")
+        blocking = payload.get("blocking_resources")
+        resolutions = payload.get("submission_resolutions")
+        if not isinstance(blocking, list) or not isinstance(resolutions, list):
+            raise RuntimeError("Reconciliation checkpoint readiness fields are invalid")
+
+        reported_unresolved: set[str] = set()
+        for resource in blocking:
+            if not isinstance(resource, str) or not resource.strip():
+                raise RuntimeError("Reconciliation blocking resource is invalid")
+            reported_unresolved.add(f"resource:{resource.strip()}")
+        for resolution in resolutions:
+            if not isinstance(resolution, dict):
+                raise RuntimeError("Reconciliation submission resolution is invalid")
+            outcome = resolution.get("outcome")
+            attempt_id = resolution.get("attempt_id")
+            if outcome == "UNKNOWN":
+                if not isinstance(attempt_id, str) or not attempt_id.strip():
+                    raise RuntimeError(
+                        "UNKNOWN reconciliation resolution lacks attempt identity"
+                    )
+                reported_unresolved.add(attempt_id.strip())
+
+        self.unresolved_attempts = (
+            self._unresolved_send_attempts | reported_unresolved
+        )
+        complete = (
+            payload.get("complete") is True
+            and payload.get("snapshot_consistent") is True
+            and payload.get("activity_coverage_complete") is True
+        )
+        self.provider_reconciled = bool(complete and not self.unresolved_attempts)
+        if self.provider_reconciled:
+            self.reason_codes.discard("startup_reconciliation_required")
+            self.reason_codes.discard("clock_requalification_required")
+            self.reason_codes.discard("provider_uncertainty")
+        else:
+            self.reason_codes.add("provider_uncertainty")
+        self._recompute_state()
+
+        event_id = checkpoint.get("event_id")
+        payload_hash = checkpoint.get("payload_hash")
+        journal_sequence = checkpoint.get("journal_sequence")
+        if (
+            not isinstance(event_id, str)
+            or not event_id
+            or not isinstance(payload_hash, str)
+            or not payload_hash.startswith("sha256:")
+            or type(journal_sequence) is not int
+            or journal_sequence <= 0
+        ):
+            raise RuntimeError("Reconciliation checkpoint durable identity is invalid")
+        return {
+            "event_id": event_id,
+            "payload_hash": payload_hash,
+            "journal_sequence": journal_sequence,
+            "owner_id": self.owner.owner_id,
+            "owner_epoch": self.owner.epoch,
+        }
+
     def record_reconciliation(self, *, consistent: bool, uncertainty: Iterable[str] = ()) -> None:
         if self.owner is None:
             raise RuntimeError("No active owner")
         self._require_current_durable_owner()
+        if self._owner_store is not None:
+            raise PermissionError(
+                "Durable recovery requires a journal-issued reconciliation checkpoint"
+            )
         if type(consistent) is not bool:
             raise TypeError("consistent must be a boolean")
         if not self.storage_writable:

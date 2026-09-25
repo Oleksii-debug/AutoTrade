@@ -96,6 +96,18 @@ def _require_checkpoint_scope(
     return payload
 
 
+def _checkpoint_owner(
+    payload: Mapping[str, Any],
+) -> tuple[str, str]:
+    owner = payload.get("checkpoint_owner")
+    if not isinstance(owner, Mapping):
+        raise ValueError("checkpoint owner identity is required")
+    return (
+        _text(owner.get("host_id"), name="checkpoint_owner.host_id"),
+        _text(owner.get("owner_epoch"), name="checkpoint_owner.owner_epoch"),
+    )
+
+
 def reconciliation_payload(
     result: ReconciliationResult,
     *,
@@ -172,6 +184,10 @@ def record_reconciliation_checkpoint(
     host = _text(host_id, name="host_id")
     epoch = _text(owner_epoch, name="owner_epoch")
     payload = reconciliation_payload(result, observed_at=observed_at)
+    payload["checkpoint_owner"] = {
+        "host_id": host,
+        "owner_epoch": epoch,
+    }
     aggregate_id = _reconciliation_aggregate_id(
         reconciliation_id=rid,
         provider_id=result.provider_id,
@@ -249,6 +265,46 @@ def load_latest_reconciliation_checkpoint(
         environment=environment,
     )
     return event
+
+
+def load_reconciliation_checkpoint_for_readiness(
+    store: JournalStore,
+    *,
+    reconciliation_id: str,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    host_id: str,
+    owner_epoch: str,
+) -> dict[str, Any] | None:
+    """Return only a checkpoint eligible to authorize the current owner.
+
+    Historical checkpoints remain available through
+    load_latest_reconciliation_checkpoint(), but ownership transfer must force a
+    new checkpoint before reconciliation can clear recovery/UNKNOWN gates.
+    """
+
+    checkpoint = load_latest_reconciliation_checkpoint(
+        store,
+        reconciliation_id=reconciliation_id,
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
+    if checkpoint is None:
+        return None
+    payload = _require_checkpoint_scope(
+        checkpoint,
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
+    checkpoint_host, checkpoint_epoch = _checkpoint_owner(payload)
+    expected_host = _text(host_id, name="host_id")
+    expected_epoch = _text(owner_epoch, name="owner_epoch")
+    if checkpoint_host != expected_host or checkpoint_epoch != expected_epoch:
+        return None
+    return checkpoint
 
 
 def unresolved_attempt_ids_from_checkpoint(

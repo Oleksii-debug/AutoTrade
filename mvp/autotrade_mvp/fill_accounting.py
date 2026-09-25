@@ -500,6 +500,7 @@ class ProviderFillFinancialPlan:
     reservation_id: str
     intent_id: str
     provider_execution_id: str
+    reservation_cut_digest: str
     transaction: JournalTransaction
     usage_items: tuple[tuple[str, Decimal], ...]
     plan_digest: str
@@ -586,18 +587,34 @@ def build_provider_fill_financial_plan(
             )
 
     usage_items = tuple(sorted(usage.items()))
+    reservation_cut = {
+        "reservation_id": reservation_snapshot.reservation_id,
+        "intent_id": reservation_snapshot.intent_id,
+        "original": {
+            key: format(value, "f")
+            for key, value in sorted(reservation_snapshot.original.items())
+        },
+        "remaining": {
+            key: format(value, "f")
+            for key, value in sorted(reservation_snapshot.remaining.items())
+        },
+        "consumed": {
+            key: format(value, "f")
+            for key, value in sorted(reservation_snapshot.consumed.items())
+        },
+        "state": reservation_snapshot.state,
+        "resolution_evidence": reservation_snapshot.resolution_evidence,
+    }
+    reservation_cut_digest = payload_digest(reservation_cut)
     material = {
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
         "provider_id": provider_fill.provider_id,
         "account_id": provider_fill.account_id,
         "environment": provider_fill.environment,
         "reservation_id": reservation_snapshot.reservation_id,
         "intent_id": reservation_snapshot.intent_id,
         "provider_execution_id": provider_fill.provider_execution_id,
-        "admitted_resources": {
-            key: format(value, "f")
-            for key, value in sorted(original.items())
-        },
+        "reservation_cut_digest": reservation_cut_digest,
         "transaction": canonical_transaction(transaction),
         "derived_usage": {
             key: format(value, "f")
@@ -608,6 +625,7 @@ def build_provider_fill_financial_plan(
         reservation_id=reservation_snapshot.reservation_id,
         intent_id=reservation_snapshot.intent_id,
         provider_execution_id=provider_fill.provider_execution_id,
+        reservation_cut_digest=reservation_cut_digest,
         transaction=transaction,
         usage_items=usage_items,
         plan_digest=payload_digest(material),

@@ -21,6 +21,7 @@ from typing import Callable, Mapping
 import re
 
 from .corporate_actions import CorporateEvent
+from .instruments import InstrumentVersion
 from .persistence import payload_digest
 from .provider_core import ProviderResponseObservation, Surface
 
@@ -141,10 +142,9 @@ class CorporateActionObservation:
             )
         effective = _utc(self.effective_at, "effective_at")
         observed = _utc(self.observed_at, "observed_at")
-        if observed < effective:
-            raise CorporateActionEvidenceError(
-                "provider evidence observed before economic effective time cannot authorize mutation"
-            )
+        # Corporate actions are commonly announced before their economic effective
+        # time.  Preserve causal observation time independently from effective time;
+        # the durable financial writer must gate mutation on effective/pay semantics.
         digest = _text(self.raw_evidence_digest, "raw_evidence_digest")
         if _DIGEST.fullmatch(digest) is None:
             raise CorporateActionEvidenceError(
@@ -214,6 +214,7 @@ EvidenceResolver = Callable[[str], ProviderResponseObservation]
 CorporateActionNormalizer = Callable[
     [ProviderResponseObservation], CorporateActionObservation
 ]
+InstrumentResolver = Callable[[CorporateActionObservation], InstrumentVersion]
 
 
 def resolve_authoritative_corporate_action(
@@ -221,6 +222,10 @@ def resolve_authoritative_corporate_action(
     *,
     evidence_resolver: EvidenceResolver,
     normalizer: CorporateActionNormalizer,
+    instrument_resolver: InstrumentResolver,
+    expected_provider_id: str,
+    expected_account_id: str,
+    expected_environment: str,
     allowed_endpoints: frozenset[str],
     permission_scope: str,
 ) -> AuthoritativeCorporateAction:
@@ -231,6 +236,17 @@ def resolve_authoritative_corporate_action(
         raise TypeError("evidence_resolver must be callable")
     if not callable(normalizer):
         raise TypeError("normalizer must be callable")
+    if not callable(instrument_resolver):
+        raise TypeError("instrument_resolver must be callable")
+    expected_provider = _text(expected_provider_id, "expected_provider_id").upper()
+    expected_account = _text(expected_account_id, "expected_account_id")
+    expected_environment_value = _text(
+        expected_environment, "expected_environment"
+    ).upper()
+    if expected_environment_value not in _ENVIRONMENTS:
+        raise CorporateActionEvidenceError(
+            "expected_environment must be canonical"
+        )
     if not isinstance(allowed_endpoints, frozenset) or not allowed_endpoints:
         raise TypeError("allowed_endpoints must be a non-empty frozenset")
     endpoints = frozenset(
@@ -265,11 +281,11 @@ def resolve_authoritative_corporate_action(
         )
     try:
         source.require_scope(
-            provider_id=source.provider_id,
+            provider_id=expected_provider,
             surface=Surface.ACTIVITIES,
             endpoint=endpoint,
-            account_id=source.account_id,
-            environment=source.environment,
+            account_id=expected_account,
+            environment=expected_environment_value,
         )
     except Exception as error:
         raise CorporateActionEvidenceError(
@@ -309,6 +325,25 @@ def resolve_authoritative_corporate_action(
     if observation.complete is not True:
         raise CorporateActionEvidenceError(
             "incomplete corporate-action evidence cannot authorize mutation"
+        )
+
+    try:
+        instrument = instrument_resolver(observation)
+    except Exception as error:
+        raise CorporateActionEvidenceError(
+            "canonical corporate-action instrument could not be resolved"
+        ) from error
+    if not isinstance(instrument, InstrumentVersion):
+        raise CorporateActionEvidenceError(
+            "instrument_resolver must return InstrumentVersion"
+        )
+    if (
+        instrument.provider_id.upper() != observation.provider_id
+        or instrument.instrument_id != observation.instrument_id
+        or instrument.version != observation.instrument_version
+    ):
+        raise CorporateActionEvidenceError(
+            "normalized corporate action does not match canonical instrument binding"
         )
 
     provenance = {

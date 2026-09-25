@@ -147,6 +147,10 @@ def point_in_time_market_events(
             raise HistoricalDataError("ingested_at cannot precede evidenced available_at")
         raw_evidence = _evidence(event.get("raw_evidence_ref"))
         evidence_observed = _utc(raw_evidence["observed_at"], "raw evidence observed_at")
+        if evidence_observed < source_at:
+            raise HistoricalDataError(
+                "raw evidence cannot be observed before source_event_at"
+            )
         if evidence_observed > ingested:
             raise HistoricalDataError("raw evidence cannot be observed after event ingestion")
         if available > point:

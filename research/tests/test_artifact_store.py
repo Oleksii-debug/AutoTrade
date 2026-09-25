@@ -172,6 +172,54 @@ class ArtifactStoreTests(unittest.TestCase):
             self.assertIn("manifest_hash", upgraded)
             self.assertEqual(store.read_bytes(artifact_id), b"evidence")
 
+    def test_legacy_rebind_does_not_seal_untrusted_timestamp_or_extra_fields(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"legacy-evidence",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                source_refs=["source:fixture"],
+                metadata={"kind": "legacy-rebind"},
+            )
+            path = store._manifest_path(artifact_id)
+            legacy = dict(manifest)
+            legacy.pop("manifest_hash")
+            legacy["created_at"] = "2000-01-01T00:00:00Z"
+            legacy["untrusted_extra"] = {"claimed": "historical-proof"}
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+
+            rebound = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"legacy-evidence",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                source_refs=["source:fixture"],
+                metadata={"kind": "legacy-rebind"},
+            )
+
+            self.assertIn("manifest_hash", rebound)
+            self.assertNotEqual(rebound["created_at"], "2000-01-01T00:00:00Z")
+            self.assertNotIn("untrusted_extra", rebound)
+            self.assertEqual(
+                set(rebound),
+                {
+                    "schema_version",
+                    "artifact_id",
+                    "sha256",
+                    "bytes",
+                    "media_type",
+                    "rights",
+                    "source_refs",
+                    "metadata",
+                    "created_at",
+                    "manifest_hash",
+                },
+            )
+            self.assertEqual(store.read_bytes(artifact_id), b"legacy-evidence")
+
     def test_recovery_removes_only_unreferenced_objects(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)

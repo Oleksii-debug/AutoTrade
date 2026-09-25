@@ -520,6 +520,38 @@ def parse_position_executions(
         fill_time = row.get("fillTime")
         if fill_time is None:
             raise ProviderCoreError("trade position event must include fillTime")
+
+        old_position = _decimal(row.get("oldPosition"), name="oldPosition")
+        new_position = _decimal(row.get("newPosition"), name="newPosition")
+        execution_size = _decimal(
+            row.get("executionSize"), name="executionSize", positive=True
+        )
+        if old_position == new_position:
+            raise ProviderCoreError(
+                "trade position event must change provider position"
+            )
+        if abs(new_position - old_position) != execution_size:
+            raise ProviderCoreError(
+                "executionSize must equal exact provider position delta"
+            )
+        expected_change = (
+            "open"
+            if old_position == 0 and new_position != 0
+            else "close"
+            if old_position != 0 and new_position == 0
+            else "reverse"
+            if old_position * new_position < 0
+            else "increase"
+            if abs(new_position) > abs(old_position)
+            else "decrease"
+        )
+        position_change = _text(row.get("positionChange"), name="positionChange")
+        if position_change != expected_change:
+            raise ProviderCoreError(
+                "positionChange conflicts with exact provider positions"
+            )
+        side = "BUY" if new_position > old_position else "SELL"
+
         client_id = clients.get(execution_id)
         if client_id is not None:
             client_id = _client_order_id(client_id)
@@ -530,7 +562,8 @@ def parse_position_executions(
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=instrument,
-            quantity=row.get("executionSize"),
+            side=side,
+            quantity=execution_size,
             price=row.get("executionPrice"),
             fee_amount=row.get("fee", "0"),
             fee_currency=_text(row.get("feeCurrency"), name="feeCurrency"),

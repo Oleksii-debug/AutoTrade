@@ -453,6 +453,9 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                         "executionUid": "exec-1",
                         "executionPrice": "65000.10",
                         "executionSize": "0.25",
+                        "oldPosition": "0",
+                        "newPosition": "0.25",
+                        "positionChange": "open",
                         "timestamp": 1790280000123,
                         "updateReason": "trade",
                     },
@@ -471,12 +474,99 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         fill = fills[0]
         self.assertEqual(fill.provider_execution_id, "exec-1")
         self.assertEqual(fill.client_order_id, "hedge-007")
+        self.assertEqual(fill.side, "BUY")
         self.assertEqual(fill.quantity, Decimal("0.25"))
         self.assertEqual(fill.price, Decimal("65000.10"))
         self.assertEqual(fill.fee_amount, Decimal("1.25"))
         self.assertEqual(fill.trade_time, "2026-09-24T20:00:00.123Z")
         self.assertEqual(fill.account_id, "paper-1")
         self.assertEqual(fill.environment, "PAPER")
+
+    def test_position_history_direction_is_derived_from_exact_position_delta(self):
+        cases = (
+            ("0", "-0.25", "0.25", "open", "SELL"),
+            ("-0.25", "0", "0.25", "close", "BUY"),
+            ("0.25", "0.75", "0.50", "increase", "BUY"),
+            ("0.75", "0.25", "0.50", "decrease", "SELL"),
+            ("0.25", "-0.25", "0.50", "reverse", "SELL"),
+        )
+        for old_position, new_position, size, change, expected_side in cases:
+            with self.subTest(change=change, expected_side=expected_side):
+                fills = parse_position_executions(
+                    futures_position_observation(
+                        {
+                            "elements": [
+                                {
+                                    "tradeable": "PI_XBTUSD",
+                                    "fillTime": 1790280000123,
+                                    "fee": "0",
+                                    "feeCurrency": "USD",
+                                    "executionUid": f"exec-{change}",
+                                    "executionPrice": "65000",
+                                    "executionSize": size,
+                                    "oldPosition": old_position,
+                                    "newPosition": new_position,
+                                    "positionChange": change,
+                                    "timestamp": 1790280000123,
+                                    "updateReason": "trade",
+                                }
+                            ]
+                        }
+                    ),
+                    instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+                )
+                self.assertEqual(fills[0].side, expected_side)
+
+    def test_position_history_direction_fails_closed_on_inconsistent_provider_state(self):
+        base = {
+            "tradeable": "PI_XBTUSD",
+            "fillTime": 1790280000123,
+            "fee": "0",
+            "feeCurrency": "USD",
+            "executionUid": "exec-inconsistent",
+            "executionPrice": "65000",
+            "executionSize": "1",
+            "oldPosition": "0",
+            "newPosition": "1",
+            "positionChange": "open",
+            "timestamp": 1790280000123,
+            "updateReason": "trade",
+        }
+        with self.assertRaisesRegex(
+            ProviderCoreError, "executionSize must equal exact provider position delta"
+        ):
+            parse_position_executions(
+                futures_position_observation(
+                    {"elements": [{**base, "executionSize": "2"}]}
+                ),
+                instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+            )
+        with self.assertRaisesRegex(
+            ProviderCoreError, "positionChange conflicts"
+        ):
+            parse_position_executions(
+                futures_position_observation(
+                    {"elements": [{**base, "positionChange": "decrease"}]}
+                ),
+                instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+            )
+        with self.assertRaisesRegex(
+            ProviderCoreError, "must change provider position"
+        ):
+            parse_position_executions(
+                futures_position_observation(
+                    {
+                        "elements": [
+                            {
+                                **base,
+                                "oldPosition": "1",
+                                "newPosition": "1",
+                            }
+                        ]
+                    }
+                ),
+                instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+            )
 
     def test_position_history_requires_exact_bound_endpoint(self):
         observation = futures_position_observation(
@@ -498,13 +588,25 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
             "executionUid": "same",
             "executionPrice": "65000",
             "executionSize": "1",
+            "oldPosition": "0",
+            "newPosition": "1",
+            "positionChange": "open",
             "timestamp": 1790280000123,
             "updateReason": "trade",
         }
         with self.assertRaisesRegex(ProviderCoreError, "conflicting"):
             parse_position_executions(
                 futures_position_observation(
-                    {"elements": [base, {**base, "executionSize": "2"}]}
+                    {
+                        "elements": [
+                            base,
+                            {
+                                **base,
+                                "executionSize": "2",
+                                "newPosition": "2",
+                            },
+                        ]
+                    }
                 ),
                 instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
             )

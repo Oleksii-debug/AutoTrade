@@ -12,8 +12,10 @@ from mvp.autotrade_mvp.fill_accounting import (
     book_provider_fill_correction,
     build_provider_fill_correction_transactions,
     build_provider_fill_transaction,
+    book_unexpected_provider_fill,
+    build_unexpected_provider_fill_transaction,
 )
-from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence
+from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence, ReconciliationResult
 
 
 def matched_fill(
@@ -1006,6 +1008,172 @@ class FillAccountingTests(unittest.TestCase):
                 for transaction in book.transactions
             )
         )
+
+
+
+    def _unexpected_result(self, execution_id="external-exec-1"):
+        return ReconciliationResult(
+            provider_id="PROVIDER-A",
+            account_id="acct-1",
+            environment="PAPER",
+            complete=False,
+            matched_execution_ids=(),
+            unexpected_execution_ids=(execution_id,),
+            missing_local_execution_ids=(),
+            matched_working_client_order_ids=(),
+            unexpected_working_provider_order_ids=(),
+            missing_local_working_client_order_ids=(),
+            snapshot_consistent=True,
+            provider_cash={},
+            provider_positions={},
+            snapshot_mode="ATOMIC",
+            snapshot_query_started_at="2026-01-01T00:00:00Z",
+            snapshot_query_completed_at="2026-01-01T00:00:01Z",
+            cash_differences={},
+            position_differences={},
+            submission_resolutions=(),
+            blocking_resources=("EXECUTION:external-exec-1",),
+            reasons=("unexpected provider execution",),
+        )
+
+    def _unexpected_fill(self, *, side="BUY", position_side=None, execution_id="external-exec-1"):
+        return ProviderFillEvidence.create(
+            provider_id="PROVIDER-A",
+            account_id="acct-1",
+            environment="PAPER",
+            provider_execution_id=execution_id,
+            client_order_id=None,
+            instrument="ABC",
+            side=side,
+            position_side=position_side,
+            quantity="2",
+            price="100",
+            fee_amount="1",
+            fee_currency="USD",
+            trade_time="2026-01-01T00:00:00Z",
+            evidence_refs=("sha256:provider-read",),
+        )
+
+    def test_unexpected_provider_buy_and_sell_book_signed_economics_exactly_once(self):
+        cases = (
+            ("BUY", Decimal("2"), Decimal("-201")),
+            ("SELL", Decimal("-2"), Decimal("199")),
+        )
+        for side, expected_position, expected_cash in cases:
+            with self.subTest(side=side):
+                book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
+                fill = self._unexpected_fill(side=side)
+                reconciliation = self._unexpected_result()
+                self.assertTrue(
+                    book_unexpected_provider_fill(
+                        book=book,
+                        reconciliation=reconciliation,
+                        provider_fill=fill,
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                    )
+                )
+                self.assertFalse(
+                    book_unexpected_provider_fill(
+                        book=book,
+                        reconciliation=reconciliation,
+                        provider_fill=fill,
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                    )
+                )
+                self.assertEqual(book.position("ABC"), expected_position)
+                self.assertEqual(book.cash("USD"), expected_cash)
+                self.assertEqual(book.fee_expense("USD"), Decimal("1"))
+                restarted = ScopedEconomicBook(
+                    environment="PAPER",
+                    account_id="acct-1",
+                    transactions=book.transactions,
+                )
+                self.assertFalse(
+                    book_unexpected_provider_fill(
+                        book=restarted,
+                        reconciliation=reconciliation,
+                        provider_fill=fill,
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                    )
+                )
+                self.assertEqual(restarted.audit_digest(), book.audit_digest())
+
+    def test_unexpected_fill_requires_reconciliation_identity_and_provider_direction(self):
+        book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
+        fill = self._unexpected_fill()
+        not_unexpected = self._unexpected_result(execution_id="different-exec")
+        with self.assertRaisesRegex(AccountingConflict, "not proven unexpected"):
+            build_unexpected_provider_fill_transaction(
+                book=book,
+                reconciliation=not_unexpected,
+                provider_fill=fill,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+            )
+
+        missing_side = ProviderFillEvidence.create(
+            provider_id=fill.provider_id,
+            account_id=fill.account_id,
+            environment=fill.environment,
+            provider_execution_id=fill.provider_execution_id,
+            client_order_id=None,
+            instrument=fill.instrument,
+            quantity=fill.quantity,
+            price=fill.price,
+            fee_amount=fill.fee_amount,
+            fee_currency=fill.fee_currency,
+            trade_time=fill.trade_time,
+        )
+        with self.assertRaisesRegex(AccountingConflict, "not independently evidenced"):
+            build_unexpected_provider_fill_transaction(
+                book=book,
+                reconciliation=self._unexpected_result(),
+                provider_fill=missing_side,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+            )
+        self.assertEqual(book.transactions, ())
+
+    def test_unexpected_hedge_leg_fails_closed_and_changed_direction_conflicts(self):
+        reconciliation = self._unexpected_result()
+        book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
+        with self.assertRaisesRegex(AccountingConflict, "leg-aware"):
+            book_unexpected_provider_fill(
+                book=book,
+                reconciliation=reconciliation,
+                provider_fill=self._unexpected_fill(
+                    side="BUY",
+                    position_side="LONG",
+                ),
+                expected_instrument="ABC",
+                settlement_currency="USD",
+            )
+        self.assertEqual(book.transactions, ())
+
+        buy = self._unexpected_fill(side="BUY")
+        self.assertTrue(
+            book_unexpected_provider_fill(
+                book=book,
+                reconciliation=reconciliation,
+                provider_fill=buy,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+            )
+        )
+        before = book.audit_digest()
+        with self.assertRaises(AccountingConflict):
+            book_unexpected_provider_fill(
+                book=book,
+                reconciliation=reconciliation,
+                provider_fill=self._unexpected_fill(side="SELL"),
+                expected_instrument="ABC",
+                settlement_currency="USD",
+            )
+        self.assertEqual(book.audit_digest(), before)
+        self.assertEqual(len(book.transactions), 1)
 
 
 

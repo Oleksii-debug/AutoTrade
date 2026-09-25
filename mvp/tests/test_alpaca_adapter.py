@@ -443,10 +443,21 @@ class AlpacaAdapterTests(unittest.TestCase):
         )
         self.assertEqual(result["outcome"], "UNKNOWN")
         self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
-        self.assertIsNone(result["provider_received_at"])
-        self.assertEqual(result["observed_at"], "2026-09-24T20:00:00Z")
-        self.assertEqual(result["provider_environment"], "PAPER")
+        self.assertNotIn("provider_received_at", result)
+        self.assertNotIn("observed_at", result)
+        self.assertNotIn("provider_environment", result)
         self.assertEqual(result["evidence"], [])
+        self.assertEqual(
+            set(result),
+            {
+                "attempt_id",
+                "outcome",
+                "client_order_id",
+                "reason_code",
+                "evidence",
+                "retry_disposition",
+            },
+        )
 
     def test_transport_ambiguity_cannot_claim_provider_response(self):
         with self.assertRaisesRegex(AlpacaAdapterError, "must not fabricate"):

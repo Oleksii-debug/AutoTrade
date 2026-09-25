@@ -637,5 +637,52 @@ class JournalStoreTests(unittest.TestCase):
                 )
 
 
+    def test_event_retry_rejects_changed_committed_at(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            original = event()
+            store.append_event(original)
+
+            changed = dict(original)
+            changed["committed_at"] = "2026-09-25T01:00:00+00:00"
+            with self.assertRaisesRegex(ValueError, "publication intent"):
+                store.append_event(changed)
+
+            persisted = store.get_event(original["event_id"])
+            self.assertEqual(persisted["committed_at"], original["committed_at"])
+
+    def test_event_retry_rejects_changed_outbox_intent(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            original = event()
+            store.append_event(original)
+
+            with self.assertRaisesRegex(ValueError, "publication intent"):
+                store.append_event(original, outbox_topic="events")
+            self.assertEqual(store.pending_outbox(), [])
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            original = event()
+            store.append_event(original, outbox_topic="events")
+
+            with self.assertRaisesRegex(ValueError, "publication intent"):
+                store.append_event(original)
+            self.assertEqual(len(store.pending_outbox()), 1)
+
+    def test_event_retry_rejects_changed_outbox_topic(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            original = event()
+            store.append_event(original, outbox_topic="events")
+
+            with self.assertRaisesRegex(ValueError, "publication intent"):
+                store.append_event(original, outbox_topic="other-events")
+
+            pending = store.pending_outbox()
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(pending[0]["topic"], "events")
+
+
 if __name__ == "__main__":
     unittest.main()

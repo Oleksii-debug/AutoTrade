@@ -63,6 +63,7 @@ class ProducerFixture:
         execution_reconciled_at=None,
         episode_id=None,
         decision_time=None,
+        evidence_refs=None,
     ):
         self._episode_counter += 1
         decision = decision_time or (
@@ -70,8 +71,13 @@ class ProducerFixture:
         )
         horizon = outcome_horizon_at or label_available_at
         reconciled = execution_reconciled_at or label_available_at
+        refs = (
+            ["artifact:episode-evidence"]
+            if evidence_refs is None
+            else list(evidence_refs)
+        )
         payload = {
-            "evidence_refs": ["artifact:episode-evidence"],
+            "evidence_refs": refs,
             "intended_action": {"kind": "NO_TRADE"},
             "actual_execution": {"kind": "NO_TRADE"},
             "outcome": {"class": "NULL"},
@@ -603,6 +609,73 @@ class UpdateProducerTests(unittest.TestCase):
                 },
             )
             self.assertEqual(produced.proposed_parameters["x"], Decimal("1"))
+
+    def test_cross_population_aliases_of_same_physical_observation_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            fixture = ProducerFixture(directory)
+            shared_decision = DECISION
+            shared_refs = ("provider-evidence:shared-physical-observation",)
+            shared_label = datetime(2026, 10, 3, tzinfo=timezone.utc)
+
+            fixture.append_learning(
+                task="calibration",
+                feature="1",
+                target="1",
+                observation_id="calibration-alias",
+                label_available_at=shared_label,
+                episode_id="00000000-0000-0000-0000-000000000241",
+                decision_time=shared_decision,
+                evidence_refs=shared_refs,
+            )
+            fixture.append_learning(
+                task="update",
+                feature="1",
+                target="1",
+                observation_id="update-alias",
+                label_available_at=shared_label,
+                episode_id="00000000-0000-0000-0000-000000000242",
+                decision_time=shared_decision,
+                evidence_refs=shared_refs,
+            )
+
+            checkpoint = fixture.publish_checkpoint()
+            test_ref = fixture.publish_test_evidence()
+            calibration = fixture.publish_calibration_evidence()
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=fixture.envelope(checkpoint),
+                config=fixture.config(
+                    test_ref,
+                    min_calibration_episodes=1,
+                ),
+            )
+
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIsNone(produced.proposed_parameters)
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIn(
+                "LEARNING.CROSS_POPULATION_PHYSICAL_OVERLAP",
+                artifact["reasons"],
+            )
+            overlap = artifact["population"][
+                "cross_population_physical_overlap"
+            ]
+            self.assertEqual(len(overlap), 1)
+            update_row = artifact["population"]["update_included"][0]
+            calibration_row = artifact["population"]["calibration_included"][0]
+            self.assertNotEqual(
+                update_row["observation_id"],
+                calibration_row["observation_id"],
+            )
+            self.assertEqual(
+                update_row["physical_observation_id"],
+                calibration_row["physical_observation_id"],
+            )
+            self.assertEqual(
+                overlap,
+                [update_row["physical_observation_id"]],
+            )
 
     def test_conflicting_alias_is_durable_no_update_not_fabricated_move(self):
         with TemporaryDirectory() as directory:

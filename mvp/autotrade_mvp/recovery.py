@@ -525,6 +525,63 @@ class RecoveryController:
             if not isinstance(outcome, str):
                 raise RuntimeError("Reconciliation submission outcome is invalid")
             normalized_outcome = outcome.strip().upper()
+            if normalized_outcome not in {
+                "UNKNOWN",
+                "PROVEN_ABSENT",
+                "OBSERVED_EXECUTION",
+                "OBSERVED_WORKING_ORDER",
+            }:
+                raise RuntimeError(
+                    "Reconciliation submission outcome is unsupported"
+                )
+            provider_order_ids = resolution.get("provider_order_ids", [])
+            provider_execution_ids = resolution.get("provider_execution_ids", [])
+            if not isinstance(provider_order_ids, list) or not isinstance(
+                provider_execution_ids, list
+            ):
+                raise RuntimeError(
+                    "Reconciliation submission provider identities are invalid"
+                )
+            if any(
+                not isinstance(value, str) or not value.strip()
+                for value in [*provider_order_ids, *provider_execution_ids]
+            ):
+                raise RuntimeError(
+                    "Reconciliation submission provider identities are invalid"
+                )
+            normalized_order_ids = tuple(
+                value.strip() for value in provider_order_ids
+            )
+            normalized_execution_ids = tuple(
+                value.strip() for value in provider_execution_ids
+            )
+            if (
+                len(normalized_order_ids) != len(set(normalized_order_ids))
+                or len(normalized_execution_ids)
+                != len(set(normalized_execution_ids))
+            ):
+                raise RuntimeError(
+                    "Reconciliation submission provider identities must be unique"
+                )
+            if normalized_outcome in {"UNKNOWN", "PROVEN_ABSENT"} and (
+                normalized_order_ids or normalized_execution_ids
+            ):
+                raise RuntimeError(
+                    "Absence/unknown reconciliation cannot carry provider identity"
+                )
+            if (
+                normalized_outcome == "OBSERVED_EXECUTION"
+                and not normalized_execution_ids
+            ):
+                raise RuntimeError(
+                    "Observed execution reconciliation lacks execution identity"
+                )
+            if normalized_outcome == "OBSERVED_WORKING_ORDER" and (
+                not normalized_order_ids or normalized_execution_ids
+            ):
+                raise RuntimeError(
+                    "Observed working-order reconciliation identity is invalid"
+                )
             if normalized_outcome == "UNKNOWN":
                 if not isinstance(attempt_id, str) or not attempt_id.strip():
                     raise RuntimeError(

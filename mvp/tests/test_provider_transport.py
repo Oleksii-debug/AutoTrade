@@ -253,6 +253,54 @@ class ProviderTransportTests(unittest.TestCase):
         self.assertEqual(resolver.calls, [])
         self.assertEqual(wire.requests, [])
 
+    def test_prepared_request_text_is_not_silently_normalized_before_signing(self):
+        events = []
+        wire = RecordingWire(events)
+        transport, resolver = self.make_transport(events=events, wire=wire)
+
+        request = prepared_request("at-client-1")
+        request["endpoint"] = " /api/v3/order "
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "endpoint must be canonical text",
+        ):
+            transport(
+                "at-client-1",
+                request,
+                lambda: events.append("guard"),
+            )
+
+        request = prepared_request("at-client-1")
+        request["body"][" symbol"] = request["body"].pop("symbol")
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "order parameter must be canonical text",
+        ):
+            transport(
+                "at-client-1",
+                request,
+                lambda: events.append("guard"),
+            )
+
+        self.assertEqual(events, [])
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
+
+    def test_signer_rejects_noncanonical_key_instead_of_rebinding_signed_bytes(self):
+        body = prepared_request("at-client-1")["body"].copy()
+        body[" symbol"] = body.pop("symbol")
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "order parameter must be canonical text",
+        ):
+            BinanceSpotSigner.sign(
+                policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+                endpoint="/api/v3/order",
+                body=body,
+                credential_plaintext='{"api_key":"key","api_secret":"secret"}',
+                timestamp_ms=1700000000000,
+            )
+
     def test_quota_failure_is_before_secret_and_before_final_guard(self):
         events = []
         wire = RecordingWire(events)

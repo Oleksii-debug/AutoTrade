@@ -114,7 +114,8 @@ class DecisionTraceStoreTests(unittest.TestCase):
             item = trace("trace-embedded-secrets")
             item["attributes"] = {
                 "url": "https://provider.test/orders?api_key=abc123&symbol=BTC",
-                "message": "Authorization: Bearer bearer-secret",
+                "message": "Authorization: CustomScheme bearer-secret",
+                "userinfo_url": "https://api-user:url-password@provider.test/orders",
                 "dsn": "host=db;password=hunter2;database=autotrade",
                 "key_material": "-----BEGIN PRIVATE KEY-----\\nsecret\\n-----END PRIVATE KEY-----",
                 "token_text": "token=plain-token-secret",
@@ -124,12 +125,13 @@ class DecisionTraceStoreTests(unittest.TestCase):
             store.append(item)
 
             raw = path.read_text(encoding="utf-8")
-            for leaked in ("abc123", "bearer-secret", "hunter2", "plain-token-secret", "plain-session-secret", "\\nsecret\\n"):
+            for leaked in ("abc123", "bearer-secret", "url-password", "hunter2", "plain-token-secret", "plain-session-secret", "\\nsecret\\n"):
                 self.assertNotIn(leaked, raw)
             persisted = json.loads(raw)
             attrs = persisted["attributes"]
             self.assertIn("api_key=[REDACTED]", attrs["url"])
             self.assertIn("Authorization: [REDACTED]", attrs["message"])
+            self.assertEqual(attrs["userinfo_url"], "https://[REDACTED]@provider.test/orders")
             self.assertIn("password=[REDACTED]", attrs["dsn"])
             self.assertEqual(attrs["key_material"], "[REDACTED]")
             self.assertIn("token=[REDACTED]", attrs["token_text"])

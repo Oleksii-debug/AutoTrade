@@ -34,7 +34,7 @@ jobs:
           ref: ${{ env.EXPECTED_SOURCE_SHA }}
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12.14"
+          python-version: "3.12.10"
       - run: python -m unittest mvp.tests.test_zero_model_qualification -v
       - name: Assert and generate exact-head qualification evidence
         shell: bash

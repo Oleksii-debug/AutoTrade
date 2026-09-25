@@ -283,6 +283,72 @@ class BorrowLifecycleJournalTests(unittest.TestCase):
                     now="2026-09-24T18:02:00Z",
                 )
 
+    def test_authority_snapshot_replays_exact_cut_while_later_recall_blocks_current_send(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            scope = resource()
+            journal = BorrowLifecycleJournal(store, scope)
+            journal.record_locate(locate(scope, available_quantity="20"))
+            journal.record_loan(loan(scope, borrowed_quantity="5"))
+
+            bound = journal.authority_snapshot(
+                context(position="-5", reserved="-2"),
+                symbol="ABC",
+                now="2026-09-24T18:01:00Z",
+            )
+            self.assertEqual(
+                bound["availability"],
+                {scope.resource_key: "20"},
+            )
+            self.assertEqual(
+                journal.validate_authority_snapshot(
+                    bound,
+                    now="2026-09-24T18:01:00Z",
+                ),
+                {scope.resource_key: "20"},
+            )
+
+            journal.record_recall(
+                BorrowRecallEvidence(
+                    resource=scope,
+                    recall_id="recall-after-admission",
+                    provider_revision="recall-after-rev-1",
+                    recalled_quantity="1",
+                    observed_at="2026-09-24T18:01:30Z",
+                    effective_at="2026-09-24T18:01:15Z",
+                    evidence_refs=("provider:recall-after:rev-1",),
+                )
+            )
+            self.assertTrue(journal.current_blocks_new_short())
+            # Historical admission evidence remains reproducible at its cut;
+            # the later recall is a dispatch-time fence, not a rewrite of history.
+            self.assertEqual(
+                journal.validate_authority_snapshot(
+                    bound,
+                    now="2026-09-24T18:01:00Z",
+                ),
+                {scope.resource_key: "20"},
+            )
+
+    def test_authority_snapshot_rejects_tampered_cut(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            scope = resource()
+            journal = BorrowLifecycleJournal(store, scope)
+            journal.record_locate(locate(scope, available_quantity="20"))
+            bound = journal.authority_snapshot(
+                context(),
+                symbol="ABC",
+                now="2026-09-24T18:01:00Z",
+            )
+            tampered = dict(bound)
+            tampered["availability"] = {scope.resource_key: "200"}
+            with self.assertRaisesRegex(ValueError, "capacity mismatch"):
+                journal.validate_authority_snapshot(
+                    tampered,
+                    now="2026-09-24T18:01:00Z",
+                )
+
     def test_partial_resolution_requires_affirmative_provider_evidence(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

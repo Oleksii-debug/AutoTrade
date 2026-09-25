@@ -1,22 +1,31 @@
 from datetime import date
 from decimal import Decimal
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from uuid import NAMESPACE_URL, uuid5
 
 from mvp.autotrade_mvp.accounting import (
     AccountingConflict,
     book_equity_fill,
 )
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
-from mvp.autotrade_mvp.durable_settlement import DurableSettlementBook
+from mvp.autotrade_mvp.durable_settlement import (
+    DurableSettlementBook,
+    SETTLEMENT_EVIDENCE_MEDIA_TYPE,
+    settlement_rule_evidence_metadata,
+    settlement_rule_evidence_receipt,
+)
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
     commit_economic_batch_with_reservation_consumption,
 )
 from mvp.autotrade_mvp.reservations import ReservationConflict
+from research.autotrade_research.artifacts.store import ArtifactStore
+
 from mvp.autotrade_mvp.settlement import (
     SettlementAccountScope,
     SettlementRuleBinding,
@@ -46,16 +55,21 @@ def economic_book(store: JournalStore) -> DurableProviderEconomicBook:
     )
 
 
+def artifact_store_for(store: JournalStore) -> ArtifactStore:
+    return ArtifactStore(store.path.parent / "settlement-evidence")
+
+
 def settlement_book(store: JournalStore) -> DurableSettlementBook:
     return DurableSettlementBook(
         store,
         provider_id=PROVIDER,
         account_id=ACCOUNT,
         environment=ENVIRONMENT,
+        evidence_artifact_store=artifact_store_for(store),
     )
 
 
-def settlement_obligation(transaction):
+def settlement_obligation(store: JournalStore, transaction):
     rule = SettlementRuleBinding(
         rule_id="test-equity-cash",
         rule_version="1",
@@ -69,6 +83,29 @@ def settlement_obligation(transaction):
         effective_from=date(2026, 9, 1),
         effective_to=None,
         evidence_refs=("instrument:ABC", "rule:test-equity-cash:1"),
+    )
+    receipt = settlement_rule_evidence_receipt(rule)
+    artifact_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            "https://evidence.autotrade.local/atomic-settlement-rule/"
+            + canonical_json(receipt),
+        )
+    )
+    manifest = artifact_store_for(store).publish_bytes(
+        artifact_id=artifact_id,
+        data=canonical_json(receipt).encode("utf-8"),
+        media_type=SETTLEMENT_EVIDENCE_MEDIA_TYPE,
+        rights={"storage": True, "export": False},
+        source_refs=["provider-doc:test-settlement-rule"],
+        metadata=settlement_rule_evidence_metadata(rule),
+    )
+    rule = replace(
+        rule,
+        evidence_refs=(
+            *rule.evidence_refs,
+            f"artifact:{artifact_id}@{manifest['sha256']}",
+        ),
     )
     return equity_cash_obligation_from_transaction(
         transaction,
@@ -120,7 +157,7 @@ def commit_fill(
         kwargs = {
             "settlement_book": settlements,
             "settlement_obligations": (
-                settlement_obligation(economic_transaction),
+                settlement_obligation(settlements.store, economic_transaction),
             ),
         }
     return commit_economic_batch_with_reservation_consumption(
@@ -418,7 +455,7 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
             settlements = settlement_book(store)
             reserve(reservations)
             transaction = fill_transaction()
-            obligation = settlement_obligation(transaction)
+            obligation = settlement_obligation(store, transaction)
             self.assertTrue(
                 settlements.register_obligations(
                     (obligation,),

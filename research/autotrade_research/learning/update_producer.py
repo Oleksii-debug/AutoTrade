@@ -456,40 +456,52 @@ def _verify_registered_evidence(
 
 
 def _physical_observation_identity(
+    artifact_store: ArtifactStore,
     raw: Mapping[str, Any],
     payload: Mapping[str, Any],
 ) -> str:
-    """Derive one physical observation identity without trusting caller aliases.
+    """Derive physical identity only from registered immutable evidence.
 
-    The identity is anchored to immutable evidence digests and the causal
-    observation locus. Task/regime and learning.observation_id are deliberately
-    excluded so relabelling one physical fact cannot move it between scientific
-    populations.
+    Caller-owned decision/information timestamps are deliberately excluded.
+    Until the causal locus itself is independently authority-issued, allowing
+    those labels into identity would let one physical fact cross scientific
+    populations by timestamp relabelling.
     """
 
     raw_refs = payload.get("evidence_refs")
     if not isinstance(raw_refs, (list, tuple)) or not raw_refs:
         raise ValueError("physical observation requires evidence references")
-    references = tuple(
-        sorted(_text(value, name="evidence_ref") for value in raw_refs)
-    )
-    if len(references) != len(set(references)):
-        raise ValueError("physical observation evidence references must be unique")
-    if any(re.search(r"sha256:[0-9a-f]{64}$", value) is None for value in references):
-        raise ValueError(
-            "physical observation evidence references must bind immutable SHA-256 identities"
+
+    resolved_digests: list[str] = []
+    seen_refs: set[str] = set()
+    for raw_ref in raw_refs:
+        reference, manifest, evidence_bytes = _artifact_ref(
+            artifact_store,
+            raw_ref,
+            name="physical_evidence_ref",
         )
+        if reference in seen_refs:
+            raise ValueError(
+                "physical observation evidence references must be unique"
+            )
+        seen_refs.add(reference)
+        digest = _sha256_identity(
+            manifest.get("sha256"),
+            name="physical evidence digest",
+        )
+        if _digest_bytes(evidence_bytes) != digest:
+            raise ValueError(
+                "physical observation evidence bytes changed after resolution"
+            )
+        resolved_digests.append(digest)
+
     material = {
-        "schema_version": "1.0.0",
-        "decision_time": _iso(_time(raw.get("decision_time"), name="decision_time")),
-        "information_cutoff": _iso(
-            _time(raw.get("information_cutoff"), name="information_cutoff")
-        ),
+        "schema_version": "2.0.0",
         "instrument_family": _text(
             raw.get("instrument_family"),
             name="instrument_family",
         ),
-        "evidence_refs": references,
+        "evidence_digests": tuple(sorted(resolved_digests)),
     }
     return _digest_bytes(_canonical_bytes(material))
 
@@ -497,6 +509,7 @@ def _physical_observation_identity(
 def _extract_learning_rows(
     population: CoveragePopulationSnapshot,
     *,
+    artifact_store: ArtifactStore,
     cutoff: datetime,
     config: UpdateProducerConfig,
     feature_names: tuple[str, ...],
@@ -534,6 +547,7 @@ def _extract_learning_rows(
                 name="observation_id",
             )
             physical_observation_id = _physical_observation_identity(
+                artifact_store,
                 raw,
                 payload,
             )
@@ -872,6 +886,7 @@ def produce_bounded_online_update(
         update_conflicts,
     ) = _extract_learning_rows(
         update_population,
+        artifact_store=artifact_store,
         cutoff=update_time,
         config=config,
         feature_names=feature_names,
@@ -883,6 +898,7 @@ def produce_bounded_online_update(
         calibration_conflicts,
     ) = _extract_learning_rows(
         calibration_population,
+        artifact_store=artifact_store,
         cutoff=calibration_time,
         config=config,
         feature_names=feature_names,

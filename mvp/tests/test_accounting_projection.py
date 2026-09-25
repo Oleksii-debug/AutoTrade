@@ -233,6 +233,28 @@ class EquityPositionProjectionTests(unittest.TestCase):
                 settlement_currency="USD",
             )
 
+    def test_matching_clearing_without_trade_cash_fails_closed(self):
+        book = EconomicBook()
+        book.append(JournalTransaction(
+            transaction_id="spoofed-fill",
+            cause_event_id="adjustment-1",
+            postings=(
+                posting("POSITION:ABC", "ABC", "1"),
+                posting("CLEARING:ABC", "ABC", "-1"),
+                posting("CLEARING:USD", "USD", "100"),
+                posting("SUSPENSE:USD", "USD", "-100"),
+            ),
+        ))
+        with self.assertRaisesRegex(
+            AccountingConflict,
+            "complete canonical equity-fill posting shape",
+        ):
+            project_equity_position(
+                book,
+                instrument="ABC",
+                settlement_currency="USD",
+            )
+
     def test_reversed_fill_history_fails_closed_until_effective_time_exists(self):
         book = EconomicBook()
         original = book_equity_fill(

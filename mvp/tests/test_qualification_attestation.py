@@ -170,6 +170,29 @@ def verify(receipt, store, trust_policy, **overrides):
 
 
 class QualificationAttestationTests(unittest.TestCase):
+    def test_git_sha256_identity_is_supported_without_case_aliases(self):
+        trust_root = root()
+        source_sha256 = "d" * 64
+        ref = EvidenceArtifactRef(
+            artifact_id=EVIDENCE_ID,
+            sha256=EVIDENCE_SHA,
+            media_type="application/vnd.autotrade.qualification-evidence",
+            evidence_kind="QUALIFICATION_RUN",
+            source_sha=source_sha256,
+        )
+        value = attestation(
+            trust_root,
+            source_sha=source_sha256,
+            evidence_refs=(ref,),
+        )
+        self.assertEqual(value.source_sha, source_sha256)
+        with self.assertRaisesRegex(QualificationTrustError, "lowercase 40- or 64"):
+            attestation(
+                trust_root,
+                source_sha=source_sha256.upper(),
+                evidence_refs=(ref,),
+            )
+
     def test_valid_signed_receipt_resolves_exact_evidence(self):
         trust_root = root()
         trust_policy = policy(trust_root)

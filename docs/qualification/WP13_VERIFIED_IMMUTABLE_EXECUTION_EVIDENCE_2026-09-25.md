@@ -1,11 +1,11 @@
 # WP-13 verified immutable execution evidence
 
 Date: 2026-09-25  
-Base main: `e2011191a39128ed54001920997fdf98bf057848`
+Base main: `140b35536bd3992b981603492a174a6b6108614a`
 
 ## Scope
 
-This convergence repairs issue #643 without creating a second execution-qualification authority.
+This convergence is the canonical successor to PR #675 and does not create a second execution-qualification authority.
 
 The existing `ExecutionModelQualification` remains the single WP-13 qualification record. Qualified replay no longer accepts a caller-supplied evidence digest. Instead it requires:
 

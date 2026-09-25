@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -215,9 +215,19 @@ class CoveragePopulationSnapshot:
 
 
 class ExperienceMemory:
-    def __init__(self, path: str | Path):
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        correction_evidence_resolver: Callable[[str], datetime] | None = None,
+    ):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if correction_evidence_resolver is not None and not callable(
+            correction_evidence_resolver
+        ):
+            raise TypeError("correction_evidence_resolver must be callable or None")
+        self._correction_evidence_resolver = correction_evidence_resolver
         with self._connect() as con:
             con.executescript(
                 """
@@ -260,6 +270,12 @@ class ExperienceMemory:
             }
             if "available_at" not in correction_columns:
                 con.execute("ALTER TABLE corrections ADD COLUMN available_at TEXT")
+            if "availability_authority" not in correction_columns:
+                # Pre-migration correction availability was caller-asserted and
+                # cannot be silently upgraded to trusted causal evidence.
+                con.execute(
+                    "ALTER TABLE corrections ADD COLUMN availability_authority TEXT"
+                )
             con.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_corrections_causal
@@ -339,46 +355,81 @@ class ExperienceMemory:
             "payload": payload,
         }
 
-    @staticmethod
+    def _resolve_correction_evidence_time(self, evidence_ref: str) -> datetime:
+        ref = _text(evidence_ref, name="correction evidence_ref")
+        resolver = self._correction_evidence_resolver
+        if resolver is None:
+            raise MemoryIntegrityError(
+                "independent correction evidence resolver is unavailable"
+            )
+        try:
+            resolved = resolver(ref)
+            return _time(resolved, name="correction evidence observed_at")
+        except MemoryIntegrityError:
+            raise
+        except Exception as error:
+            raise MemoryIntegrityError(
+                "correction evidence availability could not be independently verified"
+            ) from error
+
     def _verified_correction(
+        self,
         row: sqlite3.Row,
         *,
         episode_id: str,
-    ) -> tuple[dict[str, Any], datetime]:
+    ) -> tuple[dict[str, Any], datetime, str]:
         if row["episode_id"] != episode_id:
             raise MemoryIntegrityError("correction episode binding mismatch")
         payload = _stored_json(row["payload_json"], name="correction payload")
         if not isinstance(payload, dict) or not payload:
             raise MemoryIntegrityError("correction payload must be a non-empty object")
+        if "evidence_ref" not in payload:
+            raise MemoryIntegrityError("correction evidence_ref is missing")
+        evidence_ref = _stored_text(
+            payload["evidence_ref"],
+            name="correction evidence_ref",
+        )
         created = _stored_time(row["created_at"], name="correction created_at")
-        if row["available_at"] is None:
-            # Pre-causal rows used a payload-only checksum and therefore cannot
-            # cryptographically prove their original episode parent. Preserve
-            # the bytes for explicit migration/audit, but never present them as
-            # trusted causal correction evidence.
-            availability = created
-            legacy_expected = _hash(payload)
-            if row["correction_hash"] == legacy_expected:
-                raise MemoryIntegrityError(
-                    "legacy correction lacks episode-bound integrity; explicit recovery is required"
-                )
-            raise MemoryIntegrityError("correction integrity mismatch")
-
+        if row["available_at"] is None or row["availability_authority"] is None:
+            raise MemoryIntegrityError(
+                "legacy correction availability lacks independent provenance; "
+                "explicit recovery is required"
+            )
         availability = _stored_time(
             row["available_at"],
             name="correction available_at",
         )
+        authority = _stored_text(
+            row["availability_authority"],
+            name="correction availability_authority",
+        )
+        if authority == "LOCAL_APPEND":
+            if availability != created or row["available_at"] != row["created_at"]:
+                raise MemoryIntegrityError(
+                    "local correction availability must equal immutable append time"
+                )
+        elif authority == "EVIDENCE_REF":
+            evidenced_at = self._resolve_correction_evidence_time(evidence_ref)
+            if evidenced_at != availability:
+                raise MemoryIntegrityError(
+                    "correction available_at does not match independently verified evidence"
+                )
+        else:
+            raise MemoryIntegrityError(
+                "correction availability authority is unsupported"
+            )
         expected = _hash(
             {
                 "correction_id": row["correction_id"],
                 "episode_id": row["episode_id"],
                 "available_at": row["available_at"],
+                "availability_authority": authority,
                 "payload": payload,
             }
         )
         if row["correction_hash"] != expected:
             raise MemoryIntegrityError("correction integrity mismatch")
-        return payload, availability
+        return payload, availability, authority
 
     @staticmethod
     def _verified_tombstone(
@@ -520,6 +571,7 @@ class ExperienceMemory:
         payload = normalized_payload
         identifier = _identifier(correction_id)
         canonical = _canonical(payload)
+
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             episode_row = con.execute(
@@ -550,63 +602,81 @@ class ExperienceMemory:
                     "correction cannot introduce fields absent from source episode: "
                     + ", ".join(invented_fields)
                 )
-            existing = con.execute("SELECT * FROM corrections WHERE correction_id=?", (identifier,)).fetchone()
+            if (
+                requested_availability is not None
+                and requested_availability < episode_decision
+            ):
+                raise MemoryConflict(
+                    "correction availability cannot precede episode decision_time"
+                )
+
+            existing = con.execute(
+                "SELECT * FROM corrections WHERE correction_id=?",
+                (identifier,),
+            ).fetchone()
             if existing is not None:
-                existing_availability = existing["available_at"] or existing["created_at"]
-                effective_availability = (
-                    requested_availability.isoformat()
-                    if requested_availability is not None
-                    else existing_availability
-                )
-                current_digest = _hash(
-                    {
-                        "correction_id": identifier,
-                        "episode_id": episode,
-                        "available_at": existing_availability,
-                        "payload": payload,
-                    }
-                )
-                legacy_digest = _hash(payload)
-                hash_matches = existing["correction_hash"] == current_digest or (
-                    existing["available_at"] is None
-                    and existing["correction_hash"] == legacy_digest
-                )
-                same = (
-                    existing["episode_id"] == episode
-                    and existing["payload_json"] == canonical
-                    and hash_matches
-                    and existing_availability == effective_availability
-                )
-                if not same:
+                (
+                    existing_payload,
+                    existing_availability,
+                    existing_authority,
+                ) = self._verified_correction(existing, episode_id=episode)
+                if existing_payload != payload:
+                    raise MemoryConflict("correction identity conflict")
+                if requested_availability is None:
+                    if existing_authority != "LOCAL_APPEND":
+                        raise MemoryConflict(
+                            "correction retry omitted its evidence-backed availability"
+                        )
+                elif (
+                    existing_authority != "EVIDENCE_REF"
+                    or existing_availability != requested_availability
+                ):
                     raise MemoryConflict("correction identity conflict")
                 return identifier, False
 
-            availability = requested_availability or datetime.now(timezone.utc)
+            created = datetime.now(timezone.utc)
+            if requested_availability is None:
+                availability = created
+                availability_authority = "LOCAL_APPEND"
+            else:
+                availability = requested_availability
+                evidenced_at = self._resolve_correction_evidence_time(evidence_ref)
+                if evidenced_at != availability:
+                    raise MemoryIntegrityError(
+                        "correction available_at does not match independently verified evidence"
+                    )
+                availability_authority = "EVIDENCE_REF"
             if availability < episode_decision:
                 raise MemoryConflict(
                     "correction availability cannot precede episode decision_time"
                 )
+
+            created_text = created.isoformat()
+            availability_text = availability.isoformat()
             digest = _hash(
                 {
                     "correction_id": identifier,
                     "episode_id": episode,
-                    "available_at": availability.isoformat(),
+                    "available_at": availability_text,
+                    "availability_authority": availability_authority,
                     "payload": payload,
                 }
             )
             con.execute(
                 """
                 INSERT INTO corrections(
-                    correction_id,episode_id,correction_hash,payload_json,created_at,available_at
-                ) VALUES(?,?,?,?,?,?)
+                    correction_id,episode_id,correction_hash,payload_json,
+                    created_at,available_at,availability_authority
+                ) VALUES(?,?,?,?,?,?,?)
                 """,
                 (
                     identifier,
                     episode,
                     digest,
                     canonical,
-                    datetime.now(timezone.utc).isoformat(),
-                    availability.isoformat(),
+                    created_text,
+                    availability_text,
+                    availability_authority,
                 ),
             )
             con.commit()
@@ -722,9 +792,11 @@ class ExperienceMemory:
                 ).fetchall()
                 visible_corrections: list[dict[str, Any]] = []
                 for correction_row in correction_rows:
-                    correction, available = self._verified_correction(
-                        correction_row,
-                        episode_id=row["episode_id"],
+                    correction, available, _availability_authority = (
+                        self._verified_correction(
+                            correction_row,
+                            episode_id=row["episode_id"],
+                        )
                     )
                     if available <= cutoff:
                         visible_corrections.append(correction)
@@ -924,9 +996,11 @@ class ExperienceMemory:
                     (row["episode_id"],),
                 ).fetchall()
                 for correction_row in correction_rows:
-                    correction, available = self._verified_correction(
-                        correction_row,
-                        episode_id=row["episode_id"],
+                    correction, available, _availability_authority = (
+                        self._verified_correction(
+                            correction_row,
+                            episode_id=row["episode_id"],
+                        )
                     )
                     if available > cutoff:
                         continue

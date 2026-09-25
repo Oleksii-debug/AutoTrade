@@ -16,6 +16,12 @@ from hashlib import sha256
 from typing import Mapping, Sequence
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from research.autotrade_research.artifacts.store import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+)
+from research.autotrade_research.io.strict_json import strict_json_loads
+
 from .persistence import JournalStore, canonical_json, payload_digest
 from .risk import RiskContext, RiskIntent
 
@@ -23,6 +29,11 @@ from .risk import RiskContext, RiskIntent
 _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 _AVAILABILITY_STATES = frozenset({"AVAILABLE", "HARD_TO_BORROW", "UNAVAILABLE"})
 _AGGREGATE_TYPE = "borrow_lifecycle"
+BORROW_PROVIDER_EVIDENCE_MEDIA_TYPE = (
+    "application/vnd.autotrade.borrow-provider-evidence+json"
+)
+BORROW_PROVIDER_EVIDENCE_TYPE = "AUTOTRADE_BORROW_PROVIDER_EVIDENCE"
+BORROW_PROVIDER_EVIDENCE_SCHEMA_VERSION = 1
 
 
 def _text(value: str, *, name: str) -> str:
@@ -88,6 +99,137 @@ def _refs(values: Sequence[str]) -> tuple[str, ...]:
     if not result:
         raise ValueError("at least one provider evidence reference is required")
     return tuple(result)
+
+
+def _immutable_borrow_evidence_ref(value: object) -> tuple[str, str, str]:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("borrow provider evidence requires immutable artifact reference")
+    reference = value.strip()
+    marker = "@sha256:"
+    if not reference.startswith("artifact:") or marker not in reference:
+        raise ValueError(
+            "borrow evidence reference must bind artifact UUID and SHA-256 digest"
+        )
+    artifact_id, digest = reference[len("artifact:"):].split(marker, 1)
+    try:
+        artifact_id = str(UUID(artifact_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise ValueError("borrow evidence artifact identity must be a UUID") from error
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        raise ValueError(
+            "borrow evidence reference must use canonical lowercase SHA-256"
+        )
+    canonical = f"artifact:{artifact_id}@sha256:{digest}"
+    if reference != canonical:
+        raise ValueError("borrow evidence reference must be canonical")
+    return artifact_id, digest, canonical
+
+
+def _provider_borrow_evidence_kind(evidence: object) -> str:
+    if isinstance(evidence, BorrowLocateEvidence):
+        return "LOCATE"
+    if isinstance(evidence, BorrowLoanEvidence):
+        return "LOAN"
+    if isinstance(evidence, BorrowRecallEvidence):
+        return "RECALL"
+    if isinstance(evidence, BorrowRecallResolutionEvidence):
+        return "RECALL_RESOLUTION"
+    raise TypeError("unsupported provider borrow evidence type")
+
+
+def provider_borrow_evidence_receipt(evidence: object) -> dict[str, object]:
+    """Canonical immutable provider receipt excluding its self-reference."""
+
+    kind = _provider_borrow_evidence_kind(evidence)
+    payload = evidence.payload()
+    payload.pop("evidence_refs", None)
+    return {
+        "schema_version": BORROW_PROVIDER_EVIDENCE_SCHEMA_VERSION,
+        "evidence_type": BORROW_PROVIDER_EVIDENCE_TYPE,
+        "observation_kind": kind,
+        "observation": payload,
+    }
+
+
+def provider_borrow_evidence_metadata(evidence: object) -> dict[str, object]:
+    kind = _provider_borrow_evidence_kind(evidence)
+    resource = evidence.resource
+    metadata: dict[str, object] = {
+        "evidence_type": BORROW_PROVIDER_EVIDENCE_TYPE,
+        "observation_kind": kind,
+        "provider_id": resource.provider_id,
+        "account_id": resource.account_id,
+        "environment": resource.environment,
+        "instrument_id": resource.instrument_id,
+        "instrument_version": resource.instrument_version,
+        "provider_revision": evidence.provider_revision,
+    }
+    if isinstance(evidence, BorrowLocateEvidence):
+        metadata["locate_id"] = evidence.locate_id
+    if isinstance(evidence, (BorrowRecallEvidence, BorrowRecallResolutionEvidence)):
+        metadata["recall_id"] = evidence.recall_id
+    return metadata
+
+
+def _verify_provider_borrow_evidence(
+    evidence: object,
+    artifact_store: ArtifactStore,
+) -> tuple[str, ...]:
+    if not isinstance(artifact_store, ArtifactStore):
+        raise ValueError("provider borrow evidence requires trusted ArtifactStore")
+    expected_receipt = provider_borrow_evidence_receipt(evidence)
+    expected_metadata = provider_borrow_evidence_metadata(evidence)
+    canonical_refs: list[str] = []
+    for raw_ref in evidence.evidence_refs:
+        artifact_id, digest, canonical_ref = _immutable_borrow_evidence_ref(raw_ref)
+        try:
+            manifest = artifact_store.load_manifest(artifact_id)
+            manifest_hash = manifest.get("manifest_hash")
+            if (
+                not isinstance(manifest_hash, str)
+                or len(manifest_hash) != 71
+                or not manifest_hash.startswith("sha256:")
+            ):
+                raise ArtifactIntegrityError(
+                    "borrow evidence manifest lacks integrity binding"
+                )
+            if manifest.get("sha256") != f"sha256:{digest}":
+                raise ArtifactIntegrityError(
+                    "borrow evidence digest does not match manifest"
+                )
+            if manifest.get("media_type") != BORROW_PROVIDER_EVIDENCE_MEDIA_TYPE:
+                raise ArtifactIntegrityError(
+                    "borrow evidence has unsupported media type"
+                )
+            if manifest.get("metadata") != expected_metadata:
+                raise ArtifactIntegrityError(
+                    "borrow evidence manifest metadata does not match financial scope"
+                )
+            rights = manifest.get("rights")
+            if not isinstance(rights, dict) or rights.get("storage") is not True:
+                raise ArtifactIntegrityError(
+                    "borrow evidence manifest lacks storage provenance"
+                )
+            raw = artifact_store.read_bytes(artifact_id)
+            receipt = strict_json_loads(raw.decode("utf-8"))
+        except (
+            ArtifactIntegrityError,
+            FileNotFoundError,
+            UnicodeError,
+            ValueError,
+            TypeError,
+        ) as error:
+            raise ValueError("borrow provider evidence verification failed") from error
+        if receipt != expected_receipt:
+            raise ValueError(
+                "borrow provider evidence does not match supplied economics"
+            )
+        if raw != canonical_json(expected_receipt).encode("utf-8"):
+            raise ValueError("borrow provider evidence must use canonical JSON bytes")
+        canonical_refs.append(canonical_ref)
+    if tuple(canonical_refs) != evidence.evidence_refs:
+        raise ValueError("borrow provider evidence references are noncanonical")
+    return tuple(canonical_refs)
 
 
 @dataclass(frozen=True)
@@ -661,13 +803,22 @@ def validated_borrow_capacity(
 class BorrowLifecycleJournal:
     """Restart-safe provider-evidence projection for one borrow resource."""
 
-    def __init__(self, store: JournalStore, resource: BorrowResourceIdentity):
+    def __init__(
+        self,
+        store: JournalStore,
+        resource: BorrowResourceIdentity,
+        *,
+        evidence_artifact_store: ArtifactStore,
+    ):
         if not isinstance(store, JournalStore):
             raise TypeError("store must be JournalStore")
         if not isinstance(resource, BorrowResourceIdentity):
             raise TypeError("resource must be BorrowResourceIdentity")
+        if not isinstance(evidence_artifact_store, ArtifactStore):
+            raise TypeError("evidence_artifact_store must be ArtifactStore")
         self.store = store
         self.resource = resource
+        self.evidence_artifact_store = evidence_artifact_store
         self.aggregate_id = "borrow-lifecycle:" + str(
             uuid5(
                 NAMESPACE_URL,
@@ -695,7 +846,7 @@ class BorrowLifecycleJournal:
 
     def _locate_from_payload(self, payload: Mapping[str, object]) -> BorrowLocateEvidence:
         resource = self._resource_from_payload(payload)
-        return BorrowLocateEvidence(
+        evidence = BorrowLocateEvidence(
             resource=resource,
             locate_id=payload.get("locate_id"),
             provider_revision=payload.get("provider_revision"),
@@ -709,10 +860,12 @@ class BorrowLifecycleJournal:
             indicative_rate=payload.get("indicative_rate"),
             rate_unit=payload.get("rate_unit"),
         )
+        _verify_provider_borrow_evidence(evidence, self.evidence_artifact_store)
+        return evidence
 
     def _loan_from_payload(self, payload: Mapping[str, object]) -> BorrowLoanEvidence:
         resource = self._resource_from_payload(payload)
-        return BorrowLoanEvidence(
+        evidence = BorrowLoanEvidence(
             resource=resource,
             provider_revision=payload.get("provider_revision"),
             borrowed_quantity=payload.get("borrowed_quantity"),
@@ -721,10 +874,12 @@ class BorrowLifecycleJournal:
             valid_until=payload.get("valid_until"),
             evidence_refs=tuple(payload.get("evidence_refs") or ()),
         )
+        _verify_provider_borrow_evidence(evidence, self.evidence_artifact_store)
+        return evidence
 
     def _recall_from_payload(self, payload: Mapping[str, object]) -> BorrowRecallEvidence:
         resource = self._resource_from_payload(payload)
-        return BorrowRecallEvidence(
+        evidence = BorrowRecallEvidence(
             resource=resource,
             recall_id=payload.get("recall_id"),
             provider_revision=payload.get("provider_revision"),
@@ -734,12 +889,14 @@ class BorrowLifecycleJournal:
             deadline=payload.get("deadline"),
             evidence_refs=tuple(payload.get("evidence_refs") or ()),
         )
+        _verify_provider_borrow_evidence(evidence, self.evidence_artifact_store)
+        return evidence
 
     def _resolution_from_payload(
         self, payload: Mapping[str, object]
     ) -> BorrowRecallResolutionEvidence:
         resource = self._resource_from_payload(payload)
-        return BorrowRecallResolutionEvidence(
+        evidence = BorrowRecallResolutionEvidence(
             resource=resource,
             recall_id=payload.get("recall_id"),
             provider_revision=payload.get("provider_revision"),
@@ -747,6 +904,8 @@ class BorrowLifecycleJournal:
             observed_at=payload.get("observed_at"),
             evidence_refs=tuple(payload.get("evidence_refs") or ()),
         )
+        _verify_provider_borrow_evidence(evidence, self.evidence_artifact_store)
+        return evidence
 
     def state(self, *, through_version: int | None = None) -> BorrowLifecycleState:
         if through_version is not None and (
@@ -1223,6 +1382,7 @@ class BorrowLifecycleJournal:
             raise TypeError("evidence must be BorrowLocateEvidence")
         if evidence.resource != self.resource:
             raise ValueError("borrow locate resource scope mismatch")
+        _verify_provider_borrow_evidence(evidence, self.evidence_artifact_store)
         return self._append(
             event_type="BorrowLocateObserved",
             payload=evidence.payload(),
@@ -1234,6 +1394,7 @@ class BorrowLifecycleJournal:
             raise TypeError("evidence must be BorrowLoanEvidence")
         if evidence.resource != self.resource:
             raise ValueError("borrow loan resource scope mismatch")
+        _verify_provider_borrow_evidence(evidence, self.evidence_artifact_store)
         return self._append(
             event_type="BorrowLoanObserved",
             payload=evidence.payload(),
@@ -1245,6 +1406,7 @@ class BorrowLifecycleJournal:
             raise TypeError("evidence must be BorrowRecallEvidence")
         if evidence.resource != self.resource:
             raise ValueError("borrow recall resource scope mismatch")
+        _verify_provider_borrow_evidence(evidence, self.evidence_artifact_store)
         return self._append(
             event_type="BorrowRecallObserved",
             payload=evidence.payload(),
@@ -1263,6 +1425,7 @@ class BorrowLifecycleJournal:
             raise TypeError("evidence must be BorrowRecallResolutionEvidence")
         if evidence.resource != self.resource:
             raise ValueError("borrow recall resolution resource scope mismatch")
+        _verify_provider_borrow_evidence(evidence, self.evidence_artifact_store)
         return self._append(
             event_type="BorrowRecallReduced",
             payload=evidence.payload(),

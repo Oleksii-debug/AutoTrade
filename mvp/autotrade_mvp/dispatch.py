@@ -57,6 +57,32 @@ def _identity_digest(*parts: str) -> str:
     return sha256(canonical_json(list(parts)).encode("utf-8")).hexdigest()
 
 
+def submission_attempt_aggregate_id(
+    *,
+    environment: str,
+    account_id: str,
+    attempt_id: str,
+) -> str:
+    """Return the canonical durable aggregate identity for one send attempt."""
+
+    normalized_environment = (
+        environment.strip().upper() if isinstance(environment, str) else ""
+    )
+    if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+        raise ValueError(
+            "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
+        )
+    if not isinstance(account_id, str) or not account_id.strip():
+        raise ValueError("account_id is required")
+    if not isinstance(attempt_id, str) or not attempt_id.strip():
+        raise ValueError("attempt_id is required")
+    return "submission-attempt:" + _identity_digest(
+        normalized_environment,
+        account_id.strip(),
+        attempt_id.strip(),
+    )
+
+
 def stable_client_order_id(
     provider: str,
     intent_id: str,
@@ -191,10 +217,10 @@ class GuardedDispatcher:
         self.prepared_lease_seconds = prepared_lease_seconds
 
     def _aggregate_id(self, attempt_id: str) -> str:
-        return "submission-attempt:" + _identity_digest(
-            self.environment,
-            self.account_id,
-            attempt_id,
+        return submission_attempt_aggregate_id(
+            environment=self.environment,
+            account_id=self.account_id,
+            attempt_id=attempt_id,
         )
 
     def _events(self, attempt_id: str) -> list[dict[str, Any]]:

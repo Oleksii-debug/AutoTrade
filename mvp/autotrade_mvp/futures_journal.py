@@ -338,13 +338,23 @@ def _transaction_from_payload(value: object) -> JournalTransaction | None:
 def rebuild_variation_margin_book(
     store: JournalStore,
     opening_state: VariationMarginState | InverseVariationMarginState,
+    *,
+    evidence_artifact_store: ArtifactStore,
 ) -> EconomicBook:
     """Rebuild the canonical double-entry projection from durable settlement events."""
 
     if isinstance(opening_state, VariationMarginState):
-        restore_linear_variation_margin(store, opening_state)
+        restore_linear_variation_margin(
+            store,
+            opening_state,
+            evidence_artifact_store=evidence_artifact_store,
+        )
     elif isinstance(opening_state, InverseVariationMarginState):
-        restore_inverse_variation_margin(store, opening_state)
+        restore_inverse_variation_margin(
+            store,
+            opening_state,
+            evidence_artifact_store=evidence_artifact_store,
+        )
     else:
         raise TypeError("opening_state must be a variation-margin state")
 
@@ -442,6 +452,8 @@ def _envelope(
 def restore_linear_variation_margin(
     store: JournalStore,
     opening_state: VariationMarginState,
+    *,
+    evidence_artifact_store: ArtifactStore,
 ) -> VariationMarginState:
     """Rebuild and independently verify durable linear VM economics."""
 
@@ -465,6 +477,10 @@ def restore_linear_variation_margin(
         if not isinstance(payload, Mapping) or payload.get("kind") != "LINEAR":
             raise FuturesError("durable futures settlement kind mismatch")
         settlement = _evidence_from_payload(payload.get("settlement"))
+        _verify_provider_settlement_evidence(
+            settlement,
+            evidence_artifact_store,
+        )
         prior_price = state.last_settlement_price
         next_state, delta = apply_variation_margin(state, settlement)
         if next_state is state:
@@ -491,10 +507,17 @@ def commit_linear_variation_margin(
     store: JournalStore,
     opening_state: VariationMarginState,
     settlement: FuturesSettlementEvidence,
+    *,
+    evidence_artifact_store: ArtifactStore,
 ) -> tuple[VariationMarginState, Decimal, JournalTransaction | None, bool]:
     """Atomically accept one linear settlement and its double-entry economics."""
 
-    current = restore_linear_variation_margin(store, opening_state)
+    current = restore_linear_variation_margin(
+        store,
+        opening_state,
+        evidence_artifact_store=evidence_artifact_store,
+    )
+    _verify_provider_settlement_evidence(settlement, evidence_artifact_store)
     next_state, delta = apply_variation_margin(current, settlement)
     if next_state is current:
         return current, Decimal("0"), None, False
@@ -540,7 +563,11 @@ def commit_linear_variation_margin(
         state_version=version,
         events=[(envelope, None)],
     )
-    rebuilt = restore_linear_variation_margin(store, opening_state)
+    rebuilt = restore_linear_variation_margin(
+        store,
+        opening_state,
+        evidence_artifact_store=evidence_artifact_store,
+    )
     if not inserted:
         return rebuilt, Decimal("0"), None, False
     if rebuilt != next_state:
@@ -551,6 +578,8 @@ def commit_linear_variation_margin(
 def restore_inverse_variation_margin(
     store: JournalStore,
     opening_state: InverseVariationMarginState,
+    *,
+    evidence_artifact_store: ArtifactStore,
 ) -> InverseVariationMarginState:
     """Rebuild and independently verify durable inverse VM economics."""
 
@@ -574,6 +603,10 @@ def restore_inverse_variation_margin(
         if not isinstance(payload, Mapping) or payload.get("kind") != "INVERSE":
             raise FuturesError("durable futures settlement kind mismatch")
         settlement = _evidence_from_payload(payload.get("settlement"))
+        _verify_provider_settlement_evidence(
+            settlement,
+            evidence_artifact_store,
+        )
         quantum = Decimal(str(payload.get("settlement_quantum")))
         rounding = payload.get("rounding")
         prior_price = state.last_settlement_price
@@ -608,6 +641,7 @@ def commit_inverse_variation_margin(
     opening_state: InverseVariationMarginState,
     settlement: FuturesSettlementEvidence,
     *,
+    evidence_artifact_store: ArtifactStore,
     settlement_quantum: Decimal | str,
     rounding: str = "HALF_EVEN",
 ) -> tuple[
@@ -629,7 +663,12 @@ def commit_inverse_variation_margin(
     if rounding not in {"HALF_EVEN", "DOWN"}:
         raise FuturesError("unsupported rounding policy")
 
-    current = restore_inverse_variation_margin(store, opening_state)
+    current = restore_inverse_variation_margin(
+        store,
+        opening_state,
+        evidence_artifact_store=evidence_artifact_store,
+    )
+    _verify_provider_settlement_evidence(settlement, evidence_artifact_store)
     next_state, exact_delta = apply_inverse_variation_margin(current, settlement)
     if next_state is current:
         return current, Fraction(0, 1), Decimal("0"), None, False
@@ -682,7 +721,11 @@ def commit_inverse_variation_margin(
         state_version=version,
         events=[(envelope, None)],
     )
-    rebuilt = restore_inverse_variation_margin(store, opening_state)
+    rebuilt = restore_inverse_variation_margin(
+        store,
+        opening_state,
+        evidence_artifact_store=evidence_artifact_store,
+    )
     if not inserted:
         return rebuilt, Fraction(0, 1), Decimal("0"), None, False
     if rebuilt != next_state:

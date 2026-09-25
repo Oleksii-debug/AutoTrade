@@ -1094,6 +1094,49 @@ class IndependentRiskTests(unittest.TestCase):
             next(x for x in exact.rules if x.rule == "liquidation_headroom").passed
         )
 
+    def test_negative_liquidation_headroom_is_evidence_not_a_parse_failure(self):
+        configured = policy(min_liquidation_headroom="0.25")
+        increasing = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+            ),
+            context(liquidation_headroom="-0.10"),
+            configured,
+        )
+        increasing_rule = next(
+            x for x in increasing.rules if x.rule == "liquidation_headroom"
+        )
+        self.assertFalse(increasing_rule.passed)
+        self.assertEqual(increasing_rule.observed, "-0.10")
+        self.assertFalse(increasing.admitted)
+
+        protective = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="SELL",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                reduce_only=True,
+            ),
+            context(
+                positions={"ABC": "2"},
+                stress_scenarios=({"ABC": "-0.10"},),
+                liquidation_headroom="-0.10",
+            ),
+            configured,
+        )
+        protective_rule = next(
+            x for x in protective.rules if x.rule == "liquidation_headroom"
+        )
+        self.assertTrue(protective_rule.passed)
+        self.assertEqual(protective_rule.observed, "-0.10")
+        self.assertTrue(protective.admitted)
+
     def test_reduce_only_cannot_use_exception_when_tail_risk_worsens(self):
         decision = evaluate_risk(
             RiskIntent.create(

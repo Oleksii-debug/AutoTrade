@@ -401,6 +401,7 @@ class ScientificRegistry:
             "evidence_valid_until": _text(evidence_valid_until, "evidence_valid_until"),
             "recorded_trial_count": trial_state["recorded_trials"],
             "trial_budget": trial_state["trial_budget"],
+            "trial_log_hash": trial_state["trial_log_hash"],
         }
         for field in ("retention_passed", "risk_passed"):
             if not isinstance(required[field], bool):
@@ -425,25 +426,65 @@ class ScientificRegistry:
                 raise ProtocolViolation(
                     f"locked evaluation does not prove {required_true}"
                 )
+        if trial_state["remaining_trial_budget"] > 0:
+            if result.get("stopping_rule_triggered") is not True:
+                raise ProtocolViolation(
+                    "candidate promotion before trial-budget exhaustion requires "
+                    "an explicitly triggered registered stopping rule"
+                )
+            if result.get("stopping_rules_hash") != trial_state["stopping_rules_hash"]:
+                raise ProtocolViolation(
+                    "early-stop evidence is not bound to the registered stopping rules"
+                )
+            try:
+                _text(result.get("stopping_evidence_ref"), "stopping_evidence_ref")
+            except ValueError as error:
+                raise ProtocolViolation(
+                    "early-stop promotion requires immutable stopping evidence"
+                ) from error
         return evidence
 
     def completeness(self, protocol_id: str) -> dict[str, Any]:
         protocol = _id(protocol_id)
         with self._connect() as con:
-            p = con.execute("SELECT payload_json FROM protocols WHERE protocol_id=?", (protocol,)).fetchone()
+            p = con.execute(
+                "SELECT payload_json FROM protocols WHERE protocol_id=?",
+                (protocol,),
+            ).fetchone()
             if p is None:
                 raise KeyError(protocol)
-            budget = json.loads(p["payload_json"])["trial_budget"]
-            rows = con.execute(
-                "SELECT status, COUNT(*) AS n FROM trials WHERE protocol_id=? GROUP BY status",
+            protocol_payload = json.loads(p["payload_json"])
+            budget = protocol_payload["trial_budget"]
+            trial_rows = con.execute(
+                """
+                SELECT trial_id,status,payload_hash
+                FROM trials
+                WHERE protocol_id=?
+                ORDER BY trial_id
+                """,
                 (protocol,),
             ).fetchall()
-        counts = {row["status"]: int(row["n"]) for row in rows}
-        total = sum(counts.values())
+        log = [
+            {
+                "trial_id": row["trial_id"],
+                "status": row["status"],
+                "payload_hash": row["payload_hash"],
+            }
+            for row in trial_rows
+        ]
+        counts: dict[str, int] = {}
+        for row in trial_rows:
+            counts[row["status"]] = counts.get(row["status"], 0) + 1
+        total = len(trial_rows)
         return {
             "trial_budget": budget,
             "recorded_trials": total,
             "remaining_trial_budget": budget - total,
+            "trial_log_hash": _hash(log),
+            "stopping_rules_hash": _hash(protocol_payload["stopping_rules"]),
             "statuses": counts,
-            "includes_non_successes": any(counts.get(x, 0) for x in ("FAILED", "DISCARDED", "CANCELLED")),
+            "includes_non_successes": any(
+                counts.get(x, 0)
+                for x in ("FAILED", "DISCARDED", "CANCELLED")
+            ),
         }

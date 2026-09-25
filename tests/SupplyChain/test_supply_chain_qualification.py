@@ -229,10 +229,22 @@ class SupplyChainQualificationTests(unittest.TestCase):
             corrupt.reason_codes,
         )
 
-    def test_exact_release_complete_evidence_passes_without_release_authority(self):
+    def test_caller_populated_store_proves_integrity_but_not_independent_trust(self):
         result = qualify(evidence())
-        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertFalse(result.release_authority)
+        self.assertIn(
+            ("immutable_evidence_bundle", "PASS"),
+            result.checks,
+        )
+        self.assertIn(
+            ("independent_evidence_trust", "INCONCLUSIVE"),
+            result.checks,
+        )
+        self.assertIn(
+            "SUPPLY_CHAIN.TRUST_ANCHOR_UNAVAILABLE",
+            result.reason_codes,
+        )
 
     def test_unlicensed_component_blocks_release_qualification(self):
         result = qualify(evidence(component(license_status="BLOCKED")))
@@ -276,7 +288,11 @@ class SupplyChainQualificationTests(unittest.TestCase):
             advisory_exception_hash=H2,
         )
         result = qualify(evidence(comp=allowlisted))
-        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertIn(
+            "SUPPLY_CHAIN.TRUST_ANCHOR_UNAVAILABLE",
+            result.reason_codes,
+        )
 
         changed = component(
             advisory_status="ALLOWLISTED",

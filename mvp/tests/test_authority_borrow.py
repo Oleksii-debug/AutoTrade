@@ -16,6 +16,7 @@ from mvp.autotrade_mvp.borrow import (
 )
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.reservations import InsufficientAvailable
 from mvp.autotrade_mvp.reconciliation import (
     ResourceAvailabilityEvidence,
     SnapshotConsistencyEvidence,
@@ -51,7 +52,7 @@ def policy():
 
 def risk_policy():
     return RiskPolicy.create(
-        max_abs_position="100",
+        max_abs_position="200",
         max_single_notional="10000",
         max_gross_leverage="10",
         max_net_leverage="10",
@@ -64,7 +65,7 @@ def risk_policy():
     )
 
 
-def risk_context(*, position="0", borrow_available=True):
+def risk_context(*, position="0", reserved="0", borrow_available=True):
     return RiskContext.create(
         state_version=1,
         equity="10000",
@@ -72,7 +73,9 @@ def risk_context(*, position="0", borrow_available=True):
             {} if Decimal(position) == 0 else {"ABC": position}
         ),
         marks={"ABC": "100"},
-        reserved_position_delta={},
+        reserved_position_delta=(
+            {} if Decimal(reserved) == 0 else {"ABC": reserved}
+        ),
         daily_pnl="0",
         drawdown_fraction="0",
         market_data_age_seconds="1",
@@ -84,12 +87,12 @@ def risk_context(*, position="0", borrow_available=True):
     )
 
 
-def short_intent(*, quantity="2"):
+def short_intent(*, quantity="2", price="100"):
     return RiskIntent.create(
         symbol="ABC",
         side="SELL",
         quantity=quantity,
-        price="100",
+        price=price,
         expected_state_version=1,
         instrument_type="EQUITY",
     )
@@ -198,13 +201,15 @@ def admit(
     available=None,
     command_id="borrow-command",
     admission_id="borrow-admission",
+    intent_id="borrow-intent",
+    reservation_id="borrow-reservation",
 ):
     return authority.admit(
         command_id=command_id,
         idempotency_key=command_id,
         admission_id=admission_id,
         policy_id="borrow-policy",
-        intent_id="borrow-intent",
+        intent_id=intent_id,
         intent_hash="sha256:" + "b" * 64,
         account_id=ACCOUNT_ID,
         environment=ENVIRONMENT,
@@ -218,7 +223,7 @@ def admit(
         risk_policy=risk_policy(),
         risk_valid_until="2026-09-24T18:03:30Z",
         reservation_book=reservations,
-        reservation_id="borrow-reservation",
+        reservation_id=reservation_id,
         reservation_requirements=requirements or {"CASH:USD": "200"},
         reservation_available=available or {"CASH:USD": "10000"},
         reservation_checkpoint_event_id=account_checkpoint["event_id"],
@@ -412,6 +417,70 @@ class AuthorityBorrowTests(unittest.TestCase):
                     borrow_resource().resource_key
                 ),
                 Decimal("2"),
+            )
+
+    def test_working_unknown_reservations_compete_atomically_for_borrow_capacity(self):
+        with TemporaryDirectory() as directory:
+            store, authority, reservations, account_checkpoint = self.make_runtime(
+                directory
+            )
+            record_locate(store, available="60")
+            record_loan(store, borrowed="40")
+            borrow_key = borrow_resource().resource_key
+
+            reservations.reserve(
+                command_id="existing-short-command",
+                idempotency_key="existing-short-idem",
+                reservation_id="existing-short-reservation",
+                intent_id="existing-short-intent",
+                requirements={borrow_key: "30"},
+                available={borrow_key: "60"},
+            )
+            self.assertEqual(
+                reservations.total_reserved(borrow_key),
+                Decimal("30"),
+            )
+
+            first = admit(
+                authority,
+                reservations,
+                account_checkpoint,
+                context=risk_context(
+                    position="-40",
+                    reserved="-30",
+                    borrow_available=False,
+                ),
+                intent=short_intent(quantity="20", price="10"),
+                command_id="borrow-command-first",
+                admission_id="borrow-admission-first",
+                intent_id="borrow-intent-first",
+                reservation_id="borrow-reservation-first",
+            )
+            self.assertEqual(first.outcome, "ADMITTED")
+            self.assertEqual(
+                reservations.total_reserved(borrow_key),
+                Decimal("50"),
+            )
+
+            with self.assertRaises(InsufficientAvailable):
+                admit(
+                    authority,
+                    reservations,
+                    account_checkpoint,
+                    context=risk_context(
+                        position="-40",
+                        reserved="-50",
+                        borrow_available=False,
+                    ),
+                    intent=short_intent(quantity="20", price="10"),
+                    command_id="borrow-command-second",
+                    admission_id="borrow-admission-second",
+                    intent_id="borrow-intent-second",
+                    reservation_id="borrow-reservation-second",
+                )
+            self.assertEqual(
+                reservations.total_reserved(borrow_key),
+                Decimal("50"),
             )
 
     def test_recall_after_admission_blocks_final_dispatch(self):

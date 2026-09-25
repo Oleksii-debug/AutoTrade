@@ -250,6 +250,8 @@ class SecurityBoundary:
             return [SecurityBoundary.redact(item) for item in value]
         if isinstance(value, tuple):
             return tuple(SecurityBoundary.redact(item) for item in value)
+        if isinstance(value, str) and _REDACT_RE.search(value):
+            return "[REDACTED]"
         return value
 
     def _require_active_record(self, handle_id: str) -> _SecretRecord:

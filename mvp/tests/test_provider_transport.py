@@ -1,11 +1,23 @@
+from datetime import datetime, timedelta, timezone
 import json
 from tempfile import TemporaryDirectory
 import unittest
 
+from mvp.autotrade_mvp.capabilities import (
+    CapabilityClaim,
+    EvidenceVerification,
+    derive_capability_snapshot,
+)
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.provider_core import (
+    Surface,
+    prepare_authenticated_read_query,
+)
 from mvp.autotrade_mvp.provider_transport import (
     BINANCE_SPOT_ENDPOINT_POLICIES,
+    BinanceSpotAuthenticatedReadSigner,
+    BinanceSpotAuthenticatedReadTransport,
     BinanceSpotHttpTransport,
     BinanceSpotSigner,
     ProviderEndpointPolicy,
@@ -74,6 +86,74 @@ def trade_handle(*, environment="PAPER", account_id="acct-1"):
         environment=environment,
         purpose="TRADE",
         generation=1,
+    )
+
+
+READ_NOW = datetime(2026, 9, 25, 10, 0, tzinfo=timezone.utc)
+READ_SNAPSHOT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+_READ_ARTIFACT_IDS = {
+    "DOCUMENTED": "11111111-1111-4111-8111-111111111111",
+    "API": "22222222-2222-4222-8222-222222222222",
+    "ACCOUNT": "33333333-3333-4333-8333-333333333333",
+    "INSTRUMENT": "44444444-4444-4444-8444-444444444444",
+}
+
+
+def read_handle(*, environment="PAPER", account_id="acct-1"):
+    return PersistentCredentialHandle(
+        handle_id="cred-binance-read",
+        account_id=account_id,
+        provider="BINANCE",
+        environment=environment,
+        purpose="READ",
+        generation=1,
+    )
+
+
+def verified_read_capability():
+    observed = READ_NOW - timedelta(minutes=1)
+    expires = READ_NOW + timedelta(minutes=10)
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            provider_id="BINANCE",
+            account_id="acct-1",
+            entity_id="entity-1",
+            environment="PAPER",
+            instrument_version="BTCUSDT@1",
+            observed_at=observed,
+            expires_at=expires,
+            supported_order_types=frozenset({"LIMIT"}),
+            time_in_force=frozenset({"GTC"}),
+            permission_scopes=frozenset({"ORDER.READ"}),
+            position_mode="NET",
+            native_protection=frozenset(),
+            rate_limit_policy_id="binance-test-v1",
+            data_entitlements=frozenset({"ACCOUNT"}),
+            evidence_ref={
+                "artifact_id": _READ_ARTIFACT_IDS[source],
+                "sha256": "sha256:" + "a" * 64,
+                "observed_at": observed.isoformat().replace("+00:00", "Z"),
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    return derive_capability_snapshot(
+        snapshot_id=READ_SNAPSHOT_ID,
+        claims=claims,
+        observed_at=READ_NOW,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    )
+
+
+def authenticated_read_binding(*, endpoint="/api/v3/account", query=None):
+    return prepare_authenticated_read_query(
+        capability=verified_read_capability(),
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint=endpoint,
+        query={"omitZeroBalances": "true"} if query is None else query,
+        at=READ_NOW,
+        permission_scope="ORDER.READ",
     )
 
 
@@ -474,6 +554,157 @@ class ProviderTransportTests(unittest.TestCase):
             self.assertEqual(events, ["quota"])
             self.assertEqual(resolver.calls, [])
             self.assertEqual(wire.requests, [])
+
+
+class AuthenticatedReadTransportTests(unittest.TestCase):
+    def make_read_transport(self, *, events, wire=None, quota_gate=None):
+        resolver = FakeSecretResolver(events)
+        transport = BinanceSpotAuthenticatedReadTransport(
+            policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+            account_id="acct-1",
+            capability_snapshot_id=READ_SNAPSHOT_ID,
+            secret_resolver=resolver,
+            credential_handle=read_handle(),
+            session_token="read-session-token",
+            origin="https://localhost",
+            execution_identity="host-owner",
+            clock_millis=lambda: 1700000000000,
+            clock_utc=lambda: READ_NOW + timedelta(seconds=1),
+            quota_gate=quota_gate,
+            wire_client=wire or RecordingWire(events),
+        )
+        return transport, resolver
+
+    def test_authenticated_read_signer_has_fixed_exact_vector(self):
+        request = BinanceSpotAuthenticatedReadSigner.sign(
+            policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+            query_binding=authenticated_read_binding(),
+            credential_plaintext='{"api_key":"key","api_secret":"secret"}',
+            timestamp_ms=1700000000000,
+            recv_window_ms=5000,
+        )
+        self.assertEqual(
+            request.url,
+            "https://testnet.binance.vision/api/v3/account?"
+            "omitZeroBalances=true&recvWindow=5000&timestamp=1700000000000&"
+            "signature=5091638040086d5386ccd440209d33de457b747b3595a67f1dc82e0352a99249",
+        )
+        self.assertEqual(request.headers["X-MBX-APIKEY"], "key")
+        self.assertNotIn("secret", request.url.lower())
+
+    def test_read_transport_binds_scope_exact_bytes_and_call_order(self):
+        events = []
+        wire = RecordingWire(events, response=b'{"balances":[{"asset":"USD"}]}')
+
+        def quota(provider, account, environment, purpose):
+            events.append("quota")
+            self.assertEqual(
+                (provider, account, environment, purpose),
+                ("BINANCE", "acct-1", "PAPER", "AUTHENTICATED_READ"),
+            )
+
+        transport, resolver = self.make_read_transport(
+            events=events,
+            wire=wire,
+            quota_gate=quota,
+        )
+        binding = authenticated_read_binding()
+        observation = transport(binding)
+
+        self.assertEqual(events, ["quota", "resolve", "wire"])
+        self.assertEqual(len(wire.requests), 1)
+        self.assertEqual(len(resolver.calls), 1)
+        self.assertEqual(resolver.calls[0]["purpose"], "READ")
+        self.assertEqual(observation.provider_id, "BINANCE")
+        self.assertEqual(observation.account_id, "acct-1")
+        self.assertEqual(observation.environment, "PAPER")
+        self.assertEqual(observation.query_binding, binding)
+        self.assertTrue(observation.response_sha256.startswith("sha256:"))
+        self.assertTrue(observation.evidence_ref.startswith("provider-read:sha256:"))
+        self.assertEqual(observation.payload["balances"][0]["asset"], "USD")
+        self.assertNotIn("SECRET", observation.evidence_ref)
+
+    def test_read_scope_mismatch_rejects_before_secret_or_wire(self):
+        events = []
+        wire = RecordingWire(events)
+        transport, resolver = self.make_read_transport(events=events, wire=wire)
+        other_binding = prepare_authenticated_read_query(
+            capability=derive_capability_snapshot(
+                snapshot_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                claims=tuple(
+                    CapabilityClaim(
+                        source=source,
+                        provider_id="BINANCE",
+                        account_id="other-account",
+                        entity_id="entity-1",
+                        environment="PAPER",
+                        instrument_version="BTCUSDT@1",
+                        observed_at=READ_NOW - timedelta(minutes=1),
+                        expires_at=READ_NOW + timedelta(minutes=10),
+                        supported_order_types=frozenset({"LIMIT"}),
+                        time_in_force=frozenset({"GTC"}),
+                        permission_scopes=frozenset({"ORDER.READ"}),
+                        position_mode="NET",
+                        native_protection=frozenset(),
+                        rate_limit_policy_id="binance-test-v1",
+                        data_entitlements=frozenset({"ACCOUNT"}),
+                        evidence_ref={
+                            "artifact_id": _READ_ARTIFACT_IDS[source],
+                            "sha256": "sha256:" + "b" * 64,
+                            "observed_at": (
+                                READ_NOW - timedelta(minutes=1)
+                            ).isoformat().replace("+00:00", "Z"),
+                        },
+                    )
+                    for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+                ),
+                observed_at=READ_NOW,
+                evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+            ),
+            surface=Surface.AUTHENTICATED_READ,
+            endpoint="/api/v3/account",
+            query=None,
+            at=READ_NOW,
+            permission_scope="ORDER.READ",
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "query scope mismatch",
+        ):
+            transport(other_binding)
+        self.assertEqual(events, [])
+        self.assertEqual(resolver.calls, [])
+
+    def test_trade_credential_cannot_be_reused_for_authenticated_read(self):
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "READ credential handle",
+        ):
+            BinanceSpotAuthenticatedReadTransport(
+                policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+                account_id="acct-1",
+                capability_snapshot_id=READ_SNAPSHOT_ID,
+                secret_resolver=FakeSecretResolver([]),
+                credential_handle=trade_handle(),
+                session_token="read-session-token",
+                origin="https://localhost",
+                execution_identity="host-owner",
+                clock_millis=lambda: 1700000000000,
+                clock_utc=lambda: READ_NOW,
+            )
+
+    def test_malformed_provider_json_is_not_retried(self):
+        events = []
+        wire = RecordingWire(events, response=b'{"duplicate":1,"duplicate":2}')
+        transport, resolver = self.make_read_transport(events=events, wire=wire)
+        with self.assertRaisesRegex(
+            ValueError,
+            "duplicate JSON key",
+        ):
+            transport(authenticated_read_binding())
+        self.assertEqual(events, ["resolve", "wire"])
+        self.assertEqual(len(wire.requests), 1)
+        self.assertEqual(len(resolver.calls), 1)
 
 
 if __name__ == "__main__":

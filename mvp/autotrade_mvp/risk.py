@@ -650,7 +650,44 @@ class RiskDecision:
     gross_leverage: Decimal
     net_leverage: Decimal
     worst_stress_loss: Decimal
+    input_fingerprint: str
     rules: tuple[RiskRuleResult, ...]
+
+
+def _fingerprint_value(value):
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _fingerprint_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (tuple, list)):
+        return [_fingerprint_value(item) for item in value]
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    raise TypeError(
+        f"Unsupported normalized risk fingerprint value: {type(value).__name__}"
+    )
+
+
+def _risk_input_fingerprint(
+    intent: RiskIntent,
+    context: RiskContext,
+    policy: RiskPolicy,
+) -> str:
+    payload = {
+        "intent": _fingerprint_value(vars(intent)),
+        "context": _fingerprint_value(vars(context)),
+        "policy": _fingerprint_value(vars(policy)),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
 
 
 def risk_decision_fingerprint(decision: RiskDecision) -> str:
@@ -662,6 +699,7 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
         "gross_leverage": str(decision.gross_leverage),
         "net_leverage": str(decision.net_leverage),
         "worst_stress_loss": str(decision.worst_stress_loss),
+        "input_fingerprint": decision.input_fingerprint,
         "rules": [
             {
                 "rule": item.rule,
@@ -1336,5 +1374,6 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         gross_leverage=gross_leverage,
         net_leverage=net_leverage,
         worst_stress_loss=worst_stress_loss,
+        input_fingerprint=_risk_input_fingerprint(intent, context, policy),
         rules=tuple(rules),
     )

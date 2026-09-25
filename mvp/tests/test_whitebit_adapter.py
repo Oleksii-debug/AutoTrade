@@ -57,7 +57,13 @@ from mvp.autotrade_mvp.whitebit import (
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
-def capability(*, order_types=("LIMIT", "MARKET", "STOP_MARKET", "STOP_LIMIT"), tif=("GTC", "IOC")):
+def capability(
+    *,
+    order_types=("LIMIT", "MARKET", "STOP_MARKET", "STOP_LIMIT"),
+    tif=("GTC", "IOC"),
+    account_id="account-1",
+    environment="PAPER",
+):
     evidence = {
         "artifact_id": str(uuid4()),
         "sha256": "sha256:" + "a" * 64,
@@ -67,9 +73,9 @@ def capability(*, order_types=("LIMIT", "MARKET", "STOP_MARKET", "STOP_LIMIT"), 
     return CapabilitySnapshot(
         snapshot_id=str(uuid4()),
         provider_id="WHITEBIT",
-        account_id="account-1",
+        account_id=account_id,
         entity_id="global",
-        environment="PAPER",
+        environment=environment,
         instrument_version="BTC_USDT:v1",
         observed_at=NOW - timedelta(hours=1),
         expires_at=NOW + timedelta(hours=1),
@@ -162,6 +168,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
         request = prepare_order_request(
             intent,
             client_order_id="at-0123456789abcdef",
+            account_id="account-1",
+            environment="PAPER",
             capability=capability(),
             market_rules=market_rules(),
             at=NOW,
@@ -170,6 +178,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertEqual(request.body["amount"], "0.0100")
         self.assertEqual(request.body["price"], "40000.25")
         self.assertEqual(request.body["clientOrderId"], "at-0123456789abcdef")
+        self.assertEqual(request.account_id, "account-1")
+        self.assertEqual(request.environment, "PAPER")
         self.assertNotIn("nonce", request.body)
         self.assertNotIn("request", request.body)
 
@@ -185,6 +195,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
         request = prepare_order_request(
             intent,
             client_order_id="at-stock-buy",
+            account_id="account-1",
+            environment="PAPER",
             capability=capability(),
             market_rules=market_rules(),
             at=NOW,
@@ -209,6 +221,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
             prepare_order_request(
                 intent,
                 client_order_id="at-stop-buy",
+                account_id="account-1",
+                environment="PAPER",
                 capability=capability(),
                 market_rules=market_rules(),
                 at=NOW,
@@ -304,9 +318,84 @@ class WhiteBitAdapterTests(unittest.TestCase):
             prepare_order_request(
                 intent,
                 client_order_id="at-order-1",
+                account_id="account-1",
+                environment="PAPER",
                 capability=capability(order_types=("MARKET",)),
                 market_rules=market_rules(),
                 at=NOW,
+            )
+
+    def test_preparation_is_bound_to_exact_capability_account_and_environment(self):
+        intent = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="LIMIT",
+            amount="0.01",
+            price="40000",
+        )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "target account"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-cross-account",
+                account_id="account-2",
+                environment="PAPER",
+                capability=capability(),
+                market_rules=market_rules(),
+                at=NOW,
+            )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "target environment"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-cross-environment",
+                account_id="account-1",
+                environment="LIVE",
+                capability=capability(),
+                market_rules=market_rules(),
+                at=NOW,
+            )
+
+    def test_submission_evidence_cannot_rebind_prepared_account_or_environment(self):
+        intent = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="LIMIT",
+            amount="0.01",
+            price="40000",
+        )
+        request = prepare_order_request(
+            intent,
+            client_order_id="at-submission-binding",
+            account_id="account-1",
+            environment="PAPER",
+            capability=capability(),
+            market_rules=market_rules(),
+            at=NOW,
+        )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "submission account"):
+            parse_submission_result(
+                request,
+                attempt_id="attempt-cross-account",
+                account_id="account-2",
+                environment="PAPER",
+                observed_at=NOW,
+                response_body=None,
+                http_status=None,
+                transport_ambiguous=True,
+            )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "submission environment"):
+            parse_submission_result(
+                request,
+                attempt_id="attempt-cross-environment",
+                account_id="account-1",
+                environment="LIVE",
+                observed_at=NOW,
+                response_body=None,
+                http_status=None,
+                transport_ambiguous=True,
             )
 
     def test_collateral_reduce_only_is_explicit_and_spot_rejects_it(self):
@@ -323,6 +412,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
         request = prepare_order_request(
             collateral,
             client_order_id="at-reduce-1",
+            account_id="account-1",
+            environment="PAPER",
             capability=capability(),
             market_rules=market_rules(market_type="futures"),
             at=NOW,
@@ -374,6 +465,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
         request = prepare_order_request(
             intent,
             client_order_id="at-submit-1",
+            account_id="account-1",
+            environment="PAPER",
             capability=capability(),
             market_rules=market_rules(),
             at=NOW,
@@ -414,6 +507,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
         request = prepare_order_request(
             intent,
             client_order_id="at-submit-2",
+            account_id="account-1",
+            environment="PAPER",
             capability=capability(),
             market_rules=market_rules(),
             at=NOW,
@@ -458,6 +553,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
         request = prepare_order_request(
             intent,
             client_order_id="at-unknown-1",
+            account_id="account-1",
+            environment="PAPER",
             capability=capability(),
             market_rules=market_rules(),
             at=NOW,
@@ -490,6 +587,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
         request = prepare_order_request(
             intent,
             client_order_id="at-reject-1",
+            account_id="account-1",
+            environment="PAPER",
             capability=capability(),
             market_rules=market_rules(),
             at=NOW,
@@ -527,6 +626,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
         request = prepare_order_request(
             intent,
             client_order_id="at-http-500",
+            account_id="account-1",
+            environment="PAPER",
             capability=capability(),
             market_rules=market_rules(),
             at=NOW,

@@ -1,8 +1,14 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import json
 import unittest
 from uuid import uuid4
 
+from mvp.autotrade_mvp.capabilities import (
+    CapabilityClaim,
+    EvidenceVerification,
+    derive_capability_snapshot,
+)
 from mvp.autotrade_mvp.kraken_futures import (
     build_order_payload,
     coverage_evidence,
@@ -10,10 +16,70 @@ from mvp.autotrade_mvp.kraken_futures import (
     parse_position_executions,
     parse_submission_response,
 )
-from mvp.autotrade_mvp.provider_core import ProviderCoreError
+from mvp.autotrade_mvp.provider_core import (
+    ProviderCoreError,
+    Surface,
+    observe_authenticated_json_response,
+    prepare_authenticated_read_query,
+)
 
 
+NOW_DT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 NOW = "2026-09-24T20:00:00Z"
+
+
+def futures_read_capability(*, account_id="paper-1"):
+    observed_at = NOW_DT - timedelta(hours=1)
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            provider_id="KRAKEN",
+            account_id=account_id,
+            entity_id="futures-api",
+            environment="PAPER",
+            instrument_version="PI_XBTUSD@v1",
+            observed_at=observed_at,
+            expires_at=NOW_DT + timedelta(hours=1),
+            supported_order_types=frozenset({"MARKET", "LIMIT"}),
+            time_in_force=frozenset({"GTC"}),
+            permission_scopes=frozenset({"ORDER.READ"}),
+            position_mode="NET",
+            native_protection=frozenset(),
+            rate_limit_policy_id="kraken-futures-paper",
+            data_entitlements=frozenset({"EXECUTIONS"}),
+            evidence_ref={
+                "artifact_id": str(uuid4()),
+                "sha256": "sha256:" + "e" * 64,
+                "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    return derive_capability_snapshot(
+        snapshot_id=str(uuid4()),
+        claims=claims,
+        observed_at=observed_at,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    )
+
+
+def futures_position_observation(payload, *, account_id="paper-1", endpoint="/api/history/v3/positions"):
+    binding = prepare_authenticated_read_query(
+        capability=futures_read_capability(account_id=account_id),
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint=endpoint,
+        query={},
+        at=NOW_DT,
+    )
+    return observe_authenticated_json_response(
+        query_binding=binding,
+        response_bytes=json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        observed_at=NOW_DT,
+    )
 
 
 class KrakenFuturesAdapterTests(unittest.TestCase):
@@ -110,7 +176,7 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
 
     def test_position_history_maps_only_trade_execution_facts(self):
         fills = parse_position_executions(
-            {
+            futures_position_observation({
                 "elements": [
                     {
                         "tradeable": "PI_XBTUSD",
@@ -130,12 +196,10 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                         "realizedFunding": "-0.10",
                     },
                 ]
-            },
+            }),
             instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
             execution_client_ids={"exec-1": "hedge-007"},
-        
-            account_id="paper-1",
-            environment="PAPER",)
+        )
         self.assertEqual(len(fills), 1)
         fill = fills[0]
         self.assertEqual(fill.provider_execution_id, "exec-1")
@@ -144,6 +208,19 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         self.assertEqual(fill.price, Decimal("65000.10"))
         self.assertEqual(fill.fee_amount, Decimal("1.25"))
         self.assertEqual(fill.trade_time, "2026-09-24T20:00:00.123Z")
+        self.assertEqual(fill.account_id, "paper-1")
+        self.assertEqual(fill.environment, "PAPER")
+
+    def test_position_history_requires_exact_bound_endpoint(self):
+        observation = futures_position_observation(
+            {"elements": []},
+            endpoint="/derivatives/api/v3/fills",
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "endpoint mismatch"):
+            parse_position_executions(
+                observation,
+                instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+            )
 
     def test_conflicting_duplicate_execution_id_fails_closed(self):
         base = {
@@ -159,11 +236,11 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ProviderCoreError, "conflicting"):
             parse_position_executions(
-                {"elements": [base, {**base, "executionSize": "2"}]},
+                futures_position_observation(
+                    {"elements": [base, {**base, "executionSize": "2"}]}
+                ),
                 instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
-            
-                account_id="paper-1",
-                environment="PAPER",)
+            )
 
     def test_futures_foundation_cannot_self_assert_absence_semantics(self):
         with self.assertRaisesRegex(

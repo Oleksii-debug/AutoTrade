@@ -10,6 +10,8 @@ import json
 from typing import Any, Callable, FrozenSet, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from research.autotrade_research.artifacts.store import ArtifactStore
+
 from .borrow import (
     BorrowLifecycleJournal,
     BorrowResourceIdentity,
@@ -392,8 +394,19 @@ def _authority_event_id(event_type: str, key: str) -> str:
 
 
 class AuthorityService:
-    def __init__(self, store: JournalStore | None = None):
+    def __init__(
+        self,
+        store: JournalStore | None = None,
+        *,
+        evidence_artifact_store: ArtifactStore | None = None,
+    ):
         self.store = store
+        if (
+            evidence_artifact_store is not None
+            and not isinstance(evidence_artifact_store, ArtifactStore)
+        ):
+            raise TypeError("evidence_artifact_store must be ArtifactStore")
+        self.evidence_artifact_store = evidence_artifact_store
         self._policies: dict[str, AuthorityPolicy] = {}
         self._revocations: dict[str, tuple[str, str]] = {}
         self._confirmations: dict[str, Confirmation] = {}
@@ -407,6 +420,22 @@ class AuthorityService:
         self._journal_version = 0
         if self.store is not None:
             self._restore_journal()
+
+    def _borrow_journal(
+        self,
+        resource: BorrowResourceIdentity,
+    ) -> BorrowLifecycleJournal:
+        if self.store is None:
+            raise AuthorityConflict("securities-borrow authority requires durable store")
+        if self.evidence_artifact_store is None:
+            raise AuthorityConflict(
+                "securities-borrow authority requires trusted ArtifactStore"
+            )
+        return BorrowLifecycleJournal(
+            self.store,
+            resource,
+            evidence_artifact_store=self.evidence_artifact_store,
+        )
 
     @staticmethod
     def _instrument_payload(value: InstrumentVersionIdentity) -> dict[str, Any]:
@@ -924,10 +953,7 @@ class AuthorityService:
                     raise ValueError(
                         "borrow authority scope differs from admitted instrument/account"
                     )
-                borrow_capacity = BorrowLifecycleJournal(
-                    self.store,
-                    borrow_resource,
-                ).validate_authority_snapshot(
+                borrow_capacity = self._borrow_journal(borrow_resource).validate_authority_snapshot(
                     borrow_snapshot,
                     now=record.admitted_at,
                 )
@@ -2133,7 +2159,7 @@ class AuthorityService:
                             "durable borrow resource identity mismatch"
                         )
                     borrow_dispatch_fence = (
-                        BorrowLifecycleJournal(self.store, borrow_resource),
+                        self._borrow_journal(borrow_resource),
                         borrow_snapshot,
                         borrow_key,
                         risk_requirements[borrow_key],

@@ -16,6 +16,12 @@ REGISTRY_MODES_DISABLED = frozenset({
 })
 REGISTRY_MODES = REGISTRY_MODES_DISABLED | {REGISTRY_MODE_ENABLED}
 MAX_LEASE_TTL_SECONDS = 3600
+HANDOFF_STATES = frozenset({
+    "CLAIMED",
+    "REVIEW_SUBMITTED",
+    "INTEGRATION_AUTHORIZED",
+    "COMPLETED",
+})
 
 
 class RegistryProtocolError(ValueError):
@@ -230,6 +236,220 @@ def _canonical_admission_evidence(
     }
 
 
+def _canonical_sha256(value: object, *, name: str) -> str:
+    if not isinstance(value, str) or not value.strip() or value != value.strip():
+        raise RegistryProtocolError(f"{name} must be canonical text")
+    if (
+        not value.startswith("sha256:")
+        or len(value) != 71
+        or any(ch not in "0123456789abcdef" for ch in value[7:])
+    ):
+        raise RegistryProtocolError(
+            f"{name} must be canonical sha256:<64 lowercase hex>"
+        )
+    return value
+
+
+def _canonical_git_oid(value: object, *, name: str) -> str:
+    if not isinstance(value, str) or value != value.strip():
+        raise RegistryProtocolError(f"{name} must be a canonical Git object id")
+    if (
+        len(value) not in {40, 64}
+        or value != value.lower()
+        or any(ch not in "0123456789abcdef" for ch in value)
+    ):
+        raise RegistryProtocolError(f"{name} must be a canonical Git object id")
+    return value
+
+
+def _positive_int(value: object, *, name: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise RegistryProtocolError(f"{name} must be a positive integer")
+    return value
+
+
+def _canonical_review_submission(value: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise RegistryProtocolError("review_submission must be an object")
+    return {
+        "pr_number": _positive_int(value.get("pr_number"), name="pr_number"),
+        "head_sha": _canonical_git_oid(value.get("head_sha"), name="head_sha"),
+        "review_evidence_digest": _canonical_sha256(
+            value.get("review_evidence_digest"),
+            name="review_evidence_digest",
+        ),
+        "submitted_at": format_instant(
+            parse_instant(_require_text(value, "submitted_at"))
+        ),
+        "fenced_claim_generation": _positive_int(
+            value.get("fenced_claim_generation"),
+            name="fenced_claim_generation",
+        ),
+        "owner_identity": _canonical_service_identity(
+            value.get("owner_identity")
+        ),
+    }
+
+
+def _canonical_integration_authorization(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise RegistryProtocolError(
+            "integration_authorization must be an object"
+        )
+    service = _canonical_service_identity(value.get("service_identity"))
+    if "INTEGRATION" not in service["allowed_claim_modes"]:
+        raise RegistryProtocolError(
+            "integration service identity is not authorized for INTEGRATION"
+        )
+    return {
+        "pr_number": _positive_int(value.get("pr_number"), name="pr_number"),
+        "head_sha": _canonical_git_oid(value.get("head_sha"), name="head_sha"),
+        "required_checks_digest": _canonical_sha256(
+            value.get("required_checks_digest"),
+            name="required_checks_digest",
+        ),
+        "integration_evidence_digest": _canonical_sha256(
+            value.get("integration_evidence_digest"),
+            name="integration_evidence_digest",
+        ),
+        "authorized_at": format_instant(
+            parse_instant(_require_text(value, "authorized_at"))
+        ),
+        "fenced_claim_generation": _positive_int(
+            value.get("fenced_claim_generation"),
+            name="fenced_claim_generation",
+        ),
+        "service_identity": service,
+    }
+
+
+def _canonical_completion(value: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise RegistryProtocolError("completion must be an object")
+    service = _canonical_service_identity(value.get("service_identity"))
+    if "INTEGRATION" not in service["allowed_claim_modes"]:
+        raise RegistryProtocolError(
+            "completion service identity is not authorized for INTEGRATION"
+        )
+    return {
+        "pr_number": _positive_int(value.get("pr_number"), name="pr_number"),
+        "head_sha": _canonical_git_oid(value.get("head_sha"), name="head_sha"),
+        "merge_commit_sha": _canonical_git_oid(
+            value.get("merge_commit_sha"),
+            name="merge_commit_sha",
+        ),
+        "completed_at": format_instant(
+            parse_instant(_require_text(value, "completed_at"))
+        ),
+        "fenced_claim_generation": _positive_int(
+            value.get("fenced_claim_generation"),
+            name="fenced_claim_generation",
+        ),
+        "service_identity": service,
+    }
+
+
+def _validate_claim_handoff(claim: Mapping[str, Any]) -> None:
+    state = claim.get("handoff_state", "CLAIMED")
+    if state not in HANDOFF_STATES:
+        raise RegistryProtocolError("invalid claim handoff_state")
+
+    review_raw = claim.get("review_submission")
+    integration_raw = claim.get("integration_authorization")
+    completion_raw = claim.get("completion")
+    review = (
+        _canonical_review_submission(review_raw)
+        if review_raw is not None
+        else None
+    )
+    integration = (
+        _canonical_integration_authorization(integration_raw)
+        if integration_raw is not None
+        else None
+    )
+    completion = (
+        _canonical_completion(completion_raw)
+        if completion_raw is not None
+        else None
+    )
+
+    if state == "CLAIMED" and any(
+        item is not None for item in (review, integration, completion)
+    ):
+        raise RegistryProtocolError(
+            "CLAIMED handoff cannot contain review/integration/completion evidence"
+        )
+    if state in {"REVIEW_SUBMITTED", "INTEGRATION_AUTHORIZED", "COMPLETED"}:
+        if review is None:
+            raise RegistryProtocolError(
+                "review handoff state requires review_submission"
+            )
+        if review["owner_identity"] != claim.get("owner_identity"):
+            raise RegistryProtocolError(
+                "review submission owner identity does not match claim owner"
+            )
+    if state == "REVIEW_SUBMITTED" and integration is not None:
+        raise RegistryProtocolError(
+            "review-submitted handoff cannot contain integration authorization"
+        )
+    if state in {"INTEGRATION_AUTHORIZED", "COMPLETED"}:
+        if integration is None:
+            raise RegistryProtocolError(
+                "integration handoff state requires authorization"
+            )
+        if integration["pr_number"] != review["pr_number"] or integration[
+            "head_sha"
+        ] != review["head_sha"]:
+            raise RegistryProtocolError(
+                "integration authorization retargets submitted review"
+            )
+        if (
+            integration["service_identity"]["authorized_account_id"]
+            != claim.get("account_id")
+        ):
+            raise RegistryProtocolError(
+                "integration service identity account binding mismatch"
+            )
+        if integration["fenced_claim_generation"] <= review["fenced_claim_generation"]:
+            raise RegistryProtocolError(
+                "integration authorization must fence a newer claim generation"
+            )
+    if state == "COMPLETED":
+        if completion is None:
+            raise RegistryProtocolError(
+                "COMPLETED handoff requires completion evidence"
+            )
+        if (
+            completion["pr_number"] != integration["pr_number"]
+            or completion["head_sha"] != integration["head_sha"]
+        ):
+            raise RegistryProtocolError(
+                "completion retargets integration authorization"
+            )
+        if completion["service_identity"] != integration["service_identity"]:
+            raise RegistryProtocolError(
+                "completion service identity differs from integration authorization"
+            )
+        if completion["fenced_claim_generation"] <= integration["fenced_claim_generation"]:
+            raise RegistryProtocolError(
+                "completion must fence a newer claim generation"
+            )
+        if claim.get("status") != "COMPLETED":
+            raise RegistryProtocolError(
+                "completed handoff must have COMPLETED claim status"
+            )
+    elif completion is not None:
+        raise RegistryProtocolError(
+            "completion evidence is only valid for COMPLETED handoff"
+        )
+    if claim.get("status") == "COMPLETED" and state != "COMPLETED":
+        raise RegistryProtocolError(
+            "COMPLETED claim status requires completed handoff state"
+        )
+
+
 def _validate_lease_ttl_seconds(value: int) -> int:
     if type(value) is not int or not 1 <= value <= MAX_LEASE_TTL_SECONDS:
         raise RegistryProtocolError(
@@ -304,8 +524,9 @@ def _validate_registry(registry: Mapping[str, Any]) -> None:
             raise RegistryProtocolError("claim lease_until must be service-issued ISO-8601 text")
         parse_instant(lease_until)
         _validate_lease_ttl_seconds(claim.get("lease_ttl_seconds"))
-        if claim.get("status") not in {"ACTIVE", "EXPIRED", "RELEASED"}:
+        if claim.get("status") not in {"ACTIVE", "EXPIRED", "RELEASED", "COMPLETED"}:
             raise RegistryProtocolError("invalid claim status")
+        _validate_claim_handoff(claim)
         cg = claim.get("claim_generation")
         if type(cg) is not int or not 1 <= cg <= generation:
             raise RegistryProtocolError("invalid claim generation")
@@ -429,6 +650,7 @@ def claim(
         "lease_until": lease_until,
         "lease_ttl_seconds": lease_ttl_seconds,
         "status": "ACTIVE",
+        "handoff_state": "CLAIMED",
         "claimed_at": format_instant(resolved_now),
         "claim_generation": expected_generation + 1,
     }
@@ -511,6 +733,254 @@ def release(
     next_registry["generation"] = expected_generation + 1
     next_registry["updated_at"] = format_instant(resolved_now)
     return next_registry, deepcopy(target)
+
+
+def _transition_target(
+    registry: Mapping[str, Any],
+    *,
+    claim_id: str,
+    run_id: str,
+    expected_claim_generation: int,
+    now: datetime,
+) -> dict[str, Any]:
+    if type(expected_claim_generation) is not int or expected_claim_generation < 1:
+        raise RegistryProtocolError(
+            "expected_claim_generation must be a positive integer"
+        )
+    target = next(
+        (
+            claim
+            for claim in registry["claims"]
+            if claim.get("claim_id") == claim_id
+        ),
+        None,
+    )
+    if target is None:
+        raise RegistryProtocolError("claim_id not found")
+    if target.get("run_id") != run_id:
+        raise RegistryProtocolError("run_id does not own claim")
+    if target.get("claim_mode") not in MUTATING_MODES:
+        raise RegistryProtocolError(
+            "review/integration handoff requires a mutating claim"
+        )
+    if target.get("claim_generation") != expected_claim_generation:
+        raise RegistryStaleGenerationError(
+            "stale claim generation for review/integration handoff"
+        )
+    if not _active(target, now):
+        raise RegistryProtocolError("claim is not active")
+    return target
+
+
+def submit_review(
+    registry: Mapping[str, Any],
+    *,
+    claim_id: str,
+    run_id: str,
+    expected_generation: int,
+    expected_claim_generation: int,
+    now: str,
+    service_identity: Mapping[str, Any] | None,
+    pr_number: int,
+    head_sha: str,
+    review_evidence_digest: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Bind an active mutation claim to one exact PR/head review submission."""
+
+    _validate_registry(registry)
+    _require_generation(registry, expected_generation)
+    if registry.get("mode") != REGISTRY_MODE_ENABLED:
+        raise RegistryProtocolError(
+            "registry integration handoff is disabled until atomic ownership is enabled"
+        )
+    resolved_now = parse_instant(now)
+    owner = _canonical_service_identity(service_identity)
+    next_registry = deepcopy(dict(registry))
+    target = _transition_target(
+        next_registry,
+        claim_id=claim_id,
+        run_id=run_id,
+        expected_claim_generation=expected_claim_generation,
+        now=resolved_now,
+    )
+    if target.get("owner_identity") != owner:
+        raise RegistryProtocolError(
+            "service identity does not own claim review submission"
+        )
+    if target.get("handoff_state", "CLAIMED") != "CLAIMED":
+        raise RegistryProtocolError(
+            "claim review has already been submitted or advanced"
+        )
+
+    review = {
+        "pr_number": _positive_int(pr_number, name="pr_number"),
+        "head_sha": _canonical_git_oid(head_sha, name="head_sha"),
+        "review_evidence_digest": _canonical_sha256(
+            review_evidence_digest,
+            name="review_evidence_digest",
+        ),
+        "submitted_at": format_instant(resolved_now),
+        "fenced_claim_generation": expected_claim_generation,
+        "owner_identity": deepcopy(owner),
+    }
+    target["review_submission"] = review
+    target["handoff_state"] = "REVIEW_SUBMITTED"
+    target["claim_generation"] = expected_generation + 1
+    next_registry["generation"] = expected_generation + 1
+    next_registry["updated_at"] = format_instant(resolved_now)
+    _validate_registry(next_registry)
+    return next_registry, deepcopy(review)
+
+
+def authorize_integration(
+    registry: Mapping[str, Any],
+    *,
+    claim_id: str,
+    run_id: str,
+    expected_generation: int,
+    expected_claim_generation: int,
+    now: str,
+    service_identity: Mapping[str, Any] | None,
+    pr_number: int,
+    head_sha: str,
+    required_checks_digest: str,
+    integration_evidence_digest: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Authorize integration only for the exact reviewed PR/head and live claim."""
+
+    _validate_registry(registry)
+    _require_generation(registry, expected_generation)
+    if registry.get("mode") != REGISTRY_MODE_ENABLED:
+        raise RegistryProtocolError(
+            "registry integration handoff is disabled until atomic ownership is enabled"
+        )
+    resolved_now = parse_instant(now)
+    integrator = _canonical_service_identity(service_identity)
+    if "INTEGRATION" not in integrator["allowed_claim_modes"]:
+        raise RegistryProtocolError(
+            "service identity is not authorized for INTEGRATION"
+        )
+
+    next_registry = deepcopy(dict(registry))
+    target = _transition_target(
+        next_registry,
+        claim_id=claim_id,
+        run_id=run_id,
+        expected_claim_generation=expected_claim_generation,
+        now=resolved_now,
+    )
+    if integrator["authorized_account_id"] != target.get("account_id"):
+        raise RegistryProtocolError(
+            "integration service identity is not bound to claim account"
+        )
+    if target.get("handoff_state") != "REVIEW_SUBMITTED":
+        raise RegistryProtocolError(
+            "integration requires an exact submitted review"
+        )
+    review = _canonical_review_submission(target.get("review_submission"))
+    normalized_pr = _positive_int(pr_number, name="pr_number")
+    normalized_head = _canonical_git_oid(head_sha, name="head_sha")
+    if (
+        review["pr_number"] != normalized_pr
+        or review["head_sha"] != normalized_head
+    ):
+        raise RegistryProtocolError(
+            "integration request retargets reviewed PR/head"
+        )
+
+    authorization = {
+        "pr_number": normalized_pr,
+        "head_sha": normalized_head,
+        "required_checks_digest": _canonical_sha256(
+            required_checks_digest,
+            name="required_checks_digest",
+        ),
+        "integration_evidence_digest": _canonical_sha256(
+            integration_evidence_digest,
+            name="integration_evidence_digest",
+        ),
+        "authorized_at": format_instant(resolved_now),
+        "fenced_claim_generation": expected_claim_generation,
+        "service_identity": deepcopy(integrator),
+    }
+    target["integration_authorization"] = authorization
+    target["handoff_state"] = "INTEGRATION_AUTHORIZED"
+    target["claim_generation"] = expected_generation + 1
+    next_registry["generation"] = expected_generation + 1
+    next_registry["updated_at"] = format_instant(resolved_now)
+    _validate_registry(next_registry)
+    return next_registry, deepcopy(authorization)
+
+
+def complete_integration(
+    registry: Mapping[str, Any],
+    *,
+    claim_id: str,
+    run_id: str,
+    expected_generation: int,
+    expected_claim_generation: int,
+    now: str,
+    service_identity: Mapping[str, Any] | None,
+    pr_number: int,
+    head_sha: str,
+    merge_commit_sha: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Close ownership only after the exact authorized PR/head is integrated."""
+
+    _validate_registry(registry)
+    _require_generation(registry, expected_generation)
+    resolved_now = parse_instant(now)
+    integrator = _canonical_service_identity(service_identity)
+
+    next_registry = deepcopy(dict(registry))
+    target = _transition_target(
+        next_registry,
+        claim_id=claim_id,
+        run_id=run_id,
+        expected_claim_generation=expected_claim_generation,
+        now=resolved_now,
+    )
+    if target.get("handoff_state") != "INTEGRATION_AUTHORIZED":
+        raise RegistryProtocolError(
+            "completion requires integration authorization"
+        )
+    authorization = _canonical_integration_authorization(
+        target.get("integration_authorization")
+    )
+    if authorization["service_identity"] != integrator:
+        raise RegistryProtocolError(
+            "completion service identity differs from integration authorization"
+        )
+    normalized_pr = _positive_int(pr_number, name="pr_number")
+    normalized_head = _canonical_git_oid(head_sha, name="head_sha")
+    if (
+        authorization["pr_number"] != normalized_pr
+        or authorization["head_sha"] != normalized_head
+    ):
+        raise RegistryProtocolError(
+            "completion retargets authorized PR/head"
+        )
+
+    completion = {
+        "pr_number": normalized_pr,
+        "head_sha": normalized_head,
+        "merge_commit_sha": _canonical_git_oid(
+            merge_commit_sha,
+            name="merge_commit_sha",
+        ),
+        "completed_at": format_instant(resolved_now),
+        "fenced_claim_generation": expected_claim_generation,
+        "service_identity": deepcopy(integrator),
+    }
+    target["completion"] = completion
+    target["handoff_state"] = "COMPLETED"
+    target["status"] = "COMPLETED"
+    target["closed_at"] = format_instant(resolved_now)
+    target["claim_generation"] = expected_generation + 1
+    next_registry["generation"] = expected_generation + 1
+    next_registry["updated_at"] = format_instant(resolved_now)
+    _validate_registry(next_registry)
+    return next_registry, deepcopy(completion)
 
 
 def active_mutation_claims(registry: Mapping[str, Any], *, now: str) -> list[dict[str, Any]]:

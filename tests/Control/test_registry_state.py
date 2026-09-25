@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import unittest
 
 from control.tools.branch_lease_guard import evaluate_guard
@@ -8,10 +9,13 @@ from control.tools.registry_state import (
     RegistryProtocolError,
     RegistryStaleGenerationError,
     active_mutation_claims,
+    authorize_integration as registry_authorize_integration,
     claim as registry_claim,
+    complete_integration as registry_complete_integration,
     expire_leases,
     release as registry_release,
     renew as registry_renew,
+    submit_review as registry_submit_review,
 )
 
 
@@ -31,6 +35,15 @@ SERVICE_IDENTITY = {
         "CI_TRIAGE",
     ],
 }
+
+INTEGRATION_IDENTITY = {
+    "service_id": "autotrade-integration-service",
+    "principal_id": "github-app-installation:integration-test",
+    "authorized_account_id": "worker-account-a",
+    "authentication_binding_digest": "sha256:" + ("d" * 64),
+    "allowed_claim_modes": ["INTEGRATION"],
+}
+
 
 ADMISSION_EVIDENCE = {
     "work_package_id": "WP-04",
@@ -322,6 +335,321 @@ class RegistryTests(unittest.TestCase):
             )
         self.assertEqual(first["generation"], 1)
         self.assertEqual(first["claims"][0]["status"], "ACTIVE")
+
+    def test_review_integration_completion_fences_exact_pr_head_and_claim_generation(self):
+        first, created = claim(
+            empty_registry(),
+            request(),
+            expected_generation=0,
+            now=NOW,
+        )
+        head_sha = "1" * 40
+        reviewed, review = registry_submit_review(
+            first,
+            claim_id=created["claim_id"],
+            run_id="run-a",
+            expected_generation=1,
+            expected_claim_generation=1,
+            now="2026-09-22T10:01:00Z",
+            service_identity=SERVICE_IDENTITY,
+            pr_number=101,
+            head_sha=head_sha,
+            review_evidence_digest="sha256:" + ("2" * 64),
+        )
+        self.assertEqual(reviewed["generation"], 2)
+        self.assertEqual(
+            reviewed["claims"][0]["handoff_state"],
+            "REVIEW_SUBMITTED",
+        )
+        self.assertEqual(review["fenced_claim_generation"], 1)
+
+        authorized, authorization = registry_authorize_integration(
+            reviewed,
+            claim_id=created["claim_id"],
+            run_id="run-a",
+            expected_generation=2,
+            expected_claim_generation=2,
+            now="2026-09-22T10:02:00Z",
+            service_identity=INTEGRATION_IDENTITY,
+            pr_number=101,
+            head_sha=head_sha,
+            required_checks_digest="sha256:" + ("3" * 64),
+            integration_evidence_digest="sha256:" + ("4" * 64),
+        )
+        self.assertEqual(authorized["generation"], 3)
+        self.assertEqual(
+            authorized["claims"][0]["handoff_state"],
+            "INTEGRATION_AUTHORIZED",
+        )
+        self.assertEqual(authorization["head_sha"], head_sha)
+
+        completed, completion = registry_complete_integration(
+            authorized,
+            claim_id=created["claim_id"],
+            run_id="run-a",
+            expected_generation=3,
+            expected_claim_generation=3,
+            now="2026-09-22T10:03:00Z",
+            service_identity=INTEGRATION_IDENTITY,
+            pr_number=101,
+            head_sha=head_sha,
+            merge_commit_sha="5" * 40,
+        )
+        self.assertEqual(completed["generation"], 4)
+        self.assertEqual(completed["claims"][0]["status"], "COMPLETED")
+        self.assertEqual(completed["claims"][0]["handoff_state"], "COMPLETED")
+        self.assertEqual(completion["merge_commit_sha"], "5" * 40)
+        self.assertEqual(active_mutation_claims(completed, now=NOW), [])
+
+    def test_review_submission_requires_current_claim_owner_and_claim_generation(self):
+        first, created = claim(
+            empty_registry(),
+            request(),
+            expected_generation=0,
+            now=NOW,
+        )
+        foreign = dict(SERVICE_IDENTITY)
+        foreign["principal_id"] = "github-app-installation:foreign"
+        with self.assertRaisesRegex(
+            RegistryProtocolError,
+            "does not own claim review submission",
+        ):
+            registry_submit_review(
+                first,
+                claim_id=created["claim_id"],
+                run_id="run-a",
+                expected_generation=1,
+                expected_claim_generation=1,
+                now="2026-09-22T10:01:00Z",
+                service_identity=foreign,
+                pr_number=102,
+                head_sha="6" * 40,
+                review_evidence_digest="sha256:" + ("7" * 64),
+            )
+
+        with self.assertRaisesRegex(
+            RegistryStaleGenerationError,
+            "stale claim generation",
+        ):
+            registry_submit_review(
+                first,
+                claim_id=created["claim_id"],
+                run_id="run-a",
+                expected_generation=1,
+                expected_claim_generation=999,
+                now="2026-09-22T10:01:00Z",
+                service_identity=SERVICE_IDENTITY,
+                pr_number=102,
+                head_sha="6" * 40,
+                review_evidence_digest="sha256:" + ("7" * 64),
+            )
+        self.assertEqual(first["claims"][0]["handoff_state"], "CLAIMED")
+
+    def test_unrelated_registry_generation_does_not_replace_per_claim_fence(self):
+        first, created = claim(
+            empty_registry(),
+            request(),
+            expected_generation=0,
+            now=NOW,
+        )
+        other = request(
+            "req-b",
+            "run-b",
+            scope=["src/AutoTrade.Providers.Bybit"],
+        )
+        other["semantic_key"] = "provider-bybit"
+        second, _ = claim(
+            first,
+            other,
+            expected_generation=1,
+            now=NOW,
+        )
+        self.assertEqual(second["generation"], 2)
+        self.assertEqual(second["claims"][0]["claim_generation"], 1)
+
+        reviewed, _ = registry_submit_review(
+            second,
+            claim_id=created["claim_id"],
+            run_id="run-a",
+            expected_generation=2,
+            expected_claim_generation=1,
+            now="2026-09-22T10:01:00Z",
+            service_identity=SERVICE_IDENTITY,
+            pr_number=103,
+            head_sha="8" * 40,
+            review_evidence_digest="sha256:" + ("9" * 64),
+        )
+        self.assertEqual(reviewed["claims"][0]["claim_generation"], 3)
+
+        with self.assertRaisesRegex(
+            RegistryStaleGenerationError,
+            "stale claim generation",
+        ):
+            registry_authorize_integration(
+                reviewed,
+                claim_id=created["claim_id"],
+                run_id="run-a",
+                expected_generation=3,
+                expected_claim_generation=1,
+                now="2026-09-22T10:02:00Z",
+                service_identity=INTEGRATION_IDENTITY,
+                pr_number=103,
+                head_sha="8" * 40,
+                required_checks_digest="sha256:" + ("a" * 64),
+                integration_evidence_digest="sha256:" + ("b" * 64),
+            )
+
+    def test_restored_registry_rejects_hidden_future_handoff_evidence(self):
+        first, created = claim(
+            empty_registry(),
+            request(),
+            expected_generation=0,
+            now=NOW,
+        )
+        reviewed, _ = registry_submit_review(
+            first,
+            claim_id=created["claim_id"],
+            run_id="run-a",
+            expected_generation=1,
+            expected_claim_generation=1,
+            now="2026-09-22T10:01:00Z",
+            service_identity=SERVICE_IDENTITY,
+            pr_number=107,
+            head_sha="7" * 40,
+            review_evidence_digest="sha256:" + ("8" * 64),
+        )
+        tampered = deepcopy(reviewed)
+        tampered["claims"][0]["integration_authorization"] = {
+            "pr_number": 107,
+            "head_sha": "7" * 40,
+            "required_checks_digest": "sha256:" + ("9" * 64),
+            "integration_evidence_digest": "sha256:" + ("a" * 64),
+            "authorized_at": "2026-09-22T10:02:00Z",
+            "fenced_claim_generation": 2,
+            "service_identity": deepcopy(INTEGRATION_IDENTITY),
+        }
+        with self.assertRaisesRegex(
+            RegistryProtocolError,
+            "cannot contain integration authorization",
+        ):
+            active_mutation_claims(tampered, now=NOW)
+
+    def test_integration_cannot_retarget_submitted_pr_or_head(self):
+        first, created = claim(
+            empty_registry(),
+            request(),
+            expected_generation=0,
+            now=NOW,
+        )
+        reviewed, _ = registry_submit_review(
+            first,
+            claim_id=created["claim_id"],
+            run_id="run-a",
+            expected_generation=1,
+            expected_claim_generation=1,
+            now="2026-09-22T10:01:00Z",
+            service_identity=SERVICE_IDENTITY,
+            pr_number=104,
+            head_sha="c" * 40,
+            review_evidence_digest="sha256:" + ("d" * 64),
+        )
+        for pr_number, head_sha in (
+            (105, "c" * 40),
+            (104, "e" * 40),
+        ):
+            with self.subTest(
+                pr_number=pr_number,
+                head_sha=head_sha,
+            ), self.assertRaisesRegex(
+                RegistryProtocolError,
+                "retargets reviewed PR/head",
+            ):
+                registry_authorize_integration(
+                    reviewed,
+                    claim_id=created["claim_id"],
+                    run_id="run-a",
+                    expected_generation=2,
+                    expected_claim_generation=2,
+                    now="2026-09-22T10:02:00Z",
+                    service_identity=INTEGRATION_IDENTITY,
+                    pr_number=pr_number,
+                    head_sha=head_sha,
+                    required_checks_digest="sha256:" + ("f" * 64),
+                    integration_evidence_digest="sha256:" + ("0" * 64),
+                )
+        self.assertEqual(
+            reviewed["claims"][0]["handoff_state"],
+            "REVIEW_SUBMITTED",
+        )
+
+    def test_completion_requires_same_integrator_and_exact_authorized_head(self):
+        first, created = claim(
+            empty_registry(),
+            request(),
+            expected_generation=0,
+            now=NOW,
+        )
+        reviewed, _ = registry_submit_review(
+            first,
+            claim_id=created["claim_id"],
+            run_id="run-a",
+            expected_generation=1,
+            expected_claim_generation=1,
+            now="2026-09-22T10:01:00Z",
+            service_identity=SERVICE_IDENTITY,
+            pr_number=106,
+            head_sha="1" * 40,
+            review_evidence_digest="sha256:" + ("2" * 64),
+        )
+        authorized, _ = registry_authorize_integration(
+            reviewed,
+            claim_id=created["claim_id"],
+            run_id="run-a",
+            expected_generation=2,
+            expected_claim_generation=2,
+            now="2026-09-22T10:02:00Z",
+            service_identity=INTEGRATION_IDENTITY,
+            pr_number=106,
+            head_sha="1" * 40,
+            required_checks_digest="sha256:" + ("3" * 64),
+            integration_evidence_digest="sha256:" + ("4" * 64),
+        )
+
+        other_integrator = dict(INTEGRATION_IDENTITY)
+        other_integrator["principal_id"] = "github-app-installation:other-integrator"
+        with self.assertRaisesRegex(
+            RegistryProtocolError,
+            "differs from integration authorization",
+        ):
+            registry_complete_integration(
+                authorized,
+                claim_id=created["claim_id"],
+                run_id="run-a",
+                expected_generation=3,
+                expected_claim_generation=3,
+                now="2026-09-22T10:03:00Z",
+                service_identity=other_integrator,
+                pr_number=106,
+                head_sha="1" * 40,
+                merge_commit_sha="5" * 40,
+            )
+
+        with self.assertRaisesRegex(
+            RegistryProtocolError,
+            "retargets authorized PR/head",
+        ):
+            registry_complete_integration(
+                authorized,
+                claim_id=created["claim_id"],
+                run_id="run-a",
+                expected_generation=3,
+                expected_claim_generation=3,
+                now="2026-09-22T10:03:00Z",
+                service_identity=INTEGRATION_IDENTITY,
+                pr_number=106,
+                head_sha="6" * 40,
+                merge_commit_sha="5" * 40,
+            )
 
     def test_expiry_closes_stale_lease(self):
         first, _ = claim(empty_registry(), request(), expected_generation=0, now=NOW)

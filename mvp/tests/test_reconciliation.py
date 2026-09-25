@@ -133,6 +133,85 @@ class ReconciliationTests(unittest.TestCase):
         self.assertFalse(result.complete)
         self.assertIn("ACCOUNT", result.blocking_resources)
 
+    def test_conflicting_same_unknown_attempt_id_fails_closed_before_resolution(self):
+        first = UnknownSubmission.create(
+            attempt_id="attempt-conflict",
+            intent_id="intent-one",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            client_order_id="missing-one",
+            started_at="2026-09-24T18:00:00Z",
+        )
+        conflicting = UnknownSubmission.create(
+            attempt_id="attempt-conflict",
+            intent_id="intent-two",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            client_order_id="missing-two",
+            started_at="2026-09-24T18:01:00Z",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "attempt_id has conflicting observations",
+        ):
+            self.base(
+                unknown_submissions=[first, conflicting],
+                searched_client_order_ids=["missing-one", "missing-two"],
+                absence_coverage=absence_coverage(),
+            )
+
+    def test_distinct_unknown_attempts_cannot_reuse_scoped_client_order_id(self):
+        first = UnknownSubmission.create(
+            attempt_id="attempt-one",
+            intent_id="intent-one",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            client_order_id="shared-missing-order",
+            started_at="2026-09-24T18:00:00Z",
+        )
+        second = UnknownSubmission.create(
+            attempt_id="attempt-two",
+            intent_id="intent-two",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            client_order_id="shared-missing-order",
+            started_at="2026-09-24T18:01:00Z",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "client_order_id is reused across attempts",
+        ):
+            self.base(
+                unknown_submissions=[first, second],
+                searched_client_order_ids=["shared-missing-order"],
+                absence_coverage=absence_coverage(),
+            )
+
+    def test_exact_unknown_attempt_replay_is_deduped_before_resolution(self):
+        unknown = UnknownSubmission.create(
+            attempt_id="attempt-replayed",
+            intent_id="intent-replayed",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            client_order_id="missing-replayed",
+            started_at="2026-09-24T18:00:00Z",
+        )
+        result = self.base(
+            unknown_submissions=[unknown, unknown],
+            searched_client_order_ids=["missing-replayed"],
+            absence_coverage=absence_coverage(),
+        )
+        self.assertEqual(len(result.submission_resolutions), 1)
+        self.assertEqual(
+            result.submission_resolutions[0].attempt_id,
+            "attempt-replayed",
+        )
+
     def test_incomplete_pagination_cannot_prove_unknown_send_absent(self):
         unknown = UnknownSubmission.create(
             attempt_id="a1",

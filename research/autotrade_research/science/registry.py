@@ -94,7 +94,9 @@ def _period(payload: Any, name: str) -> tuple[date, date]:
         start = date.fromisoformat(start_raw)
         end = date.fromisoformat(end_raw)
     except ValueError as exc:
-        raise ProtocolViolation(f"{name} must use ISO calendar dates") from exc
+        raise ProtocolViolation(f"{name} must use canonical YYYY-MM-DD calendar dates") from exc
+    if start_raw != start.isoformat() or end_raw != end.isoformat():
+        raise ProtocolViolation(f"{name} must use canonical YYYY-MM-DD calendar dates")
     if start > end:
         raise ProtocolViolation(f"{name} start cannot follow end")
     return start, end
@@ -142,7 +144,13 @@ def _holdout_identity(payload: Any) -> tuple[str, str]:
         start = date.fromisoformat(start_raw)
         end = date.fromisoformat(end_raw)
     except ValueError as exc:
-        raise ProtocolViolation("holdout_identity segment bounds must use ISO calendar dates") from exc
+        raise ProtocolViolation(
+            "holdout_identity segment bounds must use canonical YYYY-MM-DD calendar dates"
+        ) from exc
+    if start_raw != start.isoformat() or end_raw != end.isoformat():
+        raise ProtocolViolation(
+            "holdout_identity segment bounds must use canonical YYYY-MM-DD calendar dates"
+        )
     if start > end:
         raise ProtocolViolation("holdout_identity segment_start cannot follow segment_end")
     normalized = {

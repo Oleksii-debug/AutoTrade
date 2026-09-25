@@ -85,6 +85,8 @@ class SimulatedProviderTests(unittest.TestCase):
             provider = SimulatedProvider()
             dispatcher = GuardedDispatcher(
                 JournalStore(f"{directory}/journal.sqlite3"),
+                environment="SIMULATION",
+                account_id="sim-account",
                 owner_token="test-owner",
             )
             checks = 0
@@ -133,12 +135,19 @@ class SimulatedProviderTests(unittest.TestCase):
     def test_outage_before_final_guard_is_blocked_without_outbound_send(self):
         with TemporaryDirectory() as directory:
             intent_id = str(uuid4())
-            client_order_id = stable_client_order_id("simulated", intent_id)
+            client_order_id = stable_client_order_id(
+                "simulated",
+                intent_id,
+                environment="SIMULATION",
+                account_id="sim-account",
+            )
             provider = SimulatedProvider(
                 transport_faults={client_order_id: "BEFORE_SEND_OUTAGE"}
             )
             dispatcher = GuardedDispatcher(
                 JournalStore(f"{directory}/journal.sqlite3"),
+                environment="SIMULATION",
+                account_id="sim-account",
                 owner_token="test-owner",
             )
             result = dispatcher.dispatch(
@@ -166,12 +175,19 @@ class SimulatedProviderTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             intent_id = str(uuid4())
             attempt_id = str(uuid4())
-            client_order_id = stable_client_order_id("simulated", intent_id)
+            client_order_id = stable_client_order_id(
+                "simulated",
+                intent_id,
+                environment="SIMULATION",
+                account_id="sim-account",
+            )
             provider = SimulatedProvider(
                 transport_faults={client_order_id: "AFTER_ACCEPT_RESPONSE_LOST"}
             )
             dispatcher = GuardedDispatcher(
                 JournalStore(f"{directory}/journal.sqlite3"),
+                environment="SIMULATION",
+                account_id="sim-account",
                 owner_token="test-owner",
             )
             request = {

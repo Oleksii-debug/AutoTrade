@@ -353,6 +353,69 @@ BINANCE_SPOT_AUTHENTICATED_READ_ENDPOINTS: Mapping[
 )
 
 
+BYBIT_V5_AUTHENTICATED_READ_ENDPOINTS: Mapping[
+    str, AuthenticatedReadEndpointRule
+] = MappingProxyType(
+    {
+        "/v5/order/realtime": AuthenticatedReadEndpointRule(
+            surface=Surface.AUTHENTICATED_READ,
+            permission_scope="ORDER.READ",
+            data_entitlement="ORDERS",
+            success_statuses=frozenset({200}),
+        ),
+        "/v5/order/history": AuthenticatedReadEndpointRule(
+            surface=Surface.AUTHENTICATED_READ,
+            permission_scope="ORDER.READ",
+            data_entitlement="ORDERS",
+            success_statuses=frozenset({200}),
+        ),
+        "/v5/execution/list": AuthenticatedReadEndpointRule(
+            surface=Surface.AUTHENTICATED_READ,
+            permission_scope="ORDER.READ",
+            data_entitlement="EXECUTIONS",
+            success_statuses=frozenset({200}),
+        ),
+        "/v5/position/list": AuthenticatedReadEndpointRule(
+            surface=Surface.AUTHENTICATED_READ,
+            permission_scope="POSITION.READ",
+            data_entitlement="POSITIONS",
+            success_statuses=frozenset({200}),
+        ),
+        "/v5/account/wallet-balance": AuthenticatedReadEndpointRule(
+            surface=Surface.AUTHENTICATED_READ,
+            permission_scope="ACCOUNT.READ",
+            data_entitlement="BALANCES",
+            success_statuses=frozenset({200}),
+        ),
+        "/v5/account/transaction-log": AuthenticatedReadEndpointRule(
+            surface=Surface.AUTHENTICATED_READ,
+            permission_scope="ACCOUNT.READ",
+            data_entitlement="ACTIVITIES",
+            success_statuses=frozenset({200}),
+        ),
+    }
+)
+
+
+def _bybit_authenticated_read_rule(
+    binding: AuthenticatedReadQueryBinding,
+) -> AuthenticatedReadEndpointRule:
+    rule = BYBIT_V5_AUTHENTICATED_READ_ENDPOINTS.get(binding.endpoint)
+    if rule is None:
+        raise ProviderTransportScopeError(
+            "Bybit authenticated-read endpoint is not explicitly allowed"
+        )
+    if binding.surface != rule.surface:
+        raise ProviderTransportScopeError(
+            "authenticated-read endpoint surface does not match Bybit policy"
+        )
+    if binding.permission_scope != rule.permission_scope:
+        raise ProviderTransportScopeError(
+            "authenticated-read permission scope does not match Bybit endpoint policy"
+        )
+    return rule
+
+
 def _binance_authenticated_read_rule(
     binding: AuthenticatedReadQueryBinding,
 ) -> AuthenticatedReadEndpointRule:
@@ -1615,6 +1678,305 @@ class BybitV5HttpTransport:
                 "Bybit order wire client must return exact response bytes"
             )
         return ExactJsonTransportResponse(raw)
+
+
+class BybitV5AuthenticatedReadSigner:
+    """Pure Bybit V5 authenticated-GET signer over one canonical query binding."""
+
+    @staticmethod
+    def sign(
+        *,
+        policy: ProviderEndpointPolicy,
+        query_binding: AuthenticatedReadQueryBinding,
+        credential_plaintext: object,
+        timestamp_ms: object,
+        recv_window_ms: int = 5000,
+    ) -> AuthenticatedReadHttpRequest:
+        if not isinstance(query_binding, AuthenticatedReadQueryBinding):
+            raise TypeError(
+                "query_binding must be AuthenticatedReadQueryBinding"
+            )
+        if policy.provider_id != "BYBIT":
+            raise ProviderTransportScopeError(
+                "Bybit authenticated-read signer requires BYBIT policy"
+            )
+        if (
+            query_binding.provider_id != "BYBIT"
+            or query_binding.environment != policy.environment
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read binding provider/environment mismatch"
+            )
+        _bybit_authenticated_read_rule(query_binding)
+        if (
+            isinstance(timestamp_ms, bool)
+            or not isinstance(timestamp_ms, int)
+            or timestamp_ms < 0
+        ):
+            raise ProviderTransportScopeError(
+                "timestamp_ms must be a non-negative integer"
+            )
+        if (
+            isinstance(recv_window_ms, bool)
+            or not isinstance(recv_window_ms, int)
+            or recv_window_ms < 1
+            or recv_window_ms > 60000
+        ):
+            raise ProviderTransportScopeError(
+                "recv_window_ms must be an integer from 1 through 60000"
+            )
+
+        query: dict[str, str] = {}
+        for raw_key, raw_value in query_binding.query.items():
+            key = _canonical_text(raw_key, name="query parameter")
+            if not isinstance(raw_value, str) or raw_value != raw_value.strip():
+                raise ProviderTransportScopeError(
+                    "Bybit authenticated-read query values must be canonical strings"
+                )
+            if key in query:
+                raise ProviderTransportScopeError(
+                    "Bybit authenticated-read query keys must be unique"
+                )
+            query[key] = raw_value
+        if not query:
+            raise ProviderTransportScopeError(
+                "Bybit authenticated-read query must not be empty"
+            )
+
+        credential = BybitV5Credential.parse(credential_plaintext)
+        exact_query = urlencode(sorted(query.items()))
+        signing_material = (
+            str(timestamp_ms)
+            + credential.api_key
+            + str(recv_window_ms)
+            + exact_query
+        ).encode("utf-8")
+        signature = hmac.new(
+            credential.api_secret.encode("utf-8"),
+            signing_material,
+            sha256,
+        ).hexdigest()
+        return AuthenticatedReadHttpRequest(
+            url=policy.absolute_url(query_binding.endpoint) + "?" + exact_query,
+            headers=MappingProxyType(
+                {
+                    "Accept": "application/json",
+                    "X-BAPI-API-KEY": credential.api_key,
+                    "X-BAPI-TIMESTAMP": str(timestamp_ms),
+                    "X-BAPI-RECV-WINDOW": str(recv_window_ms),
+                    "X-BAPI-SIGN": signature,
+                }
+            ),
+            timeout_seconds=policy.timeout_seconds,
+        )
+
+
+class BybitV5AuthenticatedReadTransport:
+    """One-shot scoped Bybit authenticated read for reconciliation surfaces."""
+
+    def __init__(
+        self,
+        *,
+        policy: ProviderEndpointPolicy,
+        provider_environment: str,
+        account_id: str,
+        capability_snapshot_id: str,
+        capability_registry: CapabilityRegistry,
+        secret_resolver: ProviderSecretResolver,
+        credential_handle: PersistentCredentialHandle,
+        session_token: str,
+        origin: str,
+        execution_identity: str,
+        clock_millis: ClockMillis,
+        clock_utc: ClockUtc,
+        quota_gate: QuotaGate | None = None,
+        wire_client: ProviderWireClient | None = None,
+        recv_window_ms: int = 5000,
+    ) -> None:
+        if not isinstance(policy, ProviderEndpointPolicy):
+            raise TypeError("policy must be ProviderEndpointPolicy")
+        provider_env = _canonical_text(
+            provider_environment, name="provider_environment"
+        ).upper()
+        canonical_policy = BYBIT_V5_ENDPOINT_POLICIES.get(provider_env)
+        if canonical_policy is None or policy != canonical_policy:
+            raise ProviderTransportScopeError(
+                "Bybit read policy does not match exact provider environment"
+            )
+        if not isinstance(credential_handle, PersistentCredentialHandle):
+            raise TypeError(
+                "credential_handle must be PersistentCredentialHandle"
+            )
+        if (
+            credential_handle.provider != "BYBIT"
+            or credential_handle.environment != policy.environment
+            or credential_handle.purpose != "READ"
+        ):
+            raise ProviderTransportScopeError(
+                "READ credential handle provider/environment/purpose mismatch"
+            )
+        account = _canonical_text(account_id, name="account_id")
+        if credential_handle.account_id != account:
+            raise ProviderTransportScopeError(
+                "credential handle account mismatch"
+            )
+        if not isinstance(capability_registry, CapabilityRegistry):
+            raise TypeError("capability_registry must be CapabilityRegistry")
+        if not hasattr(secret_resolver, "resolve_for_execution"):
+            raise TypeError(
+                "secret_resolver must implement resolve_for_execution"
+            )
+        if not callable(clock_millis) or not callable(clock_utc):
+            raise TypeError("Bybit read clocks must be callable")
+        if quota_gate is not None and not callable(quota_gate):
+            raise TypeError("quota_gate must be callable or None")
+        if wire_client is not None and not hasattr(wire_client, "send"):
+            raise TypeError("wire_client must implement send")
+        if (
+            isinstance(recv_window_ms, bool)
+            or not isinstance(recv_window_ms, int)
+            or recv_window_ms < 1
+            or recv_window_ms > 60000
+        ):
+            raise ProviderTransportScopeError(
+                "recv_window_ms must be an integer from 1 through 60000"
+            )
+
+        self.policy = policy
+        self.provider_environment = provider_env
+        self.account_id = account
+        self.capability_snapshot_id = _canonical_text(
+            capability_snapshot_id, name="capability_snapshot_id"
+        )
+        self.capability_registry = capability_registry
+        self.secret_resolver = secret_resolver
+        self.credential_handle = credential_handle
+        self.session_token = _canonical_text(
+            session_token, name="session_token"
+        )
+        self.origin = _canonical_text(origin, name="origin")
+        self.execution_identity = _canonical_text(
+            execution_identity, name="execution_identity"
+        )
+        self.clock_millis = clock_millis
+        self.clock_utc = clock_utc
+        self.quota_gate = quota_gate
+        self.wire_client = wire_client or UrllibJsonWireClient()
+        self.recv_window_ms = recv_window_ms
+
+    def _require_current_capability(
+        self,
+        query_binding: AuthenticatedReadQueryBinding,
+        rule: AuthenticatedReadEndpointRule,
+    ) -> CapabilitySnapshot:
+        point = self.clock_utc()
+        if (
+            not isinstance(point, datetime)
+            or point.tzinfo is None
+            or point.utcoffset() is None
+        ):
+            raise ProviderTransportScopeError(
+                "clock_utc must return a timezone-aware datetime"
+            )
+        point = point.astimezone(timezone.utc)
+        try:
+            current = self.capability_registry.require_verified(
+                provider_id="BYBIT",
+                account_id=self.account_id,
+                entity_id=query_binding.entity_id,
+                environment=self.policy.environment,
+                instrument_version=query_binding.instrument_version,
+                at=point,
+            )
+        except Exception as error:
+            raise ProviderTransportScopeError(
+                "Bybit authenticated-read current capability cannot be verified"
+            ) from error
+        if (
+            not isinstance(current, CapabilitySnapshot)
+            or current.snapshot_id != self.capability_snapshot_id
+            or current.provider_id != "BYBIT"
+            or current.account_id != self.account_id
+            or current.entity_id != query_binding.entity_id
+            or current.environment != self.policy.environment
+            or current.instrument_version != query_binding.instrument_version
+            or current.status != "VERIFIED"
+            or not (current.observed_at <= point < current.expires_at)
+            or query_binding.permission_scope not in current.permission_scopes
+            or rule.data_entitlement not in current.data_entitlements
+        ):
+            raise ProviderTransportScopeError(
+                "Bybit authenticated-read capability is no longer valid for exact query binding"
+            )
+        return current
+
+    def __call__(
+        self,
+        query_binding: AuthenticatedReadQueryBinding,
+    ) -> ProviderResponseObservation:
+        if not isinstance(query_binding, AuthenticatedReadQueryBinding):
+            raise TypeError(
+                "query_binding must be AuthenticatedReadQueryBinding"
+            )
+        if (
+            query_binding.provider_id != "BYBIT"
+            or query_binding.account_id != self.account_id
+            or query_binding.environment != self.policy.environment
+            or query_binding.capability_snapshot_id != self.capability_snapshot_id
+        ):
+            raise ProviderTransportScopeError(
+                "Bybit authenticated-read query scope mismatch"
+            )
+        rule = _bybit_authenticated_read_rule(query_binding)
+
+        if self.quota_gate is not None:
+            self.quota_gate(
+                "BYBIT",
+                self.account_id,
+                self.policy.environment,
+                "AUTHENTICATED_READ",
+            )
+
+        self._require_current_capability(query_binding, rule)
+
+        credential_plaintext = self.secret_resolver.resolve_for_execution(
+            self.session_token,
+            origin=self.origin,
+            handle=self.credential_handle,
+            execution_identity=self.execution_identity,
+            account_id=self.account_id,
+            provider="BYBIT",
+            environment=self.policy.environment,
+            purpose="READ",
+        )
+        try:
+            signed = BybitV5AuthenticatedReadSigner.sign(
+                policy=self.policy,
+                query_binding=query_binding,
+                credential_plaintext=credential_plaintext,
+                timestamp_ms=self.clock_millis(),
+                recv_window_ms=self.recv_window_ms,
+            )
+        finally:
+            credential_plaintext = None
+
+        self._require_current_capability(query_binding, rule)
+        wire_response = self.wire_client.send(signed)
+        if not isinstance(wire_response, AuthenticatedReadWireResponse):
+            raise ProviderTransportError(
+                "Bybit authenticated-read wire client must preserve HTTP status"
+            )
+        if wire_response.http_status not in rule.success_statuses:
+            raise ProviderTransportError(
+                "Bybit authenticated read returned unexpected HTTP status "
+                + str(wire_response.http_status)
+            )
+        return observe_authenticated_json_response(
+            query_binding=query_binding,
+            http_status=wire_response.http_status,
+            response_bytes=wire_response.body,
+            observed_at=self.clock_utc(),
+        )
 
 
 @dataclass(frozen=True)

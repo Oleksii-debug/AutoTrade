@@ -36,6 +36,26 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("refreshSnapshot({announceRefresh: true})", js)
         self.assertIn("Host state snapshot refreshed after an event cursor gap.", js)
 
+    def test_cursor_gap_recovery_failure_blocks_commands_fail_closed(self):
+        js = APP.read_text(encoding="utf-8")
+        catch_index = js.index("error.status === 409 || error.status === 410")
+        recovery_index = js.index(
+            "await refreshSnapshot({announceRefresh: true})",
+            catch_index,
+        )
+        nested_catch = js.index("} catch {", recovery_index)
+        blocked = js.index("setCommandAvailability(false)", nested_catch)
+        snapshot_unready = js.index("state.snapshotReady = false", nested_catch)
+        identity_cleared = js.index("state.sessionIdentity = null", nested_catch)
+        self.assertGreater(nested_catch, recovery_index)
+        self.assertGreater(blocked, nested_catch)
+        self.assertGreater(snapshot_unready, nested_catch)
+        self.assertGreater(identity_cleared, nested_catch)
+        self.assertIn(
+            "Host synchronization gap recovery failed. Commands remain blocked",
+            js[nested_catch:blocked + 500],
+        )
+
     def test_successful_http_response_still_rejects_internal_cursor_gap(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("let expectedCursor = state.cursor + 1n", js)

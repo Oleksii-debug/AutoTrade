@@ -575,10 +575,9 @@ class RiskContext:
         normalized_liquidation_headroom = (
             None
             if liquidation_headroom is None
-            else _positive(
+            else _decimal(
                 liquidation_headroom,
                 name="liquidation_headroom",
-                allow_zero=True,
             )
         )
         normalized_drawdown = _positive(

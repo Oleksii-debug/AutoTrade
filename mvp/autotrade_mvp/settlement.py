@@ -65,6 +65,54 @@ class SettlementObligation:
 
 
 @dataclass(frozen=True, slots=True)
+class SettlementCheckpoint:
+    """Explicit restart boundary: cash state plus the exact settled-history prefix."""
+
+    checkpoint_id: str
+    settled_cash: tuple[tuple[str, Decimal], ...]
+    settled_obligation_evidence: tuple[tuple[str, str], ...]
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        checkpoint_id: str,
+        settled_cash: Mapping[str, Decimal | str | int],
+        settled_obligation_evidence: Mapping[str, str],
+    ) -> "SettlementCheckpoint":
+        cash: dict[str, Decimal] = {}
+        for raw_currency, raw_amount in settled_cash.items():
+            currency = _text(raw_currency, name="checkpoint currency").upper()
+            if currency in cash:
+                raise SettlementConflict(
+                    "checkpoint contains duplicate normalized currency codes"
+                )
+            cash[currency] = _decimal(raw_amount, name="checkpoint settled_cash")
+
+        evidence: dict[str, str] = {}
+        for raw_id, raw_ref in settled_obligation_evidence.items():
+            obligation_id = _text(raw_id, name="checkpoint obligation_id")
+            evidence_ref = _text(raw_ref, name="checkpoint settlement_evidence_ref")
+            if obligation_id in evidence:
+                raise SettlementConflict(
+                    "checkpoint contains duplicate normalized obligation ids"
+                )
+            evidence[obligation_id] = evidence_ref
+
+        return cls(
+            checkpoint_id=_text(checkpoint_id, name="checkpoint_id"),
+            settled_cash=tuple(sorted(cash.items())),
+            settled_obligation_evidence=tuple(sorted(evidence.items())),
+        )
+
+    def cash_dict(self) -> dict[str, Decimal]:
+        return dict(self.settled_cash)
+
+    def evidence_dict(self) -> dict[str, str]:
+        return dict(self.settled_obligation_evidence)
+
+
+@dataclass(frozen=True, slots=True)
 class SettlementSnapshot:
     currency: str
     settled_cash: Decimal
@@ -133,23 +181,39 @@ class SettlementBook:
 
         return dict(self._settlement_evidence)
 
+    def checkpoint(self, checkpoint_id: str) -> SettlementCheckpoint:
+        """Capture the exact restart boundary without re-applying its history."""
+
+        return SettlementCheckpoint.create(
+            checkpoint_id=checkpoint_id,
+            settled_cash=self._settled_cash,
+            settled_obligation_evidence=self._settlement_evidence,
+        )
+
     @classmethod
     def from_history(
         cls,
         *,
-        initial_settled_cash: dict[str, Decimal | str | int] | None = None,
+        checkpoint: SettlementCheckpoint,
         obligations: Iterable[SettlementObligation] = (),
         settled_obligation_evidence: Mapping[str, str] | None = None,
     ) -> "SettlementBook":
-        """Replay settlement evidence from pre-settlement cash.
+        """Restore checkpoint state and replay only the strict evidence suffix.
 
-        Unlike snapshot restoration through the constructor, this path derives
-        the settled-cash projection by applying each evidenced obligation once.
+        The checkpoint carries the exact settled-history prefix already reflected
+        in its cash. Full retained history is accepted only when that prefix
+        matches exactly; this prevents current cash + full history from being
+        applied twice after restart.
         """
 
-        book = cls(
-            settled_cash=initial_settled_cash,
-            obligations=obligations,
+        if not isinstance(checkpoint, SettlementCheckpoint):
+            raise TypeError("checkpoint must be SettlementCheckpoint")
+
+        obligations_tuple = tuple(obligations)
+        validation = cls(
+            settled_cash=checkpoint.cash_dict(),
+            obligations=obligations_tuple,
+            settled_obligation_evidence=checkpoint.evidence_dict(),
         )
         normalized: dict[str, str] = {}
         for raw_id, raw_ref in (settled_obligation_evidence or {}).items():
@@ -159,19 +223,33 @@ class SettlementBook:
                 raise SettlementConflict(
                     "settled obligation evidence contains duplicate normalized obligation ids"
                 )
-            if obligation_id not in book._obligations:
+            if obligation_id not in validation._obligations:
                 raise SettlementConflict(
                     "settled obligation evidence cannot reference an unknown obligation"
                 )
             normalized[obligation_id] = evidence_ref
 
-        for obligation_id in sorted(
+        ordered_ids = sorted(
             normalized,
             key=lambda key: (
-                book._obligations[key].settlement_date,
+                validation._obligations[key].settlement_date,
                 key,
             ),
-        ):
+        )
+        checkpoint_evidence = checkpoint.evidence_dict()
+        prefix_ids = ordered_ids[: len(checkpoint_evidence)]
+        if set(prefix_ids) != set(checkpoint_evidence):
+            raise SettlementConflict(
+                "checkpoint settled history is not the exact retained-history prefix"
+            )
+        for obligation_id in prefix_ids:
+            if normalized[obligation_id] != checkpoint_evidence[obligation_id]:
+                raise SettlementConflict(
+                    "checkpoint settlement evidence conflicts with retained history"
+                )
+
+        book = validation
+        for obligation_id in ordered_ids[len(prefix_ids) :]:
             obligation = book._obligations[obligation_id]
             book.settle(
                 obligation_id,

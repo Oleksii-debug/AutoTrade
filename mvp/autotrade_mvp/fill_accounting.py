@@ -49,6 +49,7 @@ class ProjectedFillEvidence:
     fill_id: str
     provider_execution_id: str
     intent_id: str
+    client_order_id: str | None
     side: str
     quantity: Decimal
     price: Decimal
@@ -63,6 +64,11 @@ class ProjectedFillEvidence:
             _text(self.provider_execution_id, name="provider_execution_id"),
         )
         object.__setattr__(self, "intent_id", _text(self.intent_id, name="intent_id"))
+        object.__setattr__(
+            self,
+            "client_order_id",
+            (_text(self.client_order_id, name="client_order_id") if self.client_order_id is not None else None),
+        )
         normalized_side = _text(self.side, name="side").upper()
         if normalized_side not in {"BUY", "SELL"}:
             raise ValueError("side must be BUY or SELL")
@@ -99,6 +105,7 @@ class ProjectedFillEvidence:
         fill_id: str,
         provider_execution_id: str,
         intent_id: str,
+        client_order_id: str | None,
         side: str,
         quantity,
         price,
@@ -109,6 +116,7 @@ class ProjectedFillEvidence:
             fill_id=fill_id,
             provider_execution_id=provider_execution_id,
             intent_id=intent_id,
+            client_order_id=client_order_id,
             side=side,
             quantity=_decimal(quantity, name="quantity"),
             price=_decimal(price, name="price"),
@@ -145,6 +153,11 @@ def build_provider_fill_transaction(
         )
     if projected_fill.provider_execution_id != provider_fill.provider_execution_id:
         raise AccountingConflict("provider execution identity does not match projection")
+    if (
+        provider_fill.client_order_id is not None
+        and projected_fill.client_order_id != provider_fill.client_order_id
+    ):
+        raise AccountingConflict("provider client order identity does not match projection")
     if projected_fill.quantity != provider_fill.quantity:
         raise AccountingConflict("provider fill quantity does not match projection")
     if projected_fill.price != provider_fill.price:
@@ -158,7 +171,7 @@ def build_provider_fill_transaction(
         "environment": book.environment,
         "account_id": book.account_id,
         "provider_execution_id": provider_fill.provider_execution_id,
-        "client_order_id": provider_fill.client_order_id,
+        "client_order_id": projected_fill.client_order_id,
         "fill_id": projected_fill.fill_id,
         "intent_id": projected_fill.intent_id,
         "side": projected_fill.side,

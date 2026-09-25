@@ -135,6 +135,34 @@ class DurableModelBudgetTests(unittest.TestCase):
                     billed="0.1",
                 )
 
+    def test_release_revalidates_exact_amount_before_commit(self):
+        class InterleavingBudget(DurableModelBudget):
+            def _commit(self, *, validate, payload, **kwargs):
+                candidate = self._replay()
+                candidate.release(payload["request_id"])
+                validate(candidate)
+                return True
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            budget = InterleavingBudget(
+                journal=journal,
+                budget_id="policy-1",
+                ceiling="1",
+                clock=lambda: NOW,
+            )
+            budget.reserve("req-1", "0.4")
+            before = tuple(journal.load_events("model_budget", "policy-1"))
+            with self.assertRaisesRegex(
+                ValueError,
+                "release amount changed before commit",
+            ):
+                budget.release("req-1")
+            self.assertEqual(
+                tuple(journal.load_events("model_budget", "policy-1")),
+                before,
+            )
+
     def test_release_is_durable_across_restart(self):
         with TemporaryDirectory() as directory:
             _, first = open_budget(directory)

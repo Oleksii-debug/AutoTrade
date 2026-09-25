@@ -332,14 +332,15 @@ class OnlineUpdateInput:
         ):
             if not isinstance(value, bool):
                 raise TypeError(f"{name} must be boolean")
-        current = {
-            _text(key, name="current parameter name"): _decimal(value, name=f"current[{key}]")
-            for key, value in current_parameters.items()
-        }
-        proposed = {
-            _text(key, name="proposed parameter name"): _decimal(value, name=f"proposed[{key}]")
-            for key, value in proposed_parameters.items()
-        }
+        if not isinstance(current_parameters, Mapping) or not isinstance(
+            proposed_parameters, Mapping
+        ):
+            raise TypeError("parameter sets must be mappings")
+        # Preserve raw key identity until __post_init__. Normalizing here would
+        # silently collapse keys such as "alpha" and " alpha " before the
+        # immutable duplicate-identity check can reject them.
+        current = dict(current_parameters)
+        proposed = dict(proposed_parameters)
         observed = _utc(observed_at, name="observed_at")
         label_available = _utc(
             label_available_at,

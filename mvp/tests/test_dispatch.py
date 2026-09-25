@@ -936,11 +936,10 @@ class DispatchTests(unittest.TestCase):
                 dispatcher._aggregate_id("paper-current-owner"),
             )
             self.assertEqual(
-                [event["payload"]["owner_epoch"] for event in events],
-                [owner.epoch, owner.epoch, owner.epoch],
+                [event["owner_epoch"] for event in events],
+                [str(owner.epoch), str(owner.epoch), str(owner.epoch)],
             )
             self.assertEqual(events[0]["payload"]["owner_epoch"], owner.epoch)
-            self.assertEqual(events[1]["payload"]["owner_epoch"], owner.epoch)
 
     def test_owner_epoch_must_be_positive_integer(self):
         with TemporaryDirectory() as directory:

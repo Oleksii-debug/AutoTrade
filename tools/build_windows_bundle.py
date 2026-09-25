@@ -35,6 +35,12 @@ FORBIDDEN_SUFFIXES = {
 FORBIDDEN_PREFIXES = (
     ".env.",
 )
+PRIVATE_KEY_MARKERS = (
+    b"-----BEGIN PRIVATE KEY-----",
+    b"-----BEGIN RSA PRIVATE KEY-----",
+    b"-----BEGIN EC PRIVATE KEY-----",
+    b"-----BEGIN OPENSSH PRIVATE KEY-----",
+)
 WINDOWS_RESERVED_STEMS = frozenset(
     {"con", "prn", "aux", "nul"}
     | {f"com{index}" for index in range(1, 10)}
@@ -92,6 +98,49 @@ def _is_sensitive(path: Path) -> bool:
     return bool(lowered_parts & {"secrets", "credentials", "private-keys"})
 
 
+def _looks_like_credential_vault(data: bytes) -> bool:
+    """Detect the existing AutoTrade protected-vault shape by content.
+
+    Filename/path gates are necessary but insufficient: a copied credential
+    vault can be renamed before staging.  Detection intentionally requires the
+    characteristic owner/ciphertext record shape to avoid treating arbitrary
+    JSON documents as secrets.
+    """
+
+    if (
+        b'"records"' not in data
+        or b'"owner_identity"' not in data
+        or b'"ciphertext"' not in data
+    ):
+        return False
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(value, dict):
+        return False
+    records = value.get("records")
+    if not isinstance(records, dict) or not records:
+        return False
+    for record in records.values():
+        if not isinstance(record, dict):
+            continue
+        if {"handle", "owner_identity", "ciphertext", "active"} <= set(record):
+            return True
+    return False
+
+
+def _reject_sensitive_content(relative: str, data: bytes) -> None:
+    if any(marker in data for marker in PRIVATE_KEY_MARKERS):
+        raise BundleError(
+            f"private-key material is forbidden in bundles: {relative}"
+        )
+    if _looks_like_credential_vault(data):
+        raise BundleError(
+            f"credential-vault content is forbidden in bundles: {relative}"
+        )
+
+
 def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
     if not staging.is_dir():
         raise BundleError("staging must be an existing directory")
@@ -115,7 +164,9 @@ def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
         windows_names[windows_key] = relative
         if _is_sensitive(PurePosixPath(relative)):
             raise BundleError(f"sensitive path is forbidden in bundles: {relative}")
-        collected.append((relative, path, path.read_bytes()))
+        data = path.read_bytes()
+        _reject_sensitive_content(relative, data)
+        collected.append((relative, path, data))
     if not collected:
         raise BundleError("staging directory contains no files")
     return collected

@@ -60,36 +60,26 @@ class AlpacaAdapterTests(unittest.TestCase):
     def test_direct_prepared_request_cannot_bypass_scope_or_provenance(self):
         base = {
             "endpoint": "/v2/orders",
-            "body": {"symbol": "AAPL", "client_order_id": "at-direct"},
+            "body": {
+                "symbol": "AAPL",
+                "side": "buy",
+                "type": "market",
+                "time_in_force": "day",
+                "client_order_id": "at-direct",
+                "qty": "1",
+                "extended_hours": False,
+            },
             "account_id": "paper-account",
             "environment": "PAPER",
             "capability_snapshot_id": "cap-1",
             "documentation_refs": ("https://docs.alpaca.markets/orders",),
+            "instrument_versions": ("AAPL:v1",),
         }
-        request = AlpacaPreparedRequest(**base)
-        self.assertEqual(request.environment, "PAPER")
-        with self.assertRaisesRegex(AlpacaAdapterError, "endpoint"):
-            AlpacaPreparedRequest(**{**base, "endpoint": "/v2/account"})
-        with self.assertRaisesRegex(AlpacaAdapterError, "environment"):
-            AlpacaPreparedRequest(**{**base, "environment": "SIMULATION"})
-        with self.assertRaisesRegex(AlpacaAdapterError, "capability_snapshot_id"):
-            AlpacaPreparedRequest(**{**base, "capability_snapshot_id": " "})
-        with self.assertRaisesRegex(AlpacaAdapterError, "documentation_refs"):
-            AlpacaPreparedRequest(**{**base, "documentation_refs": ()})
-        with self.assertRaisesRegex(AlpacaAdapterError, "must be unique"):
-            AlpacaPreparedRequest(
-                **{
-                    **base,
-                    "capability_snapshot_ids": ("cap-1", "cap-1"),
-                }
-            )
-        with self.assertRaisesRegex(AlpacaAdapterError, "primary capability_snapshot_id"):
-            AlpacaPreparedRequest(
-                **{
-                    **base,
-                    "capability_snapshot_ids": ("other-cap",),
-                }
-            )
+        with self.assertRaisesRegex(
+            AlpacaAdapterError,
+            "canonical preparation factory",
+        ):
+            AlpacaPreparedRequest(**base)
 
     def test_equity_limit_request_preserves_decimal_strings(self):
         intent = AlpacaOrderIntent.create(
@@ -113,6 +103,9 @@ class AlpacaAdapterTests(unittest.TestCase):
         self.assertEqual(request.endpoint, "/v2/orders")
         self.assertEqual(request.account_id, "paper-account")
         self.assertEqual(request.environment, "PAPER")
+        self.assertEqual(request.instrument_versions, ("AAPL:v1",))
+        self.assertEqual(len(request.capability_snapshot_ids), 1)
+        self.assertRegex(request.body_sha256, r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(request.body["qty"], "1.25")
         self.assertEqual(request.body["limit_price"], "220.10")
         self.assertNotIn("notional", request.body)
@@ -586,6 +579,11 @@ class AlpacaMlegFoundationTests(unittest.TestCase):
                 for leg in intent.legs
             ),
         )
+        self.assertEqual(
+            request.instrument_versions,
+            tuple(leg.instrument_version for leg in intent.legs),
+        )
+        self.assertRegex(request.body_sha256, r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(request.body["qty"], "2")
         self.assertEqual(request.body["limit_price"], "-0.60")
         self.assertNotIn("symbol", request.body)

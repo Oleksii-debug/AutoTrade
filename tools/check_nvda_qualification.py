@@ -154,13 +154,44 @@ def validate_evidence(
 
 
 def evidence_digest(path: Path) -> str:
-    return "sha256:" + sha256(path.read_bytes()).hexdigest()
+    try:
+        payload = path.read_bytes()
+    except OSError as error:
+        raise NvdaQualificationError("evidence file cannot be read") from error
+    return "sha256:" + sha256(payload).hexdigest()
+
+
+def release_artifact_digest(path: Path) -> str:
+    try:
+        if not path.is_file():
+            raise NvdaQualificationError("release artifact must be a readable file")
+        payload = path.read_bytes()
+    except OSError as error:
+        raise NvdaQualificationError("release artifact cannot be read") from error
+    return "sha256:" + sha256(payload).hexdigest()
+
+
+def validate_release_artifact_binding(
+    evidence: dict[str, object],
+    release_artifact: Path,
+) -> str:
+    declared = _required_text(
+        evidence.get("artifact_sha256"),
+        name="artifact_sha256",
+    ).lower()
+    actual = release_artifact_digest(release_artifact)
+    if declared != actual:
+        raise NvdaQualificationError(
+            "release artifact SHA-256 does not match NVDA evidence"
+        )
+    return actual
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--requirements", type=Path, default=DEFAULT_REQUIREMENTS)
     parser.add_argument("--evidence", type=Path)
+    parser.add_argument("--release-artifact", type=Path)
     parser.add_argument("--status", type=Path, default=DEFAULT_STATUS)
     parser.add_argument("--check-status", action="store_true")
     args = parser.parse_args()
@@ -204,8 +235,16 @@ def main() -> int:
 
         if args.evidence is None:
             raise NvdaQualificationError("--evidence is required unless --check-status is used")
+        if args.release_artifact is None:
+            raise NvdaQualificationError(
+                "--release-artifact is required for real NVDA qualification"
+            )
         evidence = _load(args.evidence, name="evidence")
         result = validate_evidence(evidence, requirements)
+        result["artifact_sha256"] = validate_release_artifact_binding(
+            evidence,
+            args.release_artifact,
+        )
         result["evidence_sha256"] = evidence_digest(args.evidence)
         print(json.dumps(result, sort_keys=True))
         return 0

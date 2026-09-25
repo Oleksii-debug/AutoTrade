@@ -1,6 +1,6 @@
 {
   "$schema":"https://json-schema.org/draft/2020-12/schema",
-  "$id":"https://schemas.autotrade.local/1.0.0/provider.schema.json",
+  "$id":"https://schemas.autotrade.local/2.0.0/provider.schema.json",
   "title":"AutoTrade provider interface result contracts",
   "$defs":{
     "Balance":{

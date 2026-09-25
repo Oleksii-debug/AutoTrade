@@ -243,6 +243,8 @@ def _allocation_bundle(reservations, *, environment=ENVIRONMENT):
             "reservation_state_digest": reservations.state_digest,
             "cash_available": "1000",
             "base_currency": "USD",
+            "positions_complete": True,
+            "position_quantities": {"ABC": "0"},
         },
     )
     stress = _evidence(
@@ -282,6 +284,7 @@ def _allocation_bundle(reservations, *, environment=ENVIRONMENT):
             max_symbol_notional="1000",
             max_total_cost="50",
             max_stress_loss="500",
+            max_turnover_notional="1000",
         ),
         objective_evidence={"ABC": objective},
         market_evidence={"ABC": market},

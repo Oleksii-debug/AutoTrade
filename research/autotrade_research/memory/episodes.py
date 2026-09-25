@@ -219,8 +219,12 @@ class ExperienceMemory:
                 "correction must contain every superseded field: "
                 + ", ".join(missing_fields)
             )
+        if "evidence_ref" not in payload:
+            raise ValueError("correction requires evidence_ref")
+        evidence_ref = _text(payload["evidence_ref"], name="evidence_ref")
         normalized_payload = dict(payload)
         normalized_payload["supersedes_fields"] = list(supersedes)
+        normalized_payload["evidence_ref"] = evidence_ref
         payload = normalized_payload
         identifier = _identifier(correction_id)
         canonical = _canonical(payload)

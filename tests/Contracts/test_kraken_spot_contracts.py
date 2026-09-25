@@ -73,7 +73,7 @@ class KrakenSpotContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "environment"):
             parse_spot_submission_response(
                 attempt_id=str(uuid4()),
-                client_order_id="spot-contract-invalid-env",
+                client_order_id="spot-bad-env",
                 environment="MARS",
                 observed_at=NOW,
                 source_uri=SOURCE,

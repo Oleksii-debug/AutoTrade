@@ -194,12 +194,8 @@ class WhiteBitAdapterContractTests(unittest.TestCase):
             )
 
     def test_unqualified_environment_and_source_are_rejected(self):
-        invalid_environment = self._result(environment="MARS")
         with self.assertRaisesRegex(WhiteBitAdapterError, "environment"):
-            canonical_submission_result(
-                invalid_environment,
-                response_evidence=response_evidence(invalid_environment),
-            )
+            self._result(environment="MARS")
 
         internal = self._result()
         with self.assertRaisesRegex(WhiteBitAdapterError, "source_uri"):

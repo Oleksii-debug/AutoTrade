@@ -519,7 +519,7 @@ class EvaluationGateTests(unittest.TestCase):
         self.assertEqual(decision.checks["primary_baseline"], "FAIL")
 
     def test_gate_decision_checks_are_immutable_after_evaluation(self):
-        decision = evaluate_gates(profile(), evidence())
+        decision = evaluate_with_verified_bundle(profile(), evidence())
         self.assertEqual(decision.status, "PASS")
         with self.assertRaises(TypeError):
             decision.checks["net_advantage"] = "FAIL"

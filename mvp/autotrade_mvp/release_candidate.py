@@ -50,8 +50,8 @@ def _text(value: str, *, name: str) -> str:
 
 
 def _git_sha(value: str, *, name: str) -> str:
-    text = _text(value, name=name).lower()
-    if _GIT_SHA.fullmatch(text) is None:
+    text = _text(value, name=name)
+    if text != text.lower() or _GIT_SHA.fullmatch(text) is None:
         raise ReleaseCandidateError(
             f"{name} must be a 40-character lowercase git SHA"
         )
@@ -59,8 +59,8 @@ def _git_sha(value: str, *, name: str) -> str:
 
 
 def _sha256(value: str, *, name: str) -> str:
-    text = _text(value, name=name).lower()
-    if _SHA256.fullmatch(text) is None:
+    text = _text(value, name=name)
+    if text != text.lower() or _SHA256.fullmatch(text) is None:
         raise ReleaseCandidateError(
             f"{name} must be canonical sha256:<64 lowercase hex>"
         )

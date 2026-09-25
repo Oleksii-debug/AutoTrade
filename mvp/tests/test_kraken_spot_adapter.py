@@ -542,6 +542,7 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                     "T-EXEC-1": {
                         "ordertxid": "OABC-D123-E456",
                         "pair": "XXBTZUSD",
+                        "type": "buy",
                         "time": "1790280001.123456",
                         "price": "60000.25",
                         "vol": "0.0100",
@@ -561,16 +562,64 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         self.assertEqual(fill.provider_execution_id, "T-EXEC-1")
         self.assertEqual(fill.client_order_id, "at-order-1")
         self.assertEqual(fill.instrument, "XBTUSD:v1")
+        self.assertEqual(fill.side, "BUY")
         self.assertEqual(fill.quantity, Decimal("0.0100"))
         self.assertEqual(fill.price, Decimal("60000.25"))
         self.assertEqual(fill.fee_amount, Decimal("0.20"))
         self.assertEqual(fill.fee_currency, "USD")
         self.assertEqual(fill.trade_time, "2026-09-24T20:00:01.123456Z")
 
+    def test_trade_history_side_is_provider_evidenced_and_fail_closed(self):
+        trade = {
+            "ordertxid": "OABC-D123-E456",
+            "pair": "XXBTZUSD",
+            "type": "sell",
+            "time": "1790280001.123456",
+            "price": "60000.25",
+            "vol": "0.0100",
+            "fee": "0.20",
+        }
+        kwargs = {
+            "instrument_versions": {"XXBTZUSD": "XBTUSD:v1"},
+            "client_ids_by_provider_order": {
+                "OABC-D123-E456": "at-order-1"
+            },
+            "fee_currency_by_pair": {"XXBTZUSD": "USD"},
+        }
+        response = {
+            "error": [],
+            "result": {"trades": {"T-EXEC-SIDE": dict(trade)}},
+        }
+        fill = parse_trade_history(
+            trade_history_observation(response), **kwargs
+        )[0]
+        self.assertEqual(fill.side, "SELL")
+
+        missing = dict(trade)
+        missing.pop("type")
+        response["result"]["trades"]["T-EXEC-SIDE"] = missing
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "trade.type"):
+            parse_trade_history(trade_history_observation(response), **kwargs)
+
+        for invalid in ("BUY", "SELL", "Buy", "Sell", "unknown"):
+            with self.subTest(type=invalid):
+                response["result"]["trades"]["T-EXEC-SIDE"] = {
+                    **trade,
+                    "type": invalid,
+                }
+                with self.assertRaisesRegex(
+                    KrakenSpotAdapterError,
+                    "provider-evidenced buy or sell",
+                ):
+                    parse_trade_history(
+                        trade_history_observation(response), **kwargs
+                    )
+
     def test_trade_history_never_invents_missing_fee_as_zero(self):
         base_trade = {
             "ordertxid": "OABC-D123-E456",
             "pair": "XXBTZUSD",
+            "type": "buy",
             "time": "1790280001.123456",
             "price": "60000.25",
             "vol": "0.0100",
@@ -605,6 +654,7 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                     "T-EXEC-1": {
                         "ordertxid": "OABC-D123-E456",
                         "pair": "XXBTZUSD",
+                        "type": "buy",
                         "time": "1790280001",
                         "price": "60000",
                         "vol": "0.01",
@@ -636,6 +686,7 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                     "T-EXEC-1": {
                         "ordertxid": "OABC-D123-E456",
                         "pair": "XXBTZUSD",
+                        "type": "buy",
                         "time": 1790280001.25,
                         "price": "60000",
                         "vol": "0.01",
@@ -669,6 +720,7 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                     "T-SCOPE-1": {
                         "ordertxid": "O-SCOPE-1",
                         "pair": "XXBTZUSD",
+                        "type": "buy",
                         "time": "1790280001",
                         "price": "60000",
                         "vol": "0.01",

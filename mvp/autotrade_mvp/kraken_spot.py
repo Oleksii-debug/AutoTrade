@@ -631,6 +631,13 @@ def parse_trade_history(
             raise KrakenSpotAdapterError(
                 f"missing provider fee amount for Kraken trade: {execution_id}"
             )
+        raw_side = _text(raw.get("type"), name="trade.type")
+        side_by_provider_value = {"buy": "BUY", "sell": "SELL"}
+        if raw_side not in side_by_provider_value:
+            raise KrakenSpotAdapterError(
+                "Kraken trade type must be provider-evidenced buy or sell"
+            )
+        side = side_by_provider_value[raw_side]
         fills.append(
             ProviderFillEvidence.create(
                 provider_id="KRAKEN",
@@ -639,6 +646,7 @@ def parse_trade_history(
                 provider_execution_id=execution_id,
                 client_order_id=client_id,
                 instrument=_text(instrument_versions[pair], name="instrument_version"),
+                side=side,
                 quantity=raw.get("vol"),
                 price=raw.get("price"),
                 fee_amount=raw["fee"],

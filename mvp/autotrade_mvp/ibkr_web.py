@@ -591,12 +591,9 @@ def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
     message_value = item.get("message")
     error_value = item.get("error")
     has_order = order_value is not None and order_value != ""
-    has_reply = (
-        reply_value is not None
-        and reply_value != ""
-        and message_value is not None
-        and message_value != ""
-    )
+    has_reply_shape = "id" in item and message_value is not None and message_value != ""
+    validated_reply_id = _reply_id(reply_value) if has_reply_shape else None
+    has_reply = has_reply_shape
     has_error = error_value is not None and error_value != ""
 
     if sum(bool(value) for value in (has_order, has_reply, has_error)) != 1:
@@ -626,7 +623,7 @@ def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
             raise IbkrWebAdapterError("isSuppressed must be boolean when present")
         return IbkrSubmissionOutcome(
             status="REPLY_REQUIRED",
-            reply_id=_reply_id(item["id"]),
+            reply_id=validated_reply_id,
             messages=messages,
             message_ids=message_ids,
         )

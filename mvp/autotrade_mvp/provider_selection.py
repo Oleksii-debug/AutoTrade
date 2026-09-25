@@ -71,8 +71,10 @@ def _text(value: str, name: str) -> str:
 
 def _code_sha(value: str) -> str:
     text = _text(value, "adapter_code_sha")
-    if len(text) not in {40, 64}:
-        raise ProviderSelectionError("adapter_code_sha must be a 40- or 64-character hex SHA")
+    if len(text) != 40:
+        raise ProviderSelectionError(
+            "adapter_code_sha must be a canonical 40-character Git SHA"
+        )
     try:
         int(text, 16)
     except ValueError as error:

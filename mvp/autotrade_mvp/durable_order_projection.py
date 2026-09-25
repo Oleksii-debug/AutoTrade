@@ -1140,10 +1140,15 @@ class DurableOrderBookProjection:
                 raise OrderProjectionConflict(
                     "corrected ExecutionFill provider_execution_id differs from target fill"
                 )
+            root_fill_id = order.provider_execution_index.get(incoming_execution_id)
+            if root_fill_id is None:
+                raise OrderProjectionConflict(
+                    "corrected ExecutionFill execution lineage is not indexed"
+                )
             return self.correct_fill(
                 event_key=event_key,
                 client_order_id=client_id,
-                fill_id=correction_target,
+                fill_id=root_fill_id,
                 correction_fill_id=_text(
                     execution_fill.get("fill_id"),
                     name="fill_id",

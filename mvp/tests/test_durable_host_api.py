@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp.durable_host_api import JournalBackedHostCommandStore
-from mvp.autotrade_mvp.host_api import EventGap
+from mvp.autotrade_mvp.host_api import EventGap, HostCommandStore
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 
 
@@ -14,9 +14,17 @@ class JournalBackedHostApiTests(unittest.TestCase):
         self.path = f"{self.directory.name}/journal.sqlite3"
         self.sessions = {("session-a", "alice"), ("session-b", "bob")}
 
-    def store(self, *, max_events=100):
+    def store(
+        self,
+        *,
+        max_events=100,
+        account_id="paper-account-1",
+        environment="PAPER",
+    ):
         return JournalBackedHostCommandStore(
             JournalStore(self.path),
+            account_id=account_id,
+            environment=environment,
             session_validator=lambda session, actor: (session, actor) in self.sessions,
             max_events=max_events,
             now=lambda: "2026-09-24T18:00:00Z",
@@ -30,6 +38,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
         version="0",
         actor="alice",
         session="session-a",
+        account_id="paper-account-1",
         environment="PAPER",
         action="BLOCK_NEW_EXPOSURE",
         payload=None,
@@ -40,22 +49,70 @@ class JournalBackedHostApiTests(unittest.TestCase):
             "idempotency_key": key,
             "actor": actor,
             "session": session,
+            "account_id": account_id,
             "environment": environment,
             "action": action,
             "payload": payload or {},
         }
 
-    def test_environment_is_required_and_scopes_durable_command(self):
+    def test_v2_scope_is_required_canonical_and_matches_active_host(self):
         store = self.store()
-        missing = self.command()
-        missing.pop("environment")
+        missing_account = self.command()
+        missing_account.pop("account_id")
+        with self.assertRaisesRegex(ValueError, "account_id"):
+            store.submit(missing_account)
+        missing_environment = self.command()
+        missing_environment.pop("environment")
         with self.assertRaisesRegex(ValueError, "environment"):
-            store.submit(missing)
-        with self.assertRaisesRegex(ValueError, "environment must be"):
-            store.submit(self.command(environment="STAGING"))
+            store.submit(missing_environment)
+        with self.assertRaisesRegex(ValueError, "canonical Environment"):
+            store.submit(self.command(environment="paper"))
+        with self.assertRaisesRegex(ValueError, "active host"):
+            store.submit(self.command(account_id="other-account"))
+        with self.assertRaisesRegex(ValueError, "active host"):
+            store.submit(self.command(environment="LIVE"))
 
-        accepted = store.submit(self.command(environment="PAPER"))
+        accepted = store.submit(self.command())
         self.assertEqual(accepted.status, "ACCEPTED")
+        event = store.events_after(0)[0]
+        self.assertEqual(event.payload["account_id"], "paper-account-1")
+        self.assertEqual(event.payload["environment"], "PAPER")
+        snapshot = store.snapshot()
+        self.assertEqual(snapshot["account_id"], "paper-account-1")
+        self.assertEqual(snapshot["environment"], "PAPER")
+
+    def test_same_v2_command_has_identical_in_memory_and_durable_admission(self):
+        command = self.command()
+        memory = HostCommandStore(
+            account_id="paper-account-1",
+            environment="PAPER",
+            session_validator=lambda session, actor: (session, actor) in self.sessions,
+            now=lambda: "2026-09-24T18:00:00Z",
+        )
+        self.assertEqual(memory.submit(command), self.store().submit(command))
+
+    def test_restart_rejects_journal_from_another_active_account_scope(self):
+        first = self.store()
+        accepted = first.submit(self.command())
+        wrong_scope = self.store(account_id="other-account")
+        with self.assertRaisesRegex(ValueError, "journal command scope"):
+            wrong_scope.get_operation(accepted.operation_id)
+
+    def test_durable_idempotency_scope_includes_actor_and_environment(self):
+        store = self.store()
+        first = store.submit(self.command(key="shared-key"))
+        self.assertEqual(first.status, "ACCEPTED")
+        second = store.submit(
+            self.command(
+                command_id="22222222-2222-2222-2222-222222222222",
+                key="shared-key",
+                version="1",
+                actor="bob",
+                session="session-b",
+            )
+        )
+        self.assertEqual(second.status, "ACCEPTED")
+        self.assertEqual(store.state_version, 2)
 
     def test_accepted_command_and_operation_survive_restart(self):
         first = self.store()

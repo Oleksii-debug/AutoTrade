@@ -14,6 +14,8 @@ import json
 from typing import Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
+from contracts.bindings.python.common_scalars import is_valid_common_scalar
+
 
 class EventGap(RuntimeError):
     """Raised when a client cursor predates retained host events."""
@@ -90,12 +92,20 @@ class HostCommandStore:
     def __init__(
         self,
         *,
+        account_id: str,
+        environment: str,
         session_validator: Callable[[str, str], bool],
         max_events: int = 100,
         now: Callable[[], str] | None = None,
     ) -> None:
+        if not isinstance(account_id, str) or not account_id:
+            raise ValueError("account_id must be a non-empty string")
+        if not is_valid_common_scalar("Environment", environment):
+            raise ValueError("environment must be a canonical Environment")
         if max_events < 1:
             raise ValueError("max_events must be positive")
+        self.account_id = account_id
+        self.environment = environment
         self._session_validator = session_validator
         self._max_events = max_events
         self._now = now or (
@@ -104,7 +114,9 @@ class HostCommandStore:
         self.state_version = 0
         self.cursor = 0
         self._events: list[HostEvent] = []
-        self._idempotency: dict[str, tuple[str, CommandResult]] = {}
+        self._idempotency: dict[
+            tuple[str, str, str], tuple[str, CommandResult]
+        ] = {}
         self._commands: dict[str, str] = {}
         self._operations: dict[str, OperationResult] = {}
 
@@ -154,10 +166,18 @@ class HostCommandStore:
         return event
 
     def submit(self, command: Mapping[str, object]) -> CommandResult:
+        if not isinstance(command, Mapping):
+            raise TypeError("command must be a mapping")
         command_id = self._required_text(command, "command_id")
         idempotency_key = self._required_text(command, "idempotency_key")
         actor = self._required_text(command, "actor")
         session = self._required_text(command, "session")
+        account_id = self._required_text(command, "account_id")
+        environment = self._required_text(command, "environment")
+        if not is_valid_common_scalar("Environment", environment):
+            raise ValueError("environment must be a canonical Environment")
+        if account_id != self.account_id or environment != self.environment:
+            raise ValueError("command scope does not match active host account/environment")
         action = self._required_text(command, "action")
         expected_raw = self._required_text(command, "expected_state_version")
         if "payload" not in command or not isinstance(command["payload"], dict):
@@ -168,7 +188,8 @@ class HostCommandStore:
             raise PermissionError("Session is not authorized for actor")
 
         digest = self._digest(command)
-        previous = self._idempotency.get(idempotency_key)
+        scope_key = (actor, environment, idempotency_key)
+        previous = self._idempotency.get(scope_key)
         if previous is not None:
             previous_digest, previous_result = previous
             if previous_digest != digest:
@@ -197,7 +218,7 @@ class HostCommandStore:
                 state_version=str(self.state_version),
                 reason_codes=("stale_state_version",),
             )
-            self._idempotency[idempotency_key] = (digest, result)
+            self._idempotency[scope_key] = (digest, result)
             self._commands[command_id] = digest
             return result
 
@@ -222,6 +243,8 @@ class HostCommandStore:
                 "operation_id": operation_id,
                 "action": action,
                 "actor": actor,
+                "account_id": account_id,
+                "environment": environment,
                 **operation_result_payload(operation),
             },
         )
@@ -231,7 +254,7 @@ class HostCommandStore:
             state_version=str(self.state_version),
             operation_id=operation_id,
         )
-        self._idempotency[idempotency_key] = (digest, result)
+        self._idempotency[scope_key] = (digest, result)
         self._commands[command_id] = digest
         return result
 
@@ -296,6 +319,8 @@ class HostCommandStore:
         return {
             "state_version": str(self.state_version),
             "event_cursor": str(self.cursor),
+            "account_id": self.account_id,
+            "environment": self.environment,
             "operations": {
                 operation_id: operation.phase
                 for operation_id, operation in self._operations.items()

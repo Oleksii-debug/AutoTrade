@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from typing import Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
+from contracts.bindings.python.common_scalars import is_valid_common_scalar
+
 from .host_api import (
     CommandResult,
     EventGap,
@@ -34,17 +36,25 @@ class JournalBackedHostCommandStore:
         self,
         journal: JournalStore,
         *,
+        account_id: str,
+        environment: str,
         session_validator: Callable[[str, str], bool],
         max_events: int = 100,
         now: Callable[[], str] | None = None,
     ) -> None:
         if not isinstance(journal, JournalStore):
             raise TypeError("journal must be a JournalStore")
+        if not isinstance(account_id, str) or not account_id:
+            raise ValueError("account_id must be a non-empty string")
+        if not is_valid_common_scalar("Environment", environment):
+            raise ValueError("environment must be a canonical Environment")
         if not callable(session_validator):
             raise TypeError("session_validator must be callable")
         if not isinstance(max_events, int) or isinstance(max_events, bool) or max_events < 1:
             raise ValueError("max_events must be positive")
         self._journal = journal
+        self.account_id = account_id
+        self.environment = environment
         self._session_validator = session_validator
         self._max_events = max_events
         self._now = now or (
@@ -151,11 +161,12 @@ class JournalBackedHostCommandStore:
         idempotency_key = self._required_text(command, "idempotency_key")
         actor = self._required_text(command, "actor")
         session = self._required_text(command, "session")
-        environment = self._required_text(command, "environment").upper()
-        if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
-            raise ValueError(
-                "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
-            )
+        account_id = self._required_text(command, "account_id")
+        environment = self._required_text(command, "environment")
+        if not is_valid_common_scalar("Environment", environment):
+            raise ValueError("environment must be a canonical Environment")
+        if account_id != self.account_id or environment != self.environment:
+            raise ValueError("command scope does not match active host account/environment")
         action = self._required_text(command, "action")
         expected_raw = self._required_text(command, "expected_state_version")
         if "payload" not in command or not isinstance(command["payload"], dict):
@@ -216,6 +227,8 @@ class JournalBackedHostCommandStore:
                 "operation_id": operation_id,
                 "action": action,
                 "actor": actor,
+                "account_id": account_id,
+                "environment": environment,
                 "phase": "QUEUED",
                 "started_at": operation_time,
                 "updated_at": operation_time,
@@ -258,6 +271,12 @@ class JournalBackedHostCommandStore:
             if not isinstance(payload, Mapping):
                 raise ValueError("Host journal event payload must be an object")
             if event["event_type"] == "COMMAND_ACCEPTED":
+                account_id = self._required_text(payload, "account_id")
+                environment = self._required_text(payload, "environment")
+                if account_id != self.account_id or environment != self.environment:
+                    raise ValueError(
+                        "Host journal command scope does not match active host account/environment"
+                    )
                 operation_id = self._required_text(payload, "operation_id")
                 if operation_id in operations:
                     raise ValueError(
@@ -448,6 +467,8 @@ class JournalBackedHostCommandStore:
         return {
             "state_version": str(self.state_version),
             "event_cursor": str(self.cursor),
+            "account_id": self.account_id,
+            "environment": self.environment,
             "operations": {
                 operation_id: operation.phase
                 for operation_id, operation in operations.items()

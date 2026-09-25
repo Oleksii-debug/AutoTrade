@@ -22,6 +22,10 @@ def digest(text: str) -> str:
     return "sha256:" + sha256(text.encode("utf-8")).hexdigest()
 
 
+def checkpoint_ref(artifact_id: str, payload: str) -> str:
+    return f"artifact:{artifact_id}@{digest(payload)}"
+
+
 def resolution_proof(
     directory,
     *,
@@ -758,20 +762,42 @@ class ResearchJobStoreTests(unittest.TestCase):
                 job["job_id"],
                 worker_id="worker-a",
                 generation=int(claimed["generation"]),
-                checkpoint_ref="artifact:checkpoint-1",
+                checkpoint_ref=checkpoint_ref("11111111-1111-4111-8111-111111111111", "checkpoint-1"),
                 resource_usage={"wall_seconds": 20, "memory_bytes": 512},
                 now=self.now + timedelta(seconds=1),
             )
-            self.assertEqual(updated["checkpoint_ref"], "artifact:checkpoint-1")
+            self.assertEqual(
+                updated["checkpoint_ref"],
+                checkpoint_ref("11111111-1111-4111-8111-111111111111", "checkpoint-1"),
+            )
             with self.assertRaises(JobBudgetError):
                 store.checkpoint(
                     job["job_id"],
                     worker_id="worker-a",
                     generation=int(claimed["generation"]),
-                    checkpoint_ref="artifact:checkpoint-2",
+                    checkpoint_ref=checkpoint_ref("22222222-2222-4222-8222-222222222222", "checkpoint-2"),
                     resource_usage={"wall_seconds": 61, "memory_bytes": 512},
                     now=self.now + timedelta(seconds=2),
                 )
+
+    def test_checkpoint_rejects_mutable_reference_before_journal_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            job, _ = self._enqueue(store, "immutable-checkpoint")
+            claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
+            before = store.get(job["job_id"])
+            with self.assertRaisesRegex(ValueError, "immutable artifact"):
+                store.checkpoint(
+                    job["job_id"],
+                    worker_id="worker-a",
+                    generation=int(claimed["generation"]),
+                    checkpoint_ref="artifact:mutable-checkpoint",
+                    resource_usage={"wall_seconds": 1},
+                    now=self.now + timedelta(seconds=1),
+                )
+            after = store.get(job["job_id"])
+            self.assertNotIn("checkpoint_ref", after)
+            self.assertEqual(after["resource_usage"], before["resource_usage"])
 
     def test_checkpoint_resource_usage_is_monotonic_and_sparse_updates_preserve_totals(self):
         with TemporaryDirectory() as directory:
@@ -784,7 +810,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                 job["job_id"],
                 worker_id="worker-a",
                 generation=generation,
-                checkpoint_ref="artifact:checkpoint-1",
+                checkpoint_ref=checkpoint_ref("11111111-1111-4111-8111-111111111111", "checkpoint-1"),
                 resource_usage={"wall_seconds": 20, "memory_bytes": 512},
                 now=self.now + timedelta(seconds=1),
             )
@@ -795,7 +821,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                 job["job_id"],
                 worker_id="worker-a",
                 generation=generation,
-                checkpoint_ref="artifact:checkpoint-2",
+                checkpoint_ref=checkpoint_ref("22222222-2222-4222-8222-222222222222", "checkpoint-2"),
                 resource_usage={"memory_bytes": 768},
                 now=self.now + timedelta(seconds=2),
             )
@@ -807,7 +833,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     job["job_id"],
                     worker_id="worker-a",
                     generation=generation,
-                    checkpoint_ref="artifact:checkpoint-regression",
+                    checkpoint_ref=checkpoint_ref("33333333-3333-4333-8333-333333333333", "checkpoint-regression"),
                     resource_usage={"wall_seconds": 19},
                     now=self.now + timedelta(seconds=3),
                 )

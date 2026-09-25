@@ -204,7 +204,7 @@ class DispatchTests(unittest.TestCase):
                 transport_send=transport,
             )
             self.assertEqual(result.status, "BLOCKED")
-            self.assertEqual(result.reason, "request_changed_before_final_barrier")
+            self.assertEqual(result.reason, "transport_failed_before_send")
             self.assertEqual(outbound, 0)
             self.assertEqual(original, {"order": {"qty": "1"}})
             events = store.load_events(
@@ -214,6 +214,49 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(
                 [event["event_type"] for event in events],
                 ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+
+    def test_request_cannot_be_mutated_after_final_barrier(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            outbound = 0
+
+            def authority(intent_hash, now):
+                return True, "allowed"
+
+            def transport(client_id, request, final_guard):
+                nonlocal outbound
+                final_guard()
+                request["order"]["qty"] = "999"
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            result = dispatcher.dispatch(
+                attempt_id="post-guard-mutate",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={"order": {"qty": "1"}},
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "transport_result_ambiguous")
+            self.assertEqual(outbound, 0)
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("post-guard-mutate"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
             )
 
     def test_caller_nested_mutation_cannot_alias_dispatch_payload(self):

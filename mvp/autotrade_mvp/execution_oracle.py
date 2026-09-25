@@ -80,6 +80,19 @@ def assert_conservative_execution(
     if result.filled_quantity > zero:
         if market_time <= arrival:
             raise ExecutionOracleError("fill uses same or earlier liquidity")
+        if model.data_fidelity == "BAR":
+            if observation.interval_start is None:
+                raise ExecutionOracleError(
+                    "BAR fill requires interval_start for causal volume"
+                )
+            interval_start = _instant(
+                observation.interval_start,
+                name="interval_start",
+            )
+            if arrival >= interval_start:
+                raise ExecutionOracleError(
+                    "BAR fill uses interval volume from before venue arrival"
+                )
         if result.trade_time != observation.market_time:
             raise ExecutionOracleError("fill trade_time must equal source market_time")
         if result.fill_price is None or result.fill_price <= zero:

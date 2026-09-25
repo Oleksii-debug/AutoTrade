@@ -95,6 +95,7 @@ class ExecutionQualificationTests(unittest.TestCase):
             qualification=qualification(exec_model),
             asset_class="EQUITY",
             protocol_sha256=PROTOCOL,
+            evidence_sha256=EVIDENCE,
             purpose="REPLAY",
         )
         self.assertEqual(result.status, "FILLED")
@@ -113,6 +114,7 @@ class ExecutionQualificationTests(unittest.TestCase):
                 asset_class="EQUITY",
                 instrument_version="ABC@v1",
                 protocol_sha256=PROTOCOL,
+                evidence_sha256=EVIDENCE,
                 purpose="REPLAY",
             )
 
@@ -132,6 +134,7 @@ class ExecutionQualificationTests(unittest.TestCase):
                 asset_class="EQUITY",
                 instrument_version="ABC@v1",
                 protocol_sha256=PROTOCOL,
+                evidence_sha256=EVIDENCE,
                 purpose="REPLAY",
             )
 
@@ -144,6 +147,7 @@ class ExecutionQualificationTests(unittest.TestCase):
                 asset_class="EQUITY",
                 instrument_version="ABC@v1",
                 protocol_sha256=PROTOCOL,
+                evidence_sha256=EVIDENCE,
                 purpose="REPLAY",
             )
 
@@ -160,6 +164,7 @@ class ExecutionQualificationTests(unittest.TestCase):
                 asset_class="EQUITY",
                 instrument_version="ABC@v1",
                 protocol_sha256=PROTOCOL,
+                evidence_sha256=EVIDENCE,
                 purpose="REPLAY",
             )
 
@@ -175,6 +180,23 @@ class ExecutionQualificationTests(unittest.TestCase):
                 asset_class="EQUITY",
                 instrument_version="ABC@v1",
                 protocol_sha256="f" * 64,
+                evidence_sha256=EVIDENCE,
+                purpose="REPLAY",
+            )
+
+    def test_evidence_digest_must_match_immutable_evidence(self):
+        exec_model = model()
+        with self.assertRaisesRegex(
+            ExecutionQualificationError,
+            "evidence_sha256",
+        ):
+            validate_execution_qualification(
+                model=exec_model,
+                qualification=qualification(exec_model),
+                asset_class="EQUITY",
+                instrument_version="ABC@v1",
+                protocol_sha256=PROTOCOL,
+                evidence_sha256="d" * 64,
                 purpose="REPLAY",
             )
 
@@ -193,6 +215,7 @@ class ExecutionQualificationTests(unittest.TestCase):
                 asset_class="EQUITY",
                 instrument_version="XYZ@v2",
                 protocol_sha256=PROTOCOL,
+                evidence_sha256=EVIDENCE,
                 purpose="REPLAY",
             )
 
@@ -219,6 +242,7 @@ class ExecutionQualificationTests(unittest.TestCase):
                 asset_class="EQUITY",
                 instrument_version="ABC@v1",
                 protocol_sha256=PROTOCOL,
+                evidence_sha256=EVIDENCE,
                 purpose="PROMOTION",
             )
 
@@ -248,6 +272,7 @@ class ExecutionQualificationTests(unittest.TestCase):
             qualification=qualification(exec_model),
             asset_class="EQUITY",
             protocol_sha256=PROTOCOL,
+            evidence_sha256=EVIDENCE,
             purpose="REPLAY",
         )
         forged = replace(valid, fill_price=Decimal("100"))
@@ -263,6 +288,7 @@ class ExecutionQualificationTests(unittest.TestCase):
                     qualification=qualification(exec_model),
                     asset_class="EQUITY",
                     protocol_sha256=PROTOCOL,
+                    evidence_sha256=EVIDENCE,
                     purpose="REPLAY",
                 )
 

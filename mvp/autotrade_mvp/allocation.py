@@ -722,29 +722,56 @@ def _cash_fallback(
     *,
     reason: str,
 ) -> AllocationResult:
-    current_targets = tuple(
-        AllocationTarget(
-            symbol=candidate.symbol,
-            quantity=candidate.current_quantity,
-            notional=candidate.current_quantity * candidate.price,
-            estimated_cost=Decimal("0"),
-            turnover_notional=Decimal("0"),
+    """Preserve current reconciled positions without inventing zero economics.
+
+    A no-increase decision is not an all-cash state when reconciled holdings
+    already exist.  Turnover is zero, but existing exposure still consumes
+    capital and can carry holding costs.  Report those known economics exactly
+    so downstream risk/authority code cannot mistake a preserved portfolio for
+    unused capital.  Stress loss remains scenario-derived elsewhere; callers
+    that lack qualified stress evidence must rely on the fail-closed status and
+    reason rather than treating this fallback as a fresh risk approval.
+    """
+
+    targets: list[AllocationTarget] = []
+    current_notionals: list[Decimal] = []
+    total_holding_cost = Decimal("0")
+    capital_required = Decimal("0")
+    for candidate in candidates:
+        notional = candidate.current_quantity * candidate.price
+        if candidate.current_quantity == 0:
+            holding_cost = Decimal("0")
+        else:
+            if candidate.holding_cost_rate is None:
+                raise ValueError(
+                    "non-zero current position lacks explicit holding cost rate"
+                )
+            holding_cost = abs(notional) * candidate.holding_cost_rate
+        total_holding_cost += holding_cost
+        capital_required += abs(notional) * candidate.capital_requirement_rate
+        current_notionals.append(notional)
+        targets.append(
+            AllocationTarget(
+                symbol=candidate.symbol,
+                quantity=candidate.current_quantity,
+                notional=notional,
+                estimated_cost=holding_cost,
+                turnover_notional=Decimal("0"),
+            )
         )
-        for candidate in candidates
-    )
-    current_notionals = tuple(target.notional for target in current_targets)
+
     return AllocationResult(
         status="NO_INCREASE_FALLBACK",
         scale=Decimal("0"),
-        targets=current_targets,
+        targets=tuple(targets),
         gross_notional=sum(
             (abs(value) for value in current_notionals),
             Decimal("0"),
         ),
         net_notional=abs(sum(current_notionals, Decimal("0"))),
-        estimated_cost=Decimal("0"),
+        estimated_cost=total_holding_cost,
         worst_stress_loss=Decimal("0"),
-        cash_required=Decimal("0"),
+        cash_required=capital_required + total_holding_cost,
         turnover_notional=Decimal("0"),
         reason=reason,
     )

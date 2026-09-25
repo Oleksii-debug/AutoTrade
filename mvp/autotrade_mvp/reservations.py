@@ -5,7 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
-from typing import Mapping
+from typing import Mapping, Protocol
+
+
+class CapitalAvailabilityEvidence(Protocol):
+    """Explicit available-capital projection accepted by reservation admission."""
+
+    blocks_new_risk: bool
+
+    def reservation_resources(self) -> Mapping[str, Decimal]:
+        ...
 
 
 class ReservationConflict(ValueError):
@@ -136,6 +145,36 @@ class ReservationBook:
         )
         self._records[rid] = snapshot
         return snapshot
+
+    def reserve_from_capital(
+        self,
+        *,
+        reservation_id: str,
+        intent_id: str,
+        requirements: Mapping[str, Decimal | str | int],
+        capital: CapitalAvailabilityEvidence,
+    ) -> ReservationSnapshot:
+        """Reserve only from an explicit, non-blocking capital projection."""
+
+        if not hasattr(capital, "reservation_resources"):
+            raise TypeError(
+                "capital must provide explicit reservation_resources()"
+            )
+        if getattr(capital, "blocks_new_risk", True):
+            raise InsufficientAvailable(
+                "capital projection is unresolved and blocks new risk"
+            )
+        available = capital.reservation_resources()
+        if not isinstance(available, Mapping):
+            raise TypeError(
+                "capital reservation_resources() must return a mapping"
+            )
+        return self.reserve(
+            reservation_id=reservation_id,
+            intent_id=intent_id,
+            requirements=requirements,
+            available=available,
+        )
 
     def consume(
         self,

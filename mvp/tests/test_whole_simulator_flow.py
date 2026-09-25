@@ -145,14 +145,17 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                     provider_id="SIMULATED",
                     account_id="sim-account",
                     environment="SIMULATION",
-                    snapshot_id="sim-admission-capacity-1",
+                    snapshot_id=initial_snapshot["snapshot_id"],
                     query_started_at=NOW,
                     query_completed_at=NOW,
-                    valid_until="2026-09-24T18:05:00Z",
+                    valid_until=LATER,
                     available_resources={
-                        "CASH:USD": initial_snapshot["balances"][0]["total"]
+                        "CASH:USD": initial_snapshot["balances"][0]["available"]
                     },
-                    evidence_refs=("simulated:account-snapshot",),
+                    provider_as_of=initial_snapshot["provider_as_of"],
+                    evidence_refs=(
+                        f"provider:snapshot:{initial_snapshot['snapshot_id']}",
+                    ),
                 ),
             )
             availability_checkpoint = record_reconciliation_checkpoint(
@@ -202,8 +205,6 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 reservation_available={"CASH:USD": "1000"},
                 reservation_checkpoint_event_id=availability_checkpoint["event_id"],
                 reservation_provider_id="SIMULATED",
-                reservation_host_id="sim-host",
-                reservation_owner_epoch="1",
                 reservation_max_age_seconds="60",
                 now=NOW,
             )

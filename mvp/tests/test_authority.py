@@ -179,12 +179,13 @@ def public_financial_kwargs(store, **overrides):
             provider_id=provider_id,
             account_id="paper-1",
             environment="PAPER",
-            snapshot_id="authority-test-capacity-1",
+            snapshot_id="authority-account-snapshot",
             query_started_at="2026-09-24T18:00:00Z",
             query_completed_at="2026-09-24T18:00:30Z",
             valid_until="2026-09-24T18:02:00Z",
             available_resources={"CASH:USD": "1000"},
-            evidence_refs=("provider:authority-test-capacity-1",),
+            provider_as_of="2026-09-24T18:00:30Z",
+            evidence_refs=("provider:authority-account-snapshot",),
         ),
     )
     checkpoint = record_reconciliation_checkpoint(
@@ -212,8 +213,6 @@ def public_financial_kwargs(store, **overrides):
         reservation_available={"CASH:USD": "1000"},
         reservation_checkpoint_event_id=checkpoint["event_id"],
         reservation_provider_id=provider_id,
-        reservation_host_id="authority-test-host",
-        reservation_owner_epoch="1",
         reservation_max_age_seconds="60",
         now="2026-09-24T18:01:00Z",
     )

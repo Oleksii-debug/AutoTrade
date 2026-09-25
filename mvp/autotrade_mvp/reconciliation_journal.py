@@ -469,8 +469,6 @@ def load_account_resource_availability_evidence(
     provider_id: str,
     account_id: str,
     environment: str,
-    host_id: str,
-    owner_epoch: str,
     resources: Iterable[str],
     now: str,
     max_age_seconds: Decimal | str | int,
@@ -501,11 +499,6 @@ def load_account_resource_availability_evidence(
         account_id=account_id,
         environment=environment,
     )
-    checkpoint_host, checkpoint_epoch = _checkpoint_owner(payload)
-    expected_host = _text(host_id, name="host_id")
-    expected_epoch = _text(owner_epoch, name="owner_epoch")
-    if checkpoint_host != expected_host or checkpoint_epoch != expected_epoch:
-        raise ValueError("availability checkpoint owner mismatch")
     if (
         payload.get("complete") is not True
         or payload.get("snapshot_consistent") is not True
@@ -549,78 +542,72 @@ def load_account_resource_availability_evidence(
     if age_seconds > max_age:
         raise ValueError("availability checkpoint is stale")
 
-    capacity = payload.get("resource_availability")
-    if not isinstance(capacity, Mapping):
+    resource_evidence = payload.get("resource_availability")
+    if not isinstance(resource_evidence, Mapping):
         raise ValueError(
-            "availability checkpoint lacks canonical resource availability evidence"
+            "availability checkpoint lacks explicit provider resource availability"
         )
+    provider, account, scope = _scope(
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
     if (
-        _text(capacity.get("provider_id"), name="resource_availability.provider_id").upper()
-        != _text(provider_id, name="provider_id").upper()
-        or _text(capacity.get("account_id"), name="resource_availability.account_id")
-        != _text(account_id, name="account_id")
-        or _text(capacity.get("environment"), name="resource_availability.environment").upper()
-        != _text(environment, name="environment").upper()
+        resource_evidence.get("provider_id") != provider
+        or resource_evidence.get("account_id") != account
+        or resource_evidence.get("environment") != scope
     ):
-        raise ValueError("resource availability scope mismatch")
+        raise ValueError("resource availability evidence scope mismatch")
 
-    resource_started = _instant(
-        capacity.get("query_started_at"),
-        name="resource_availability.query_started_at",
-    )
-    resource_completed = _instant(
-        capacity.get("query_completed_at"),
-        name="resource_availability.query_completed_at",
-    )
-    snapshot_started = _instant(
+    snapshot_started_text = _instant(
         snapshot.get("query_started_at"),
         name="snapshot.query_started_at",
     )
-    if resource_started != snapshot_started or resource_completed != completed_text:
+    resource_started_text = _instant(
+        resource_evidence.get("query_started_at"),
+        name="resource_availability.query_started_at",
+    )
+    resource_completed_text = _instant(
+        resource_evidence.get("query_completed_at"),
+        name="resource_availability.query_completed_at",
+    )
+    if (
+        resource_started_text != snapshot_started_text
+        or resource_completed_text != completed_text
+    ):
         raise ValueError(
             "resource availability snapshot cut differs from reconciliation"
         )
 
-    valid_until = _instant(
-        capacity.get("valid_until"),
+    valid_until_text = _instant(
+        resource_evidence.get("valid_until"),
         name="resource_availability.valid_until",
     )
-    valid = datetime.fromisoformat(valid_until.replace("Z", "+00:00"))
-    if current >= valid:
+    valid_until = datetime.fromisoformat(
+        valid_until_text.replace("Z", "+00:00")
+    )
+    if current >= valid_until:
         raise ValueError("resource availability evidence is expired")
 
-    provider_as_of = capacity.get("provider_as_of")
-    if provider_as_of is not None:
-        provider_as_of = _instant(
-            provider_as_of,
-            name="resource_availability.provider_as_of",
+    raw_available = resource_evidence.get("available_resources")
+    if not isinstance(raw_available, Mapping) or not raw_available:
+        raise ValueError(
+            "availability checkpoint lacks explicit available resources"
         )
-    snapshot_id = _text(
-        capacity.get("snapshot_id"),
-        name="resource_availability.snapshot_id",
-    )
-    evidence_refs_raw = capacity.get("evidence_refs")
-    if not isinstance(evidence_refs_raw, list):
-        raise ValueError("resource availability evidence_refs must be a list")
-    evidence_refs = tuple(
-        _text(value, name="resource_availability.evidence_ref")
-        for value in evidence_refs_raw
-    )
-    if len(evidence_refs) != len(set(evidence_refs)):
-        raise ValueError("resource availability evidence_refs must be unique")
-
-    raw_available = capacity.get("available_resources")
-    if not isinstance(raw_available, Mapping):
-        raise ValueError("resource availability amounts are missing")
-    available_resources: dict[str, Decimal] = {}
+    canonical_available: dict[str, Decimal] = {}
     for raw_resource, raw_amount in raw_available.items():
-        resource = _text(raw_resource, name="available resource")
-        if resource in available_resources:
+        resource = _text(
+            raw_resource,
+            name="resource_availability resource",
+        )
+        if resource in canonical_available:
             raise ValueError(
-                "available resource keys must be unique after normalization"
+                "resource availability keys must be unique after normalization"
             )
         if isinstance(raw_amount, bool) or isinstance(raw_amount, float):
-            raise TypeError("resource availability must use exact decimal encoding")
+            raise TypeError(
+                "resource availability must use exact decimal encoding"
+            )
         try:
             amount = Decimal(raw_amount)
         except Exception as error:
@@ -629,20 +616,24 @@ def load_account_resource_availability_evidence(
             ) from error
         if not amount.is_finite() or amount < 0:
             raise ValueError(
-                "resource availability amounts must be non-negative finite decimals"
+                "resource availability must be a non-negative finite decimal"
             )
-        available_resources[resource] = amount
+        canonical_available[resource] = amount
 
     requested = tuple(_text(value, name="resource") for value in resources)
     if not requested or len(requested) != len(set(requested)):
         raise ValueError("resources must be non-empty and unique")
     availability: dict[str, Decimal] = {}
     for resource in requested:
-        if resource not in available_resources:
+        if not resource.startswith("CASH:"):
             raise ValueError(
-                "canonical resource availability does not contain requested resource"
+                "resource availability semantics are not canonically supported"
             )
-        availability[resource] = available_resources[resource]
+        if resource not in canonical_available:
+            raise ValueError(
+                "provider snapshot does not contain requested available resource"
+            )
+        availability[resource] = canonical_available[resource]
 
     aggregate_version = checkpoint.get("aggregate_version")
     if type(aggregate_version) is not int or aggregate_version <= 0:
@@ -661,14 +652,21 @@ def load_account_resource_availability_evidence(
         "provider_id": _text(payload.get("provider_id"), name="provider_id").upper(),
         "account_id": _text(payload.get("account_id"), name="account_id"),
         "environment": _text(payload.get("environment"), name="environment").upper(),
-        "checkpoint_host_id": checkpoint_host,
-        "checkpoint_owner_epoch": checkpoint_epoch,
         "snapshot_mode": _text(snapshot.get("mode"), name="snapshot.mode").upper(),
         "snapshot_query_completed_at": completed_text,
-        "availability_snapshot_id": snapshot_id,
-        "availability_valid_until": valid_until,
-        "availability_provider_as_of": provider_as_of,
-        "availability_evidence_refs": list(evidence_refs),
+        "resource_snapshot_id": _text(
+            resource_evidence.get("snapshot_id"),
+            name="resource_availability.snapshot_id",
+        ),
+        "resource_valid_until": valid_until_text,
+        "resource_evidence_refs": tuple(
+            _text(value, name="resource_availability.evidence_ref")
+            for value in (
+                resource_evidence.get("evidence_refs")
+                if isinstance(resource_evidence.get("evidence_refs"), list)
+                else ()
+            )
+        ),
         "observed_at": _instant(payload.get("observed_at"), name="observed_at"),
         "age_seconds": str(age_seconds),
         "availability": {

@@ -245,8 +245,60 @@ class MarketNormalizer:
         self._registry = registry
         self._max_available_age = max_available_age
         self._last_sequence: dict[tuple[str, str, str, str], int] = {}
-        self._seen_sequence: dict[tuple[str, str, str, str, int], tuple[str, str]] = {}
-        self._unverified_book_streams: set[tuple[str, str, str, str]] = set()
+        self._seen_sequence_ids: set[tuple[str, str, str, str, int]] = set()
+        self._last_revision: dict[tuple[str, str, str, str, int], int] = {}
+        self._last_revision_available_at: dict[
+            tuple[str, str, str, str, int], datetime
+        ] = {}
+        self._sequence_source_identity: dict[
+            tuple[str, str, str, str, int], tuple[str, str, datetime]
+        ] = {}
+        self._seen_revision: dict[
+            tuple[str, str, str, str, int, int], tuple[str, str]
+        ] = {}
+        self._book_state: dict[tuple[str, str, str, str], str] = {}
+
+    @staticmethod
+    def _book_key(
+        provider_id: str,
+        venue_id: str,
+        provider_symbol: str,
+        stream: str,
+    ) -> tuple[str, str, str, str]:
+        return (
+            _text(provider_id, "provider_id"),
+            _text(venue_id, "venue_id"),
+            _text(provider_symbol, "provider_symbol"),
+            _text(stream, "stream"),
+        )
+
+    def book_state(
+        self,
+        *,
+        provider_id: str,
+        venue_id: str,
+        provider_symbol: str,
+        stream: str = "book",
+    ) -> str:
+        key = self._book_key(provider_id, venue_id, provider_symbol, stream)
+        return self._book_state.get(key, "UNINITIALIZED")
+
+    def require_executable_book(
+        self,
+        *,
+        provider_id: str,
+        venue_id: str,
+        provider_symbol: str,
+        stream: str = "book",
+    ) -> None:
+        state = self.book_state(
+            provider_id=provider_id,
+            venue_id=venue_id,
+            provider_symbol=provider_symbol,
+            stream=stream,
+        )
+        if state != "READY":
+            raise MarketDataError(f"book state is {state}; new risk is blocked")
 
     @staticmethod
     def _instrument_version_id(instrument: InstrumentVersion) -> str:
@@ -449,76 +501,197 @@ class MarketNormalizer:
             update.source_sequence,
         ) if update.source_sequence is not None else None
 
-        sequence_fingerprint = _canonical(
-            {
-                "payload_sha256": payload_digest,
-                "source_event_at": _utc_text(update.source_event_at),
-                "available_at": _utc_text(update.available_at),
-                "availability_basis": update.availability_basis,
-                "revision": update.revision,
-            }
-        )
+        revision_identity = (
+            *sequence_identity,
+            update.revision,
+        ) if sequence_identity is not None else None
 
         new_sequence = False
-        if update.source_sequence is not None:
-            existing = self._seen_sequence.get(sequence_identity)
+        new_revision = False
+        if sequence_identity is not None and revision_identity is not None:
+            instrument_version_id = self._instrument_version_id(instrument)
+            source_identity = (
+                instrument_version_id,
+                update.kind,
+                update.source_event_at,
+            )
+            existing_source_identity = self._sequence_source_identity.get(
+                sequence_identity
+            )
+            if (
+                existing_source_identity is not None
+                and existing_source_identity != source_identity
+            ):
+                raise SequenceConflict(
+                    "source sequence revision changed immutable source identity"
+                )
+
+            revision_fingerprint = sha256(
+                _canonical(
+                    {
+                        "instrument_version": instrument_version_id,
+                        "kind": update.kind,
+                        "source_event_at": _utc_text(update.source_event_at),
+                        "available_at": _utc_text(update.available_at),
+                        "availability_basis": update.availability_basis,
+                        "revision": str(update.revision),
+                        "payload": normalized_payload,
+                    }
+                ).encode("utf-8")
+            ).hexdigest()
+            existing = self._seen_revision.get(revision_identity)
             if existing is not None:
                 existing_fingerprint, _ = existing
-                if existing_fingerprint != sequence_fingerprint:
+                if existing_fingerprint != revision_fingerprint:
                     raise SequenceConflict(
-                        "source sequence was reused with different causal content"
+                        "source sequence revision was reused with changed causal content"
                     )
                 flags.add("DUPLICATE")
             else:
-                new_sequence = True
-                last = self._last_sequence.get(stream_key)
-                if last is not None:
-                    if update.source_sequence > last + 1:
-                        flags.add("SEQUENCE_GAP")
-                    elif update.source_sequence < last:
-                        flags.add("OUT_OF_ORDER")
-                self._last_sequence[stream_key] = (
-                    update.source_sequence
-                    if last is None
-                    else max(last, update.source_sequence)
+                new_revision = True
+                last_revision = self._last_revision.get(sequence_identity)
+                last_available = self._last_revision_available_at.get(sequence_identity)
+                if last_revision is None:
+                    if update.revision > 0:
+                        flags.add("REVISION_BASE_MISSING")
+                else:
+                    flags.add("CORRECTION")
+                    if update.revision > last_revision + 1:
+                        flags.add("REVISION_GAP")
+                    elif update.revision < last_revision:
+                        flags.add("OUT_OF_ORDER_REVISION")
+                    if (
+                        update.revision > last_revision
+                        and last_available is not None
+                        and update.available_at < last_available
+                    ):
+                        raise SequenceConflict(
+                            "higher source revision cannot backdate availability"
+                        )
+
+                if (
+                    last_revision is None
+                    or update.revision > last_revision
+                ):
+                    self._last_revision[sequence_identity] = update.revision
+                    self._last_revision_available_at[
+                        sequence_identity
+                    ] = update.available_at
+
+                if sequence_identity not in self._seen_sequence_ids:
+                    new_sequence = True
+                    last = self._last_sequence.get(stream_key)
+                    if update.kind == "BOOK_SNAPSHOT":
+                        # A verified snapshot may establish a new baseline only
+                        # when it does not move the stream sequence backward.
+                        if last is not None and update.source_sequence < last:
+                            flags.add("OUT_OF_ORDER")
+                        else:
+                            self._last_sequence[stream_key] = update.source_sequence
+                    else:
+                        if last is not None:
+                            if update.source_sequence > last + 1:
+                                flags.add("SEQUENCE_GAP")
+                            elif update.source_sequence < last:
+                                flags.add("OUT_OF_ORDER")
+                        self._last_sequence[stream_key] = (
+                            update.source_sequence
+                            if last is None
+                            else max(last, update.source_sequence)
+                        )
+                    self._seen_sequence_ids.add(sequence_identity)
+                    self._sequence_source_identity[
+                        sequence_identity
+                    ] = source_identity
+
+        if update.kind in {"BOOK_SNAPSHOT", "BOOK_DELTA"}:
+            if update.source_sequence is None:
+                flags.add("BOOK_SEQUENCE_UNVERIFIED")
+                flags.add("BOOK_UNUSABLE")
+                self._book_state[stream_key] = "UNVERIFIED"
+            elif update.kind == "BOOK_SNAPSHOT":
+                current = self._book_state.get(stream_key, "UNINITIALIZED")
+                last_sequence = self._last_sequence.get(stream_key)
+                historical_correction = (
+                    "CORRECTION" in flags
+                    and update.source_sequence is not None
+                    and last_sequence is not None
+                    and update.source_sequence < last_sequence
                 )
+                if historical_correction:
+                    # A revised historical snapshot changes the baseline on which
+                    # later deltas were applied. Until a deterministic rebuild or
+                    # a later verified snapshot establishes a new baseline, the
+                    # executable book is no longer authoritative.
+                    flags.add("HISTORICAL_BOOK_CORRECTION")
+                    self._book_state[stream_key] = "GAPPED"
+                    flags.add("BOOK_UNUSABLE")
+                elif "STALE" in flags:
+                    # A delayed snapshot cannot establish current executable
+                    # book truth even when its provider sequence is valid.
+                    self._book_state[stream_key] = "GAPPED"
+                    flags.add("BOOK_UNUSABLE")
+                elif new_sequence and "OUT_OF_ORDER" not in flags:
+                    self._book_state[stream_key] = "READY"
+                elif "OUT_OF_ORDER" in flags:
+                    # A stale snapshot is unusable as a new baseline. Preserve
+                    # the newer current state rather than rolling sequence truth back.
+                    flags.add("BOOK_UNUSABLE")
+                elif current != "READY":
+                    # Replaying an old duplicate snapshot after a later gap cannot
+                    # silently re-authorize the book.
+                    flags.add("BOOK_UNUSABLE")
+            else:
+                current = self._book_state.get(stream_key, "UNINITIALIZED")
+                last_sequence = self._last_sequence.get(stream_key)
+                historical_correction = (
+                    "CORRECTION" in flags
+                    and update.source_sequence is not None
+                    and last_sequence is not None
+                    and update.source_sequence < last_sequence
+                )
+                if historical_correction:
+                    # A revised historical delta changes the state on which
+                    # later deltas were applied. Until a deterministic rebuild
+                    # or a later verified snapshot establishes a new baseline,
+                    # the executable book is no longer authoritative.
+                    flags.add("HISTORICAL_BOOK_CORRECTION")
+                    self._book_state[stream_key] = "GAPPED"
+                    flags.add("BOOK_UNUSABLE")
+                elif (
+                    current != "READY"
+                    or "SEQUENCE_GAP" in flags
+                    or "OUT_OF_ORDER" in flags
+                ):
+                    self._book_state[stream_key] = "GAPPED"
+                    flags.add("BOOK_UNUSABLE")
+                else:
+                    self._book_state[stream_key] = "READY"
 
-        if update.kind == "BOOK_DELTA" and (
-            "SEQUENCE_GAP" in flags or "OUT_OF_ORDER" in flags
-        ):
-            self._unverified_book_streams.add(stream_key)
-
-        if (
-            update.kind == "BOOK_SNAPSHOT"
-            and update.source_sequence is not None
-            and "DUPLICATE" not in flags
-            and "OUT_OF_ORDER" not in flags
-        ):
-            self._unverified_book_streams.discard(stream_key)
-
-        if update.kind == "BOOK_DELTA" and stream_key in self._unverified_book_streams:
-            flags.add("UNVERIFIED_BOOK_STATE")
-
-        identity_material = "|".join(
+        identity_material = _canonical(
             [
                 update.provider_id,
                 update.venue_id,
                 update.provider_symbol,
                 stream,
-                str(update.source_sequence) if update.source_sequence is not None else "-",
+                (
+                    str(update.source_sequence)
+                    if update.source_sequence is not None
+                    else None
+                ),
                 str(update.revision),
                 payload_digest,
                 _utc_text(update.source_event_at),
                 _utc_text(update.available_at),
                 _utc_text(update.ingested_at),
-                ",".join(sorted(flags)),
-                _canonical(dict(update.raw_evidence_ref)),
+                sorted(flags),
+                dict(update.raw_evidence_ref),
             ]
         )
         event_id = str(uuid5(NAMESPACE_URL, identity_material))
-        if update.source_sequence is not None and new_sequence:
-            self._seen_sequence[sequence_identity] = (
-                sequence_fingerprint,
+        if revision_identity is not None and new_revision:
+            self._seen_revision[revision_identity] = (
+                revision_fingerprint,
                 event_id,
             )
 

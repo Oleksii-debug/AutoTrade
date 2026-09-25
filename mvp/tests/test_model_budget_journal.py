@@ -123,6 +123,64 @@ class DurableModelBudgetTests(unittest.TestCase):
             self.assertEqual(before, after)
             self.assertEqual(restarted.snapshot().reserved, Decimal("0.6"))
 
+    def test_admitted_route_retry_after_deadline_is_rejected_without_releasing_reservation(self):
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory, ceiling="1")
+            req = route_request("route-deadline")
+            descriptor = route_model_descriptor(cost="0.6")
+            first = budget.admit_route(
+                route_policy(),
+                req,
+                [descriptor],
+                now_utc=ROUTE_NOW,
+            )
+            self.assertEqual(first.status, RouteStatus.ADMITTED)
+            self.assertEqual(budget.snapshot().reserved, Decimal("0.6"))
+
+            expired = budget.admit_route(
+                route_policy(),
+                req,
+                [descriptor],
+                now_utc=req.deadline_utc,
+            )
+            self.assertEqual(expired.status, RouteStatus.REJECTED)
+            self.assertEqual(expired.reason, "deadline_expired")
+            self.assertEqual(expired.reserved_cost, Decimal("0"))
+            # The historical reservation remains conservative until an explicit
+            # release/settlement path proves the call incurred no cost.
+            self.assertEqual(budget.snapshot().reserved, Decimal("0.6"))
+
+    def test_admitted_route_retry_after_cancellation_is_rejected_conservatively(self):
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory, ceiling="1")
+            req = route_request("route-cancel")
+            descriptor = route_model_descriptor(cost="0.4")
+            first = budget.admit_route(
+                route_policy(),
+                req,
+                [descriptor],
+                now_utc=ROUTE_NOW,
+            )
+            self.assertEqual(first.status, RouteStatus.ADMITTED)
+
+            cancelled = ModelRequest(
+                request_id=req.request_id,
+                allowed_model_ids=req.allowed_model_ids,
+                privacy_remote_allowed=req.privacy_remote_allowed,
+                budget_remaining=req.budget_remaining,
+                deadline_utc=req.deadline_utc,
+                cancelled=True,
+            )
+            stopped = budget.admit_route(
+                route_policy(),
+                cancelled,
+                [descriptor],
+                now_utc=ROUTE_NOW + timedelta(seconds=1),
+            )
+            self.assertEqual(stopped.status, RouteStatus.REJECTED)
+            self.assertEqual(stopped.reason, "request_cancelled")
+            self.assertEqual(budget.snapshot().reserved, Decimal("0.4"))
+
     def test_changed_model_revision_under_route_identity_conflicts(self):
         with TemporaryDirectory() as directory:
             journal, budget = open_budget(directory, ceiling="1")

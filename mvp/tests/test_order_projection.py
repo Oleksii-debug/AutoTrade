@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from mvp.autotrade_mvp.order_projection import (
     OcoGroupProjection,
+    OrderBookProjection,
     OrderProjection,
     OrderProjectionConflict,
 )
@@ -328,6 +329,110 @@ class OrderProjectionTests(unittest.TestCase):
                 quantity=1.0,
                 price="10",
             )
+
+    def test_overfill_quantity_is_explicit_in_snapshot(self):
+        item = order(requested_quantity="1")
+        item.record_fill(
+            fill_id="f-over",
+            provider_execution_id="exec-over",
+            quantity="1.25",
+            price="10",
+        )
+        snap = item.snapshot()
+        self.assertEqual(snap.state, "OVERFILLED")
+        self.assertEqual(snap.open_quantity, Decimal("0"))
+        self.assertEqual(snap.overfill_quantity, Decimal("0.25"))
+
+    def test_correction_can_have_separate_immutable_observation_identity(self):
+        item = order(requested_quantity="2")
+        item.record_fill(
+            fill_id="f1",
+            provider_execution_id="exec-1",
+            quantity="1",
+            price="10",
+            provider_revision="r1",
+        )
+        self.assertTrue(item.correct_fill(
+            fill_id="f1",
+            correction_fill_id="f1-correction-r2",
+            quantity="1.5",
+            price="11",
+            provider_revision="r2",
+        ))
+        current = item.active_fills[0]
+        self.assertEqual(current.fill_id, "f1-correction-r2")
+        self.assertEqual(current.correction_of, "f1")
+        self.assertEqual(current.provider_execution_id, "exec-1")
+        self.assertEqual(item.filled_quantity, Decimal("1.5"))
+        self.assertEqual(
+            [record.fill_id for record in item.fill_history],
+            ["f1", "f1-correction-r2"],
+        )
+        self.assertFalse(item.correct_fill(
+            fill_id="f1",
+            correction_fill_id="f1-correction-r2",
+            quantity="1.5",
+            price="11",
+            provider_revision="r2",
+        ))
+
+    def test_multi_order_projection_preserves_single_child_amendment_lineage(self):
+        book = OrderBookProjection()
+        old = book.create(
+            client_order_id="old",
+            instrument="ABC",
+            side="BUY",
+            requested_quantity="10",
+        )
+        new = book.create(
+            client_order_id="new",
+            instrument="ABC",
+            side="BUY",
+            requested_quantity="8",
+            parent_intent_id="old",
+        )
+        self.assertEqual(book.amendment_child("old"), "new")
+        self.assertIs(book.order("old"), old)
+        self.assertIs(book.order("new"), new)
+        with self.assertRaises(OrderProjectionConflict):
+            book.create(
+                client_order_id="other",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="7",
+                parent_intent_id="old",
+            )
+
+    def test_multi_order_projection_aggregates_effective_fills_and_oco_breach(self):
+        book = OrderBookProjection()
+        take = book.create(
+            client_order_id="take",
+            instrument="ABC",
+            side="SELL",
+            requested_quantity="1",
+            oco_group_id="g1",
+        )
+        stop = book.create(
+            client_order_id="stop",
+            instrument="ABC",
+            side="SELL",
+            requested_quantity="1",
+            oco_group_id="g1",
+        )
+        take.record_fill(
+            fill_id="f-take",
+            provider_execution_id="exec-take",
+            quantity="1",
+            price="110",
+        )
+        stop.record_fill(
+            fill_id="f-stop",
+            provider_execution_id="exec-stop",
+            quantity="1",
+            price="90",
+        )
+        self.assertEqual(len(book.effective_fills()), 2)
+        self.assertEqual(book.oco_breaches()["g1"], ("stop", "take"))
 
 
 if __name__ == "__main__":

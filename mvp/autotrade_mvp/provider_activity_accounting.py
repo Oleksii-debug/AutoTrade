@@ -205,6 +205,14 @@ def _book_id(
     environment: str,
     provider_environment: str | None = None,
 ) -> str:
+    # The legacy identity remains readable for upgrade diagnostics only.
+    # DurableProviderEconomicBook itself requires explicit BYBIT provider scope.
+    if provider_environment is None:
+        return _legacy_book_id(
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+        )
     return _scoped_identity(
         "economic-book",
         *_scoped_environment_identity_parts(

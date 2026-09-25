@@ -230,6 +230,10 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 checkpoint["aggregate_version"],
             )
             self.assertEqual(
+                evidence["scope_latest_checkpoint_journal_sequence"],
+                checkpoint["journal_sequence"],
+            )
+            self.assertEqual(
                 evidence["availability"],
                 {"CASH:USD": "1000"},
             )

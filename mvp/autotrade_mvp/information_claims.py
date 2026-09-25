@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import re
 from typing import Iterable
 
 
@@ -27,6 +28,75 @@ def _text(value: str, *, name: str) -> str:
 
 def _digest(text: str) -> str:
     return "sha256:" + sha256(text.encode("utf-8")).hexdigest()
+
+
+def _canonical_digest(value: str, *, name: str) -> str:
+    normalized = _text(value, name=name)
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", normalized) is None:
+        raise ValueError(f"{name} must be a canonical SHA-256 digest")
+    return normalized
+
+
+def _canonical_json_digest(payload: dict[str, str]) -> str:
+    return _digest(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+    )
+
+
+def _syndication_digest(
+    *,
+    subject: str,
+    predicate: str,
+    value: str,
+    passage_hash: str,
+    published_at: datetime,
+) -> str:
+    return _canonical_json_digest(
+        {
+            "subject": subject,
+            "predicate": predicate,
+            "value": value,
+            "passage_hash": passage_hash,
+            "published_at": published_at.isoformat(),
+        }
+    )
+
+
+def _conflict_digest(
+    *,
+    subject: str,
+    predicate: str,
+    published_at: datetime,
+) -> str:
+    return _canonical_json_digest(
+        {
+            "subject": subject,
+            "predicate": predicate,
+            "published_at": published_at.isoformat(),
+        }
+    )
+
+
+def _claim_identity_digest(
+    *,
+    source_id: str,
+    source_revision: str,
+    syndication_key: str,
+    locator: str,
+) -> str:
+    return _canonical_json_digest(
+        {
+            "source_id": source_id,
+            "source_revision": source_revision,
+            "syndication_key": syndication_key,
+            "locator": locator,
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -94,6 +164,151 @@ class InformationClaim:
     untrusted_content: bool = True
     permission_effect: str = "NONE"
 
+    def __post_init__(self) -> None:
+        for field in (
+            "subject",
+            "predicate",
+            "value",
+            "source_id",
+            "source_revision",
+            "locator",
+            "rights_basis",
+        ):
+            object.__setattr__(self, field, _text(getattr(self, field), name=field))
+
+        kind = _text(self.source_kind, name="source_kind").upper()
+        if kind not in {"NEWS", "MACRO", "CORPORATE", "OFFICIAL"}:
+            raise ValueError("unsupported source_kind")
+        object.__setattr__(self, "source_kind", kind)
+
+        published = _time(self.published_at, name="published_at")
+        available = _time(self.available_at, name="available_at")
+        if available < published:
+            raise ValueError("available_at cannot precede published_at")
+        object.__setattr__(self, "published_at", published)
+        object.__setattr__(self, "available_at", available)
+
+        for field in ("claim_id", "passage_hash", "syndication_key", "conflict_key"):
+            object.__setattr__(
+                self,
+                field,
+                _canonical_digest(getattr(self, field), name=field),
+            )
+
+        expected_syndication_key = _syndication_digest(
+            subject=self.subject,
+            predicate=self.predicate,
+            value=self.value,
+            passage_hash=self.passage_hash,
+            published_at=self.published_at,
+        )
+        if self.syndication_key != expected_syndication_key:
+            raise ValueError("syndication_key identity mismatch")
+
+        expected_conflict_key = _conflict_digest(
+            subject=self.subject,
+            predicate=self.predicate,
+            published_at=self.published_at,
+        )
+        if self.conflict_key != expected_conflict_key:
+            raise ValueError("conflict_key identity mismatch")
+
+        expected_claim_id = _claim_identity_digest(
+            source_id=self.source_id,
+            source_revision=self.source_revision,
+            syndication_key=self.syndication_key,
+            locator=self.locator,
+        )
+        if self.claim_id != expected_claim_id:
+            raise ValueError("claim_id identity mismatch")
+
+        if self.untrusted_content is not True or self.permission_effect != "NONE":
+            raise ValueError("information claims cannot grant authority")
+
+    def evidence_digest(self) -> str:
+        payload = {
+            "claim_id": self.claim_id,
+            "subject": self.subject,
+            "predicate": self.predicate,
+            "value": self.value,
+            "source_id": self.source_id,
+            "source_revision": self.source_revision,
+            "source_kind": self.source_kind,
+            "published_at": self.published_at.isoformat(),
+            "available_at": self.available_at.isoformat(),
+            "passage_hash": self.passage_hash,
+            "locator": self.locator,
+            "rights_basis": self.rights_basis,
+            "syndication_key": self.syndication_key,
+            "conflict_key": self.conflict_key,
+            "untrusted_content": self.untrusted_content,
+            "permission_effect": self.permission_effect,
+        }
+        return _digest(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+        )
+
+
+@dataclass(frozen=True)
+class InformationSnapshot:
+    """Causal, content-addressed view of claims visible at one replay cutoff."""
+
+    cutoff: datetime
+    claims: tuple[InformationClaim, ...]
+
+    def __post_init__(self) -> None:
+        cutoff = _time(self.cutoff, name="cutoff")
+        object.__setattr__(self, "cutoff", cutoff)
+        if not isinstance(self.claims, tuple):
+            raise ValueError("claims must be a tuple")
+
+        seen: set[str] = set()
+        for claim in self.claims:
+            if not isinstance(claim, InformationClaim):
+                raise ValueError("snapshot claims must be InformationClaim values")
+            if claim.available_at > cutoff:
+                raise ValueError("snapshot cannot contain future claims")
+            if claim.claim_id in seen:
+                raise ValueError("snapshot cannot contain duplicate claim identities")
+            seen.add(claim.claim_id)
+
+        canonical = tuple(
+            sorted(
+                self.claims,
+                key=lambda item: (item.available_at, item.published_at, item.claim_id),
+            )
+        )
+        if canonical != self.claims:
+            raise ValueError("snapshot claims must be in canonical order")
+
+    def to_manifest(self) -> dict[str, object]:
+        return {
+            "schema_version": "1.0.0",
+            "cutoff": self.cutoff.isoformat(),
+            "claims": [
+                {
+                    "claim_id": claim.claim_id,
+                    "evidence_digest": claim.evidence_digest(),
+                }
+                for claim in self.claims
+            ],
+        }
+
+    def digest(self) -> str:
+        return _digest(
+            json.dumps(
+                self.to_manifest(),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+        )
+
 
 class ClaimStore:
     def __init__(self):
@@ -117,40 +332,23 @@ class ClaimStore:
         normalized_predicate = _text(predicate, name="predicate")
         normalized_value = _text(value, name="value")
         passage_hash = _digest(document.passage)
-        syndication_payload = {
-            "subject": normalized_subject,
-            "predicate": normalized_predicate,
-            "value": normalized_value,
-            "passage_hash": passage_hash,
-            "published_at": document.published_at.isoformat(),
-        }
-        syndication_key = _digest(
-            json.dumps(syndication_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        syndication_key = _syndication_digest(
+            subject=normalized_subject,
+            predicate=normalized_predicate,
+            value=normalized_value,
+            passage_hash=passage_hash,
+            published_at=document.published_at,
         )
-        conflict_key = _digest(
-            json.dumps(
-                {
-                    "subject": normalized_subject,
-                    "predicate": normalized_predicate,
-                    "published_at": document.published_at.isoformat(),
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-            )
+        conflict_key = _conflict_digest(
+            subject=normalized_subject,
+            predicate=normalized_predicate,
+            published_at=document.published_at,
         )
-        claim_id = _digest(
-            json.dumps(
-                {
-                    "source_id": document.source_id,
-                    "source_revision": document.source_revision,
-                    "syndication_key": syndication_key,
-                    "locator": document.locator,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-            )
+        claim_id = _claim_identity_digest(
+            source_id=document.source_id,
+            source_revision=document.source_revision,
+            syndication_key=syndication_key,
+            locator=document.locator,
         )
         return InformationClaim(
             claim_id=claim_id,
@@ -180,7 +378,24 @@ class ClaimStore:
 
         duplicate_id = self._syndication.get(claim.syndication_key)
         if duplicate_id is not None:
-            return self._by_id[duplicate_id], False
+            existing_duplicate = self._by_id[duplicate_id]
+            existing_key = (
+                existing_duplicate.available_at,
+                existing_duplicate.published_at,
+                existing_duplicate.claim_id,
+            )
+            candidate_key = (claim.available_at, claim.published_at, claim.claim_id)
+            if candidate_key < existing_key:
+                # Syndication identity is semantic content identity, but causal replay
+                # must retain the earliest observed availability independent of ingest
+                # order. Replace only the representative; do not count a duplicate.
+                index = self._claims.index(existing_duplicate)
+                self._claims[index] = claim
+                del self._by_id[duplicate_id]
+                self._by_id[claim.claim_id] = claim
+                self._syndication[claim.syndication_key] = claim.claim_id
+                return claim, False
+            return existing_duplicate, False
 
         self._claims.append(claim)
         self._by_id[claim.claim_id] = claim
@@ -202,6 +417,10 @@ class ClaimStore:
                 key=lambda item: (item.available_at, item.published_at, item.claim_id),
             )
         )
+
+    def snapshot_at(self, cutoff: datetime) -> InformationSnapshot:
+        time = _time(cutoff, name="cutoff")
+        return InformationSnapshot(cutoff=time, claims=self.available_at(time))
 
     def revisions(self, source_id: str) -> tuple[InformationClaim, ...]:
         identifier = _text(source_id, name="source_id")

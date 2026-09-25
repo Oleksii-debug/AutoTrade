@@ -21,6 +21,7 @@ from .accounting import (
     AccountingConflict,
     JournalTransaction,
     Posting,
+    _canonical_equity_split_terms,
     book_equity_split_adjustment,
     reverse_transaction,
     transaction_digest,
@@ -98,7 +99,7 @@ def _canonical_entitlement_position_proof(
     expected_pre_action_quantity: Decimal,
     excluded_order_key: str,
 ) -> dict[str, object]:
-    """Prove dividend quantity from causal durable position history.
+    """Prove the pre-action quantity from causal durable position history.
 
     The pure CorporateActionBook remains a calculator, not a position authority.
     Only POSITION postings already durable and causally knowable at the provider
@@ -132,10 +133,9 @@ def _canonical_entitlement_position_proof(
     contributors: list[dict[str, str]] = []
 
     economic_book.refresh()
-    current_order_key = _text(
-        excluded_order_key,
-        name="excluded_order_key",
-    )
+    if not isinstance(excluded_order_key, str) or not excluded_order_key.strip():
+        raise ValueError("excluded_order_key is required")
+    current_order_key = excluded_order_key.strip()
     for transaction in economic_book.transactions:
         # Exact retry of a position-changing action must reconstruct the
         # pre-action entitlement cut, not count its own already-durable effect.

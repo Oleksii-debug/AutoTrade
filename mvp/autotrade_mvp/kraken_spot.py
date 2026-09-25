@@ -36,12 +36,22 @@ _FREE_CLIENT_ID = re.compile(r"^[\x21-\x7e]{1,18}$")
 _ORDER_TYPES = frozenset({"MARKET", "LIMIT"})
 _SIDES = frozenset({"BUY", "SELL"})
 _TIME_IN_FORCE = frozenset({"GTC", "IOC"})
+_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 
 
 def _text(value: str, *, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise KrakenSpotAdapterError(f"{name} is required")
     return value.strip()
+
+
+def _environment(value: str) -> str:
+    environment = _text(value, name="environment").upper()
+    if environment not in _ENVIRONMENTS:
+        raise KrakenSpotAdapterError(
+            "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
+        )
+    return environment
 
 
 def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
@@ -239,7 +249,7 @@ def _submission_evidence(
     environment: str,
     source_uri: str,
 ) -> dict[str, str]:
-    env = _text(environment, name="environment").upper()
+    env = _environment(environment)
     source = _text(source_uri, name="source_uri")
     if not source.startswith("https://") or not source.endswith("/0/private/AddOrder"):
         raise KrakenSpotAdapterError(
@@ -277,7 +287,7 @@ def parse_spot_submission_response(
     aid = _uuid_text(attempt_id, name="attempt_id")
     cid = validate_spot_client_order_id(client_order_id)
     when = _iso_utc_text(observed_at, name="observed_at")
-    env = _text(environment, name="environment").upper()
+    env = _environment(environment)
     source = _text(source_uri, name="source_uri")
     if type(transport_ambiguous) is not bool:
         raise TypeError("transport_ambiguous must be boolean")

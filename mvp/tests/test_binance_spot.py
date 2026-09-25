@@ -158,7 +158,9 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             [rows[0], dict(rows[0])],
             instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
             client_ids_by_order_id={42: "at-ack-1"},
-        )
+        
+            account_id="paper-1",
+            environment="PAPER",)
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].provider_execution_id, "BINANCE-SPOT:BTCUSDT:7")
         self.assertEqual(fills[0].client_order_id, "at-ack-1")
@@ -181,7 +183,9 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             parse_account_trades(
                 [first, changed],
                 instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
-            )
+            
+                account_id="paper-1",
+                environment="PAPER",)
 
     def test_absence_semantics_are_never_assumed_from_empty_surface(self):
         evidence = coverage_evidence(
@@ -190,7 +194,9 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             coverage_end="2026-09-24T19:00:00Z",
             pagination_complete=True,
             consistency_horizon_satisfied=True,
-        )
+        
+            account_id="paper-1",
+            environment="PAPER",)
         self.assertFalse(evidence.provider_semantics_exclude_execution)
         qualified = coverage_evidence(
             surface="ORDER_HISTORY",
@@ -199,7 +205,9 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             pagination_complete=True,
             consistency_horizon_satisfied=True,
             qualified_exclusion_semantics=True,
-        )
+        
+            account_id="paper-1",
+            environment="PAPER",)
         self.assertTrue(qualified.provider_semantics_exclude_execution)
 
 

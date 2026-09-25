@@ -379,7 +379,9 @@ class BybitV5AdapterTests(unittest.TestCase):
         fills = parse_executions(
             response,
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
-        )
+        
+            account_id="paper-1",
+            environment="PAPER",)
         self.assertEqual(len(fills), 1)
         fill = fills[0]
         self.assertEqual(fill.provider_execution_id, "exec-1")
@@ -416,13 +418,17 @@ class BybitV5AdapterTests(unittest.TestCase):
             parse_executions(
                 response,
                 instrument_versions={"ETHPERP": "ETHPERP@v1"},
-            )
+            
+                account_id="paper-1",
+                environment="PAPER",)
 
         fills = parse_executions(
             response,
             instrument_versions={"ETHPERP": "ETHPERP@v1"},
             qualified_fee_currencies={"ETHPERP@v1": "USDT"},
-        )
+        
+            account_id="paper-1",
+            environment="PAPER",)
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].fee_amount, Decimal("0.071409"))
         self.assertEqual(fills[0].fee_currency, "USDT")
@@ -454,7 +460,9 @@ class BybitV5AdapterTests(unittest.TestCase):
             parse_executions(
                 response,
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
-            )
+            
+                account_id="paper-1",
+                environment="PAPER",)
 
     def test_empty_extra_fee_shapes_remain_economically_complete(self):
         for extra_fees in (None, "", [], {}):
@@ -474,7 +482,9 @@ class BybitV5AdapterTests(unittest.TestCase):
                 fills = parse_executions(
                     {"retCode": 0, "result": {"list": [row]}},
                     instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
-                )
+                
+                    account_id="paper-1",
+                    environment="PAPER",)
                 self.assertEqual(fills[0].fee_currency, "USDT")
 
     def test_execution_conflict_and_unknown_symbol_fail_closed(self):
@@ -509,7 +519,9 @@ class BybitV5AdapterTests(unittest.TestCase):
             parse_executions(
                 conflict,
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
-            )
+            
+                account_id="paper-1",
+                environment="PAPER",)
 
         unknown = {
             "retCode": 0,
@@ -529,7 +541,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             },
         }
         with self.assertRaisesRegex(ProviderCoreError, "unmapped"):
-            parse_executions(unknown, instrument_versions={})
+            parse_executions(unknown, instrument_versions={} , account_id="paper-1", environment="PAPER")
 
     def test_auth_timestamp_window_matches_documented_boundaries(self):
         server = 1_000_000
@@ -575,7 +587,9 @@ class BybitV5AdapterTests(unittest.TestCase):
             coverage_end="2026-09-24T21:00:00Z",
             pagination_complete=True,
             consistency_horizon_satisfied=True,
-        )
+        
+            account_id="paper-1",
+            environment="PAPER",)
         self.assertFalse(evidence.provider_semantics_exclude_execution)
         self.assertFalse(
             evidence.proves_absence_for(
@@ -590,7 +604,9 @@ class BybitV5AdapterTests(unittest.TestCase):
             pagination_complete=True,
             consistency_horizon_satisfied=True,
             qualified_exclusion_semantics=True,
-        )
+        
+            account_id="paper-1",
+            environment="PAPER",)
         self.assertTrue(
             qualified.proves_absence_for(
                 datetime(2026, 9, 24, 20, tzinfo=timezone.utc)

@@ -256,7 +256,9 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
             client_ids_by_provider_order={"OABC-D123-E456": "at-order-1"},
             fee_currency_by_pair={"XXBTZUSD": "USD"},
-        )
+        
+            account_id="paper-1",
+            environment="PAPER",)
         self.assertEqual(len(fills), 1)
         fill = fills[0]
         self.assertEqual(fill.provider_execution_id, "T-EXEC-1")
@@ -290,14 +292,18 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 instrument_versions={},
                 client_ids_by_provider_order={},
                 fee_currency_by_pair={"XXBTZUSD": "USD"},
-            )
+            
+                account_id="paper-1",
+                environment="PAPER",)
         with self.assertRaisesRegex(KrakenSpotAdapterError, "fee currency"):
             parse_trade_history(
                 response,
                 instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
                 client_ids_by_provider_order={},
                 fee_currency_by_pair={},
-            )
+            
+                account_id="paper-1",
+                environment="PAPER",)
 
     def test_trade_timestamp_rejects_binary_float_and_sub_microsecond_precision(self):
         base = {
@@ -321,7 +327,9 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
                 client_ids_by_provider_order={},
                 fee_currency_by_pair={"XXBTZUSD": "USD"},
-            )
+            
+                account_id="paper-1",
+                environment="PAPER",)
         base["result"]["trades"]["T-EXEC-1"]["time"] = "1790280001.1234567"
         with self.assertRaisesRegex(KrakenSpotAdapterError, "microsecond"):
             parse_trade_history(
@@ -329,7 +337,9 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
                 client_ids_by_provider_order={},
                 fee_currency_by_pair={"XXBTZUSD": "USD"},
-            )
+            
+                account_id="paper-1",
+                environment="PAPER",)
 
     def test_coverage_defaults_to_non_authoritative_absence(self):
         coverage = coverage_evidence(
@@ -338,7 +348,9 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             coverage_end="2026-09-24T21:00:00Z",
             pagination_complete=True,
             consistency_horizon_satisfied=True,
-        )
+        
+            account_id="paper-1",
+            environment="PAPER",)
         self.assertEqual(coverage.surface, "EXECUTIONS")
         self.assertFalse(coverage.provider_semantics_exclude_execution)
         self.assertFalse(coverage.proves_absence_for(NOW))
@@ -353,7 +365,9 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 pagination_complete=True,
                 consistency_horizon_satisfied=True,
                 qualified_exclusion_semantics=True,
-            )
+            
+                account_id="paper-1",
+                environment="PAPER",)
 
 
 

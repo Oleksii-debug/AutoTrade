@@ -133,7 +133,9 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
             },
             instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
             execution_client_ids={"exec-1": "hedge-007"},
-        )
+        
+            account_id="paper-1",
+            environment="PAPER",)
         self.assertEqual(len(fills), 1)
         fill = fills[0]
         self.assertEqual(fill.provider_execution_id, "exec-1")
@@ -159,7 +161,9 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
             parse_position_executions(
                 {"elements": [base, {**base, "executionSize": "2"}]},
                 instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
-            )
+            
+                account_id="paper-1",
+                environment="PAPER",)
 
     def test_futures_foundation_cannot_self_assert_absence_semantics(self):
         with self.assertRaisesRegex(
@@ -173,7 +177,9 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 pagination_complete=True,
                 consistency_horizon_satisfied=True,
                 qualified_exclusion_semantics=True,
-            )
+            
+                account_id="paper-1",
+                environment="PAPER",)
 
     def test_absence_semantics_default_fail_closed(self):
         evidence = coverage_evidence(
@@ -182,7 +188,9 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
             coverage_end="2026-09-24T21:00:00Z",
             pagination_complete=True,
             consistency_horizon_satisfied=True,
-        )
+        
+            account_id="paper-1",
+            environment="PAPER",)
         self.assertFalse(evidence.provider_semantics_exclude_execution)
         self.assertFalse(
             evidence.proves_absence_for(datetime(2026, 9, 24, 20, tzinfo=timezone.utc))

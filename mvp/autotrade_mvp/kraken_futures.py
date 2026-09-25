@@ -285,6 +285,8 @@ def parse_submission_response(
 def parse_position_executions(
     response: Mapping[str, Any],
     *,
+    account_id: str,
+    environment: str,
     instrument_versions: Mapping[str, str],
     execution_client_ids: Mapping[str, str] | None = None,
 ) -> tuple[ProviderFillEvidence, ...]:
@@ -315,6 +317,9 @@ def parse_position_executions(
         if client_id is not None:
             client_id = _client_order_id(client_id)
         fill = ProviderFillEvidence.create(
+        fill =     provider_id="KRAKEN",
+        fill =     account_id=account_id,
+        fill =     environment=environment,
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=instrument,
@@ -335,6 +340,8 @@ def parse_position_executions(
 
 def coverage_evidence(
     *,
+    account_id: str,
+    environment: str,
     surface: str,
     coverage_start: str,
     coverage_end: str,
@@ -359,6 +366,9 @@ def coverage_evidence(
             "Kraken Futures foundation cannot self-assert provider exclusion semantics"
         )
     return CoverageSurfaceEvidence(
+        provider_id="KRAKEN",
+        account_id=account_id,
+        environment=environment,
         surface=normalized,
         coverage_start=coverage_start,
         coverage_end=coverage_end,

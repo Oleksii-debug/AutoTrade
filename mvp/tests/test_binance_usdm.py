@@ -289,7 +289,9 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             [row, dict(row)],
             instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
             client_ids_by_order_id={25851813: "at-usdm-fill"},
-        )
+        
+            account_id="paper-1",
+            environment="PAPER",)
         self.assertEqual(len(fills), 1)
         fill = fills[0]
         self.assertEqual(fill.provider_execution_id, "BINANCE-USDM:BTCUSDT:698759")
@@ -316,7 +318,9 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             parse_account_trades(
                 [first, changed],
                 instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
-            )
+            
+                account_id="paper-1",
+                environment="PAPER",)
 
     def test_empty_order_history_never_proves_absence_by_default(self):
         evidence = coverage_evidence(
@@ -325,7 +329,9 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             coverage_end="2026-09-25T00:00:00Z",
             pagination_complete=True,
             consistency_horizon_satisfied=True,
-        )
+        
+            account_id="paper-1",
+            environment="PAPER",)
         self.assertFalse(evidence.provider_semantics_exclude_execution)
 
         qualified = coverage_evidence(
@@ -335,7 +341,9 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             pagination_complete=True,
             consistency_horizon_satisfied=True,
             qualified_exclusion_semantics=True,
-        )
+        
+            account_id="paper-1",
+            environment="PAPER",)
         self.assertTrue(qualified.provider_semantics_exclude_execution)
 
     def test_bad_position_mode_and_bad_trade_position_side_fail_closed(self):
@@ -370,7 +378,9 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                     }
                 ],
                 instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
-            )
+            
+                account_id="paper-1",
+                environment="PAPER",)
 
 
 if __name__ == "__main__":

@@ -1478,6 +1478,149 @@ class IndependentRiskTests(unittest.TestCase):
             next(x for x in decision.rules if x.rule == "liquidation_headroom").passed
         )
 
+
+    def test_liquidation_evidence_scope_cannot_cross_account_environment_or_margin(self):
+        store = _LiquidationEvidenceStore()
+        bound = liquidation_evidence(
+            store,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="PAPER",
+            margin_mode="CROSS",
+            risk_tier_version="tier-v1",
+        )
+        evidence = bound["liquidation_headroom_evidence"]
+        mismatches = (
+            LiquidationScope("KRAKEN", "acct-1", "PAPER", "CROSS", "tier-v1"),
+            LiquidationScope("BYBIT", "acct-2", "PAPER", "CROSS", "tier-v1"),
+            LiquidationScope("BYBIT", "acct-1", "LIVE", "CROSS", "tier-v1"),
+            LiquidationScope("BYBIT", "acct-1", "PAPER", "ISOLATED", "tier-v1"),
+            LiquidationScope("BYBIT", "acct-1", "PAPER", "CROSS", "tier-v2"),
+        )
+        for bad_scope in mismatches:
+            with self.subTest(scope=bad_scope):
+                with self.assertRaisesRegex(ValueError, "scope differs"):
+                    context(
+                        liquidation_headroom=evidence.headroom,
+                        liquidation_scope=bad_scope,
+                        liquidation_headroom_evidence=evidence,
+                        decision_time=bound["decision_time"],
+                    )
+
+    def test_liquidation_evidence_future_stale_or_tampered_fails_closed(self):
+        configured = policy(min_liquidation_headroom="0.25")
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="100",
+            expected_state_version=7,
+        )
+
+        future_store = _LiquidationEvidenceStore()
+        future = liquidation_evidence(
+            future_store,
+            headroom="0.50",
+            observed_at=LIQUIDATION_BASE + timedelta(minutes=10),
+        )
+        future["decision_time"] = LIQUIDATION_BASE + timedelta(minutes=9)
+        future_decision = evaluate_risk(
+            intent,
+            context(**future),
+            configured,
+            evidence_store=future_store,
+        )
+        self.assertFalse(
+            next(
+                x for x in future_decision.rules
+                if x.rule == "liquidation_headroom"
+            ).passed
+        )
+
+        stale_store = _LiquidationEvidenceStore()
+        stale = liquidation_evidence(
+            stale_store,
+            headroom="0.50",
+            observed_at=LIQUIDATION_BASE,
+            expires_at=LIQUIDATION_BASE + timedelta(minutes=2),
+        )
+        stale["decision_time"] = LIQUIDATION_BASE + timedelta(minutes=3)
+        stale_decision = evaluate_risk(
+            intent,
+            context(**stale),
+            configured,
+            evidence_store=stale_store,
+        )
+        self.assertFalse(
+            next(
+                x for x in stale_decision.rules
+                if x.rule == "liquidation_headroom"
+            ).passed
+        )
+
+        tampered_store = _LiquidationEvidenceStore()
+        tampered = liquidation_evidence(tampered_store, headroom="0.50")
+        artifact_id = tampered["liquidation_headroom_evidence"].artifact_id
+        tampered_store._objects[artifact_id] = b"{}"
+        tampered_decision = evaluate_risk(
+            intent,
+            context(**tampered),
+            configured,
+            evidence_store=tampered_store,
+        )
+        tampered_rule = next(
+            x for x in tampered_decision.rules if x.rule == "liquidation_headroom"
+        )
+        self.assertFalse(tampered_rule.passed)
+        self.assertEqual(tampered_rule.observed, "UNVERIFIED")
+
+    def test_liquidation_evidence_identity_is_in_risk_fingerprint(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="100",
+            expected_state_version=7,
+        )
+        configured = policy(min_liquidation_headroom="0.25")
+
+        store_a = _LiquidationEvidenceStore()
+        tier_a = liquidation_evidence(
+            store_a,
+            headroom="0.50",
+            risk_tier_version="tier-v1",
+        )
+        decision_a = evaluate_risk(
+            intent,
+            context(**tier_a),
+            configured,
+            evidence_store=store_a,
+        )
+
+        store_b = _LiquidationEvidenceStore()
+        tier_b = liquidation_evidence(
+            store_b,
+            headroom="0.50",
+            risk_tier_version="tier-v2",
+        )
+        decision_b = evaluate_risk(
+            intent,
+            context(**tier_b),
+            configured,
+            evidence_store=store_b,
+        )
+
+        self.assertTrue(decision_a.admitted)
+        self.assertTrue(decision_b.admitted)
+        self.assertNotEqual(
+            decision_a.input_fingerprint,
+            decision_b.input_fingerprint,
+        )
+        self.assertNotEqual(
+            risk_decision_fingerprint(decision_a),
+            risk_decision_fingerprint(decision_b),
+        )
+
     def test_tail_and_liquidation_inputs_reject_binary_float(self):
         with self.assertRaises(TypeError):
             context(tail_scenarios=({"ABC": -0.10},))

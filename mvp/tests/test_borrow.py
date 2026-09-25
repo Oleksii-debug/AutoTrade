@@ -385,6 +385,34 @@ class BorrowLifecycleJournalTests(unittest.TestCase):
                     )
                 )
 
+    def test_time_reversed_recall_resolution_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            scope = resource()
+            journal = BorrowLifecycleJournal(store, scope)
+            journal.record_recall(
+                BorrowRecallEvidence(
+                    resource=scope,
+                    recall_id="recall-time",
+                    provider_revision="recall-time-rev-1",
+                    recalled_quantity="3",
+                    observed_at="2026-09-24T18:02:00Z",
+                    effective_at="2026-09-24T18:01:30Z",
+                    evidence_refs=("provider:recall-time:rev-1",),
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "predates"):
+                journal.record_recall_resolution(
+                    BorrowRecallResolutionEvidence(
+                        resource=scope,
+                        recall_id="recall-time",
+                        provider_revision="resolution-time-rev-1",
+                        resolved_quantity="1",
+                        observed_at="2026-09-24T18:01:59Z",
+                        evidence_refs=("provider:recall-time:resolution-rev-1",),
+                    )
+                )
+
     def test_conflicting_provider_revision_fails_closed_and_exact_retry_is_idempotent(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -99,6 +100,76 @@ def _stored_json(value: Any, *, name: str) -> Any:
     if canonical != value:
         raise MemoryIntegrityError(f"{name} is not canonical JSON")
     return parsed
+
+
+@dataclass(frozen=True)
+class CoveragePopulationSnapshot:
+    """Immutable identity for one canonical qualification-facing memory query."""
+
+    causal_cutoff: str
+    permission_classes: tuple[str, ...]
+    task: str | None
+    instrument_family: str | None
+    rows: tuple[dict[str, Any], ...]
+    eligible_count: int
+    root_hash: str
+
+    def __post_init__(self) -> None:
+        cutoff = _stored_time(self.causal_cutoff, name="coverage causal_cutoff")
+        if cutoff.isoformat() != self.causal_cutoff:
+            raise MemoryIntegrityError("coverage causal_cutoff is not canonical")
+        if not isinstance(self.permission_classes, tuple) or not self.permission_classes:
+            raise MemoryIntegrityError("coverage permission_classes must be a non-empty tuple")
+        normalized_permissions = tuple(
+            _stored_text(value, name="coverage permission_class")
+            for value in self.permission_classes
+        )
+        if normalized_permissions != self.permission_classes:
+            raise MemoryIntegrityError("coverage permission_classes are not canonical")
+        if tuple(sorted(set(normalized_permissions))) != normalized_permissions:
+            raise MemoryIntegrityError("coverage permission_classes must be sorted and unique")
+        if self.task is not None and _stored_text(self.task, name="coverage task") != self.task:
+            raise MemoryIntegrityError("coverage task is not canonical")
+        if (
+            self.instrument_family is not None
+            and _stored_text(
+                self.instrument_family,
+                name="coverage instrument_family",
+            )
+            != self.instrument_family
+        ):
+            raise MemoryIntegrityError("coverage instrument_family is not canonical")
+        if not isinstance(self.rows, tuple):
+            raise MemoryIntegrityError("coverage rows must be an immutable tuple")
+        if any(not isinstance(row, dict) for row in self.rows):
+            raise MemoryIntegrityError("coverage rows must contain canonical mappings")
+        if (
+            not isinstance(self.eligible_count, int)
+            or isinstance(self.eligible_count, bool)
+            or self.eligible_count < 0
+            or self.eligible_count != len(self.rows)
+        ):
+            raise MemoryIntegrityError("coverage eligible_count does not match rows")
+        episode_ids = tuple(row.get("episode_id") for row in self.rows)
+        if any(not isinstance(value, str) or not value for value in episode_ids):
+            raise MemoryIntegrityError("coverage rows require episode identities")
+        if len(set(episode_ids)) != len(episode_ids):
+            raise MemoryIntegrityError("coverage rows contain duplicate episode identities")
+        expected = _hash(
+            {
+                "schema_version": 1,
+                "causal_cutoff": self.causal_cutoff,
+                "permission_classes": self.permission_classes,
+                "task": self.task,
+                "instrument_family": self.instrument_family,
+                "eligible_count": self.eligible_count,
+                "rows": self.rows,
+            }
+        )
+        if self.root_hash != expected:
+            raise MemoryIntegrityError(
+                "coverage population root does not match canonical ExperienceMemory snapshot"
+            )
 
 
 class ExperienceMemory:
@@ -691,6 +762,54 @@ class ExperienceMemory:
                 "permission_class": verified["permission_class"],
                 "tombstones": tombstones,
             }
+
+    def coverage_population_snapshot(
+        self,
+        *,
+        causal_cutoff: datetime,
+        granted_permissions: set[str],
+        task: str | None = None,
+        instrument_family: str | None = None,
+    ) -> CoveragePopulationSnapshot:
+        """Freeze the complete canonical population and its exact query identity."""
+
+        rows = self.coverage_population(
+            causal_cutoff=causal_cutoff,
+            granted_permissions=granted_permissions,
+            task=task,
+            instrument_family=instrument_family,
+        )
+        cutoff = _iso(causal_cutoff)
+        permissions = tuple(
+            sorted(
+                _text(value, name="granted_permission")
+                for value in granted_permissions
+            )
+        )
+        normalized_task = None if task is None else _text(task, name="task")
+        normalized_family = (
+            None
+            if instrument_family is None
+            else _text(instrument_family, name="instrument_family")
+        )
+        payload = {
+            "schema_version": 1,
+            "causal_cutoff": cutoff,
+            "permission_classes": permissions,
+            "task": normalized_task,
+            "instrument_family": normalized_family,
+            "eligible_count": len(rows),
+            "rows": rows,
+        }
+        return CoveragePopulationSnapshot(
+            causal_cutoff=cutoff,
+            permission_classes=permissions,
+            task=normalized_task,
+            instrument_family=normalized_family,
+            rows=rows,
+            eligible_count=len(rows),
+            root_hash=_hash(payload),
+        )
 
     def coverage_population(
         self,

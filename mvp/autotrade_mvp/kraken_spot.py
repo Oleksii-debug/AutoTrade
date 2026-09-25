@@ -7,7 +7,7 @@ holds no credential and grants no financial authority.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
@@ -159,28 +159,136 @@ class KrakenSpotOrderIntent:
         )
 
 
+_KRAKEN_SPOT_PREPARED_REQUEST_FACTORY_TOKEN = object()
+
+
 @dataclass(frozen=True)
 class KrakenSpotPreparedRequest:
     endpoint: str
     body: Mapping[str, object]
+    account_id: str
+    environment: str
     capability_snapshot_id: str
     documentation_refs: tuple[str, ...]
+    instrument_version: str
+    body_sha256: str = field(init=False)
+    _factory_token: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
+        if self._factory_token is not _KRAKEN_SPOT_PREPARED_REQUEST_FACTORY_TOKEN:
+            raise KrakenSpotAdapterError(
+                "KrakenSpotPreparedRequest must be created by the canonical preparation factory"
+            )
+        endpoint = _text(self.endpoint, name="endpoint")
+        if endpoint != "/0/private/AddOrder":
+            raise KrakenSpotAdapterError(
+                "prepared endpoint must be the canonical Kraken Spot AddOrder path"
+            )
+        if not isinstance(self.body, Mapping):
+            raise TypeError("body must be a mapping")
+        body = dict(self.body)
+        required = {
+            "pair",
+            "type",
+            "ordertype",
+            "volume",
+            "cl_ord_id",
+            "timeinforce",
+        }
+        optional = {"price", "oflags"}
+        if not required <= set(body) or set(body) - required - optional:
+            raise KrakenSpotAdapterError(
+                "prepared AddOrder body does not match the canonical request shape"
+            )
+        client_id = validate_spot_client_order_id(body.get("cl_ord_id"))
+        pair = _text(body.get("pair"), name="pair")
+        if pair != pair.upper():
+            raise KrakenSpotAdapterError("prepared pair must be canonical uppercase text")
+        side = _text(body.get("type"), name="type")
+        if side not in {"buy", "sell"}:
+            raise KrakenSpotAdapterError("prepared type must be buy or sell")
+        order_type = _text(body.get("ordertype"), name="ordertype")
+        if order_type not in {"market", "limit"}:
+            raise KrakenSpotAdapterError("prepared ordertype must be market or limit")
+        tif = _text(body.get("timeinforce"), name="timeinforce")
+        if tif not in {"gtc", "ioc"}:
+            raise KrakenSpotAdapterError("prepared timeinforce must be gtc or ioc")
+        volume_text = _text(body.get("volume"), name="volume")
+        if _decimal_text(_decimal(volume_text, name="volume", positive=True)) != volume_text:
+            raise KrakenSpotAdapterError("prepared volume must be exact canonical decimal text")
+        price_text = body.get("price")
+        if order_type == "limit":
+            price = _text(price_text, name="price")
+            if _decimal_text(_decimal(price, name="price", positive=True)) != price:
+                raise KrakenSpotAdapterError("prepared price must be exact canonical decimal text")
+        elif price_text is not None:
+            raise KrakenSpotAdapterError("market request cannot contain price")
+        flags = body.get("oflags")
+        if flags is not None and flags != "post":
+            raise KrakenSpotAdapterError("unsupported prepared AddOrder flags")
+        if flags == "post" and (order_type != "limit" or tif == "ioc"):
+            raise KrakenSpotAdapterError("prepared post-only order shape is invalid")
+        try:
+            rendered_body = json.dumps(
+                body,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as error:
+            raise KrakenSpotAdapterError(
+                "prepared AddOrder body must be canonical JSON"
+            ) from error
+        account = _text(self.account_id, name="account_id")
+        environment = _environment(self.environment)
+        capability_snapshot_id = _text(
+            self.capability_snapshot_id,
+            name="capability_snapshot_id",
+        )
+        instrument_version = _text(
+            self.instrument_version,
+            name="instrument_version",
+        )
+        if not isinstance(self.documentation_refs, tuple):
+            raise TypeError("documentation_refs must be a tuple")
+        refs = tuple(
+            _text(value, name="documentation_ref")
+            for value in self.documentation_refs
+        )
+        if not refs:
+            raise KrakenSpotAdapterError("documentation_refs must not be empty")
+        body["cl_ord_id"] = client_id
+        object.__setattr__(self, "endpoint", endpoint)
+        object.__setattr__(self, "body", MappingProxyType(body))
+        object.__setattr__(self, "account_id", account)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "capability_snapshot_id", capability_snapshot_id)
+        object.__setattr__(self, "instrument_version", instrument_version)
+        object.__setattr__(self, "documentation_refs", refs)
+        object.__setattr__(
+            self,
+            "body_sha256",
+            "sha256:" + sha256(rendered_body.encode("utf-8")).hexdigest(),
+        )
 
 
 def prepare_spot_order_request(
     intent: KrakenSpotOrderIntent,
     *,
     client_order_id: str,
+    account_id: str,
+    environment: str,
     capability: CapabilitySnapshot,
     at: datetime,
 ) -> KrakenSpotPreparedRequest:
     """Prepare a logical AddOrder request without nonce, signature or deadline.
 
     Nonce/authentication and any wall-clock deadline belong at the transport
-    boundary after GuardedDispatcher's final authority check.
+    boundary after GuardedDispatcher's final authority check. Account and
+    environment are explicit because Kraken's private path itself does not carry
+    account identity; credential selection must not be allowed to retarget a
+    request after capability admission.
     """
 
     if not isinstance(intent, KrakenSpotOrderIntent):
@@ -189,8 +297,14 @@ def prepare_spot_order_request(
         raise TypeError("capability must be CapabilitySnapshot")
     point = _instant(at, name="at")
     client_id = validate_spot_client_order_id(client_order_id)
+    account = _text(account_id, name="account_id")
+    env = _environment(environment)
     if capability.provider_id.upper() != "KRAKEN":
         raise KrakenSpotAdapterError("capability belongs to another provider")
+    if capability.account_id != account:
+        raise KrakenSpotAdapterError("capability account does not match target account")
+    if capability.environment.upper() != env:
+        raise KrakenSpotAdapterError("capability environment does not match target environment")
     if capability.instrument_version != intent.instrument_version:
         raise KrakenSpotAdapterError("capability instrument version does not match intent")
     if not capability.admits(
@@ -217,10 +331,13 @@ def prepare_spot_order_request(
     return KrakenSpotPreparedRequest(
         endpoint="/0/private/AddOrder",
         body=body,
+        account_id=account,
+        environment=env,
         capability_snapshot_id=capability.snapshot_id,
         documentation_refs=tuple(KRAKEN_SPOT_DOCS.values()),
+        instrument_version=intent.instrument_version,
+        _factory_token=_KRAKEN_SPOT_PREPARED_REQUEST_FACTORY_TOKEN,
     )
-
 
 def _uuid_text(value: object, *, name: str) -> str:
     text = _text(value, name=name)
@@ -242,21 +359,48 @@ def _iso_utc_text(value: object, *, name: str) -> str:
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _submission_evidence(
-    payload: Mapping[str, object],
+def _validate_submission_scope(
+    prepared_request: KrakenSpotPreparedRequest,
     *,
-    observed_at: str,
-    environment: str,
     source_uri: str,
-) -> dict[str, str]:
-    env = _environment(environment)
+) -> str:
+    if not isinstance(prepared_request, KrakenSpotPreparedRequest):
+        raise TypeError("prepared_request must be KrakenSpotPreparedRequest")
+    if prepared_request.environment != "LIVE":
+        raise KrakenSpotAdapterError(
+            "Kraken Spot provider submission evidence is qualified only for LIVE"
+        )
     source = _text(source_uri, name="source_uri")
-    if not source.startswith("https://") or not source.endswith("/0/private/AddOrder"):
+    if source != "https://api.kraken.com/0/private/AddOrder":
         raise KrakenSpotAdapterError(
             "source_uri must be the exact HTTPS Kraken Spot AddOrder endpoint"
         )
+    return source
+
+
+def _submission_evidence(
+    payload: Mapping[str, object],
+    *,
+    prepared_request: KrakenSpotPreparedRequest,
+    observed_at: str,
+    source_uri: str,
+) -> dict[str, str]:
+    source = _validate_submission_scope(
+        prepared_request,
+        source_uri=source_uri,
+    )
+    bound = {
+        "schema_version": 1,
+        "provider": "KRAKEN_SPOT",
+        "account_id": prepared_request.account_id,
+        "environment": prepared_request.environment,
+        "capability_snapshot_id": prepared_request.capability_snapshot_id,
+        "instrument_version": prepared_request.instrument_version,
+        "request_body_sha256": prepared_request.body_sha256,
+        "provider_response": dict(payload),
+    }
     encoded = json.dumps(
-        payload,
+        bound,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -275,20 +419,29 @@ def _submission_evidence(
 def parse_spot_submission_response(
     *,
     attempt_id: str,
-    client_order_id: str,
-    environment: str,
+    prepared_request: KrakenSpotPreparedRequest,
     observed_at: str,
     source_uri: str,
     payload: Mapping[str, object] | None,
     transport_ambiguous: bool = False,
 ) -> dict[str, object]:
-    """Map a recorded AddOrder outcome without confusing ACK with execution."""
+    """Map a recorded AddOrder outcome without confusing ACK with execution.
+
+    The canonical prepared request is the account/environment/capability binding.
+    The SubmissionResult shape stays schema-compatible; scope is retained by the
+    durable attempt identity and, when a provider response exists, by the evidence
+    digest over the exact prepared-request scope plus response payload.
+    """
 
     aid = _uuid_text(attempt_id, name="attempt_id")
-    cid = validate_spot_client_order_id(client_order_id)
+    source = _validate_submission_scope(
+        prepared_request,
+        source_uri=source_uri,
+    )
+    cid = validate_spot_client_order_id(
+        prepared_request.body.get("cl_ord_id")
+    )
     when = _iso_utc_text(observed_at, name="observed_at")
-    env = _environment(environment)
-    source = _text(source_uri, name="source_uri")
     if type(transport_ambiguous) is not bool:
         raise TypeError("transport_ambiguous must be boolean")
     if transport_ambiguous:
@@ -310,8 +463,8 @@ def parse_spot_submission_response(
     evidence = [
         _submission_evidence(
             payload,
+            prepared_request=prepared_request,
             observed_at=when,
-            environment=env,
             source_uri=source,
         )
     ]
@@ -334,10 +487,8 @@ def parse_spot_submission_response(
         raise KrakenSpotAdapterError("successful response must contain a result object")
     txids = result.get("txid")
     if isinstance(txids, (str, bytes)) or not isinstance(txids, (list, tuple)) or not txids:
-        raise KrakenSpotAdapterError("successful response must contain one or more transaction ids")
-    normalized = tuple(_text(str(value), name="txid") for value in txids)
-    if len(set(normalized)) != len(normalized):
-        raise KrakenSpotAdapterError("provider transaction ids must be unique")
+        raise KrakenSpotAdapterError("successful response must contain exactly one transaction id")
+    normalized = tuple(_text(value, name="txid") for value in txids)
     if len(normalized) != 1:
         raise KrakenSpotAdapterError(
             "canonical SubmissionResult requires exactly one provider order id"
@@ -360,30 +511,28 @@ class KrakenSpotAbsenceEvidence:
     trades_complete: bool
     ledgers_complete: bool
     consistency_horizon_satisfied: bool
+    qualified_exclusion_semantics: bool = False
 
     def __post_init__(self) -> None:
-        for field in (
+        for field_name in (
             "order_found",
             "open_orders_complete",
             "closed_orders_complete",
             "trades_complete",
             "ledgers_complete",
             "consistency_horizon_satisfied",
+            "qualified_exclusion_semantics",
         ):
-            if type(getattr(self, field)) is not bool:
-                raise TypeError(f"{field} must be boolean")
+            if type(getattr(self, field_name)) is not bool:
+                raise TypeError(f"{field_name} must be boolean")
+        if self.qualified_exclusion_semantics:
+            raise KrakenSpotAdapterError(
+                "Kraken Spot foundation cannot self-assert provider exclusion semantics"
+            )
 
     def verdict(self) -> str:
         if self.order_found:
             return "FOUND"
-        if (
-            self.open_orders_complete
-            and self.closed_orders_complete
-            and self.trades_complete
-            and self.ledgers_complete
-            and self.consistency_horizon_satisfied
-        ):
-            return "PROVEN_ABSENT"
         return "INCONCLUSIVE"
 
 
@@ -461,6 +610,10 @@ def parse_trade_history(
         client_id = client_ids_by_provider_order.get(provider_order_id)
         if client_id is not None:
             client_id = validate_spot_client_order_id(client_id)
+        if "fee" not in raw or raw["fee"] is None:
+            raise KrakenSpotAdapterError(
+                f"missing provider fee amount for Kraken trade: {execution_id}"
+            )
         fills.append(
             ProviderFillEvidence.create(
                 provider_id="KRAKEN",
@@ -471,7 +624,7 @@ def parse_trade_history(
                 instrument=_text(instrument_versions[pair], name="instrument_version"),
                 quantity=raw.get("vol"),
                 price=raw.get("price"),
-                fee_amount=raw.get("fee", "0"),
+                fee_amount=raw["fee"],
                 fee_currency=_text(fee_currency_by_pair[pair], name="fee_currency"),
                 trade_time=_seconds_to_utc(raw.get("time"), name="time"),
             )

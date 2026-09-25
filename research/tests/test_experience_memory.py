@@ -622,6 +622,87 @@ class ExperienceMemoryTests(unittest.TestCase):
             )
             self.assertEqual(historical[0]["corrections"], [])
 
+    def test_late_appended_episode_cannot_backfill_qualification_population(self):
+        with TemporaryDirectory() as directory:
+            store = memory(Path(directory) / "memory.sqlite3")
+            episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("late-recorded"),
+            )
+
+            historical = store.coverage_population(
+                causal_cutoff=BASE,
+                granted_permissions={"research"},
+            )
+            self.assertEqual(historical, ())
+
+            current = store.coverage_population(
+                causal_cutoff=datetime.now(timezone.utc) + timedelta(seconds=1),
+                granted_permissions={"research"},
+            )
+            self.assertEqual([item["episode_id"] for item in current], [episode])
+
+    def test_episode_availability_backdating_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = memory(Path(directory) / "memory.sqlite3")
+            episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload(),
+            )
+            with store._connect() as con:
+                con.execute(
+                    "UPDATE episodes SET created_at=? WHERE episode_id=?",
+                    (BASE.isoformat(), episode),
+                )
+
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "episode availability integrity mismatch",
+            ):
+                store.coverage_population(
+                    causal_cutoff=BASE,
+                    granted_permissions={"research"},
+                )
+
+    def test_legacy_episode_availability_requires_explicit_recovery(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.sqlite3"
+            store = memory(path)
+            episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload(),
+            )
+            with store._connect() as con:
+                con.execute(
+                    "UPDATE episodes SET availability_hash=NULL WHERE episode_id=?",
+                    (episode,),
+                )
+
+            reopened = memory(path)
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "legacy episode availability lacks integrity identity",
+            ):
+                reopened.retrieve(
+                    information_cutoff=datetime.now(timezone.utc) + timedelta(seconds=1),
+                    granted_permissions={"research"},
+                )
+
     def test_episode_payload_tamper_fails_closed_on_source_and_retrieve(self):
         with TemporaryDirectory() as directory:
             store = memory(Path(directory) / "memory.sqlite3")

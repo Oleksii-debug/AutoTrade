@@ -302,6 +302,7 @@ class RiskContext:
     drawdown_fraction: Decimal
     market_data_age_seconds: Decimal
     fx_age_seconds: Mapping[str, Decimal]
+    fx_required: bool
     margin_headroom: Decimal
     capability_allowed: bool
     borrow_available: bool | None
@@ -332,6 +333,7 @@ class RiskContext:
         drawdown_fraction=0,
         market_data_age_seconds=0,
         fx_age_seconds: Mapping[str, object] | None = None,
+        fx_required: bool = False,
         margin_headroom,
         capability_allowed: bool,
         borrow_available: bool | None,
@@ -475,6 +477,8 @@ class RiskContext:
         )
         if normalized_drawdown > 1:
             raise ValueError("drawdown_fraction cannot exceed 1")
+        if not isinstance(fx_required, bool):
+            raise TypeError("fx_required must be a boolean")
         if not isinstance(capability_allowed, bool):
             raise TypeError("capability_allowed must be a boolean")
         if borrow_available is not None and not isinstance(borrow_available, bool):
@@ -496,6 +500,7 @@ class RiskContext:
             drawdown_fraction=normalized_drawdown,
             market_data_age_seconds=_positive(market_data_age_seconds, name="market_data_age_seconds", allow_zero=True),
             fx_age_seconds=normalized_fx,
+            fx_required=fx_required,
             margin_headroom=_positive(margin_headroom, name="margin_headroom", allow_zero=True),
             capability_allowed=capability_allowed,
             borrow_available=borrow_available,
@@ -591,6 +596,7 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         drawdown_fraction=context.drawdown_fraction,
         market_data_age_seconds=context.market_data_age_seconds,
         fx_age_seconds=context.fx_age_seconds,
+        fx_required=context.fx_required,
         margin_headroom=context.margin_headroom,
         capability_allowed=context.capability_allowed,
         borrow_available=context.borrow_available,
@@ -885,13 +891,14 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
             policy.max_clock_age_seconds,
             "clock synchronization evidence must be fresh enough for admission",
         )
+    fx_evidenced = bool(context.fx_age_seconds) or not context.fx_required
     stale_fx = max(context.fx_age_seconds.values(), default=Decimal("0"))
     add(
         "fx_freshness",
-        stale_fx <= policy.max_fx_age_seconds,
-        stale_fx,
+        fx_evidenced and stale_fx <= policy.max_fx_age_seconds,
+        stale_fx if fx_evidenced else "UNKNOWN",
         policy.max_fx_age_seconds,
-        "FX inputs must be fresh enough for valuation",
+        "required FX inputs must be present and fresh enough for valuation",
     )
     add(
         "position_limit",

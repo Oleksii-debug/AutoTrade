@@ -134,10 +134,63 @@ class PopulationCoverageManifest:
         _sha_identity(self.digest, name="population coverage digest")
         if not isinstance(self.permission_classes, tuple) or not self.permission_classes:
             raise ValueError("permission_classes must be a non-empty tuple")
+        tuple_fields = (
+            "eligible_episode_ids",
+            "included_episode_ids",
+            "exclusions",
+            "episode_digests",
+            "eligible_outcomes",
+            "included_outcomes",
+            "included_regime_counts",
+            "included_labels_complete_by_regime",
+        )
+        if any(not isinstance(getattr(self, name), tuple) for name in tuple_fields):
+            raise TypeError("population manifest collections must be immutable tuples")
         if len(self.eligible_episode_ids) != len(set(self.eligible_episode_ids)):
             raise ValueError("eligible episode identities must be unique")
         if len(self.included_episode_ids) != len(set(self.included_episode_ids)):
             raise ValueError("included episode identities must be unique")
+        excluded_ids = tuple(episode_id for episode_id, _reason in self.exclusions)
+        if len(excluded_ids) != len(set(excluded_ids)):
+            raise ValueError("excluded episode identities must be unique")
+        included = set(self.included_episode_ids)
+        excluded = set(excluded_ids)
+        eligible = set(self.eligible_episode_ids)
+        if included & excluded:
+            raise ValueError("episode cannot be both included and excluded")
+        if included | excluded != eligible:
+            raise ValueError("population manifest must account for every eligible episode")
+        if not isinstance(self.eligible_no_trade_count, int) or isinstance(
+            self.eligible_no_trade_count, bool
+        ) or self.eligible_no_trade_count < 0:
+            raise ValueError("eligible_no_trade_count must be a non-negative integer")
+        if not isinstance(self.included_no_trade_count, int) or isinstance(
+            self.included_no_trade_count, bool
+        ) or self.included_no_trade_count < 0:
+            raise ValueError("included_no_trade_count must be a non-negative integer")
+        expected = _digest(
+            {
+                "candidate_hash": self.candidate_hash,
+                "frozen_protocol_hash": self.frozen_protocol_hash,
+                "input_snapshot_hash": self.input_snapshot_hash,
+                "causal_cutoff": self.causal_cutoff,
+                "permission_classes": self.permission_classes,
+                "task": self.task,
+                "instrument_family": self.instrument_family,
+                "eligible_episode_ids": self.eligible_episode_ids,
+                "included_episode_ids": self.included_episode_ids,
+                "exclusions": self.exclusions,
+                "episode_digests": self.episode_digests,
+                "eligible_outcomes": self.eligible_outcomes,
+                "included_outcomes": self.included_outcomes,
+                "eligible_no_trade_count": self.eligible_no_trade_count,
+                "included_no_trade_count": self.included_no_trade_count,
+                "included_regime_counts": self.included_regime_counts,
+                "included_labels_complete_by_regime": self.included_labels_complete_by_regime,
+            }
+        )
+        if expected != self.digest:
+            raise ValueError("population coverage digest does not match canonical content")
 
     @property
     def complete(self) -> bool:

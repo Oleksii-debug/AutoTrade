@@ -24,6 +24,45 @@ PRODUCER_TYPES = {
     "ACCOUNT": "ACCOUNT_CAPABILITY",
     "INSTRUMENT": "INSTRUMENT_CAPABILITY",
 }
+ISSUER_HEX = {
+    "DOCUMENTED": "1",
+    "API": "2",
+    "ACCOUNT": "3",
+    "INSTRUMENT": "4",
+}
+
+
+def _issuer_ref(source: str) -> str:
+    return f"fixture-{source.lower()}:sha256:" + ISSUER_HEX[source] * 64
+
+
+def _issuer_sha256(source: str) -> str:
+    return "sha256:" + ISSUER_HEX[source] * 64
+
+
+def _trusted_issuer_verifiers():
+    def make(expected_source: str):
+        def verify(claim, issuer_ref, issuer_sha256):
+            if claim.source != expected_source:
+                return EvidenceVerification(
+                    valid=False,
+                    conflicted=True,
+                    reason="issuer source mismatch",
+                )
+            if (
+                issuer_ref != _issuer_ref(expected_source)
+                or issuer_sha256 != _issuer_sha256(expected_source)
+            ):
+                return EvidenceVerification(
+                    valid=False,
+                    conflicted=True,
+                    reason="issuer identity mismatch",
+                )
+            return EvidenceVerification(valid=True)
+
+        return verify
+
+    return {source: make(source) for source in SOURCES}
 
 
 def _claim(source: str, evidence_ref: dict[str, object], *, expires_at=None) -> CapabilityClaim:
@@ -81,6 +120,8 @@ def _publish(store: ArtifactStore, source: str, *, account_id="paper-account") -
             "environment": "PAPER",
             "instrument_version": "instrument-v1",
             "observed_at": observed_at,
+            "issuer_ref": _issuer_ref(source),
+            "issuer_sha256": _issuer_sha256(source),
         },
     )
     return {
@@ -89,6 +130,8 @@ def _publish(store: ArtifactStore, source: str, *, account_id="paper-account") -
         "observed_at": observed_at,
         "source_uri": source_uri,
         "rights_id": rights_id,
+        "issuer_ref": _issuer_ref(source),
+        "issuer_sha256": _issuer_sha256(source),
     }
 
 
@@ -119,6 +162,23 @@ class CapabilityArtifactEvidenceTests(unittest.TestCase):
                 snapshot_id=SNAPSHOT,
                 claims=claims,
                 observed_at=NOW,
+                evidence_verifier=artifact_store_evidence_verifier(
+                    store,
+                    issuer_verifiers=_trusted_issuer_verifiers(),
+                ),
+            )
+            self.assertEqual(snapshot.status, "UNKNOWN")
+            self.assertEqual(snapshot.sources, frozenset())
+            self.assertEqual(snapshot.evidence, ())
+
+    def test_generic_artifact_metadata_cannot_self_authorize_verified_snapshot(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            refs = {source: _publish(store, source) for source in SOURCES}
+            snapshot = derive_capability_snapshot(
+                snapshot_id=SNAPSHOT,
+                claims=tuple(_claim(source, refs[source]) for source in SOURCES),
+                observed_at=NOW,
                 evidence_verifier=artifact_store_evidence_verifier(store),
             )
             self.assertEqual(snapshot.status, "UNKNOWN")
@@ -136,7 +196,10 @@ class CapabilityArtifactEvidenceTests(unittest.TestCase):
                 snapshot_id=SNAPSHOT,
                 claims=tuple(_claim(source, refs[source]) for source in SOURCES),
                 observed_at=NOW,
-                evidence_verifier=artifact_store_evidence_verifier(store),
+                evidence_verifier=artifact_store_evidence_verifier(
+                    store,
+                    issuer_verifiers=_trusted_issuer_verifiers(),
+                ),
             )
             self.assertEqual(snapshot.status, "CONFLICTED")
             self.assertNotIn("API", snapshot.sources)
@@ -173,7 +236,10 @@ class CapabilityArtifactEvidenceTests(unittest.TestCase):
             store = ArtifactStore(directory)
             refs = {source: _publish(store, source) for source in SOURCES}
             claims = tuple(_claim(source, refs[source]) for source in SOURCES)
-            verifier = artifact_store_evidence_verifier(store)
+            verifier = artifact_store_evidence_verifier(
+                store,
+                issuer_verifiers=_trusted_issuer_verifiers(),
+            )
             current = derive_capability_snapshot(
                 snapshot_id=SNAPSHOT,
                 claims=claims,

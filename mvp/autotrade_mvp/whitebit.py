@@ -263,10 +263,18 @@ class WhiteBitPreparedRequest:
     endpoint: str
     body: Mapping[str, object]
     capability_snapshot_id: str
+    account_id: str
+    environment: str
     documentation_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
+        object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
+        object.__setattr__(
+            self,
+            "environment",
+            _text(self.environment, name="environment").upper(),
+        )
 
 
 @dataclass(frozen=True)
@@ -407,6 +415,8 @@ def prepare_order_request(
     intent: WhiteBitOrderIntent,
     *,
     client_order_id: str,
+    account_id: str,
+    environment: str,
     capability: CapabilitySnapshot,
     market_rules: WhiteBitMarketRules,
     at: datetime,
@@ -424,10 +434,16 @@ def prepare_order_request(
         raise TypeError("capability must be CapabilitySnapshot")
     point = _instant(at, name="at")
     client_id = validate_client_order_id(client_order_id)
+    target_account = _text(account_id, name="account_id")
+    target_environment = _text(environment, name="environment").upper()
     if capability.provider_id.upper() != "WHITEBIT":
         raise WhiteBitAdapterError("capability belongs to another provider")
     if capability.instrument_version != intent.instrument_version:
         raise WhiteBitAdapterError("capability instrument version does not match intent")
+    if capability.account_id != target_account:
+        raise WhiteBitAdapterError("capability account does not match target account")
+    if capability.environment != target_environment:
+        raise WhiteBitAdapterError("capability environment does not match target environment")
     if not capability.admits(
         at=point,
         order_type=intent.order_type,
@@ -477,6 +493,8 @@ def prepare_order_request(
         endpoint=endpoint,
         body=body,
         capability_snapshot_id=capability.snapshot_id,
+        account_id=target_account,
+        environment=target_environment,
         documentation_refs=tuple(WHITEBIT_OFFICIAL_DOCS.values()),
     )
 
@@ -579,6 +597,14 @@ def parse_submission_result(
     account = _text(account_id, name="account_id")
     env = _text(environment, name="environment").upper()
     point = _instant(observed_at, name="observed_at")
+    if account != prepared.account_id:
+        raise WhiteBitAdapterError(
+            "submission account does not match prepared capability account"
+        )
+    if env != prepared.environment:
+        raise WhiteBitAdapterError(
+            "submission environment does not match prepared capability environment"
+        )
 
     if transport_ambiguous:
         if response_body is not None or http_status is not None:

@@ -484,6 +484,49 @@ def _canonical_equity_fill_terms(
     unit_price = abs(trade_cash / quantity)
     if unit_price <= 0 or not unit_price.is_finite():
         raise AccountingConflict("Position projection requires a finite positive price")
+
+    # Clearing legs alone are not evidence that this transaction came from the
+    # canonical equity-fill booking path. Reconstruct the only allowed posting
+    # shape from the inferred economic terms and compare the complete ordered
+    # postings, including trade cash and the optional single fee/rebate pair.
+    # This prevents an arbitrary balanced SUSPENSE/ADJUSTMENT leg from being
+    # interpreted as fill cash merely because it happened to carry matching
+    # clearing amounts.
+    fee_postings = [
+        item
+        for item in normalized.postings
+        if item.ledger_account.startswith("FEE_EXPENSE:")
+    ]
+    if len(fee_postings) > 1:
+        raise AccountingConflict(
+            "Position projection requires canonical equity-fill fee postings"
+        )
+    fee_amount = Decimal("0")
+    fee_currency: str | None = None
+    if fee_postings:
+        fee_posting = fee_postings[0]
+        fee_currency = fee_posting.asset_or_currency
+        if fee_posting.ledger_account != f"FEE_EXPENSE:{fee_currency}":
+            raise AccountingConflict(
+                "Position projection requires canonical equity-fill fee postings"
+            )
+        fee_amount = fee_posting.signed_amount
+
+    expected = book_equity_fill(
+        transaction_id=normalized.transaction_id,
+        cause_event_id=normalized.cause_event_id,
+        instrument=symbol,
+        settlement_currency=settlement,
+        side="BUY" if quantity > 0 else "SELL",
+        quantity=abs(quantity),
+        price=unit_price,
+        fee=fee_amount,
+        fee_currency=fee_currency,
+    )
+    if normalized.postings != expected.postings:
+        raise AccountingConflict(
+            "Position projection requires complete canonical equity-fill posting shape"
+        )
     return quantity, unit_price
 
 

@@ -28,6 +28,15 @@ def digest(value: str) -> str:
     return "sha256:" + sha256(value.encode("utf-8")).hexdigest()
 
 
+def holdout_identity(seed: str) -> dict[str, str]:
+    return {
+        "dataset_digest": digest(f"locked-forward:{seed}"),
+        "segment_start": "2026-07-02",
+        "segment_end": "2026-09-30",
+        "role": "LOCKED_FORWARD",
+    }
+
+
 def protocol():
     return {
         "hypothesis": "candidate improves registered net outcome",
@@ -72,15 +81,6 @@ def protocol():
     }
 
 
-def holdout_identity():
-    return {
-        "dataset_digest": "sha256:" + ("a" * 64),
-        "segment_start": "2026-07-02",
-        "segment_end": "2026-09-30",
-        "role": "LOCKED_FORWARD",
-    }
-
-
 def approval(
     science,
     candidate="candidate-a",
@@ -118,17 +118,18 @@ def approval(
         "trial_budget": trial_state["trial_budget"],
         "trial_log_hash": trial_state["trial_log_hash"],
     }
+    identity = holdout_identity(candidate)
     if contaminate:
         science.record_holdout_access(
             registered.protocol_id,
             holdout_id=f"holdout-{candidate}",
-            holdout_identity=holdout_identity(),
+            holdout_identity=identity,
             purpose="manual peek",
         )
     locked = science.register_evaluation(
         registered.protocol_id,
         holdout_id=f"holdout-{candidate}",
-        holdout_identity=holdout_identity(),
+        holdout_identity=identity,
         result=result,
     )
     return CandidateApproval.create(
@@ -290,7 +291,7 @@ class ChampionRegistryTests(unittest.TestCase):
             locked = science.register_evaluation(
                 registered.protocol_id,
                 holdout_id="holdout-forged-trial-binding",
-                holdout_identity=holdout_identity(),
+                holdout_identity=holdout_identity("holdout-forged-trial-binding"),
                 result=result,
             )
             forged_payload = {
@@ -378,7 +379,7 @@ class ChampionRegistryTests(unittest.TestCase):
             locked = science.register_evaluation(
                 registered.protocol_id,
                 holdout_id="holdout-early-stop",
-                holdout_identity=holdout_identity(),
+                holdout_identity=holdout_identity("holdout-early-stop"),
                 result=base_result,
             )
             approval_value = CandidateApproval.create(
@@ -455,7 +456,7 @@ class ChampionRegistryTests(unittest.TestCase):
             locked = science.register_evaluation(
                 registered.protocol_id,
                 holdout_id="holdout-log-bound",
-                holdout_identity=holdout_identity(),
+                holdout_identity=holdout_identity("holdout-log-bound"),
                 result=result,
             )
             # Simulate storage corruption/tampering that keeps trial count and
@@ -735,7 +736,7 @@ class ChampionRegistryTests(unittest.TestCase):
             science.record_holdout_access(
                 candidate.protocol_id,
                 holdout_id=evidence.holdout_id,
-                holdout_identity=holdout_identity(),
+                holdout_identity=holdout_identity(candidate.candidate_id),
                 purpose="post-evaluation manual inspection",
             )
             with self.assertRaisesRegex(
@@ -799,7 +800,7 @@ class ChampionRegistryTests(unittest.TestCase):
             locked = science.register_evaluation(
                 registered.protocol_id,
                 holdout_id="holdout-a",
-                holdout_identity=holdout_identity(),
+                holdout_identity=holdout_identity("holdout-a"),
                 result=result,
             )
             candidate = CandidateApproval.create(

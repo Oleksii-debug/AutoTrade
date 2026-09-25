@@ -1549,7 +1549,14 @@ def evaluate_risk(
         raise ValueError(f"Missing marks for positions: {', '.join(sorted(missing_marks))}")
 
     def exposure_per_unit(symbol: str) -> Decimal:
-        return equivalent_exposure_map.get(symbol, context.marks[symbol])
+        instrument_type = (
+            intent.instrument_type
+            if symbol == intent.symbol
+            else context_instrument_types.get(symbol)
+        )
+        if instrument_type in derivative_instrument_types:
+            return equivalent_exposure_map.get(symbol, context.marks[symbol])
+        return context.marks[symbol]
 
     base_notionals = {
         symbol: qty * exposure_per_unit(symbol)

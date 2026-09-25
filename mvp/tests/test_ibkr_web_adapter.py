@@ -94,6 +94,7 @@ def ibkr_trade_observation(payload, *, account_id="U1234567"):
     )
     return observe_authenticated_json_response(
         query_binding=binding,
+        http_status=200,
         response_bytes=json.dumps(
             payload,
             sort_keys=True,

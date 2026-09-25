@@ -1,35 +1,43 @@
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
+    CapabilityRegistry,
     EvidenceVerification,
     derive_capability_snapshot,
 )
+from mvp.autotrade_mvp.binance_spot import parse_account_trades
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
     Surface,
+    observe_authenticated_json_response,
     prepare_authenticated_read_query,
 )
 from mvp.autotrade_mvp.provider_transport import (
     BINANCE_SPOT_ENDPOINT_POLICIES,
+    AuthenticatedReadHttpRequest,
+    AuthenticatedReadWireResponse,
     BinanceSpotAuthenticatedReadSigner,
     BinanceSpotAuthenticatedReadTransport,
     BinanceSpotHttpTransport,
     BinanceSpotSigner,
     ProviderEndpointPolicy,
+    ProviderTransportError,
     ProviderTransportScopeError,
 )
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 
 
 class FakeSecretResolver:
-    def __init__(self, events):
+    def __init__(self, events, *, on_resolve=None):
         self.events = events
         self.calls = []
+        self.on_resolve = on_resolve
 
     def resolve_for_execution(
         self,
@@ -56,6 +64,8 @@ class FakeSecretResolver:
                 "purpose": purpose,
             }
         )
+        if self.on_resolve is not None:
+            self.on_resolve()
         return json.dumps(
             {"api_key": "api-key-SECRET", "api_secret": "signing-SECRET"},
             sort_keys=True,
@@ -64,10 +74,18 @@ class FakeSecretResolver:
 
 
 class RecordingWire:
-    def __init__(self, events, *, response=b'{"ok":true}', error=None):
+    def __init__(
+        self,
+        events,
+        *,
+        response=b'{"ok":true}',
+        error=None,
+        http_status=200,
+    ):
         self.events = events
         self.response = response
         self.error = error
+        self.http_status = http_status
         self.requests = []
 
     def send(self, request):
@@ -75,6 +93,11 @@ class RecordingWire:
         self.requests.append(request)
         if self.error is not None:
             raise self.error
+        if isinstance(request, AuthenticatedReadHttpRequest):
+            return AuthenticatedReadWireResponse(
+                http_status=self.http_status,
+                body=self.response,
+            )
         return self.response
 
 
@@ -110,9 +133,15 @@ def read_handle(*, environment="PAPER", account_id="acct-1"):
     )
 
 
-def verified_read_capability():
-    observed = READ_NOW - timedelta(minutes=1)
-    expires = READ_NOW + timedelta(minutes=10)
+def verified_read_capability(
+    *,
+    snapshot_id=READ_SNAPSHOT_ID,
+    snapshot_observed_at=READ_NOW,
+    permission_scopes=frozenset({"ORDER.READ"}),
+    data_entitlements=frozenset({"ACCOUNT"}),
+):
+    observed = snapshot_observed_at - timedelta(minutes=1)
+    expires = snapshot_observed_at + timedelta(minutes=10)
     claims = tuple(
         CapabilityClaim(
             source=source,
@@ -125,11 +154,11 @@ def verified_read_capability():
             expires_at=expires,
             supported_order_types=frozenset({"LIMIT"}),
             time_in_force=frozenset({"GTC"}),
-            permission_scopes=frozenset({"ORDER.READ"}),
+            permission_scopes=permission_scopes,
             position_mode="NET",
             native_protection=frozenset(),
             rate_limit_policy_id="binance-test-v1",
-            data_entitlements=frozenset({"ACCOUNT"}),
+            data_entitlements=data_entitlements,
             evidence_ref={
                 "artifact_id": _READ_ARTIFACT_IDS[source],
                 "sha256": "sha256:" + "a" * 64,
@@ -139,21 +168,38 @@ def verified_read_capability():
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
     return derive_capability_snapshot(
-        snapshot_id=READ_SNAPSHOT_ID,
+        snapshot_id=snapshot_id,
         claims=claims,
-        observed_at=READ_NOW,
+        observed_at=snapshot_observed_at,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
     )
 
 
-def authenticated_read_binding(*, endpoint="/api/v3/account", query=None):
+class RecordingCapabilityRegistry(CapabilityRegistry):
+    def __init__(self, events):
+        super().__init__()
+        self.events = events
+
+    def require_verified(self, **kwargs):
+        self.events.append("capability")
+        return super().require_verified(**kwargs)
+
+
+def authenticated_read_binding(
+    *,
+    endpoint="/api/v3/account",
+    query=None,
+    capability=None,
+    permission_scope="ORDER.READ",
+    surface=Surface.AUTHENTICATED_READ,
+):
     return prepare_authenticated_read_query(
-        capability=verified_read_capability(),
-        surface=Surface.AUTHENTICATED_READ,
+        capability=capability or verified_read_capability(),
+        surface=surface,
         endpoint=endpoint,
         query={"omitZeroBalances": "true"} if query is None else query,
         at=READ_NOW,
-        permission_scope="ORDER.READ",
+        permission_scope=permission_scope,
     )
 
 
@@ -557,19 +603,36 @@ class ProviderTransportTests(unittest.TestCase):
 
 
 class AuthenticatedReadTransportTests(unittest.TestCase):
-    def make_read_transport(self, *, events, wire=None, quota_gate=None):
-        resolver = FakeSecretResolver(events)
+    def make_read_transport(
+        self,
+        *,
+        events,
+        wire=None,
+        quota_gate=None,
+        capability=None,
+        capability_registry=None,
+        secret_resolver=None,
+        clock_utc=None,
+    ):
+        resolver = secret_resolver or FakeSecretResolver(events)
+        final_capability = capability or verified_read_capability()
+
+        if capability_registry is None:
+            capability_registry = RecordingCapabilityRegistry(events)
+            capability_registry.add(final_capability)
+
         transport = BinanceSpotAuthenticatedReadTransport(
             policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
             account_id="acct-1",
             capability_snapshot_id=READ_SNAPSHOT_ID,
+            capability_registry=capability_registry,
             secret_resolver=resolver,
             credential_handle=read_handle(),
             session_token="read-session-token",
             origin="https://localhost",
             execution_identity="host-owner",
             clock_millis=lambda: 1700000000000,
-            clock_utc=lambda: READ_NOW + timedelta(seconds=1),
+            clock_utc=clock_utc or (lambda: READ_NOW + timedelta(seconds=1)),
             quota_gate=quota_gate,
             wire_client=wire or RecordingWire(events),
         )
@@ -611,7 +674,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
         binding = authenticated_read_binding()
         observation = transport(binding)
 
-        self.assertEqual(events, ["quota", "resolve", "wire"])
+        self.assertEqual(events, ["quota", "capability", "resolve", "capability", "wire"])
         self.assertEqual(len(wire.requests), 1)
         self.assertEqual(len(resolver.calls), 1)
         self.assertEqual(resolver.calls[0]["purpose"], "READ")
@@ -623,6 +686,55 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
         self.assertTrue(observation.evidence_ref.startswith("provider-read:sha256:"))
         self.assertEqual(observation.payload["balances"][0]["asset"], "USD")
         self.assertNotIn("SECRET", observation.evidence_ref)
+
+    def test_my_trades_activity_transport_flows_into_fill_parser(self):
+        events = []
+        capability = verified_read_capability(
+            permission_scopes=frozenset({"TRADE.READ"}),
+            data_entitlements=frozenset({"TRADES"}),
+        )
+        body = (
+            b'[{"symbol":"BTCUSDT","id":7,"orderId":42,'
+            b'"price":"100.2500","qty":"0.2000","commission":"0.0010",'
+            b'"commissionAsset":"BNB","time":1790272800123}]'
+        )
+        transport, _resolver = self.make_read_transport(
+            events=events,
+            capability=capability,
+            wire=RecordingWire(events, response=body, http_status=200),
+        )
+        binding = authenticated_read_binding(
+            endpoint="/api/v3/myTrades",
+            query={"symbol": "BTCUSDT"},
+            capability=capability,
+            permission_scope="TRADE.READ",
+            surface=Surface.ACTIVITIES,
+        )
+        observation = transport(binding)
+        fills = parse_account_trades(
+            observation,
+            instrument_versions={"BTCUSDT": "BTCUSDT@1"},
+            client_ids_by_order_id={42: "at-fill-42"},
+        )
+        self.assertEqual(len(fills), 1)
+        fill = fills[0]
+        self.assertEqual(fill.quantity, Decimal("0.2000"))
+        self.assertEqual(fill.price, Decimal("100.2500"))
+        self.assertEqual(fill.fee_amount, Decimal("0.0010"))
+        self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
+
+        wrong_binding = authenticated_read_binding(
+            endpoint="/api/v3/myTrades",
+            query={"symbol": "BTCUSDT"},
+            capability=capability,
+            permission_scope="TRADE.READ",
+            surface=Surface.AUTHENTICATED_READ,
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "surface does not match",
+        ):
+            transport(wrong_binding)
 
     def test_read_scope_mismatch_rejects_before_secret_or_wire(self):
         events = []
@@ -684,6 +796,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
                 policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
                 account_id="acct-1",
                 capability_snapshot_id=READ_SNAPSHOT_ID,
+                capability_registry=CapabilityRegistry(),
                 secret_resolver=FakeSecretResolver([]),
                 credential_handle=trade_handle(),
                 session_token="read-session-token",
@@ -692,6 +805,227 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
                 clock_millis=lambda: 1700000000000,
                 clock_utc=lambda: READ_NOW,
             )
+
+    def test_final_capability_expiry_after_quota_blocks_before_secret_or_wire(self):
+        events = []
+        wire = RecordingWire(events)
+        capability = verified_read_capability()
+
+        def quota(*_args):
+            events.append("quota")
+
+        transport, resolver = self.make_read_transport(
+            events=events,
+            wire=wire,
+            quota_gate=quota,
+            capability=capability,
+            clock_utc=lambda: READ_NOW + timedelta(minutes=11),
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "cannot be verified",
+        ):
+            transport(authenticated_read_binding(capability=capability))
+        self.assertEqual(events, ["quota", "capability"])
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
+
+    def test_newer_capability_supersedes_prepared_snapshot_before_secret_or_wire(self):
+        events = []
+        wire = RecordingWire(events)
+        capability = verified_read_capability()
+        registry = RecordingCapabilityRegistry(events)
+        registry.add(capability)
+        registry.add(
+            verified_read_capability(
+                snapshot_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                snapshot_observed_at=READ_NOW + timedelta(milliseconds=500),
+                data_entitlements=frozenset({"MARKET_DATA"}),
+            )
+        )
+
+        transport, resolver = self.make_read_transport(
+            events=events,
+            wire=wire,
+            capability=capability,
+            capability_registry=registry,
+            clock_utc=lambda: READ_NOW + timedelta(seconds=1),
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "no longer valid",
+        ):
+            transport(authenticated_read_binding(capability=capability))
+        self.assertEqual(events, ["capability"])
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
+
+    def test_supersession_after_secret_resolution_blocks_final_wire_send(self):
+        events = []
+        wire = RecordingWire(events)
+        capability = verified_read_capability()
+        registry = RecordingCapabilityRegistry(events)
+        registry.add(capability)
+        replacement = verified_read_capability(
+            snapshot_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            snapshot_observed_at=READ_NOW + timedelta(milliseconds=500),
+            data_entitlements=frozenset({"MARKET_DATA"}),
+        )
+
+        def supersede():
+            registry.add(replacement)
+
+        secret_resolver = FakeSecretResolver(events, on_resolve=supersede)
+        transport, secret_resolver = self.make_read_transport(
+            events=events,
+            wire=wire,
+            capability=capability,
+            capability_registry=registry,
+            secret_resolver=secret_resolver,
+            clock_utc=lambda: READ_NOW + timedelta(seconds=1),
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "no longer valid",
+        ):
+            transport(authenticated_read_binding(capability=capability))
+        self.assertEqual(events, ["capability", "resolve", "capability"])
+        self.assertEqual(len(secret_resolver.calls), 1)
+        self.assertEqual(wire.requests, [])
+
+    def test_unsupported_authenticated_endpoint_fails_before_secret_or_wire(self):
+        events = []
+        wire = RecordingWire(events)
+        transport, resolver = self.make_read_transport(events=events, wire=wire)
+        binding = authenticated_read_binding(endpoint="/api/v3/order")
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "endpoint is not explicitly allowed",
+        ):
+            transport(binding)
+        self.assertEqual(events, [])
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
+
+    def test_non_write_mutating_scope_name_cannot_cross_read_endpoint_policy(self):
+        events = []
+        wire = RecordingWire(events)
+        capability = verified_read_capability(
+            permission_scopes=frozenset({"ORDER.PLACE"}),
+        )
+        binding = authenticated_read_binding(
+            capability=capability,
+            permission_scope="ORDER.PLACE",
+        )
+        transport, resolver = self.make_read_transport(
+            events=events,
+            wire=wire,
+            capability=capability,
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "permission scope does not match",
+        ):
+            transport(binding)
+        self.assertEqual(events, [])
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
+
+    def test_required_data_entitlement_is_revalidated_before_secret_or_wire(self):
+        events = []
+        wire = RecordingWire(events)
+        capability = verified_read_capability(
+            data_entitlements=frozenset({"MARKET_DATA"}),
+        )
+        transport, resolver = self.make_read_transport(
+            events=events,
+            wire=wire,
+            capability=capability,
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "no longer valid",
+        ):
+            transport(authenticated_read_binding(capability=capability))
+        self.assertEqual(events, ["capability"])
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
+
+    def test_unexpected_http_status_is_never_promoted_to_provider_state(self):
+        body = b'{"balances":[{"asset":"USD"}]}'
+        for status in (201, 202, 206, 401, 429, 500):
+            events = []
+            wire = RecordingWire(events, response=body, http_status=status)
+            transport, resolver = self.make_read_transport(
+                events=events,
+                wire=wire,
+            )
+            with self.subTest(status=status), self.assertRaisesRegex(
+                ProviderTransportError,
+                "unexpected HTTP status",
+            ):
+                transport(authenticated_read_binding())
+            self.assertEqual(events, ["capability", "resolve", "capability", "wire"])
+            self.assertEqual(len(resolver.calls), 1)
+            self.assertEqual(len(wire.requests), 1)
+
+    def test_http_status_is_bound_into_read_evidence_identity(self):
+        body = b'{"balances":[{"asset":"USD"}]}'
+        binding = authenticated_read_binding()
+        observations = [
+            observe_authenticated_json_response(
+                query_binding=binding,
+                http_status=status,
+                response_bytes=body,
+                observed_at=READ_NOW + timedelta(seconds=1),
+            )
+            for status in (200, 201)
+        ]
+        self.assertEqual(
+            observations[0].response_sha256,
+            observations[1].response_sha256,
+        )
+        self.assertNotEqual(
+            observations[0].evidence_ref,
+            observations[1].evidence_ref,
+        )
+
+    def test_authenticated_read_preserves_exact_decimal_json_numbers(self):
+        events = []
+        body = (
+            b'{"small":0.1,"precise":1234567890.12345678901234567890,'
+            b'"exponent":1e-18,"negative":-42.5000,"integer":7}'
+        )
+        transport, _resolver = self.make_read_transport(
+            events=events,
+            wire=RecordingWire(events, response=body),
+        )
+        observation = transport(authenticated_read_binding())
+
+        self.assertIsInstance(observation.payload["small"], Decimal)
+        self.assertEqual(observation.payload["small"], Decimal("0.1"))
+        self.assertEqual(
+            observation.payload["precise"],
+            Decimal("1234567890.12345678901234567890"),
+        )
+        self.assertEqual(observation.payload["exponent"], Decimal("1e-18"))
+        self.assertEqual(observation.payload["negative"], Decimal("-42.5000"))
+        self.assertEqual(observation.payload["integer"], 7)
+        self.assertNotIsInstance(observation.payload["small"], float)
+
+    def test_authenticated_read_rejects_non_finite_json_numbers(self):
+        for token in (b"NaN", b"Infinity", b"-Infinity"):
+            events = []
+            body = b'{"value":' + token + b"}"
+            transport, _resolver = self.make_read_transport(
+                events=events,
+                wire=RecordingWire(events, response=body),
+            )
+            with self.subTest(token=token), self.assertRaisesRegex(
+                ValueError,
+                "non-finite JSON constant",
+            ):
+                transport(authenticated_read_binding())
 
     def test_malformed_provider_json_is_not_retried(self):
         events = []
@@ -702,7 +1036,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
             "duplicate JSON key",
         ):
             transport(authenticated_read_binding())
-        self.assertEqual(events, ["resolve", "wire"])
+        self.assertEqual(events, ["capability", "resolve", "capability", "wire"])
         self.assertEqual(len(wire.requests), 1)
         self.assertEqual(len(resolver.calls), 1)
 

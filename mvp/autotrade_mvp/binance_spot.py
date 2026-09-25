@@ -301,7 +301,7 @@ def parse_account_trades(
         raise TypeError("observation must be ProviderResponseObservation")
     observation.require_scope(
         provider_id="BINANCE",
-        surface=Surface.AUTHENTICATED_READ,
+        surface=Surface.ACTIVITIES,
         endpoint=BINANCE_SPOT_ENDPOINTS["EXECUTIONS"],
     )
     rows = observation.payload

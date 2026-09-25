@@ -51,6 +51,9 @@ def artifact(
     )
 
 
+def freeze_verified(candidate, verifier=lambda artifact: True):
+    return freeze_release_candidate(candidate, verify_evidence=verifier)
+
 class ReleaseCandidateFreezeTests(unittest.TestCase):
     def candidate(self, **overrides):
         values = dict(
@@ -68,10 +71,10 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         return ReleaseCandidateInput.create(**values)
 
     def test_complete_exact_evidence_freezes_deterministic_manifest(self):
-        first = freeze_release_candidate(self.candidate())
+        first = freeze_verified(self.candidate())
         reordered = list(self.candidate().artifacts)
         reordered.reverse()
-        second = freeze_release_candidate(
+        second = freeze_verified(
             self.candidate(artifacts=tuple(reordered))
         )
         self.assertEqual(first.status, "FROZEN")
@@ -84,7 +87,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         artifacts = tuple(
             item for item in self.candidate().artifacts if item.role != "SBOM"
         )
-        decision = freeze_release_candidate(
+        decision = freeze_verified(
             self.candidate(artifacts=artifacts)
         )
         self.assertEqual(decision.status, "BLOCKED")
@@ -94,7 +97,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
     def test_artifact_from_another_source_sha_blocks_freeze(self):
         artifacts = list(self.candidate().artifacts)
         artifacts[0] = artifact("HOST", source_sha=OTHER_SOURCE)
-        decision = freeze_release_candidate(
+        decision = freeze_verified(
             self.candidate(artifacts=artifacts)
         )
         self.assertEqual(decision.status, "BLOCKED")
@@ -111,7 +114,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                     )
                     for item in self.candidate().artifacts
                 ]
-                decision = freeze_release_candidate(
+                decision = freeze_verified(
                     self.candidate(artifacts=artifacts)
                 )
                 self.assertEqual(decision.status, "BLOCKED")
@@ -133,7 +136,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
             )
             for item in self.candidate().artifacts
         ]
-        decision = freeze_release_candidate(
+        decision = freeze_verified(
             self.candidate(artifacts=artifacts)
         )
         self.assertEqual(decision.status, "BLOCKED")
@@ -148,7 +151,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
             )
             for item in self.candidate().artifacts
         ]
-        decision = freeze_release_candidate(
+        decision = freeze_verified(
             self.candidate(artifacts=artifacts)
         )
         self.assertEqual(decision.status, "BLOCKED")
@@ -163,7 +166,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
             for item in self.candidate().artifacts
             if item.role != "RELEASE_QUALIFICATION"
         )
-        missing = freeze_release_candidate(
+        missing = freeze_verified(
             self.candidate(artifacts=artifacts)
         )
         self.assertEqual(missing.status, "BLOCKED")
@@ -183,7 +186,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
             )
             for item in self.candidate().artifacts
         ]
-        inconclusive = freeze_release_candidate(
+        inconclusive = freeze_verified(
             self.candidate(artifacts=inconclusive_artifacts)
         )
         self.assertEqual(inconclusive.status, "BLOCKED")
@@ -193,7 +196,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         )
 
     def test_unresolved_blocker_prevents_manifest_publication(self):
-        decision = freeze_release_candidate(
+        decision = freeze_verified(
             self.candidate(
                 unresolved_blockers=("provider-paper-qualification",)
             )
@@ -248,11 +251,11 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
             )
 
     def test_manifest_hash_changes_when_evidence_hash_changes(self):
-        original = freeze_release_candidate(self.candidate())
+        original = freeze_verified(self.candidate())
         artifacts = list(self.candidate().artifacts)
         index = next(i for i, item in enumerate(artifacts) if item.role == "SBOM")
         artifacts[index] = artifact("SBOM", digest_char="f")
-        changed = freeze_release_candidate(
+        changed = freeze_verified(
             self.candidate(artifacts=artifacts)
         )
         self.assertEqual(changed.status, "FROZEN")
@@ -273,7 +276,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                     )
                     for item in self.candidate().artifacts
                 ]
-                decision = freeze_release_candidate(
+                decision = freeze_verified(
                     self.candidate(artifacts=artifacts)
                 )
                 self.assertEqual(decision.status, "BLOCKED")
@@ -283,6 +286,41 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 )
 
 
+
+    def test_freeze_requires_independent_evidence_verifier(self):
+        decision = freeze_release_candidate(self.candidate())
+        self.assertEqual(decision.status, "BLOCKED")
+        self.assertIn(
+            "independent_evidence_verifier_missing",
+            decision.reasons,
+        )
+        self.assertIsNone(decision.manifest_json)
+
+    def test_false_independent_verification_blocks_exact_artifact(self):
+        decision = freeze_verified(
+            self.candidate(),
+            verifier=lambda item: item.role != "SBOM",
+        )
+        self.assertEqual(decision.status, "BLOCKED")
+        self.assertIn(
+            "evidence_not_independently_verified:SBOM",
+            decision.reasons,
+        )
+
+    def test_verifier_exception_fails_closed(self):
+        def broken_verifier(_artifact):
+            raise RuntimeError("resolver unavailable")
+
+        decision = freeze_verified(self.candidate(), verifier=broken_verifier)
+        self.assertEqual(decision.status, "BLOCKED")
+        self.assertIn(
+            "evidence_not_independently_verified:HOST",
+            decision.reasons,
+        )
+
+    def test_verifier_must_be_callable_when_supplied(self):
+        with self.assertRaisesRegex(TypeError, "verify_evidence must be callable"):
+            freeze_release_candidate(self.candidate(), verify_evidence=True)
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,10 +9,13 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from hashlib import sha256
 from typing import Mapping
+from uuid import UUID
 import json
 import re
 import sqlite3
 
+from autotrade_research.artifacts.store import ArtifactIntegrityError, ArtifactStore
+from autotrade_research.io.strict_json import strict_json_loads
 from autotrade_research.science.registry import ScientificRegistry
 
 
@@ -64,6 +67,26 @@ def _decimal(value, *, name: str, non_negative: bool = False) -> Decimal:
     if non_negative and result < 0:
         raise ValueError(f"{name} cannot be negative")
     return result
+
+
+
+@dataclass(frozen=True)
+class OnlineEvidenceRef:
+    artifact_id: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        try:
+            artifact_id = str(UUID(self.artifact_id))
+        except (ValueError, AttributeError, TypeError) as error:
+            raise ValueError("online evidence artifact_id must be a UUID") from error
+        digest = _digest(self.sha256, name="online evidence sha256")
+        object.__setattr__(self, "artifact_id", artifact_id)
+        object.__setattr__(self, "sha256", digest)
+
+    @property
+    def token(self) -> str:
+        return f"{self.artifact_id}@{self.sha256}"
 
 
 @dataclass(frozen=True)
@@ -385,11 +408,20 @@ class PromotionConflict(RuntimeError):
 
 
 class ChampionRegistry:
-    def __init__(self, path: str | Path, *, scientific_registry: ScientificRegistry):
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        scientific_registry: ScientificRegistry,
+        artifact_store: ArtifactStore | None = None,
+    ):
         if not isinstance(scientific_registry, ScientificRegistry):
             raise TypeError("scientific_registry must be ScientificRegistry")
+        if artifact_store is not None and not isinstance(artifact_store, ArtifactStore):
+            raise TypeError("artifact_store must be ArtifactStore or None")
         self.path = Path(path)
         self.scientific_registry = scientific_registry
+        self.artifact_store = artifact_store
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as con:
             con.executescript(
@@ -649,6 +681,102 @@ class ChampionRegistry:
             con.commit()
         return self.state()
 
+
+
+    def _verified_artifact(self, ref: OnlineEvidenceRef) -> tuple[dict, bytes]:
+        if not isinstance(ref, OnlineEvidenceRef):
+            raise TypeError("online evidence reference must be OnlineEvidenceRef")
+        if self.artifact_store is None:
+            raise ValueError("online update requires an immutable artifact verifier")
+        try:
+            manifest = self.artifact_store.load_manifest(ref.artifact_id)
+            data = self.artifact_store.read_bytes(ref.artifact_id)
+        except (FileNotFoundError, ArtifactIntegrityError, OSError, ValueError) as error:
+            raise ValueError("online evidence artifact cannot be verified") from error
+        if manifest.get("manifest_hash") is None:
+            raise ValueError("online evidence manifest lacks integrity binding")
+        if manifest.get("sha256") != ref.sha256:
+            raise ValueError("online evidence digest does not match immutable artifact")
+        return manifest, data
+
+    def _verified_online_decision(
+        self,
+        ref: OnlineEvidenceRef,
+        *,
+        kind: str,
+        envelope: OnlineEnvelope,
+        expected_generation: int,
+        applied: datetime,
+        label_ref: str | None = None,
+    ) -> dict:
+        _manifest, data = self._verified_artifact(ref)
+        try:
+            raw = data.decode("utf-8")
+            payload = strict_json_loads(raw)
+        except (UnicodeError, ValueError) as error:
+            raise ValueError("online decision evidence must be strict UTF-8 JSON") from error
+        if type(payload) is not dict:
+            raise ValueError("online decision evidence must be an object")
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        if canonical != raw:
+            raise ValueError("online decision evidence must use canonical JSON bytes")
+
+        common = {
+            "kind",
+            "champion_artifact_hash",
+            "routing_generation",
+            "authority_scope_id",
+            "envelope_hash",
+            "available_at",
+        }
+        if kind == "DRIFT_GATE":
+            expected_keys = common | {"status"}
+        elif kind == "STOP_CONDITION":
+            expected_keys = common | {"triggered"}
+        elif kind == "ONLINE_LABEL":
+            expected_keys = common | {"label_ref", "outcome_state"}
+        else:
+            raise ValueError("unsupported online evidence kind")
+        if set(payload) != expected_keys or payload.get("kind") != kind:
+            raise ValueError(f"{kind} evidence shape is invalid")
+
+        if payload.get("champion_artifact_hash") != envelope.champion_artifact_hash:
+            raise ValueError("online evidence is bound to a different champion artifact")
+        if payload.get("routing_generation") != expected_generation:
+            raise ValueError("online evidence is bound to a different routing generation")
+        if payload.get("authority_scope_id") != envelope.authority_scope_id:
+            raise ValueError("online evidence is bound to a different authority scope")
+        if payload.get("envelope_hash") != envelope.envelope_hash:
+            raise ValueError("online evidence is bound to a different online envelope")
+        available_raw = payload.get("available_at")
+        if not isinstance(available_raw, str):
+            raise ValueError("online evidence available_at is required")
+        try:
+            available = _time(
+                datetime.fromisoformat(available_raw.replace("Z", "+00:00")),
+                name="online evidence available_at",
+            )
+        except ValueError as error:
+            raise ValueError("online evidence available_at must be timezone-aware ISO-8601") from error
+        if available > applied:
+            raise ValueError("future online evidence cannot authorize this update")
+
+        if kind == "DRIFT_GATE" and payload.get("status") != "PASS":
+            raise ValueError("online update is blocked by the registered drift gate")
+        if kind == "STOP_CONDITION" and payload.get("triggered") is not False:
+            raise ValueError("online update is blocked by a registered stop condition")
+        if kind == "ONLINE_LABEL":
+            if payload.get("label_ref") != label_ref:
+                raise ValueError("online label evidence identity mismatch")
+            if payload.get("outcome_state") != "RECONCILED":
+                raise ValueError("online update label outcome is not reconciled/eligible")
+        return payload
 
     def record_online_update(
         self,

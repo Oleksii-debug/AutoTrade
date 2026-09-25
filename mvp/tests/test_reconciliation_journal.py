@@ -546,7 +546,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                         "schema_version": "1.0.0",
                         "aggregate_type": "submission_attempt",
                         "aggregate_id": aggregate_id,
-                        "aggregate_version": version,
+                        "aggregate_version": str(version),
                         "host_id": "local-mvp",
                         "owner_epoch": "1",
                         "environment": "PAPER",

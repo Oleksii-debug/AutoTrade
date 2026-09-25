@@ -146,6 +146,75 @@ def online_envelope(candidate="candidate-a", *, interval=60, max_cost="2"):
 
 
 class ChampionRegistryTests(unittest.TestCase):
+    def test_direct_candidate_approval_cannot_bypass_identity_or_boolean_guards(self):
+        common = dict(
+            candidate_id="candidate-a",
+            artifact_hash=digest("candidate-a"),
+            evidence_id="evidence:candidate-a",
+            evidence_valid_until=BASE + timedelta(days=1),
+            evaluation_status="PASS",
+            retention_passed=True,
+            risk_passed=True,
+            authority_scope_id="paper-scope",
+            protocol_id="protocol-1",
+            protocol_hash=digest("protocol"),
+            evaluation_id="evaluation-1",
+            evaluation_result_hash=digest("evaluation"),
+        )
+        with self.assertRaisesRegex(ValueError, "artifact_hash"):
+            CandidateApproval(**{**common, "artifact_hash": "not-a-digest"})
+        with self.assertRaisesRegex(TypeError, "boolean"):
+            CandidateApproval(**{**common, "retention_passed": 1})
+        with self.assertRaisesRegex(ValueError, "evaluation_status"):
+            CandidateApproval(**{**common, "evaluation_status": "APPROVED"})
+
+    def test_direct_parameter_bound_cannot_bypass_exact_range_guards(self):
+        with self.assertRaisesRegex(TypeError, "exact decimal"):
+            ParameterBound(name="threshold", minimum=0.1, maximum="0.9")
+        with self.assertRaisesRegex(ValueError, "minimum"):
+            ParameterBound(name="threshold", minimum="1", maximum="0")
+
+    def test_direct_online_envelope_cannot_forge_content_hash(self):
+        bound = ParameterBound.create(
+            name="threshold",
+            minimum="0.1",
+            maximum="0.9",
+        )
+        with self.assertRaisesRegex(ValueError, "envelope_hash"):
+            OnlineEnvelope(
+                envelope_id="forged-envelope",
+                champion_artifact_hash=digest("candidate-a"),
+                authority_scope_id="paper-scope",
+                parameter_bounds=(bound,),
+                minimum_update_interval_seconds=60,
+                maximum_update_cost="1",
+                eligible_label_refs=("label:reconciled-outcome",),
+                envelope_hash=digest("unrelated-content"),
+            )
+
+    def test_direct_online_envelope_rejects_duplicate_parameter_names(self):
+        first = ParameterBound.create(
+            name="threshold",
+            minimum="0.1",
+            maximum="0.9",
+        )
+        second = ParameterBound.create(
+            name="threshold",
+            minimum="0.2",
+            maximum="0.8",
+        )
+        with self.assertRaisesRegex(ValueError, "parameter names"):
+            OnlineEnvelope(
+                envelope_id="duplicate-bounds",
+                champion_artifact_hash=digest("candidate-a"),
+                authority_scope_id="paper-scope",
+                parameter_bounds=(first, second),
+                minimum_update_interval_seconds=60,
+                maximum_update_cost="1",
+                eligible_label_refs=("label:reconciled-outcome",),
+                envelope_hash=digest("cannot-be-valid"),
+            )
+
     def test_atomic_initial_promotion_changes_future_pointer(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")

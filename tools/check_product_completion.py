@@ -8,6 +8,7 @@ same source revision.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
@@ -16,6 +17,18 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from mvp.autotrade_mvp.qualification_attestation import (
+    QualificationTrustError,
+    QualificationTrustPolicy,
+    parse_qualification_trust_policy,
+    parse_signed_qualification_attestation,
+    verify_qualification_attestation,
+)
+from research.autotrade_research.artifacts.store import ArtifactStore
+
 DEFAULT_SPEC = ROOT / "docs" / "product" / "PRODUCT_SPEC_CANONICAL.txt"
 DEFAULT_BANK = ROOT / "control" / "work-packages" / "bank.json"
 DEFAULT_QUALIFICATION = ROOT / "control" / "qualification.json"
@@ -50,6 +63,32 @@ TERMINAL_PACKAGE_STATUS = "DONE"
 TERMINAL_OVERALL_STATUS = "FULL_PRODUCT_QUALIFIED"
 TERMINAL_GATE_STATUS = "QUALIFIED"
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_WHOLE_PRODUCT_DOMAIN = "WHOLE_PRODUCT"
+_WHOLE_PRODUCT_GATE = "COMPLETION"
+_WHOLE_PRODUCT_PACKAGE = "WP-60"
+_WHOLE_PRODUCT_PROTOCOL = "whole-product-completion-v1"
+_WHOLE_PRODUCT_PROTOCOL_VERSION = "1.0.0"
+
+
+@dataclass(frozen=True)
+class WholeProductEvidenceContext:
+    evidence_store: ArtifactStore
+    policy: QualificationTrustPolicy
+    expected_policy_id: str
+    expected_policy_version: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.evidence_store, ArtifactStore):
+            raise TypeError("evidence_store must be ArtifactStore")
+        if not isinstance(self.policy, QualificationTrustPolicy):
+            raise TypeError("policy must be QualificationTrustPolicy")
+        if not isinstance(self.expected_policy_id, str) or not self.expected_policy_id:
+            raise ValueError("expected_policy_id is required")
+        if (
+            not isinstance(self.expected_policy_version, str)
+            or not self.expected_policy_version
+        ):
+            raise ValueError("expected_policy_version is required")
 
 
 class ProductCompletionError(ValueError):
@@ -102,10 +141,50 @@ def _exact_source(value: object) -> str | None:
     return None
 
 
+def _independently_verified_evidence(
+    item: dict[str, Any],
+    *,
+    requirement_id: str,
+    exact_source_sha: str | None,
+    evidence_context: WholeProductEvidenceContext | None,
+) -> bool:
+    if exact_source_sha is None or evidence_context is None:
+        return False
+    receipt_payload = item.get("receipt")
+    evidence_ref = item.get("evidence_ref")
+    try:
+        receipt = parse_signed_qualification_attestation(receipt_payload)
+        if evidence_ref != receipt.attestation.attestation_id:
+            return False
+        accepted = verify_qualification_attestation(
+            receipt,
+            policy=evidence_context.policy,
+            evidence_store=evidence_context.evidence_store,
+            expected_policy_id=evidence_context.expected_policy_id,
+            expected_policy_version=evidence_context.expected_policy_version,
+            expected_source_sha=exact_source_sha,
+            expected_domain=_WHOLE_PRODUCT_DOMAIN,
+            expected_gate=_WHOLE_PRODUCT_GATE,
+            expected_package_id=_WHOLE_PRODUCT_PACKAGE,
+            expected_protocol_id=_WHOLE_PRODUCT_PROTOCOL,
+            expected_protocol_version=_WHOLE_PRODUCT_PROTOCOL_VERSION,
+            expected_requirement_id=requirement_id,
+        )
+    except (QualificationTrustError, TypeError, ValueError):
+        return False
+    return (
+        accepted.result == "PASS"
+        and accepted.source_sha == exact_source_sha
+        and accepted.requirement_id == requirement_id
+        and accepted.attestation_id == evidence_ref
+    )
+
+
 def _evidence_matrix(
     qualification: dict[str, Any],
     *,
     exact_source_sha: str | None,
+    evidence_context: WholeProductEvidenceContext | None,
 ) -> tuple[list[str], list[str], list[str]]:
     required = {
         ("PRODUCT_SECTION", section) for section in EXPECTED_SECTION_IDS
@@ -119,6 +198,7 @@ def _evidence_matrix(
         raise ProductCompletionError("whole_product_evidence must be an array")
 
     by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    evidence_refs: set[str] = set()
     for item in raw:
         if type(item) is not dict:
             raise ProductCompletionError("whole_product_evidence entries must be objects")
@@ -138,6 +218,11 @@ def _evidence_matrix(
             raise ProductCompletionError(
                 f"evidence_ref is required for {kind}:{requirement_id}"
             )
+        if evidence_ref in evidence_refs:
+            raise ProductCompletionError(
+                f"whole-product evidence_ref must be unique: {evidence_ref}"
+            )
+        evidence_refs.add(evidence_ref)
         by_key[key] = item
 
     missing_sections = [
@@ -156,6 +241,15 @@ def _evidence_matrix(
             nonpassing.append(f"{kind}:{requirement_id}:status")
         if exact_source_sha is None or item.get("source_sha") != exact_source_sha:
             nonpassing.append(f"{kind}:{requirement_id}:source_sha")
+        if not _independently_verified_evidence(
+            item,
+            requirement_id=requirement_id,
+            exact_source_sha=exact_source_sha,
+            evidence_context=evidence_context,
+        ):
+            nonpassing.append(
+                f"{kind}:{requirement_id}:independent_verification"
+            )
     return missing_sections, missing_packages, nonpassing
 
 
@@ -166,6 +260,7 @@ def evaluate_completion(
     *,
     spec_text: str,
     exact_source_sha: str | None,
+    evidence_context: WholeProductEvidenceContext | None = None,
 ) -> dict[str, Any]:
     sections = _section_ids(spec_text)
     packages = bank.get("packages")
@@ -217,6 +312,7 @@ def evaluate_completion(
     missing_sections, missing_evidence_packages, nonpassing_evidence = _evidence_matrix(
         qualification,
         exact_source_sha=source_sha,
+        evidence_context=evidence_context,
     )
     overall_status = qualification.get("overall_status")
     nvda_qualified = nvda_status.get("qualified") is True
@@ -294,11 +390,47 @@ def main() -> int:
     parser.add_argument("--qualification", type=Path, default=DEFAULT_QUALIFICATION)
     parser.add_argument("--nvda-status", type=Path, default=DEFAULT_NVDA_STATUS)
     parser.add_argument("--source-sha")
+    parser.add_argument("--evidence-store", type=Path)
+    parser.add_argument("--qualification-policy", type=Path)
+    parser.add_argument("--expected-policy-id")
+    parser.add_argument("--expected-policy-version")
     parser.add_argument("--require-complete", action="store_true")
     args = parser.parse_args()
 
     try:
         qualification = _load(args.qualification, name="qualification")
+        trust_values = (
+            args.evidence_store,
+            args.qualification_policy,
+            args.expected_policy_id,
+            args.expected_policy_version,
+        )
+        if any(value is not None for value in trust_values) and not all(
+            value is not None for value in trust_values
+        ):
+            raise ProductCompletionError(
+                "whole-product evidence trust inputs must be supplied together"
+            )
+        evidence_context = None
+        if all(value is not None for value in trust_values):
+            if not args.evidence_store.is_dir():
+                raise ProductCompletionError(
+                    "whole-product evidence store must be an existing directory"
+                )
+            try:
+                policy = parse_qualification_trust_policy(
+                    _load(args.qualification_policy, name="qualification trust policy")
+                )
+                evidence_context = WholeProductEvidenceContext(
+                    evidence_store=ArtifactStore(args.evidence_store),
+                    policy=policy,
+                    expected_policy_id=args.expected_policy_id,
+                    expected_policy_version=args.expected_policy_version,
+                )
+            except (QualificationTrustError, TypeError, ValueError) as error:
+                raise ProductCompletionError(
+                    "whole-product evidence trust inputs are invalid"
+                ) from error
         report = evaluate_completion(
             _load(args.bank, name="work-package bank"),
             qualification,
@@ -307,6 +439,7 @@ def main() -> int:
             # Exact source must come from the invoking checkout/workflow boundary.
             # qualification.json cannot self-assert the revision it qualifies.
             exact_source_sha=args.source_sha,
+            evidence_context=evidence_context,
         )
     except ProductCompletionError as error:
         print(str(error), file=sys.stderr)

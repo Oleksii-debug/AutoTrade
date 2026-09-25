@@ -2,13 +2,29 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 import unittest
+from uuid import NAMESPACE_URL, uuid5
 
+from research.autotrade_research.artifacts.store import ArtifactStore
+
+from mvp.autotrade_mvp.qualification_attestation import (
+    EvidenceArtifactRef,
+    QualificationAttestation,
+    QualificationScope,
+    SignedQualificationAttestation,
+)
+from mvp.tests.test_qualification_attestation import (
+    policy as fixture_policy,
+    root as fixture_root,
+    sign as fixture_sign,
+)
 from tools.check_product_completion import (
     EXPECTED_GATE_NAMES,
     EXPECTED_PACKAGE_IDS,
     EXPECTED_SECTION_IDS,
     ProductCompletionError,
+    WholeProductEvidenceContext,
     evaluate_completion,
 )
 
@@ -16,6 +32,8 @@ from tools.check_product_completion import (
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = (ROOT / "docs/product/PRODUCT_SPEC_CANONICAL.txt").read_text(encoding="utf-8")
 SHA = "a" * 40
+EVIDENCE_MEDIA_TYPE = "application/vnd.autotrade.whole-product-evidence"
+EVIDENCE_KIND = "WHOLE_PRODUCT_QUALIFICATION"
 
 
 def complete_bank():
@@ -52,27 +70,127 @@ def complete_evidence():
     return records
 
 
-def complete_qualification():
+def complete_qualification(evidence=None):
     return {
         "schema_version": "2.0.0",
         "source_sha": SHA,
         "overall_status": "FULL_PRODUCT_QUALIFIED",
         "gates": {name: "QUALIFIED" for name in EXPECTED_GATE_NAMES},
-        "whole_product_evidence": complete_evidence(),
+        "whole_product_evidence": complete_evidence() if evidence is None else evidence,
     }
+
+
+def verified_evidence(store, trust_root):
+    records = []
+    requirements = [
+        ("PRODUCT_SECTION", section) for section in EXPECTED_SECTION_IDS
+    ] + [
+        ("WORK_PACKAGE", package) for package in EXPECTED_PACKAGE_IDS
+    ]
+    for kind, requirement_id in requirements:
+        artifact_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                f"whole-product-artifact:{kind}:{requirement_id}",
+            )
+        )
+        payload = f"verified:{kind}:{requirement_id}".encode("utf-8")
+        manifest = store.publish_bytes(
+            artifact_id=artifact_id,
+            data=payload,
+            media_type=EVIDENCE_MEDIA_TYPE,
+            rights={"storage": True, "export": False},
+            source_refs=[f"git:{SHA}"],
+            metadata={"evidence_kind": EVIDENCE_KIND},
+        )
+        evidence_ref = EvidenceArtifactRef(
+            artifact_id=artifact_id,
+            sha256=manifest["sha256"],
+            media_type=EVIDENCE_MEDIA_TYPE,
+            evidence_kind=EVIDENCE_KIND,
+            source_sha=SHA,
+        )
+        attestation = QualificationAttestation(
+            attestation_id=str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"whole-product-attestation:{kind}:{requirement_id}",
+                )
+            ),
+            source_sha=SHA,
+            domain="WHOLE_PRODUCT",
+            gate="COMPLETION",
+            package_id="WP-60",
+            protocol_id="whole-product-completion-v1",
+            protocol_version="1.0.0",
+            requirement_ids=(requirement_id,),
+            evidence_refs=(evidence_ref,),
+            producer_id=trust_root.producer_id,
+            verifier_id=trust_root.verifier_id,
+            trust_root_id=trust_root.root_id,
+            runner_id="whole-product-test-runner",
+            harness_version="1.0.0",
+            started_at="2026-09-25T02:00:00Z",
+            completed_at="2026-09-25T02:10:00Z",
+            signed_at="2026-09-25T02:11:00Z",
+            result="PASS",
+        )
+        receipt = SignedQualificationAttestation(
+            attestation=attestation,
+            signature_b64=fixture_sign(attestation),
+        )
+        records.append(
+            {
+                "kind": kind,
+                "requirement_id": requirement_id,
+                "source_sha": SHA,
+                "status": "PASS",
+                "evidence_ref": attestation.attestation_id,
+                "receipt": {
+                    "attestation": attestation.canonical_payload(),
+                    "signature_b64": receipt.signature_b64,
+                },
+            }
+        )
+    return records
+
+
+def verified_completion_fixture(directory):
+    store = ArtifactStore(directory)
+    trust_root = fixture_root(
+        scopes=(QualificationScope("WHOLE_PRODUCT", "COMPLETION"),)
+    )
+    trust_policy = fixture_policy(trust_root)
+    context = WholeProductEvidenceContext(
+        evidence_store=store,
+        policy=trust_policy,
+        expected_policy_id=trust_policy.policy_id,
+        expected_policy_version=trust_policy.policy_version,
+    )
+    return (
+        complete_qualification(verified_evidence(store, trust_root)),
+        context,
+    )
 
 
 def nvda(*, qualified=True, source_sha=SHA):
     return {"qualified": qualified, "source_sha": source_sha}
 
 
-def evaluate(bank=None, qualification=None, nvda_status=None, source_sha=SHA):
+def evaluate(
+    bank=None,
+    qualification=None,
+    nvda_status=None,
+    source_sha=SHA,
+    evidence_context=None,
+):
     return evaluate_completion(
         bank or complete_bank(),
         qualification or complete_qualification(),
         nvda_status or nvda(),
         spec_text=SPEC,
         exact_source_sha=source_sha,
+        evidence_context=evidence_context,
     )
 
 
@@ -97,8 +215,23 @@ class ProductCompletionGateTests(unittest.TestCase):
         self.assertGreater(len(report["nonterminal_gates"]), 0)
         self.assertFalse(report["nvda_qualified"])
 
-    def test_only_exact_complete_matrix_can_report_complete(self):
+    def test_self_asserted_complete_matrix_cannot_report_complete(self):
         report = evaluate()
+        self.assertFalse(report["complete"])
+        self.assertTrue(
+            all(
+                item.endswith(":independent_verification")
+                for item in report["nonpassing_evidence"]
+            )
+        )
+
+    def test_only_independently_verified_exact_matrix_can_report_complete(self):
+        with TemporaryDirectory() as directory:
+            qualification, evidence_context = verified_completion_fixture(directory)
+            report = evaluate(
+                qualification=qualification,
+                evidence_context=evidence_context,
+            )
         self.assertTrue(report["complete"])
         self.assertEqual(report["blockers"], [])
         self.assertEqual(report["missing_section_evidence"], [])

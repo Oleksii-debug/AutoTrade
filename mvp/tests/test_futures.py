@@ -68,6 +68,7 @@ class FuturesLifecycleTests(unittest.TestCase):
             last_trade_at=utc(30, 20),
             delivery_cutoff=utc(29, 12) if payoff == "LINEAR" else utc(30, 20),
             settlement_method=settlement_method,
+            margin_model_id="TEST_FUTURES_MARGIN_V1",
         )
 
     def _linear_contract(self, settlement_method="CASH"):

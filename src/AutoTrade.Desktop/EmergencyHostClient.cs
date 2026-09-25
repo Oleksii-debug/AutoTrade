@@ -226,6 +226,7 @@ public enum EmergencyOperationState
     Running,
     Succeeded,
     Failed,
+    Cancelled,
     Unknown,
 }
 
@@ -325,12 +326,23 @@ public interface IEmergencyHostClient
 /// </summary>
 public sealed class DisconnectedEmergencyHostClient : IEmergencyHostClient
 {
+    private readonly string _reason;
+
+    public DisconnectedEmergencyHostClient(
+        string reason = "Host is not connected. Displayed financial state cannot be refreshed.")
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            throw new ArgumentException("Disconnected host reason is required.", nameof(reason));
+        }
+
+        _reason = reason.Trim();
+    }
+
     public Task<EmergencyHostStatus> GetStatusAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(
-            EmergencyHostStatus.Disconnected(
-                "Host is not connected. Displayed financial state cannot be refreshed."));
+        return Task.FromResult(EmergencyHostStatus.Disconnected(_reason));
     }
 
     public Task<EmergencyCommandResult> BlockNewExposureAsync(CancellationToken cancellationToken)
@@ -342,7 +354,7 @@ public sealed class DisconnectedEmergencyHostClient : IEmergencyHostClient
                 durableBlockConfirmed: false,
                 inFlightActions: InFlightActionState.Unknown,
                 operationId: "Unavailable",
-                message: "Host is not connected. No durable block of new exposure has been confirmed."));
+                message: _reason + " No durable block of new exposure has been confirmed."));
     }
 
     public Task<EmergencyOperationStatus> GetOperationAsync(

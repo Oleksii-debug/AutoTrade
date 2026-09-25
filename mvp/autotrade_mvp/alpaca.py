@@ -670,7 +670,6 @@ def parse_trade_activities(
             client_order_id=client_id,
             instrument=instrument,
             side=side,
-            position_side="BOTH",
             quantity=raw.get("qty"),
             price=raw.get("price"),
             fee_amount=fee_amount,

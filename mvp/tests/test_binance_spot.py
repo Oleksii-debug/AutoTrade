@@ -17,6 +17,12 @@ from mvp.autotrade_mvp.provider_core import (
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
 )
+from mvp.autotrade_mvp.accounting import ScopedEconomicBook
+from mvp.autotrade_mvp.fill_accounting import (
+    ProjectedFillEvidence,
+    build_provider_fill_financial_plan,
+)
+from mvp.autotrade_mvp.reservations import ReservationSnapshot
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
     EvidenceVerification,
@@ -228,7 +234,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         self.assertEqual(fills[0].quantity, Decimal("0.2"))
         self.assertEqual(fills[0].fee_currency, "BNB")
         self.assertEqual(fills[0].side, "BUY")
-        self.assertEqual(fills[0].position_side, "BOTH")
+        self.assertIsNone(fills[0].position_side)
 
     def test_account_trade_requires_provider_evidenced_direction(self):
         base = {
@@ -261,7 +267,52 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
         )
         self.assertEqual(fills[0].side, "SELL")
-        self.assertEqual(fills[0].position_side, "BOTH")
+        self.assertIsNone(fills[0].position_side)
+
+    def test_spot_fill_remains_compatible_with_cash_equity_financial_plan(self):
+        row = {
+            "symbol": "BTCUSDT",
+            "id": 9,
+            "orderId": 44,
+            "price": "101.25",
+            "qty": "0.1",
+            "commission": "0",
+            "commissionAsset": "BNB",
+            "isBuyer": True,
+            "time": 1790272802123,
+        }
+        provider_fill = parse_account_trades(
+            execution_observation([row]),
+            instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
+        )[0]
+        self.assertIsNone(provider_fill.position_side)
+        projected = ProjectedFillEvidence.create(
+            fill_id="spot-fill-9",
+            provider_execution_id=provider_fill.provider_execution_id,
+            intent_id="spot-intent-9",
+            client_order_id=provider_fill.client_order_id,
+            side=provider_fill.side,
+            quantity=provider_fill.quantity,
+            price=provider_fill.price,
+        )
+        reservation = ReservationSnapshot(
+            reservation_id="spot-reservation-9",
+            intent_id="spot-intent-9",
+            original={"CASH:USDT": Decimal("20")},
+            remaining={"CASH:USDT": Decimal("20")},
+            consumed={"CASH:USDT": Decimal("0")},
+            state="WORKING",
+        )
+        plan = build_provider_fill_financial_plan(
+            book=ScopedEconomicBook(environment="PAPER", account_id="paper-1"),
+            provider_id="BINANCE",
+            projected_fill=projected,
+            provider_fill=provider_fill,
+            expected_instrument="BTCUSDT:v1",
+            settlement_currency="USDT",
+            reservation_snapshot=reservation,
+        )
+        self.assertEqual(plan.usage["CASH:USDT"], Decimal("10.125"))
 
     def test_execution_parser_rejects_wrong_authenticated_read_surface(self):
         row = {

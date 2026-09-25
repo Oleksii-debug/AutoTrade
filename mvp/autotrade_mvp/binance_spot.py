@@ -354,7 +354,6 @@ def parse_account_trades(
             client_order_id=client_id,
             instrument=_text(instrument_versions[symbol], name="instrument_version"),
             side="BUY" if is_buyer else "SELL",
-            position_side="BOTH",
             quantity=raw.get("qty"),
             price=raw.get("price"),
             fee_amount=raw.get("commission", "0"),

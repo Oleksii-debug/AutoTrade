@@ -125,7 +125,7 @@ class MarketNormalizationTests(unittest.TestCase):
         self.assertNotIn("DUPLICATE", first.quality_flags)
         self.assertIn("DUPLICATE", second.quality_flags)
 
-        with self.assertRaisesRegex(SequenceConflict, "different causal content"):
+        with self.assertRaisesRegex(SequenceConflict, "changed causal content"):
             normalizer.normalize(
                 raw(
                     "TRADE",
@@ -134,40 +134,101 @@ class MarketNormalizationTests(unittest.TestCase):
                 )
             )
 
-    def test_same_sequence_cannot_change_causal_identity_with_same_payload(self):
+    def test_late_revision_preserves_sequence_as_immutable_correction(self):
+        normalizer = MarketNormalizer(registry())
+        original = normalizer.normalize(
+            raw("TRADE", {"price": "100", "quantity": "1"}, sequence=7, revision=0)
+        )
+        corrected = normalizer.normalize(
+            raw(
+                "TRADE",
+                {"price": "101", "quantity": "1"},
+                sequence=7,
+                revision=1,
+                available=at() + timedelta(seconds=1),
+                ingested=at() + timedelta(seconds=2),
+            )
+        )
+        self.assertNotEqual(original.event_id, corrected.event_id)
+        self.assertIn("CORRECTION", corrected.quality_flags)
+        self.assertNotIn("DUPLICATE", corrected.quality_flags)
+        self.assertEqual(corrected.payload["price"], "101")
+
+    def test_revision_gap_and_out_of_order_revision_are_explicit(self):
+        normalizer = MarketNormalizer(registry())
+        normalizer.normalize(
+            raw("TRADE", {"price": "100", "quantity": "1"}, sequence=9, revision=0)
+        )
+        rev3 = normalizer.normalize(
+            raw(
+                "TRADE",
+                {"price": "103", "quantity": "1"},
+                sequence=9,
+                revision=3,
+                available=at() + timedelta(seconds=3),
+                ingested=at() + timedelta(seconds=4),
+            )
+        )
+        late_rev2 = normalizer.normalize(
+            raw(
+                "TRADE",
+                {"price": "102", "quantity": "1"},
+                sequence=9,
+                revision=2,
+                available=at() + timedelta(seconds=2),
+                ingested=at() + timedelta(seconds=5),
+            )
+        )
+        self.assertTrue({"CORRECTION", "REVISION_GAP"} <= set(rev3.quality_flags))
+        self.assertTrue(
+            {"CORRECTION", "OUT_OF_ORDER_REVISION"} <= set(late_rev2.quality_flags)
+        )
+
+    def test_initial_nonzero_revision_is_flagged_without_inventing_base(self):
+        normalizer = MarketNormalizer(registry())
+        revised_only = normalizer.normalize(
+            raw("TRADE", {"price": "100", "quantity": "1"}, sequence=11, revision=2)
+        )
+        self.assertIn("REVISION_BASE_MISSING", revised_only.quality_flags)
+
+    def test_same_revision_cannot_change_causal_identity_with_same_payload(self):
+        normalizer = MarketNormalizer(registry())
+        normalizer.normalize(
+            raw("TRADE", {"price": "100", "quantity": "1"}, sequence=15, revision=0)
+        )
+        with self.assertRaisesRegex(SequenceConflict, "causal content"):
+            normalizer.normalize(
+                raw(
+                    "TRADE",
+                    {"price": "100", "quantity": "1"},
+                    sequence=15,
+                    revision=0,
+                    available=at() + timedelta(seconds=2),
+                    ingested=at() + timedelta(seconds=3),
+                )
+            )
+
+    def test_higher_revision_cannot_backdate_availability(self):
         normalizer = MarketNormalizer(registry())
         normalizer.normalize(
             raw(
                 "TRADE",
                 {"price": "100", "quantity": "1"},
-                source=at(),
+                sequence=16,
                 revision=0,
+                available=at() + timedelta(seconds=2),
+                ingested=at() + timedelta(seconds=3),
             )
         )
-        with self.assertRaisesRegex(SequenceConflict, "different causal content"):
+        with self.assertRaisesRegex(SequenceConflict, "backdate"):
             normalizer.normalize(
                 raw(
                     "TRADE",
-                    {"price": "100", "quantity": "1"},
-                    source=at() + timedelta(milliseconds=1),
-                    revision=0,
-                )
-            )
-
-        other = MarketNormalizer(registry())
-        other.normalize(
-            raw(
-                "TRADE",
-                {"price": "100", "quantity": "1"},
-                revision=0,
-            )
-        )
-        with self.assertRaisesRegex(SequenceConflict, "different causal content"):
-            other.normalize(
-                raw(
-                    "TRADE",
-                    {"price": "100", "quantity": "1"},
+                    {"price": "101", "quantity": "1"},
+                    sequence=16,
                     revision=1,
+                    available=at() + timedelta(seconds=1),
+                    ingested=at() + timedelta(seconds=4),
                 )
             )
 
@@ -204,6 +265,424 @@ class MarketNormalizationTests(unittest.TestCase):
         )
         self.assertEqual(delta.payload["bids"][0]["quantity"], "0")
 
+    def test_stale_snapshot_cannot_roll_back_book_sequence_or_recover_gap(self):
+        normalizer = MarketNormalizer(registry())
+        normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=10,
+                stream="book",
+            )
+        )
+        normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [["99.98", "1"]], "asks": []},
+                sequence=11,
+                stream="book",
+            )
+        )
+
+        stale = normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.90", "1"]], "asks": [["100.10", "1"]]},
+                sequence=5,
+                stream="book",
+            )
+        )
+        self.assertIn("OUT_OF_ORDER", stale.quality_flags)
+        self.assertIn("BOOK_UNUSABLE", stale.quality_flags)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "READY",
+        )
+
+        gap = normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [["99.97", "1"]], "asks": []},
+                sequence=13,
+                stream="book",
+            )
+        )
+        self.assertIn("SEQUENCE_GAP", gap.quality_flags)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "GAPPED",
+        )
+
+        stale_after_gap = normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.80", "1"]], "asks": [["100.20", "1"]]},
+                sequence=6,
+                stream="book",
+            )
+        )
+        self.assertIn("OUT_OF_ORDER", stale_after_gap.quality_flags)
+        self.assertIn("BOOK_UNUSABLE", stale_after_gap.quality_flags)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "GAPPED",
+        )
+
+    def test_historical_snapshot_correction_blocks_execution_until_new_snapshot(self):
+        normalizer = MarketNormalizer(registry())
+        normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=10,
+                revision=0,
+                stream="book",
+            )
+        )
+        normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [["99.98", "1"]], "asks": []},
+                sequence=11,
+                revision=0,
+                stream="book",
+            )
+        )
+        normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [], "asks": [["100.02", "1"]]},
+                sequence=12,
+                revision=0,
+                stream="book",
+            )
+        )
+        normalizer.require_executable_book(
+            provider_id="provider-a",
+            venue_id="venue-a",
+            provider_symbol="ABC-USD",
+            stream="book",
+        )
+
+        corrected = normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.95", "2"]], "asks": [["100.05", "2"]]},
+                sequence=10,
+                revision=1,
+                stream="book",
+                available=at() + timedelta(seconds=3),
+                ingested=at() + timedelta(seconds=4),
+            )
+        )
+        self.assertIn("CORRECTION", corrected.quality_flags)
+        self.assertIn("HISTORICAL_BOOK_CORRECTION", corrected.quality_flags)
+        self.assertIn("BOOK_UNUSABLE", corrected.quality_flags)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "GAPPED",
+        )
+        with self.assertRaisesRegex(MarketDataError, "new risk is blocked"):
+            normalizer.require_executable_book(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            )
+
+        recovery = normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.96", "2"]], "asks": [["100.03", "2"]]},
+                sequence=20,
+                stream="book",
+                available=at() + timedelta(seconds=5),
+                ingested=at() + timedelta(seconds=6),
+            )
+        )
+        self.assertNotIn("BOOK_UNUSABLE", recovery.quality_flags)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "READY",
+        )
+
+    def test_historical_book_correction_blocks_execution_until_new_snapshot(self):
+        normalizer = MarketNormalizer(registry())
+        normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=10,
+                stream="book",
+            )
+        )
+        normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [["99.98", "1"]], "asks": []},
+                sequence=11,
+                revision=0,
+                stream="book",
+            )
+        )
+        normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [], "asks": [["100.02", "1"]]},
+                sequence=12,
+                revision=0,
+                stream="book",
+            )
+        )
+        normalizer.require_executable_book(
+            provider_id="provider-a",
+            venue_id="venue-a",
+            provider_symbol="ABC-USD",
+            stream="book",
+        )
+
+        corrected = normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [["99.97", "2"]], "asks": []},
+                sequence=11,
+                revision=1,
+                stream="book",
+                available=at() + timedelta(seconds=3),
+                ingested=at() + timedelta(seconds=4),
+            )
+        )
+        self.assertIn("CORRECTION", corrected.quality_flags)
+        self.assertIn("HISTORICAL_BOOK_CORRECTION", corrected.quality_flags)
+        self.assertIn("BOOK_UNUSABLE", corrected.quality_flags)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "GAPPED",
+        )
+        with self.assertRaisesRegex(MarketDataError, "new risk is blocked"):
+            normalizer.require_executable_book(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            )
+
+        recovery = normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.96", "2"]], "asks": [["100.03", "2"]]},
+                sequence=20,
+                stream="book",
+                available=at() + timedelta(seconds=5),
+                ingested=at() + timedelta(seconds=6),
+            )
+        )
+        self.assertNotIn("BOOK_UNUSABLE", recovery.quality_flags)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "READY",
+        )
+        normalizer.require_executable_book(
+            provider_id="provider-a",
+            venue_id="venue-a",
+            provider_symbol="ABC-USD",
+            stream="book",
+        )
+
+    def test_book_gap_blocks_new_risk_until_new_snapshot(self):
+        normalizer = MarketNormalizer(registry())
+        normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=10,
+                stream="book",
+            )
+        )
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "READY",
+        )
+        normalizer.require_executable_book(
+            provider_id="provider-a",
+            venue_id="venue-a",
+            provider_symbol="ABC-USD",
+            stream="book",
+        )
+
+        gap = normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [["99.98", "1"]], "asks": []},
+                sequence=12,
+                stream="book",
+            )
+        )
+        self.assertIn("SEQUENCE_GAP", gap.quality_flags)
+        self.assertIn("BOOK_UNUSABLE", gap.quality_flags)
+        with self.assertRaisesRegex(MarketDataError, "new risk is blocked"):
+            normalizer.require_executable_book(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            )
+
+        contiguous_after_gap = normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [["99.97", "1"]], "asks": []},
+                sequence=13,
+                stream="book",
+            )
+        )
+        self.assertIn("BOOK_UNUSABLE", contiguous_after_gap.quality_flags)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "GAPPED",
+        )
+
+        recovery = normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.96", "2"]], "asks": [["100.02", "2"]]},
+                sequence=20,
+                stream="book",
+            )
+        )
+        self.assertNotIn("BOOK_UNUSABLE", recovery.quality_flags)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "READY",
+        )
+        normalizer.require_executable_book(
+            provider_id="provider-a",
+            venue_id="venue-a",
+            provider_symbol="ABC-USD",
+            stream="book",
+        )
+
+    def test_book_without_sequence_never_becomes_executable(self):
+        normalizer = MarketNormalizer(registry())
+        event = normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=None,
+                stream="book",
+            )
+        )
+        self.assertIn("BOOK_SEQUENCE_UNVERIFIED", event.quality_flags)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+            ),
+            "UNVERIFIED",
+        )
+        with self.assertRaisesRegex(MarketDataError, "new risk is blocked"):
+            normalizer.require_executable_book(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+            )
+
+    def test_raw_evidence_ref_is_strict_contract_evidence(self):
+        base = raw("TRADE", {"price": "100", "quantity": "1"})
+        with self.assertRaisesRegex(MarketDataError, "missing required"):
+            RawMarketUpdate(
+                provider_id=base.provider_id,
+                venue_id=base.venue_id,
+                provider_symbol=base.provider_symbol,
+                kind=base.kind,
+                source_event_at=base.source_event_at,
+                available_at=base.available_at,
+                ingested_at=base.ingested_at,
+                availability_basis=base.availability_basis,
+                revision=base.revision,
+                payload=base.payload,
+                raw_evidence_ref={"artifact_id": EVIDENCE["artifact_id"]},
+            )
+        with self.assertRaisesRegex(MarketDataError, "sha256"):
+            RawMarketUpdate(
+                provider_id=base.provider_id,
+                venue_id=base.venue_id,
+                provider_symbol=base.provider_symbol,
+                kind=base.kind,
+                source_event_at=base.source_event_at,
+                available_at=base.available_at,
+                ingested_at=base.ingested_at,
+                availability_basis=base.availability_basis,
+                revision=base.revision,
+                payload=base.payload,
+                raw_evidence_ref={**EVIDENCE, "sha256": "bad"},
+            )
+        with self.assertRaisesRegex(MarketDataError, "unknown fields"):
+            RawMarketUpdate(
+                provider_id=base.provider_id,
+                venue_id=base.venue_id,
+                provider_symbol=base.provider_symbol,
+                kind=base.kind,
+                source_event_at=base.source_event_at,
+                available_at=base.available_at,
+                ingested_at=base.ingested_at,
+                availability_basis=base.availability_basis,
+                revision=base.revision,
+                payload=base.payload,
+                raw_evidence_ref={**EVIDENCE, "secret": "must-not-pass"},
+            )
+
     def test_crossed_book_and_precision_edges_fail_closed(self):
         normalizer = MarketNormalizer(registry())
         with self.assertRaisesRegex(MarketDataError, "crossed"):
@@ -217,6 +696,40 @@ class MarketNormalizationTests(unittest.TestCase):
             normalizer.normalize(raw("TRADE", {"price": "100.005", "quantity": "1"}))
         with self.assertRaisesRegex(MarketDataError, "exact decimal"):
             normalizer.normalize(raw("TRADE", {"price": 100.1, "quantity": "1"}))
+
+    def test_stale_sequenced_snapshot_cannot_establish_executable_book(self):
+        normalizer = MarketNormalizer(
+            registry(),
+            max_available_age=timedelta(seconds=5),
+        )
+        event = normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=10,
+                stream="book",
+                available=at(),
+                ingested=at() + timedelta(seconds=6),
+            )
+        )
+        self.assertIn("STALE", event.quality_flags)
+        self.assertIn("BOOK_UNUSABLE", event.quality_flags)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "GAPPED",
+        )
+        with self.assertRaisesRegex(MarketDataError, "new risk is blocked"):
+            normalizer.require_executable_book(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            )
 
     def test_staleness_is_flagged_and_impossible_timestamp_order_is_rejected(self):
         normalizer = MarketNormalizer(registry(), max_available_age=timedelta(seconds=2))
@@ -345,134 +858,6 @@ class MarketNormalizationTests(unittest.TestCase):
         self.assertTrue(event.payload["next_funding_at"].endswith("Z"))
 
 
-    def test_book_gap_stays_unverified_until_new_snapshot(self):
-        normalizer = MarketNormalizer(registry())
-        normalizer.normalize(
-            raw(
-                "BOOK_SNAPSHOT",
-                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
-                sequence=1,
-                stream="book",
-            )
-        )
-        gap = normalizer.normalize(
-            raw(
-                "BOOK_DELTA",
-                {"bids": [["99.99", "2"]], "asks": []},
-                sequence=3,
-                stream="book",
-            )
-        )
-        self.assertIn("SEQUENCE_GAP", gap.quality_flags)
-        self.assertIn("UNVERIFIED_BOOK_STATE", gap.quality_flags)
-
-        later_delta = normalizer.normalize(
-            raw(
-                "BOOK_DELTA",
-                {"bids": [], "asks": [["100.01", "2"]]},
-                sequence=4,
-                stream="book",
-            )
-        )
-        self.assertIn("UNVERIFIED_BOOK_STATE", later_delta.quality_flags)
-
-        snapshot = normalizer.normalize(
-            raw(
-                "BOOK_SNAPSHOT",
-                {"bids": [["99.98", "1"]], "asks": [["100.02", "1"]]},
-                sequence=5,
-                stream="book",
-            )
-        )
-        self.assertNotIn("UNVERIFIED_BOOK_STATE", snapshot.quality_flags)
-
-        recovered = normalizer.normalize(
-            raw(
-                "BOOK_DELTA",
-                {"bids": [["99.98", "2"]], "asks": []},
-                sequence=6,
-                stream="book",
-            )
-        )
-        self.assertNotIn("UNVERIFIED_BOOK_STATE", recovered.quality_flags)
-
-    def test_out_of_order_snapshot_cannot_clear_unverified_book_state(self):
-        normalizer = MarketNormalizer(registry())
-        normalizer.normalize(
-            raw(
-                "BOOK_SNAPSHOT",
-                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
-                sequence=1,
-                stream="book",
-            )
-        )
-        normalizer.normalize(
-            raw(
-                "BOOK_DELTA",
-                {"bids": [["99.99", "2"]], "asks": []},
-                sequence=3,
-                stream="book",
-            )
-        )
-        stale_snapshot = normalizer.normalize(
-            raw(
-                "BOOK_SNAPSHOT",
-                {"bids": [["99.97", "1"]], "asks": [["100.03", "1"]]},
-                sequence=2,
-                stream="book",
-            )
-        )
-        self.assertIn("OUT_OF_ORDER", stale_snapshot.quality_flags)
-
-        next_delta = normalizer.normalize(
-            raw(
-                "BOOK_DELTA",
-                {"bids": [], "asks": [["100.03", "2"]]},
-                sequence=4,
-                stream="book",
-            )
-        )
-        self.assertIn("UNVERIFIED_BOOK_STATE", next_delta.quality_flags)
-
-    def test_raw_evidence_ref_is_strict_contract_evidence(self):
-        base = raw("TRADE", {"price": "100", "quantity": "1"})
-        common = dict(
-            provider_id=base.provider_id,
-            venue_id=base.venue_id,
-            provider_symbol=base.provider_symbol,
-            kind=base.kind,
-            source_event_at=base.source_event_at,
-            available_at=base.available_at,
-            ingested_at=base.ingested_at,
-            availability_basis=base.availability_basis,
-            revision=base.revision,
-            payload=base.payload,
-        )
-        with self.assertRaisesRegex(MarketDataError, "missing required"):
-            RawMarketUpdate(
-                **common,
-                raw_evidence_ref={"artifact_id": EVIDENCE["artifact_id"]},
-            )
-        with self.assertRaisesRegex(MarketDataError, "sha256"):
-            RawMarketUpdate(
-                **common,
-                raw_evidence_ref={**EVIDENCE, "sha256": "bad"},
-            )
-        with self.assertRaisesRegex(MarketDataError, "unknown fields"):
-            RawMarketUpdate(
-                **common,
-                raw_evidence_ref={**EVIDENCE, "secret": "must-not-pass"},
-            )
-        with self.assertRaisesRegex(MarketDataError, "artifact_id"):
-            RawMarketUpdate(
-                **common,
-                raw_evidence_ref={**EVIDENCE, "artifact_id": "not-a-uuid"},
-            )
-        with self.assertRaisesRegex(MarketDataError, "absolute URI"):
-            RawMarketUpdate(
-                **common,
-                raw_evidence_ref={**EVIDENCE, "source_uri": "/relative"},
-            )
 
 
 if __name__ == "__main__":

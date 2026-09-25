@@ -317,6 +317,7 @@ def parse_position_executions(
         fee_amount = row.get("fee")
         if fee_amount is None:
             raise ProviderCoreError("Kraken Futures trade execution must include explicit fee evidence")
+        fee_amount = _decimal(fee_amount, name="fee")
         fill = ProviderFillEvidence.create(
             provider_execution_id=execution_id,
             client_order_id=client_id,

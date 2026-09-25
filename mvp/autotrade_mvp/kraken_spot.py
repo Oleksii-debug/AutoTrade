@@ -503,6 +503,7 @@ def parse_trade_history(
         fee_amount = raw.get("fee")
         if fee_amount is None:
             raise KrakenSpotAdapterError("Kraken trade execution must include explicit fee evidence")
+        fee_amount = _decimal(fee_amount, name="fee")
         fills.append(
             ProviderFillEvidence.create(
                 provider_execution_id=execution_id,

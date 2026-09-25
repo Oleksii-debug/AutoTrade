@@ -397,6 +397,13 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             fee_currency_by_pair={"XXBTZUSD": "USD"},
         )
         self.assertEqual(zero[0].fee_amount, Decimal("0"))
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "exact decimal"):
+            parse_trade_history(
+                {"error": [], "result": {"trades": {"T-FEE": {**trade, "fee": 0.0}}}},
+                instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
+                client_ids_by_provider_order={},
+                fee_currency_by_pair={"XXBTZUSD": "USD"},
+            )
 
     def test_trade_timestamp_rejects_binary_float_and_sub_microsecond_precision(self):
         base = {

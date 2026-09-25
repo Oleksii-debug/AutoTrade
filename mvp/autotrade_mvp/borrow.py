@@ -1037,6 +1037,119 @@ class BorrowLifecycleJournal:
 
         return self.state().blocks_new_short
 
+    def reconciliation_evidence(
+        self,
+        context: RiskContext,
+        *,
+        symbol: str,
+        now: str,
+    ) -> BorrowReconciliationEvidence:
+        """Compare provider borrow truth with filled and reserved local short risk.
+
+        Provider loan quantity is compared only with filled local short exposure.
+        WORKING/UNKNOWN future short exposure stays separate and must fit inside
+        fresh locate capacity, so it is never mistaken for an already-borrowed
+        provider loan.
+        """
+
+        if not isinstance(context, RiskContext):
+            raise TypeError("context must be RiskContext")
+        name = _text(symbol, name="symbol")
+        observed_at = _instant(now, name="now")
+        events = self._events()
+        state = self.state()
+        local_short = local_short_quantity(context, symbol=name)
+        reserved_short = _reserved_short_quantity(context, symbol=name)
+        provider_borrowed = Decimal("0")
+        locate_available = Decimal("0")
+        reasons: list[str] = []
+
+        def block(reason: str) -> None:
+            if reason not in reasons:
+                reasons.append(reason)
+
+        if state.latest_loan is None:
+            if local_short != 0:
+                block("provider borrow loan evidence is missing")
+        else:
+            provider_borrowed = state.latest_loan.borrowed_quantity
+            try:
+                state.latest_loan.assert_fresh(now=observed_at)
+            except ValueError:
+                block("provider borrow loan evidence is stale or not effective")
+            if provider_borrowed != local_short:
+                block("provider borrowed quantity differs from filled local short")
+
+        if state.latest_locate is None:
+            block("provider borrow locate evidence is missing")
+        else:
+            try:
+                state.latest_locate.assert_fresh(now=observed_at)
+                locate_available = state.latest_locate.available_quantity
+            except ValueError:
+                block("provider borrow locate evidence is stale or unavailable")
+
+        if reserved_short > locate_available:
+            block("reserved short exposure exceeds fresh locate capacity")
+        if state.active_recall_quantity > 0:
+            block("active provider borrow recall requires protection")
+        if state.active_recall_quantity > provider_borrowed:
+            block("active provider recall exceeds provider borrowed quantity")
+
+        refs: list[str] = []
+        for event in events:
+            payload = event.get("payload")
+            if not isinstance(payload, Mapping):
+                raise ValueError("borrow journal payload is required")
+            for raw_ref in payload.get("evidence_refs") or ():
+                ref = _text(raw_ref, name="evidence_ref")
+                if ref not in refs:
+                    refs.append(ref)
+
+        return BorrowReconciliationEvidence(
+            resource=self.resource,
+            symbol=name,
+            aggregate_id=self.aggregate_id,
+            aggregate_version=len(events),
+            observed_at=observed_at,
+            local_short_quantity=local_short,
+            reserved_short_quantity=reserved_short,
+            provider_borrowed_quantity=provider_borrowed,
+            locate_available_quantity=locate_available,
+            active_recall_quantity=state.active_recall_quantity,
+            loan_difference=provider_borrowed - local_short,
+            evidence_refs=tuple(refs),
+            blocking_reasons=tuple(reasons),
+        )
+
+    def project_recall_to_equity_state(self, equity_state):
+        """Synchronize durable provider recall into the existing equity state.
+
+        This only projects provider evidence. It never treats an attempted cover,
+        an acknowledgement, or an UNKNOWN send outcome as recall resolution.
+        """
+
+        from .corporate_actions import EquityState
+
+        if not isinstance(equity_state, EquityState):
+            raise TypeError("equity_state must be EquityState")
+        state = self.state()
+        if state.latest_loan is None:
+            if equity_state.borrowed_quantity != 0:
+                raise ValueError(
+                    "provider loan evidence is required for borrowed equity state"
+                )
+        elif state.latest_loan.borrowed_quantity != equity_state.borrowed_quantity:
+            raise ValueError(
+                "provider borrowed quantity differs from equity borrowed quantity"
+            )
+        recalled = state.active_recall_quantity
+        if recalled > equity_state.borrowed_quantity:
+            raise ValueError(
+                "active provider recall exceeds equity borrowed quantity"
+            )
+        return replace(equity_state, recalled_quantity=recalled)
+
     def _append(self, *, event_type: str, payload: dict[str, object], observed_at: str):
         digest = payload_digest(payload)
         identity_fields = {

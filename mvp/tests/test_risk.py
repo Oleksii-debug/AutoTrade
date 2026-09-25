@@ -1241,6 +1241,50 @@ class IndependentRiskTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "policy must be RiskPolicy"):
             evaluate_risk(valid_intent, context(), {})
 
+    def test_risk_input_fingerprint_distinguishes_equal_decisions_from_different_evidence(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        configured = policy(
+            max_expected_shortfall="100",
+            expected_shortfall_tail_fraction="0.50",
+        )
+        first = evaluate_risk(
+            intent,
+            context(
+                tail_scenarios=(
+                    {"ABC": "-0.10"},
+                    {"ABC": "-0.20"},
+                ),
+            ),
+            configured,
+        )
+        changed_evidence = evaluate_risk(
+            intent,
+            context(
+                tail_scenarios=(
+                    {"ABC": "-0.05"},
+                    {"ABC": "-0.20"},
+                ),
+            ),
+            configured,
+        )
+        first_es = next(x for x in first.rules if x.rule == "expected_shortfall")
+        changed_es = next(
+            x for x in changed_evidence.rules if x.rule == "expected_shortfall"
+        )
+        self.assertEqual(first_es.observed, changed_es.observed)
+        self.assertNotEqual(
+            first.input_fingerprint,
+            changed_evidence.input_fingerprint,
+        )
+        self.assertNotEqual(
+            risk_decision_fingerprint(first),
+            risk_decision_fingerprint(changed_evidence),
+        )
+        self.assertEqual(len(first.input_fingerprint), 64)
+
     def test_risk_decision_fingerprint_is_deterministic_and_evidence_sensitive(self):
         intent = RiskIntent.create(
             symbol="ABC", side="BUY", quantity="1", price="100",

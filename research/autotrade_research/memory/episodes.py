@@ -825,10 +825,17 @@ class ExperienceMemory:
                     "SELECT * FROM tombstones WHERE episode_id=? ORDER BY created_at,tombstone_id",
                     (row["episode_id"],),
                 ).fetchall()
-                tombstones = [
-                    self._verified_tombstone(item, episode_id=row["episode_id"])
-                    for item in tombstone_rows
-                ]
+                tombstones = []
+                for item in tombstone_rows:
+                    tombstone = self._verified_tombstone(
+                        item,
+                        episode_id=row["episode_id"],
+                    )
+                    if _stored_time(
+                        item["created_at"],
+                        name="tombstone created_at",
+                    ) <= cutoff:
+                        tombstones.append(tombstone)
                 if tombstones and not include_tombstoned:
                     continue
 
@@ -915,10 +922,17 @@ class ExperienceMemory:
                 "SELECT * FROM tombstones WHERE episode_id=? ORDER BY created_at,tombstone_id",
                 (identifier,),
             ).fetchall()
-            tombstones = [
-                self._verified_tombstone(item, episode_id=identifier)
-                for item in tombstone_rows
-            ]
+            tombstones = []
+            for item in tombstone_rows:
+                tombstone = self._verified_tombstone(
+                    item,
+                    episode_id=identifier,
+                )
+                if _stored_time(
+                    item["created_at"],
+                    name="tombstone created_at",
+                ) <= cutoff:
+                    tombstones.append(tombstone)
             if tombstones and not include_tombstoned:
                 raise PermissionError("episode is tombstoned")
 

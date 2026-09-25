@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.reconciliation import (
 from mvp.autotrade_mvp.reconciliation_journal import (
     _reconciliation_aggregate_id,
     load_latest_reconciliation_checkpoint,
+    load_submission_resolution_evidence,
     load_reconciliation_checkpoint_for_readiness,
     record_reconciliation_checkpoint,
     unknown_submissions_from_dispatch,
@@ -216,6 +217,109 @@ class ReconciliationJournalTests(unittest.TestCase):
                 owner_epoch="epoch-b",
             )
             self.assertEqual(exact_retry["event_id"], owner_b["event_id"])
+
+    def test_exact_checkpoint_event_is_submission_resolution_authority(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            unknown = UnknownSubmission.create(
+                attempt_id="attempt-authority",
+                intent_id="intent-authority",
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                client_order_id="c1",
+                started_at="2026-09-24T17:30:00Z",
+            )
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="acct-resolution-authority",
+                result=reconciliation(unknown_submissions=[unknown]),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            reopened = JournalStore(path)
+            evidence = load_submission_resolution_evidence(
+                reopened,
+                checkpoint_event_id=checkpoint["event_id"],
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                attempt_id="attempt-authority",
+                intent_id="intent-authority",
+                client_order_id="c1",
+            )
+            self.assertEqual(evidence["outcome"], "OBSERVED_EXECUTION")
+            self.assertEqual(evidence["provider_execution_ids"], ("e1",))
+            self.assertEqual(evidence["provider_order_ids"], ())
+            self.assertEqual(
+                evidence["checkpoint_event_id"],
+                checkpoint["event_id"],
+            )
+            self.assertEqual(
+                evidence["checkpoint_payload_hash"],
+                checkpoint["payload_hash"],
+            )
+
+    def test_submission_resolution_evidence_fails_closed_on_scope_or_identity_mismatch(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            unknown = UnknownSubmission.create(
+                attempt_id="attempt-scoped-authority",
+                intent_id="intent-scoped-authority",
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                client_order_id="c1",
+                started_at="2026-09-24T17:30:00Z",
+            )
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="acct-scoped-authority",
+                result=reconciliation(unknown_submissions=[unknown]),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            with self.assertRaisesRegex(ValueError, "scope mismatch"):
+                load_submission_resolution_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="other-account",
+                    environment="PAPER",
+                    attempt_id="attempt-scoped-authority",
+                    intent_id="intent-scoped-authority",
+                    client_order_id="c1",
+                )
+            with self.assertRaisesRegex(ValueError, "identity mismatch"):
+                load_submission_resolution_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    attempt_id="attempt-scoped-authority",
+                    intent_id="wrong-intent",
+                    client_order_id="c1",
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "exactly one resolution",
+            ):
+                load_submission_resolution_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    attempt_id="missing-attempt",
+                    intent_id="intent-scoped-authority",
+                    client_order_id="c1",
+                )
 
     def test_checkpoint_retains_exact_execution_ids_across_restart(self):
         with TemporaryDirectory() as directory:

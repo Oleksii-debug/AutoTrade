@@ -6,7 +6,9 @@ from collections import deque
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import re
 import os
+import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -56,7 +58,41 @@ def _normalized_key(value: object) -> str:
     )
 
 
+_EMBEDDED_SECRET_PATTERNS = (
+    re.compile(
+        r"(?i)\\b(authorization|proxy-authorization)\\s*[:=]\\s*(bearer|basic)\\s+[^\\s,;]+"
+    ),
+    re.compile(
+        r"(?i)\\b(api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|"
+        r"client[_-]?secret|password)\\s*[:=]\\s*([^&\\s;,]+)"
+    ),
+)
+_PRIVATE_KEY_MARKERS = (
+    "-----BEGIN PRIVATE KEY-----",
+    "-----BEGIN RSA PRIVATE KEY-----",
+    "-----BEGIN EC PRIVATE KEY-----",
+    "-----BEGIN OPENSSH PRIVATE KEY-----",
+)
+
+
+def _redact_embedded_secret_text(value: str) -> str:
+    if any(marker in value for marker in _PRIVATE_KEY_MARKERS):
+        return "[REDACTED]"
+    redacted = value
+    for pattern in _EMBEDDED_SECRET_PATTERNS:
+        def replacement(match: re.Match[str]) -> str:
+            name = match.group(1)
+            if name.lower() in {"authorization", "proxy-authorization"}:
+                return f"{name}: [REDACTED]"
+            separator = "=" if "=" in match.group(0) else ":"
+            return f"{name}{separator}[REDACTED]"
+        redacted = pattern.sub(replacement, redacted)
+    return redacted
+
+
 def _redact(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact_embedded_secret_text(value)
     if isinstance(value, Mapping):
         result: dict[str, Any] = {}
         for key, item in value.items():

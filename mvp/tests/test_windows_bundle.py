@@ -47,14 +47,32 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
         return path
 
     def composition(self, *, source_sha=SOURCE_SHA, overrides=None):
+        dependency_lock = self.staging / "dependency-lock.json"
+        dependency_lock.write_text(
+            '{"dependencies":{"runtime":"1.0.0"}}\n',
+            encoding="utf-8",
+        )
+        sbom = self.staging / "sbom.spdx.json"
+        sbom.write_text(
+            '{"SPDXID":"SPDXRef-DOCUMENT","spdxVersion":"SPDX-2.3"}\n',
+            encoding="utf-8",
+        )
         components = []
         for path in sorted(self.staging.rglob("*")):
             if path.is_file() and not path.is_symlink():
                 relative = path.relative_to(self.staging).as_posix()
+                if relative == "dependency-lock.json":
+                    kind = "dependency-lock"
+                elif relative == "sbom.spdx.json":
+                    kind = "sbom"
+                elif relative.endswith(".exe"):
+                    kind = "runtime"
+                else:
+                    kind = "asset"
                 components.append(
                     {
                         "component_id": relative.replace("/", "-"),
-                        "kind": "runtime" if relative.endswith(".exe") else "asset",
+                        "kind": kind,
                         "path": relative,
                         "version": "1.0.0",
                         "sha256": "sha256:" + sha256(path.read_bytes()).hexdigest(),
@@ -64,8 +82,10 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             "schema_version": "1.0.0",
             "product": "AutoTrade",
             "source_sha": source_sha,
-            "dependency_lock_sha256": "sha256:" + "1" * 64,
-            "sbom_sha256": "sha256:" + "2" * 64,
+            "dependency_lock_sha256": "sha256:" + sha256(
+                dependency_lock.read_bytes()
+            ).hexdigest(),
+            "sbom_sha256": "sha256:" + sha256(sbom.read_bytes()).hexdigest(),
             "schema_compatibility": {"minimum": "1.0.0", "maximum": "1.0.x"},
             "runtime": {
                 "architecture": "x64",
@@ -271,7 +291,12 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
         self.assertEqual(manifest["composition"]["runtime"]["runtime_identifier"], "win-x64")
         self.assertEqual(
             {item["path"] for item in manifest["composition"]["components"]},
-            {"AutoTrade.exe", "contracts/baseline.json"},
+            {
+                "AutoTrade.exe",
+                "contracts/baseline.json",
+                "dependency-lock.json",
+                "sbom.spdx.json",
+            },
         )
 
         extra = self.staging / "debug.log"
@@ -313,6 +338,65 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
                 mode="release",
                 provenance_path=self.provenance(eligible=True),
                 composition_path=bad_digest,
+            )
+
+    def test_release_composition_requires_real_sbom_lock_and_runtime_pair(self):
+        composition = self.composition()
+        document = json.loads(composition.read_text(encoding="utf-8"))
+
+        wrong_sbom = {
+            **document,
+            "sbom_sha256": "sha256:" + "e" * 64,
+        }
+        bad_sbom = self.root / "composition-wrong-sbom.json"
+        bad_sbom.write_text(json.dumps(wrong_sbom), encoding="utf-8")
+        with self.assertRaisesRegex(BundleError, "sbom digest does not match"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "wrong-sbom.zip",
+                version="1.0.0",
+                source_sha=SOURCE_SHA,
+                mode="release",
+                provenance_path=self.provenance(eligible=True),
+                composition_path=bad_sbom,
+            )
+
+        wrong_runtime = {
+            **document,
+            "runtime": {
+                "architecture": "x64",
+                "runtime_identifier": "win-arm64",
+                "minimum_windows_version": "10.0.22621",
+            },
+        }
+        bad_runtime = self.root / "composition-wrong-runtime.json"
+        bad_runtime.write_text(json.dumps(wrong_runtime), encoding="utf-8")
+        with self.assertRaisesRegex(BundleError, "runtime_identifier does not match"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "wrong-runtime.zip",
+                version="1.0.0",
+                source_sha=SOURCE_SHA,
+                mode="release",
+                provenance_path=self.provenance(eligible=True),
+                composition_path=bad_runtime,
+            )
+
+        uppercase_digest = {
+            **document,
+            "dependency_lock_sha256": document["dependency_lock_sha256"].upper(),
+        }
+        bad_case = self.root / "composition-uppercase-digest.json"
+        bad_case.write_text(json.dumps(uppercase_digest), encoding="utf-8")
+        with self.assertRaisesRegex(BundleError, "canonical lowercase"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "uppercase-digest.zip",
+                version="1.0.0",
+                source_sha=SOURCE_SHA,
+                mode="release",
+                provenance_path=self.provenance(eligible=True),
+                composition_path=bad_case,
             )
 
     def test_release_mode_requires_exact_head_provenance_binding(self):

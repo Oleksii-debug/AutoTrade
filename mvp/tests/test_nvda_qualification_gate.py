@@ -9,6 +9,7 @@ import zipfile
 
 from tools.check_nvda_qualification import (
     NvdaQualificationError,
+    _workflow_requirement_digest,
     validate_evidence,
     validate_release_artifact_binding,
 )
@@ -69,6 +70,7 @@ def complete_evidence():
                 "passed": True,
                 "keyboard_steps": f"Keyboard-only steps for {item['id']}",
                 "nvda_observation": f"Observed NVDA output for {item['id']}",
+                "requirement_sha256": _workflow_requirement_digest(item),
                 "evidence_ref": "sha256:" + sha256(
                     item["id"].encode("utf-8")
                 ).hexdigest(),
@@ -100,6 +102,25 @@ class NvdaQualificationGateTests(unittest.TestCase):
             result["workflow_count"],
             len(REQUIREMENTS["workflows"]),
         )
+
+    def test_workflow_evidence_is_bound_to_exact_requirement_revision(self):
+        evidence = complete_evidence()
+        evidence["workflows"][0]["requirement_sha256"] = "sha256:" + "0" * 64
+        with self.assertRaisesRegex(NvdaQualificationError, "stale for requirement"):
+            validate_evidence(evidence, REQUIREMENTS)
+
+        changed_requirements = json.loads(json.dumps(REQUIREMENTS))
+        changed_requirements["workflows"][0]["description"] += (
+            " Exact durable-block confirmation must be announced."
+        )
+        with self.assertRaisesRegex(NvdaQualificationError, "stale for requirement"):
+            validate_evidence(complete_evidence(), changed_requirements)
+
+    def test_workflow_requirement_requires_description(self):
+        malformed = json.loads(json.dumps(REQUIREMENTS))
+        del malformed["workflows"][0]["description"]
+        with self.assertRaisesRegex(NvdaQualificationError, "description"):
+            validate_evidence(complete_evidence(), malformed)
 
     def test_missing_workflow_or_failed_workflow_is_rejected(self):
         missing = complete_evidence()

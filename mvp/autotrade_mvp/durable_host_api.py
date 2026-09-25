@@ -98,10 +98,46 @@ class JournalBackedHostCommandStore:
 
     @staticmethod
     def _normalize_refs(values: tuple[str, ...]) -> tuple[str, ...]:
-        normalized = tuple(str(item) for item in values)
-        if any(not item.strip() for item in normalized):
-            raise ValueError("affected_refs cannot contain empty values")
-        return normalized
+        if any(not isinstance(item, str) or not item.strip() for item in values):
+            raise ValueError("affected_refs must contain non-empty strings")
+        return tuple(values)
+
+    @staticmethod
+    def _replay_text_array(
+        payload: Mapping[str, object],
+        field: str,
+        *,
+        default: tuple[str, ...] | None = None,
+    ) -> tuple[str, ...]:
+        if field not in payload:
+            if default is None:
+                raise ValueError(f"Host journal {field} must be an array")
+            return default
+        value = payload[field]
+        if not isinstance(value, list):
+            raise ValueError(f"Host journal {field} must be an array")
+        if any(not isinstance(item, str) or not item.strip() for item in value):
+            raise ValueError(
+                f"Host journal {field} must contain non-empty strings"
+            )
+        return tuple(value)
+
+    @staticmethod
+    def _replay_evidence(
+        payload: Mapping[str, object],
+        *,
+        default: tuple[Mapping[str, object], ...] | None = None,
+    ) -> tuple[Mapping[str, object], ...]:
+        if "evidence" not in payload:
+            if default is None:
+                raise ValueError("Host journal operation evidence must be an array")
+            return default
+        value = payload["evidence"]
+        if not isinstance(value, list) or any(
+            not isinstance(item, Mapping) for item in value
+        ):
+            raise ValueError("Host journal operation evidence must contain objects")
+        return tuple(dict(item) for item in value)
 
     @staticmethod
     def _normalize_evidence(
@@ -287,29 +323,18 @@ class JournalBackedHostCommandStore:
                     raise ValueError(
                         "COMMAND_ACCEPTED must create a QUEUED operation"
                     )
-                uncertainty = tuple(
-                    str(x)
-                    for x in payload.get(
-                        "remaining_uncertainty",
-                        ["financial_outcome_not_completed"],
-                    )
+                uncertainty = self._replay_text_array(
+                    payload,
+                    "remaining_uncertainty",
                 )
-                if not uncertainty or any(not item.strip() for item in uncertainty):
+                if not uncertainty:
                     raise ValueError(
                         "Queued operation must preserve financial uncertainty"
                     )
                 started_at = str(payload.get("started_at") or event["committed_at"])
                 updated_at = str(payload.get("updated_at") or started_at)
-                affected_refs = self._normalize_refs(
-                    tuple(str(x) for x in payload.get("affected_refs", ()))
-                )
-                evidence = self._normalize_evidence(
-                    tuple(
-                        x
-                        for x in payload.get("evidence", ())
-                        if isinstance(x, Mapping)
-                    )
-                )
+                affected_refs = self._replay_text_array(payload, "affected_refs")
+                evidence = self._replay_evidence(payload)
                 operations[operation_id] = OperationResult(
                     operation_id=operation_id,
                     phase=phase,
@@ -330,14 +355,10 @@ class JournalBackedHostCommandStore:
                 phase = self._required_text(payload, "phase")
                 if phase not in self.UPDATE_PHASES:
                     raise ValueError("Host journal contains unsupported operation phase")
-                uncertainty = tuple(
-                    str(x)
-                    for x in payload.get("remaining_uncertainty", ())
+                uncertainty = self._replay_text_array(
+                    payload,
+                    "remaining_uncertainty",
                 )
-                if any(not item.strip() for item in uncertainty):
-                    raise ValueError(
-                        "Host journal contains empty uncertainty evidence"
-                    )
                 if current.phase in self.TERMINAL_PHASES:
                     raise ValueError(
                         "Host journal rewrites a terminal operation"
@@ -354,16 +375,15 @@ class JournalBackedHostCommandStore:
                     raise ValueError(
                         "Terminal journal operation cannot retain uncertainty"
                     )
-                affected_refs = self._normalize_refs(
-                    tuple(
-                        str(x)
-                        for x in payload.get("affected_refs", current.affected_refs)
-                    )
+                affected_refs = self._replay_text_array(
+                    payload,
+                    "affected_refs",
+                    default=current.affected_refs,
                 )
-                evidence_values = payload.get("evidence", current.evidence)
-                if not isinstance(evidence_values, (list, tuple)):
-                    raise ValueError("Host journal operation evidence must be an array")
-                evidence = self._normalize_evidence(tuple(evidence_values))
+                evidence = self._replay_evidence(
+                    payload,
+                    default=current.evidence,
+                )
                 operations[operation_id] = OperationResult(
                     operation_id=operation_id,
                     phase=phase,
@@ -394,7 +414,12 @@ class JournalBackedHostCommandStore:
         if current is None:
             raise KeyError("Unknown operation")
 
-        normalized_uncertainty = tuple(str(x) for x in remaining_uncertainty)
+        if any(
+            not isinstance(item, str) or not item.strip()
+            for item in remaining_uncertainty
+        ):
+            raise ValueError("remaining_uncertainty must contain non-empty strings")
+        normalized_uncertainty = tuple(remaining_uncertainty)
         normalized_refs = (
             current.affected_refs
             if affected_refs is None

@@ -350,14 +350,15 @@ def load_latest_reconciliation_checkpoint_for_scope(
     account_id: str,
     environment: str,
 ) -> dict[str, Any] | None:
-    """Return the unambiguous latest reconciliation fact for one account scope.
+    """Return the latest durably recorded reconciliation fact for one scope.
 
-    Reconciliation IDs are workflow identities, not financial authority. Within
-    one reconciliation aggregate, the highest aggregate version supersedes its
-    earlier versions. Across reconciliation aggregates, the newest observed
-    provider truth is authoritative. Two different aggregate heads with the same
-    newest observation time are ambiguous and must fail closed rather than make
-    durable database iteration order a financial authority.
+    Provider observed_at is evidence about when external truth was observed; it
+    is not the ordering authority for local financial state. A later durable
+    checkpoint must supersede an earlier one even when provider clocks regress,
+    equal timestamps are reused, or a delayed response describes an older
+    provider instant. Journal schema v6 assigns every event one unique monotonic
+    journal_sequence inside the same transaction as the event itself, so the
+    greatest matching sequence is the canonical scope head.
     """
 
     if not isinstance(store, JournalStore):
@@ -367,7 +368,8 @@ def load_latest_reconciliation_checkpoint_for_scope(
         account_id=account_id,
         environment=environment,
     )
-    aggregate_heads: dict[str, tuple[int, datetime, str, dict[str, Any]]] = {}
+    latest: dict[str, Any] | None = None
+    latest_sequence = 0
     for event in store.load_events_by_aggregate_type("account_reconciliation"):
         if event.get("event_type") != "AccountReconciled":
             continue
@@ -380,42 +382,28 @@ def load_latest_reconciliation_checkpoint_for_scope(
             or payload.get("environment") != scope
         ):
             continue
-        aggregate_id = _text(event.get("aggregate_id"), name="aggregate_id")
         aggregate_version = event.get("aggregate_version")
         if type(aggregate_version) is not int or aggregate_version <= 0:
             raise ValueError(
                 "reconciliation checkpoint aggregate_version must be a positive integer"
             )
-        observed_at = _instant(
+        _instant(
             payload.get("observed_at"),
             name="reconciliation checkpoint observed_at",
         )
-        observed_instant = datetime.fromisoformat(
-            observed_at.replace("Z", "+00:00")
-        )
-        current = aggregate_heads.get(aggregate_id)
-        if current is None or aggregate_version > current[0]:
-            aggregate_heads[aggregate_id] = (
-                aggregate_version,
-                observed_instant,
-                observed_at,
-                event,
+        journal_sequence = event.get("journal_sequence")
+        if type(journal_sequence) is not int or journal_sequence <= 0:
+            raise ValueError(
+                "reconciliation checkpoint lacks durable journal sequence"
             )
+        if journal_sequence <= latest_sequence:
+            raise ValueError(
+                "reconciliation journal sequence is not strictly increasing"
+            )
+        latest_sequence = journal_sequence
+        latest = event
 
-    if not aggregate_heads:
-        return None
-
-    newest_observed_at = max(item[1] for item in aggregate_heads.values())
-    newest = [
-        item[3]
-        for item in aggregate_heads.values()
-        if item[1] == newest_observed_at
-    ]
-    if len(newest) != 1:
-        raise ValueError(
-            "latest reconciliation checkpoint for account scope is ambiguous"
-        )
-    return newest[0]
+    return latest
 
 
 def require_current_reconciliation_checkpoint(

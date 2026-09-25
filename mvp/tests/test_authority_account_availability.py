@@ -301,7 +301,7 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 account_id=ACCOUNT_ID,
             )
 
-            with self.assertRaisesRegex(ValueError, "superseded"):
+            with self.assertRaisesRegex(AuthorityConflict, "superseded"):
                 _admit(authority, reservations, older)
             self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("0"))
 
@@ -331,7 +331,7 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 account_id=ACCOUNT_ID,
             )
 
-            with self.assertRaisesRegex(ValueError, "superseded"):
+            with self.assertRaisesRegex(AuthorityConflict, "superseded"):
                 _admit(authority, reservations, older)
             self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("0"))
 

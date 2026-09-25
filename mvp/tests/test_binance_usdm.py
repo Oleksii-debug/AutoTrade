@@ -11,6 +11,10 @@ from mvp.autotrade_mvp.binance_usdm import (
     parse_order_ack,
     prepare_order_request,
 )
+from mvp.autotrade_mvp.provider_core import (
+    ProviderReadObservation,
+    ProviderReadQuery,
+)
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
     CapabilitySnapshot,
@@ -20,6 +24,30 @@ from mvp.autotrade_mvp.capabilities import (
 
 
 NOW = datetime(2026, 9, 25, 0, tzinfo=timezone.utc)
+
+
+def execution_observation(
+    rows,
+    *,
+    account_id="paper-1",
+    environment="PAPER",
+    surface="EXECUTIONS",
+):
+    query = ProviderReadQuery.prepare(
+        provider_id="BINANCE",
+        account_id=account_id,
+        environment=environment,
+        surface=surface,
+        endpoint="/fapi/v1/userTrades",
+        query={"symbol": "BTCUSDT"},
+        prepared_at=NOW,
+    )
+    return ProviderReadObservation.capture(
+        query=query,
+        response=rows,
+        observed_at=NOW + timedelta(seconds=1),
+        source_uri="https://provider.invalid/fapi/v1/userTrades",
+    )
 
 
 def capability(
@@ -309,15 +337,15 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             "time": 1569514978020,
         }
         fills = parse_account_trades(
-            [row, dict(row)],
+            execution_observation([row, dict(row)]),
             instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
             client_ids_by_order_id={25851813: "at-usdm-fill"},
-        
-            account_id="paper-1",
-            environment="PAPER",)
+        )
         self.assertEqual(len(fills), 1)
         fill = fills[0]
         self.assertEqual(fill.provider_execution_id, "BINANCE-USDM:BTCUSDT:698759")
+        self.assertEqual(fill.account_id, "paper-1")
+        self.assertTrue(fill.evidence_refs)
         self.assertEqual(fill.client_order_id, "at-usdm-fill")
         self.assertEqual(fill.quantity, Decimal("0.002"))
         self.assertEqual(fill.price, Decimal("7819.01"))
@@ -339,11 +367,9 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
         changed = dict(first, qty="0.3")
         with self.assertRaisesRegex(BinanceUsdmAdapterError, "conflicting"):
             parse_account_trades(
-                [first, changed],
+                execution_observation([first, changed]),
                 instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
-            
-                account_id="paper-1",
-                environment="PAPER",)
+            )
 
     def test_empty_order_history_never_proves_absence_by_default(self):
         evidence = coverage_evidence(
@@ -352,9 +378,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             coverage_end="2026-09-25T00:00:00Z",
             pagination_complete=True,
             consistency_horizon_satisfied=True,
-        
-            account_id="paper-1",
-            environment="PAPER",)
+        )
         self.assertFalse(evidence.provider_semantics_exclude_execution)
 
         qualified = coverage_evidence(
@@ -364,9 +388,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             pagination_complete=True,
             consistency_horizon_satisfied=True,
             qualified_exclusion_semantics=True,
-        
-            account_id="paper-1",
-            environment="PAPER",)
+        )
         self.assertTrue(qualified.provider_semantics_exclude_execution)
 
     def test_bad_position_mode_and_bad_trade_position_side_fail_closed(self):
@@ -387,7 +409,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(BinanceUsdmAdapterError, "positionSide"):
             parse_account_trades(
-                [
+                execution_observation([
                     {
                         "commission": "0.01",
                         "commissionAsset": "USDT",
@@ -399,11 +421,9 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                         "symbol": "BTCUSDT",
                         "time": 1790272800123,
                     }
-                ],
+                ]),
                 instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
-            
-                account_id="paper-1",
-                environment="PAPER",)
+            )
 
 
 if __name__ == "__main__":

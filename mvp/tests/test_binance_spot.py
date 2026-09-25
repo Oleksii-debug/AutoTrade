@@ -11,6 +11,10 @@ from mvp.autotrade_mvp.binance_spot import (
     parse_order_ack,
     prepare_order_request,
 )
+from mvp.autotrade_mvp.provider_core import (
+    ProviderReadObservation,
+    ProviderReadQuery,
+)
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
     EvidenceVerification,
@@ -19,6 +23,30 @@ from mvp.autotrade_mvp.capabilities import (
 
 
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
+
+
+def execution_observation(
+    rows,
+    *,
+    account_id="paper-1",
+    environment="PAPER",
+    surface="EXECUTIONS",
+):
+    query = ProviderReadQuery.prepare(
+        provider_id="BINANCE",
+        account_id=account_id,
+        environment=environment,
+        surface=surface,
+        endpoint="/api/v3/myTrades",
+        query={"symbol": "BTCUSDT"},
+        prepared_at=NOW,
+    )
+    return ProviderReadObservation.capture(
+        query=query,
+        response=rows,
+        observed_at=NOW + timedelta(seconds=1),
+        source_uri="https://provider.invalid/api/v3/myTrades",
+    )
 
 
 def capability(*, order_types=("LIMIT", "MARKET"), tif=("GTC", "IOC", "FOK", "NONE")):
@@ -166,15 +194,15 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             }
         ]
         fills = parse_account_trades(
-            [rows[0], dict(rows[0])],
+            execution_observation([rows[0], dict(rows[0])]),
             instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
             client_ids_by_order_id={42: "at-ack-1"},
-        
-            account_id="paper-1",
-            environment="PAPER",)
+        )
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].provider_execution_id, "BINANCE-SPOT:BTCUSDT:7")
         self.assertEqual(fills[0].client_order_id, "at-ack-1")
+        self.assertEqual(fills[0].account_id, "paper-1")
+        self.assertTrue(fills[0].evidence_refs)
         self.assertEqual(fills[0].quantity, Decimal("0.2"))
         self.assertEqual(fills[0].fee_currency, "BNB")
 
@@ -192,11 +220,9 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         changed = dict(first, qty="0.3")
         with self.assertRaisesRegex(BinanceSpotAdapterError, "conflicting"):
             parse_account_trades(
-                [first, changed],
+                execution_observation([first, changed]),
                 instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
-            
-                account_id="paper-1",
-                environment="PAPER",)
+            )
 
     def test_absence_semantics_are_never_assumed_from_empty_surface(self):
         evidence = coverage_evidence(
@@ -205,9 +231,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             coverage_end="2026-09-24T19:00:00Z",
             pagination_complete=True,
             consistency_horizon_satisfied=True,
-        
-            account_id="paper-1",
-            environment="PAPER",)
+        )
         self.assertFalse(evidence.provider_semantics_exclude_execution)
         qualified = coverage_evidence(
             surface="ORDER_HISTORY",
@@ -216,9 +240,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             pagination_complete=True,
             consistency_horizon_satisfied=True,
             qualified_exclusion_semantics=True,
-        
-            account_id="paper-1",
-            environment="PAPER",)
+        )
         self.assertTrue(qualified.provider_semantics_exclude_execution)
 
 

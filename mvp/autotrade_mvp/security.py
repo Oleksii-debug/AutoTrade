@@ -68,6 +68,8 @@ class Session:
     role: str
     origin: str
     expires_at: float
+    idle_timeout_seconds: int
+    idle_expires_at: float
 
 
 class SecurityBoundary:
@@ -106,6 +108,58 @@ class SecurityBoundary:
             raise RuntimeError("Session clock is not trustworthy")
         return numeric
 
+    @staticmethod
+    def _session_lifetime(value: object, *, name: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name} must be an integer number of seconds")
+        if value <= 0 or value > 3600:
+            raise ValueError(f"{name} is outside the permitted bound")
+        return value
+
+    def _authenticate_session_identity(
+        self,
+        *,
+        subject: str,
+        role: str,
+        origin: str,
+    ) -> None:
+        if self._session_authorizer is None:
+            raise PermissionError(
+                "Session authentication verifier is unavailable"
+            )
+        try:
+            authenticated = self._session_authorizer(subject, role, origin)
+        except Exception as error:
+            raise PermissionError("Session authentication failed") from error
+        if authenticated is not True:
+            raise PermissionError(
+                "Session identity and role are not authenticated"
+            )
+
+    def _issue_session(
+        self,
+        *,
+        subject: str,
+        role: str,
+        origin: str,
+        ttl_seconds: int,
+        idle_timeout_seconds: int,
+        now: float,
+    ) -> Session:
+        idle_timeout = min(idle_timeout_seconds, ttl_seconds)
+        expires_at = now + ttl_seconds
+        session = Session(
+            token=secrets.token_urlsafe(32),
+            subject=subject,
+            role=role,
+            origin=origin,
+            expires_at=expires_at,
+            idle_timeout_seconds=idle_timeout,
+            idle_expires_at=min(expires_at, now + idle_timeout),
+        )
+        self._sessions[session.token] = session
+        return session
+
     def create_session(
         self,
         *,
@@ -113,6 +167,7 @@ class SecurityBoundary:
         role: str,
         origin: str,
         ttl_seconds: int = 900,
+        idle_timeout_seconds: int | None = None,
     ) -> Session:
         normalized_subject = _required_text(subject, name="subject")
         normalized_role = _required_text(role, name="role").upper()
@@ -121,35 +176,29 @@ class SecurityBoundary:
             raise PermissionError("Unknown role")
         if normalized_origin not in self._paired_origins:
             raise PermissionError("Origin is not paired")
-        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
-            raise ValueError("Session lifetime must be an integer number of seconds")
-        if ttl_seconds <= 0 or ttl_seconds > 3600:
-            raise ValueError("Session lifetime is outside the permitted bound")
-        if self._session_authorizer is None:
-            raise PermissionError(
-                "Session authentication verifier is unavailable"
+        ttl = self._session_lifetime(ttl_seconds, name="Session lifetime")
+        idle_timeout = (
+            min(300, ttl)
+            if idle_timeout_seconds is None
+            else self._session_lifetime(
+                idle_timeout_seconds,
+                name="Session idle timeout",
             )
-        try:
-            authenticated = self._session_authorizer(
-                normalized_subject,
-                normalized_role,
-                normalized_origin,
-            )
-        except Exception as error:
-            raise PermissionError("Session authentication failed") from error
-        if authenticated is not True:
-            raise PermissionError(
-                "Session identity and role are not authenticated"
-            )
-        session = Session(
-            token=secrets.token_urlsafe(32),
+        )
+        self._authenticate_session_identity(
             subject=normalized_subject,
             role=normalized_role,
             origin=normalized_origin,
-            expires_at=self._now_value() + ttl_seconds,
         )
-        self._sessions[session.token] = session
-        return session
+        now = self._now_value()
+        return self._issue_session(
+            subject=normalized_subject,
+            role=normalized_role,
+            origin=normalized_origin,
+            ttl_seconds=ttl,
+            idle_timeout_seconds=idle_timeout,
+            now=now,
+        )
 
     def validate_session(
         self,
@@ -165,9 +214,13 @@ class SecurityBoundary:
         if session.origin not in self._paired_origins:
             self._sessions.pop(normalized_token, None)
             raise PermissionError("Session origin is no longer paired")
-        if self._now_value() >= session.expires_at:
+        now = self._now_value()
+        if now >= session.expires_at:
             self._sessions.pop(normalized_token, None)
             raise PermissionError("Session expired")
+        if now >= session.idle_expires_at:
+            self._sessions.pop(normalized_token, None)
+            raise PermissionError("Session idle timeout expired")
         if origin is not None and _authenticated_origin(origin) != session.origin:
             raise PermissionError("Session origin mismatch")
         if required_roles is not None:
@@ -178,7 +231,59 @@ class SecurityBoundary:
                 raise PermissionError("Unknown required role")
             if session.role not in normalized_roles:
                 raise PermissionError("Role is not authorized")
+        refreshed_idle = min(
+            session.expires_at,
+            now + session.idle_timeout_seconds,
+        )
+        if refreshed_idle != session.idle_expires_at:
+            session = Session(
+                token=session.token,
+                subject=session.subject,
+                role=session.role,
+                origin=session.origin,
+                expires_at=session.expires_at,
+                idle_timeout_seconds=session.idle_timeout_seconds,
+                idle_expires_at=refreshed_idle,
+            )
+            self._sessions[normalized_token] = session
         return session
+
+    def refresh_session(
+        self,
+        token: str,
+        *,
+        origin: str,
+        ttl_seconds: int = 900,
+        idle_timeout_seconds: int | None = None,
+    ) -> Session:
+        """Re-authenticate and rotate a session without changing its identity scope."""
+
+        current = self.validate_session(token, origin=origin)
+        ttl = self._session_lifetime(ttl_seconds, name="Session lifetime")
+        idle_timeout = (
+            current.idle_timeout_seconds
+            if idle_timeout_seconds is None
+            else self._session_lifetime(
+                idle_timeout_seconds,
+                name="Session idle timeout",
+            )
+        )
+        self._authenticate_session_identity(
+            subject=current.subject,
+            role=current.role,
+            origin=current.origin,
+        )
+        now = self._now_value()
+        replacement = self._issue_session(
+            subject=current.subject,
+            role=current.role,
+            origin=current.origin,
+            ttl_seconds=ttl,
+            idle_timeout_seconds=idle_timeout,
+            now=now,
+        )
+        self._sessions.pop(current.token, None)
+        return replacement
 
     def validate_host_session(
         self,

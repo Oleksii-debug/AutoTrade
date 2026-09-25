@@ -56,6 +56,7 @@ def prepared(client_order_id="bybit-order-1"):
         account_id="bybit-account",
         environment="PAPER",
         instrument_version="BTCUSDT@1",
+        permission_scope="ORDER_WRITE",
     )
     request = prepare_order_submission(
         capability=capability,
@@ -103,7 +104,7 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
             policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
             provider_environment="TESTNET",
             account_id="paper-1",
-            capability_snapshot_id=capability.snapshot_id,
+            capability=capability,
             capability_registry=registry,
             secret_resolver=resolver,
             credential_handle=read_handle(),
@@ -246,14 +247,18 @@ class BybitV5SharedTransportTests(unittest.TestCase):
     def make_transport(
         self,
         *,
-        capability_snapshot_id,
+        capability,
         events,
         wire=None,
         quota_gate=None,
         provider_environment="TESTNET",
         policy=None,
+        clock_utc=None,
+        on_resolve=None,
     ):
-        resolver = FakeSecretResolver(events)
+        registry = RecordingCapabilityRegistry(events)
+        registry.add(capability)
+        resolver = FakeSecretResolver(events, on_resolve=on_resolve)
         transport = BybitV5HttpTransport(
             policy=(
                 BYBIT_V5_ENDPOINT_POLICIES[provider_environment]
@@ -262,13 +267,15 @@ class BybitV5SharedTransportTests(unittest.TestCase):
             ),
             provider_environment=provider_environment,
             account_id="bybit-account",
-            capability_snapshot_id=capability_snapshot_id,
+            capability=capability,
+            capability_registry=registry,
             secret_resolver=resolver,
             credential_handle=trade_handle(),
             session_token="session-token",
             origin="https://localhost",
             execution_identity="host-owner",
             clock_millis=lambda: 1700000000000,
+            clock_utc=clock_utc or (lambda: READ_AT),
             quota_gate=quota_gate,
             wire_client=wire or RecordingWire(events),
         )
@@ -337,7 +344,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
             )
 
         transport, resolver = self.make_transport(
-            capability_snapshot_id=capability.snapshot_id,
+            capability=capability,
             events=events,
             wire=wire,
             quota_gate=quota,
@@ -349,7 +356,10 @@ class BybitV5SharedTransportTests(unittest.TestCase):
         )
 
         self.assertEqual(response.payload["retCode"], 0)
-        self.assertEqual(events, ["quota", "resolve", "guard", "wire"])
+        self.assertEqual(
+            events,
+            ["quota", "capability", "resolve", "capability", "guard", "wire"],
+        )
         self.assertEqual(len(resolver.calls), 1)
         self.assertEqual(len(wire.requests), 1)
         outbound = wire.requests[0]
@@ -367,7 +377,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
             "exact provider environment",
         ):
             self.make_transport(
-                capability_snapshot_id=capability.snapshot_id,
+                capability=capability,
                 events=[],
                 provider_environment="TESTNET",
                 policy=BYBIT_V5_ENDPOINT_POLICIES["DEMO"],
@@ -395,7 +405,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                 events = []
                 wire = RecordingWire(events)
                 transport, resolver = self.make_transport(
-                    capability_snapshot_id=capability.snapshot_id,
+                    capability=capability,
                     events=events,
                     wire=wire,
                 )
@@ -416,12 +426,71 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                 self.assertEqual(resolver.calls, [])
                 self.assertEqual(wire.requests, [])
 
+    def test_expired_write_capability_blocks_before_secret_or_send(self):
+        capability, request = prepared()
+        events = []
+        wire = RecordingWire(events)
+        transport, resolver = self.make_transport(
+            capability=capability,
+            events=events,
+            wire=wire,
+            clock_utc=lambda: READ_AT + timedelta(minutes=10),
+        )
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "current capability",
+        ):
+            transport(
+                "bybit-order-1",
+                guarded_order_projection(request),
+                lambda: events.append("guard"),
+            )
+
+        self.assertEqual(events, ["capability"])
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
+
+    def test_write_capability_expiry_during_secret_resolution_blocks_send(self):
+        capability, request = prepared()
+        events = []
+        wire = RecordingWire(events)
+        now = [READ_AT]
+
+        def expire_after_secret_resolution():
+            now[0] = READ_AT + timedelta(minutes=10)
+
+        transport, resolver = self.make_transport(
+            capability=capability,
+            events=events,
+            wire=wire,
+            clock_utc=lambda: now[0],
+            on_resolve=expire_after_secret_resolution,
+        )
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "current capability",
+        ):
+            transport(
+                "bybit-order-1",
+                guarded_order_projection(request),
+                lambda: events.append("guard"),
+            )
+
+        self.assertEqual(
+            events,
+            ["capability", "resolve", "capability"],
+        )
+        self.assertEqual(len(resolver.calls), 1)
+        self.assertEqual(wire.requests, [])
+
     def test_final_guard_failure_has_zero_outbound_requests(self):
         capability, request = prepared()
         events = []
         wire = RecordingWire(events)
         transport, resolver = self.make_transport(
-            capability_snapshot_id=capability.snapshot_id,
+            capability=capability,
             events=events,
             wire=wire,
         )
@@ -436,7 +505,10 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                 guarded_order_projection(request),
                 blocked,
             )
-        self.assertEqual(events, ["resolve", "guard"])
+        self.assertEqual(
+            events,
+            ["capability", "resolve", "capability", "guard"],
+        )
         self.assertEqual(len(resolver.calls), 1)
         self.assertEqual(wire.requests, [])
 
@@ -450,7 +522,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
             raise RuntimeError("quota unavailable")
 
         transport, resolver = self.make_transport(
-            capability_snapshot_id=capability.snapshot_id,
+            capability=capability,
             events=events,
             wire=wire,
             quota_gate=quota,
@@ -488,7 +560,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
             )
             capability, request = prepared(client_id)
             transport, _resolver = self.make_transport(
-                capability_snapshot_id=capability.snapshot_id,
+                capability=capability,
                 events=events,
                 wire=wire,
             )

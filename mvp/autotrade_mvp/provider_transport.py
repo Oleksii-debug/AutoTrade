@@ -1079,6 +1079,7 @@ class AlpacaTradingHttpTransport:
         policy: ProviderEndpointPolicy,
         account_id: str,
         capability_snapshot_id: str,
+        capability_registry: CapabilityRegistry,
         secret_resolver: ProviderSecretResolver,
         credential_handle: PersistentCredentialHandle,
         session_token: str,
@@ -1124,6 +1125,7 @@ class AlpacaTradingHttpTransport:
         self.capability_snapshot_id = _canonical_text(
             capability_snapshot_id, name="capability_snapshot_id"
         )
+        self.capability_registry = capability_registry
         self.secret_resolver = secret_resolver
         self.credential_handle = credential_handle
         self.session_token = _canonical_text(
@@ -1175,6 +1177,7 @@ class AlpacaTradingHttpTransport:
             request["capability_snapshot_id"],
             name="capability_snapshot_id",
         )
+        entity_id = _canonical_text(request["entity_id"], name="entity_id")
         raw_capabilities = request["capability_snapshot_ids"]
         raw_instruments = request["instrument_versions"]
         if (
@@ -1297,6 +1300,12 @@ class AlpacaTradingHttpTransport:
         finally:
             credential_plaintext = None
 
+        # Revalidate after secret resolution/signing so expiry or replacement
+        # during that window cannot cross the irreversible send boundary.
+        self._require_current_capability(
+            entity_id=entity_id,
+            instrument_version=instrument_version,
+        )
         final_guard()
         raw = self.wire_client.send(signed)
         if not isinstance(raw, bytes):

@@ -182,7 +182,10 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
 
             empty = protocol()
             empty["horizons"] = []
-            with self.assertRaisesRegex(ProtocolViolation, "non-empty list"):
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "required protocol fields cannot be empty: horizons",
+            ):
                 registry.register_protocol(empty)
 
     def test_failed_and_discarded_trials_consume_registered_budget(self):

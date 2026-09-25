@@ -36,6 +36,25 @@ class JournalStoreTests(unittest.TestCase):
             self.assertFalse(store.mark_outbox_delivered(pending[0]["outbox_id"]))
             self.assertEqual(store.pending_outbox(), [])
 
+    def test_idempotent_event_replay_rejects_corrupted_outbox_hash(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event(), outbox_topic="events")
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE outbox SET envelope_hash = ? WHERE event_id = ?",
+                    ("sha256:" + "0" * 64, "evt-1"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "conflicts"):
+                store.append_event(event(), outbox_topic="events")
+
     def test_outbox_envelope_metadata_tamper_fails_closed(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

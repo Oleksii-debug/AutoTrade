@@ -375,6 +375,26 @@ class HostNetworkTests(unittest.TestCase):
                     durable_path.read_bytes(),
                 )
 
+    def test_non_event_routes_reject_query_and_get_body_before_auth_mutation(self):
+        query = self.app.dispatch(
+            method="GET",
+            target="/api/v1/state?unexpected=1",
+            headers=self.headers(),
+        )
+        self.assertEqual(query.status, 400)
+        self.assertEqual(self.body(query), {"error": "INVALID_QUERY"})
+        self.assertEqual(self.app.store.state_version, 0)
+
+        body = self.app.dispatch(
+            method="GET",
+            target="/api/v1/state",
+            headers=self.headers(),
+            body=b"{}",
+        )
+        self.assertEqual(body.status, 400)
+        self.assertEqual(self.body(body), {"error": "UNEXPECTED_REQUEST_BODY"})
+        self.assertEqual(self.app.store.state_version, 0)
+
     def test_header_body_identity_mismatch_is_rejected_before_mutation(self):
         wrong_actor = self.post(
             self.command(),
@@ -710,6 +730,7 @@ class HostNetworkTests(unittest.TestCase):
             conn.putheader("Authorization", authorization)
             conn.putheader("X-AutoTrade-Actor", "owner")
             conn.putheader("Origin", origin)
+            conn.putheader("Accept", "application/json")
             if body:
                 conn.putheader("Content-Type", "application/json")
                 conn.putheader("Content-Length", str(len(body)))
@@ -726,6 +747,8 @@ class HostNetworkTests(unittest.TestCase):
             "Authorization": (authorization,),
             "X-AutoTrade-Actor": ("owner",),
             "Origin": (origin,),
+            "Host": (f"127.0.0.1:{port}",),
+            "Accept": ("application/json",),
         }
         for name, extra in read_duplicates.items():
             with self.subTest(route="state", header=name):
@@ -742,6 +765,9 @@ class HostNetworkTests(unittest.TestCase):
             "Authorization": (authorization,),
             "X-AutoTrade-Actor": ("owner",),
             "Origin": (origin,),
+            "Host": (f"127.0.0.1:{port}",),
+            "Accept": ("application/json",),
+            "Content-Type": ("application/json",),
             "Content-Length": (str(len(command_body)),),
         }
         for name, extra in post_duplicates.items():
@@ -756,6 +782,29 @@ class HostNetworkTests(unittest.TestCase):
                 self.assertEqual(status, 400)
                 self.assertNotIn(session.token.encode("utf-8"), payload)
                 self.assertEqual(app.store.state_version, 0)
+
+    def test_concrete_server_rejects_missing_or_mismatched_host_before_dispatch(self):
+        origin, session, app, port = self._network_fixture()
+        authorization = "AutoTrade-Session " + session.token
+
+        def raw_host(host_value):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+            conn.putrequest("GET", "/api/v1/state", skip_host=True)
+            if host_value is not None:
+                conn.putheader("Host", host_value)
+            conn.putheader("Authorization", authorization)
+            conn.putheader("X-AutoTrade-Actor", "owner")
+            conn.putheader("Origin", origin)
+            conn.endheaders()
+            response = conn.getresponse()
+            response.read()
+            status = response.status
+            conn.close()
+            return status
+
+        self.assertEqual(raw_host(None), 400)
+        self.assertEqual(raw_host(f"127.0.0.1:{port + 1}"), 403)
+        self.assertEqual(app.store.state_version, 0)
 
     def test_concrete_server_rejects_transfer_encoding_before_dispatch(self):
         origin, session, app, port = self._network_fixture()

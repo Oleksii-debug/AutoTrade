@@ -103,6 +103,13 @@ def _uuid(value: object, *, name: str) -> str:
         raise BinanceUsdmAdapterError(f"{name} must be a UUID") from error
 
 
+def _provider_symbol(value: object, *, name: str) -> str:
+    symbol = _text(value, name=name)
+    if symbol != symbol.upper():
+        raise BinanceUsdmAdapterError("Binance USD-M symbol must be uppercase")
+    return symbol
+
+
 def validate_client_order_id(value: object) -> str:
     client_id = _text(value, name="client_order_id")
     if _CLIENT_ID.fullmatch(client_id) is None:
@@ -139,9 +146,7 @@ class BinanceUsdmOrderIntent:
         reduce_only: bool = False,
     ) -> "BinanceUsdmOrderIntent":
         instrument = _text(instrument_version, name="instrument_version")
-        provider_symbol = _text(symbol, name="symbol")
-        if provider_symbol != provider_symbol.upper():
-            raise BinanceUsdmAdapterError("Binance USD-M symbol must be uppercase")
+        provider_symbol = _provider_symbol(symbol, name="symbol")
 
         normalized_side = _text(side, name="side").upper()
         if normalized_side not in {"BUY", "SELL"}:
@@ -333,7 +338,7 @@ def parse_order_ack(
             "Binance USD-M clientOrderId does not match request"
         )
 
-    symbol = _text(response.get("symbol"), name="response.symbol")
+    symbol = _provider_symbol(response.get("symbol"), name="response.symbol")
     order_id = response.get("orderId")
     if isinstance(order_id, bool) or not isinstance(order_id, int) or order_id < 0:
         raise BinanceUsdmAdapterError(
@@ -364,11 +369,30 @@ def parse_account_trades(
         raise BinanceUsdmAdapterError("trade rows must be an array")
     if not isinstance(instrument_versions, Mapping):
         raise BinanceUsdmAdapterError("instrument_versions must be a mapping")
-    client_map = client_ids_by_order_id or {}
+    normalized_instruments: dict[str, str] = {}
+    for symbol, instrument_version in instrument_versions.items():
+        provider_symbol = _provider_symbol(symbol, name="instrument_versions symbol")
+        normalized_instruments[provider_symbol] = _text(
+            instrument_version,
+            name="instrument_version",
+        )
+
+    client_map = {} if client_ids_by_order_id is None else client_ids_by_order_id
     if not isinstance(client_map, Mapping):
         raise BinanceUsdmAdapterError(
             "client_ids_by_order_id must be a mapping"
         )
+    normalized_client_map: dict[int, str] = {}
+    for order_id, client_id in client_map.items():
+        if (
+            isinstance(order_id, bool)
+            or not isinstance(order_id, int)
+            or order_id < 0
+        ):
+            raise BinanceUsdmAdapterError(
+                "client_ids_by_order_id keys must be non-negative integer order ids"
+            )
+        normalized_client_map[order_id] = validate_client_order_id(client_id)
 
     by_id: dict[str, ProviderFillEvidence] = {}
     for index, raw in enumerate(rows):
@@ -377,8 +401,8 @@ def parse_account_trades(
                 f"trade row {index} must be an object"
             )
 
-        symbol = _text(raw.get("symbol"), name=f"trade[{index}].symbol")
-        if symbol not in instrument_versions:
+        symbol = _provider_symbol(raw.get("symbol"), name=f"trade[{index}].symbol")
+        if symbol not in normalized_instruments:
             raise BinanceUsdmAdapterError(
                 f"unmapped Binance USD-M symbol: {symbol}"
             )
@@ -406,15 +430,13 @@ def parse_account_trades(
             )
 
         execution_id = f"BINANCE-USDM:{symbol}:{trade_id}"
-        client_id = client_map.get(order_id)
-        if client_id is not None:
-            client_id = validate_client_order_id(client_id)
+        client_id = normalized_client_map.get(order_id)
 
         fill = ProviderFillEvidence.create(
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=_text(
-                instrument_versions[symbol], name="instrument_version"
+                normalized_instruments[symbol], name="instrument_version"
             ),
             quantity=raw.get("qty"),
             price=raw.get("price"),

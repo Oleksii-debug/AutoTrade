@@ -3,14 +3,17 @@
 This module does not simulate orders itself and does not create execution
 authority.  It binds an already implemented deterministic execution model to a
 specific asset class, data fidelity, scenario, scientific protocol and
-immutable evidence digest before the model may be used as qualified replay
-evidence.
+resolved immutable artifact evidence before the model may be used as qualified
+replay evidence.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal
+from uuid import UUID
+
+from autotrade_research.artifacts.store import ArtifactIntegrityError, ArtifactStore
 
 from .execution_oracle import assert_conservative_execution
 from .execution_realism import (
@@ -44,6 +47,14 @@ def _text(value: object, *, name: str) -> str:
     return value.strip()
 
 
+def _uuid(value: object, *, name: str) -> str:
+    text = _text(value, name=name)
+    try:
+        return str(UUID(text))
+    except (ValueError, AttributeError, TypeError) as error:
+        raise ExecutionQualificationError(f"{name} must be a UUID") from error
+
+
 def _sha256(value: object, *, name: str) -> str:
     text = _text(value, name=name).lower()
     if text.startswith("sha256:"):
@@ -67,6 +78,7 @@ class ExecutionModelQualification:
     model_fingerprint: str
     calibration_sha256: str
     protocol_sha256: str
+    evidence_artifact_id: str
     evidence_sha256: str
     instrument_version: str | None = None
 
@@ -92,6 +104,10 @@ class ExecutionModelQualification:
         fingerprint = _sha256(self.model_fingerprint, name="model_fingerprint")
         calibration = _sha256(self.calibration_sha256, name="calibration_sha256")
         protocol = _sha256(self.protocol_sha256, name="protocol_sha256")
+        evidence_artifact_id = _uuid(
+            self.evidence_artifact_id,
+            name="evidence_artifact_id",
+        )
         evidence = _sha256(self.evidence_sha256, name="evidence_sha256")
         instrument = (
             None
@@ -107,6 +123,7 @@ class ExecutionModelQualification:
         object.__setattr__(self, "model_fingerprint", fingerprint)
         object.__setattr__(self, "calibration_sha256", calibration)
         object.__setattr__(self, "protocol_sha256", protocol)
+        object.__setattr__(self, "evidence_artifact_id", evidence_artifact_id)
         object.__setattr__(self, "evidence_sha256", evidence)
         object.__setattr__(self, "instrument_version", instrument)
 
@@ -118,7 +135,8 @@ def validate_execution_qualification(
     asset_class: str,
     instrument_version: str,
     protocol_sha256: str,
-    evidence_sha256: str,
+    artifact_store: ArtifactStore,
+    evidence_artifact_id: str,
     purpose: str,
 ) -> None:
     """Fail closed unless every frozen qualification dimension matches exactly."""
@@ -127,6 +145,8 @@ def validate_execution_qualification(
         raise TypeError("model must be ExecutionModel")
     if not isinstance(qualification, ExecutionModelQualification):
         raise TypeError("qualification must be ExecutionModelQualification")
+    if not isinstance(artifact_store, ArtifactStore):
+        raise TypeError("artifact_store must be the canonical ArtifactStore")
 
     normalized_asset = _text(asset_class, name="asset_class").upper()
     if normalized_asset not in _ASSET_CLASSES:
@@ -139,7 +159,31 @@ def validate_execution_qualification(
     if normalized_purpose not in _PURPOSES:
         raise ExecutionQualificationError("unsupported purpose")
     normalized_protocol = _sha256(protocol_sha256, name="protocol_sha256")
-    normalized_evidence = _sha256(evidence_sha256, name="evidence_sha256")
+    normalized_evidence_artifact_id = _uuid(
+        evidence_artifact_id,
+        name="evidence_artifact_id",
+    )
+
+    try:
+        evidence_manifest = artifact_store.load_manifest(
+            normalized_evidence_artifact_id
+        )
+        if evidence_manifest.get("manifest_hash") is None:
+            raise ExecutionQualificationError(
+                "execution evidence manifest lacks integrity binding"
+            )
+        artifact_store.read_bytes(normalized_evidence_artifact_id)
+    except ExecutionQualificationError:
+        raise
+    except (FileNotFoundError, ArtifactIntegrityError, OSError, ValueError) as error:
+        raise ExecutionQualificationError(
+            "execution evidence artifact cannot be verified"
+        ) from error
+
+    resolved_evidence = _sha256(
+        evidence_manifest.get("sha256"),
+        name="resolved evidence sha256",
+    )
 
     failures: list[str] = []
     if qualification.asset_class != normalized_asset:
@@ -156,7 +200,9 @@ def validate_execution_qualification(
         failures.append("calibration_sha256")
     if qualification.protocol_sha256 != normalized_protocol:
         failures.append("protocol_sha256")
-    if qualification.evidence_sha256 != normalized_evidence:
+    if qualification.evidence_artifact_id != normalized_evidence_artifact_id:
+        failures.append("evidence_artifact_id")
+    if qualification.evidence_sha256 != resolved_evidence:
         failures.append("evidence_sha256")
     if (
         qualification.instrument_version is not None
@@ -182,7 +228,8 @@ def simulate_qualified_execution(
     qualification: ExecutionModelQualification,
     asset_class: str,
     protocol_sha256: str,
-    evidence_sha256: str,
+    artifact_store: ArtifactStore,
+    evidence_artifact_id: str,
     purpose: str = "REPLAY",
 ) -> SimulatedExecution:
     """Run the existing simulator only after exact qualification succeeds.
@@ -202,7 +249,8 @@ def simulate_qualified_execution(
         asset_class=asset_class,
         instrument_version=order.instrument_version,
         protocol_sha256=protocol_sha256,
-        evidence_sha256=evidence_sha256,
+        artifact_store=artifact_store,
+        evidence_artifact_id=evidence_artifact_id,
         purpose=purpose,
     )
     result = simulate_execution(order, observation, model)

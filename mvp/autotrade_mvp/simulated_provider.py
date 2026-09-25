@@ -104,12 +104,20 @@ class SimulatedOrder:
     submitted_at: str
 
 
-def _same_order_request(left: SimulatedOrder, right: SimulatedOrder) -> bool:
-    """Compare immutable request identity/economics, excluding receipt time."""
+def _same_attempt_request(left: SimulatedOrder, right: SimulatedOrder) -> bool:
+    """Compare one local attempt identity/economics, excluding receipt time."""
 
     return (
         left.attempt_id == right.attempt_id
-        and left.client_order_id == right.client_order_id
+        and _same_client_order_request(left, right)
+    )
+
+
+def _same_client_order_request(left: SimulatedOrder, right: SimulatedOrder) -> bool:
+    """Compare provider-idempotent order economics across local attempts."""
+
+    return (
+        left.client_order_id == right.client_order_id
         and left.provider_order_id == right.provider_order_id
         and left.instrument_version == right.instrument_version
         and left.side == right.side
@@ -186,7 +194,7 @@ class SimulatedProvider:
 
         prior_attempt = self._attempts.get(aid)
         if prior_attempt is not None:
-            if not _same_order_request(prior_attempt, proposed):
+            if not _same_attempt_request(prior_attempt, proposed):
                 raise SimulatedProviderConflict(
                     "attempt_id already has different simulated order content"
                 )
@@ -194,12 +202,12 @@ class SimulatedProvider:
 
         prior_client = self.orders.get(cid)
         if prior_client is not None:
-            if not _same_order_request(prior_client, proposed):
+            if not _same_client_order_request(prior_client, proposed):
                 raise SimulatedProviderConflict(
                     "client_order_id already has different simulated order content"
                 )
-            self._attempts[aid] = prior_client
-            return self._submission_result(prior_client, canonical_now)
+            self._attempts[aid] = proposed
+            return self._submission_result(proposed, canonical_now)
 
         self.orders[cid] = proposed
         self._attempts[aid] = proposed

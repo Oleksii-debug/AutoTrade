@@ -501,8 +501,14 @@ class WhiteBitSubmissionResult:
     rejection_message: str | None = None
 
     def __post_init__(self) -> None:
-        for name in ("attempt_id", "account_id", "environment"):
+        for name in ("attempt_id", "account_id"):
             object.__setattr__(self, name, _text(getattr(self, name), name=name))
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+            raise WhiteBitAdapterError(
+                "environment must be one of REPLAY, SIMULATION, PAPER, LIVE"
+            )
+        object.__setattr__(self, "environment", environment)
         object.__setattr__(
             self,
             "client_order_id",
@@ -710,6 +716,8 @@ def parse_submission_result(
 
     if not isinstance(prepared, WhiteBitPreparedRequest):
         raise TypeError("prepared must be WhiteBitPreparedRequest")
+    if type(transport_ambiguous) is not bool:
+        raise WhiteBitAdapterError("transport_ambiguous must be a boolean")
     client_id = validate_client_order_id(str(prepared.body.get("clientOrderId", "")))
     attempt = _text(attempt_id, name="attempt_id")
     account = _text(account_id, name="account_id")

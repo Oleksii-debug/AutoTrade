@@ -1540,6 +1540,73 @@ def allocate_evidence_bound_objective_targets(
             expected_environment=normalized_environment,
             at=normalized_decision_time,
         )
+        quote_currency = _payload_text(
+            resolved_market[symbol],
+            "quote_currency",
+        ).upper()
+        valuation_fx_rate = _payload_decimal(valuation, "fx_rate")
+        if quote_currency == base_currency:
+            monetary_rate = Decimal("1")
+        else:
+            constraint_currency = _payload_text(
+                resolved_market[symbol],
+                "monetary_constraint_currency",
+            ).upper()
+            desired_currency = _payload_text(
+                resolved_objective[symbol],
+                "desired_notional_currency",
+            ).upper()
+            valuation_constraint_currency = _payload_text(
+                valuation,
+                "source_monetary_currency",
+            ).upper()
+            valuation_desired_currency = _payload_text(
+                valuation,
+                "desired_notional_currency",
+            ).upper()
+            if constraint_currency != quote_currency:
+                raise ValueError(
+                    f"market monetary constraints for {symbol} must declare quote-currency units"
+                )
+            if desired_currency != quote_currency:
+                raise ValueError(
+                    f"objective desired_notional for {symbol} must declare quote-currency units"
+                )
+            if valuation_constraint_currency != constraint_currency:
+                raise ValueError(
+                    f"valuation source monetary currency mismatch for {symbol}"
+                )
+            if valuation_desired_currency != desired_currency:
+                raise ValueError(
+                    f"valuation desired_notional currency mismatch for {symbol}"
+                )
+            monetary_rate = valuation_fx_rate
+
+        desired_notional_base = item.candidate.desired_notional * monetary_rate
+        min_notional_base = item.candidate.min_notional * monetary_rate
+        fee_floor_base = item.candidate.fee_floor * monetary_rate
+        max_executable_notional_base = (
+            None
+            if item.candidate.max_executable_notional is None
+            else item.candidate.max_executable_notional * monetary_rate
+        )
+        if quote_currency != base_currency:
+            if _payload_decimal(
+                valuation,
+                "desired_notional_base",
+            ) != desired_notional_base:
+                raise ValueError(
+                    f"valuation desired_notional_base mismatch for {symbol}"
+                )
+        elif "desired_notional_base" in valuation.payload:
+            if _payload_decimal(
+                valuation,
+                "desired_notional_base",
+            ) != desired_notional_base:
+                raise ValueError(
+                    f"valuation desired_notional_base mismatch for {symbol}"
+                )
+
         try:
             normalized = normalize_allocation_valuation(
                 symbol=symbol,
@@ -1548,9 +1615,9 @@ def allocate_evidence_bound_objective_targets(
                 source_price=item.candidate.price,
                 expected_cost_rate=item.candidate.cost_rate,
                 expected_capital_requirement_rate=item.candidate.capital_requirement_rate,
-                expected_min_notional_base=item.candidate.min_notional,
-                expected_fee_floor_base=item.candidate.fee_floor,
-                expected_max_executable_notional_base=item.candidate.max_executable_notional,
+                expected_min_notional_base=min_notional_base,
+                expected_fee_floor_base=fee_floor_base,
+                expected_max_executable_notional_base=max_executable_notional_base,
                 decision_time=normalized_decision_time,
                 portfolio_base_currency=base_currency,
             )
@@ -1563,14 +1630,14 @@ def allocate_evidence_bound_objective_targets(
             ObjectiveCandidate(
                 candidate=AllocationCandidate(
                     symbol=symbol,
-                    desired_notional=item.candidate.desired_notional,
+                    desired_notional=desired_notional_base,
                     price=normalized.unit_base_notional,
                     lot_size=item.candidate.lot_size,
                     cost_rate=item.candidate.cost_rate,
                     capital_requirement_rate=item.candidate.capital_requirement_rate,
-                    min_notional=item.candidate.min_notional,
-                    fee_floor=item.candidate.fee_floor,
-                    max_executable_notional=item.candidate.max_executable_notional,
+                    min_notional=min_notional_base,
+                    fee_floor=fee_floor_base,
+                    max_executable_notional=max_executable_notional_base,
                 ),
                 expected_return_rate=item.expected_return_rate,
                 risk_penalty_rate=item.risk_penalty_rate,

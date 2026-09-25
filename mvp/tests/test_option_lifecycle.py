@@ -22,7 +22,7 @@ from mvp.autotrade_mvp.option_lifecycle import (
     OptionLifecycleError,
     OptionLifecycleObservation,
 )
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.provider_core import (
     Surface,
@@ -54,11 +54,12 @@ def option_version(
     settlement_method: str = "PHYSICAL",
     deliverable_quantity: str = "100",
     strike: str = "50",
+    provider_id: str = "BYBIT",
 ) -> InstrumentVersion:
     return InstrumentVersion(
         instrument_id=OPTION_ID,
         version=version,
-        provider_id="BYBIT",
+        provider_id=provider_id,
         venue_id="OPTIONS",
         provider_symbol="ABC-202612-C50",
         asset_class="OPTION",
@@ -475,11 +476,201 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             evidence["parser_id"],
             "autotrade.option-lifecycle.sealed-json",
         )
-        self.assertEqual(evidence["parser_version"], "1.1.0")
+        self.assertEqual(evidence["parser_version"], "1.2.0")
         self.assertRegex(
             evidence["parser_contract_digest"],
             r"^sha256:[0-9a-f]{64}$",
         )
+
+    def test_generic_preupgrade_event_exact_retry_remains_idempotent(self):
+        legacy_parser_contract_digest = payload_digest(
+            {
+                "parser_id": "autotrade.option-lifecycle.sealed-json",
+                "parser_version": "1.1.0",
+                "source_type": "ProviderResponseObservation",
+                "source_surface": "ACTIVITIES",
+                "payload_fields": [
+                    "venue_id",
+                    "external_event_id",
+                    "event_kind",
+                    "signed_contracts",
+                    "effective_at",
+                    "provider_revision",
+                    "underlying_price",
+                    "cash_settlement_amount",
+                    "corrects_external_event_id",
+                ],
+                "financial_binding": "EXACT_SEALED_PAYLOAD",
+            }
+        )
+        generic_registry = InstrumentRegistry(
+            versions=(option_version(provider_id="ALPACA"),)
+        )
+        reference = self.evidence(
+            provider_id="ALPACA",
+            external_event_id="legacy-generic-life",
+        )
+        source = self._evidence[reference]
+        normalized = self._normalize_provider_lifecycle(source)
+
+        def seed_position(book, suffix):
+            book.append(
+                book_equity_fill(
+                    transaction_id=f"legacy-generic-seed-{suffix}",
+                    cause_event_id=f"legacy-generic-seed-cause-{suffix}",
+                    instrument=f"{OPTION_ID}@1",
+                    settlement_currency="USD",
+                    side="BUY",
+                    quantity="1",
+                    price="1",
+                )
+            )
+
+        with TemporaryDirectory() as source_directory:
+            source_store = JournalStore(source_directory + "/journal.sqlite3")
+            source_book = DurableProviderEconomicBook(
+                source_store,
+                provider_id="ALPACA",
+                account_id="paper-1",
+                environment="PAPER",
+            )
+            seed_position(source_book, "source")
+            source_authority = DurableOptionLifecycleAuthority(
+                source_store,
+                registry=generic_registry,
+                economic_book=source_book,
+                evidence_resolver=lambda ref: self._evidence[ref],
+                lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+                permission_scope=LIFECYCLE_SCOPE,
+                provider_environment="PAPER",
+            )
+            source_result = source_authority.apply(reference)
+            source_event = source_store.get_event(
+                source_result.lifecycle_event_id
+            )
+            self.assertIsNotNone(source_event)
+            lifecycle_transaction = next(
+                item
+                for item in source_book.transactions
+                if item.transaction_id
+                == source_result.active_transaction_ids[0]
+            )
+
+        with TemporaryDirectory() as target_directory:
+            target_store = JournalStore(target_directory + "/journal.sqlite3")
+            target_book = DurableProviderEconomicBook(
+                target_store,
+                provider_id="ALPACA",
+                account_id="paper-1",
+                environment="PAPER",
+            )
+            seed_position(target_book, "target")
+            self.assertTrue(target_book.append(lifecycle_transaction))
+            target_authority = DurableOptionLifecycleAuthority(
+                target_store,
+                registry=generic_registry,
+                economic_book=target_book,
+                evidence_resolver=lambda ref: self._evidence[ref],
+                lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+                permission_scope=LIFECYCLE_SCOPE,
+                provider_environment="PAPER",
+            )
+
+            legacy_observation = {
+                "schema_version": "1.0.0",
+                "provider_id": normalized.provider_id,
+                "account_id": normalized.account_id,
+                "environment": normalized.environment,
+                "venue_id": normalized.venue_id,
+                "instrument_version": normalized.instrument_version,
+                "external_event_id": normalized.external_event_id,
+                "event_kind": normalized.event_kind,
+                "signed_contracts": format(
+                    normalized.signed_contracts.normalize(), "f"
+                ),
+                "effective_at": normalized.effective_at.isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "observed_at": normalized.observed_at.isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "raw_evidence_digest": normalized.raw_evidence_digest,
+                "provider_revision": normalized.provider_revision,
+                "underlying_price": (
+                    None
+                    if normalized.underlying_price is None
+                    else format(normalized.underlying_price.normalize(), "f")
+                ),
+                "cash_settlement_amount": (
+                    None
+                    if normalized.cash_settlement_amount is None
+                    else format(
+                        normalized.cash_settlement_amount.normalize(), "f"
+                    )
+                ),
+                "corrects_external_event_id": (
+                    normalized.corrects_external_event_id
+                ),
+            }
+            legacy_provider_evidence = {
+                "evidence_ref": source.evidence_ref,
+                "response_sha256": source.response_sha256,
+                "query_digest": source.query_binding.query_digest,
+                "endpoint": source.query_binding.endpoint,
+                "permission_scope": source.query_binding.permission_scope,
+                "capability_snapshot_id": (
+                    source.query_binding.capability_snapshot_id
+                ),
+                "instrument_version": source.query_binding.instrument_version,
+                "observed_at": source.observed_at,
+                "parser_id": "autotrade.option-lifecycle.sealed-json",
+                "parser_version": "1.1.0",
+                "parser_contract_digest": legacy_parser_contract_digest,
+            }
+            legacy_payload = dict(source_event["payload"])
+            legacy_payload["schema_version"] = "1.0.0"
+            legacy_payload.pop("provider_environment", None)
+            legacy_payload["provider_evidence"] = legacy_provider_evidence
+            legacy_payload["provider_evidence_digest"] = payload_digest(
+                legacy_provider_evidence
+            )
+            legacy_payload["observation_digest"] = payload_digest(
+                legacy_observation
+            )
+            legacy_envelope = dict(source_event)
+            legacy_envelope["aggregate_id"] = target_authority.aggregate_id
+            legacy_envelope["payload"] = legacy_payload
+            legacy_envelope["payload_hash"] = payload_digest(legacy_payload)
+            target_store.append_event(legacy_envelope)
+
+            before_transactions = tuple(target_book.transactions)
+            retried = target_authority.apply(reference)
+            self.assertFalse(retried.inserted)
+            self.assertEqual(tuple(target_book.transactions), before_transactions)
+            self.assertEqual(
+                len(
+                    target_store.load_events(
+                        "option_lifecycle",
+                        target_authority.aggregate_id,
+                    )
+                ),
+                1,
+            )
+
+            changed = self.evidence(
+                provider_id="ALPACA",
+                external_event_id="legacy-generic-life",
+                signed_contracts="2",
+                provider_revision="provider-r2",
+                observed_at=utc(12, 18, 19, 2),
+            )
+            with self.assertRaisesRegex(
+                OptionLifecycleConflict,
+                "changed evidence",
+            ):
+                target_authority.apply(changed)
+            self.assertEqual(tuple(target_book.transactions), before_transactions)
+
 
     def test_lifecycle_cannot_consume_contracts_absent_from_canonical_position(self):
         reference = self.evidence()

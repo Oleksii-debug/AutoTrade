@@ -671,6 +671,43 @@ class SettlementBook:
                 "settlement evidence references an unknown obligation"
             )
 
+        bound_source_currencies = {
+            (item.source_transaction_id, item.currency)
+            for item in items
+            if item.source_transaction_id is not None
+        }
+        settlement_bound_sources = {
+            source_transaction_id
+            for source_transaction_id, _currency in bound_source_currencies
+        }
+        for transaction in economic_book.transactions:
+            corrected_id = transaction.corrects_transaction_id
+            if (
+                corrected_id is None
+                or transaction.transaction_id in reversed_ids
+                or corrected_id not in settlement_bound_sources
+            ):
+                continue
+            replacement_cash: dict[str, Decimal] = {}
+            for posting in transaction.postings:
+                if posting.ledger_account == f"CASH:{posting.asset_or_currency}":
+                    replacement_cash[posting.asset_or_currency] = (
+                        replacement_cash.get(
+                            posting.asset_or_currency,
+                            Decimal("0"),
+                        )
+                        + posting.signed_amount
+                    )
+            for currency, amount in replacement_cash.items():
+                if (
+                    amount != 0
+                    and (transaction.transaction_id, currency)
+                    not in bound_source_currencies
+                ):
+                    raise SettlementConflict(
+                        "active correction replacement cash leg lacks settlement obligation"
+                    )
+
         active: list[SettlementObligation] = []
         active_source_currency: set[tuple[str, str]] = set()
         currencies: set[str] = set()

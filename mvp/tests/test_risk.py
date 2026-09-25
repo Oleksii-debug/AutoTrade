@@ -85,6 +85,37 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertTrue({"state_version", "market_freshness", "fx_freshness"} <= failed)
         self.assertFalse(decision.admitted)
 
+    def test_required_fx_evidence_fails_closed_when_missing(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="100",
+            expected_state_version=7,
+        )
+        missing = evaluate_risk(
+            intent,
+            context(fx_age_seconds={}, fx_required=True),
+            policy(),
+        )
+        rule = next(item for item in missing.rules if item.rule == "fx_freshness")
+        self.assertFalse(rule.passed)
+        self.assertEqual(rule.observed, "UNKNOWN")
+        self.assertFalse(missing.admitted)
+
+        not_required = evaluate_risk(
+            intent,
+            context(fx_age_seconds={}, fx_required=False),
+            policy(),
+        )
+        self.assertTrue(
+            next(item for item in not_required.rules if item.rule == "fx_freshness").passed
+        )
+
+    def test_fx_required_must_be_real_boolean(self):
+        with self.assertRaises(TypeError):
+            context(fx_required="yes")
+
     def test_reserved_exposure_counts_against_position_and_leverage(self):
         decision = evaluate_risk(
             RiskIntent.create(

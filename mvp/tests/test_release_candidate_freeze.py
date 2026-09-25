@@ -338,7 +338,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         digest = "sha256:" + sha256(manifest.encode("utf-8")).hexdigest()
         with self.assertRaisesRegex(
             ReleaseCandidateError,
-            "attestation identity mismatch",
+            "unsupported structure",
         ):
             ReleaseCandidateDecision(
                 status="FROZEN",

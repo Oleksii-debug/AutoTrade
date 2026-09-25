@@ -290,5 +290,95 @@ class MarketNormalizationTests(unittest.TestCase):
         self.assertTrue(event.payload["next_funding_at"].endswith("Z"))
 
 
+    def test_book_gap_stays_unverified_until_new_snapshot(self):
+        normalizer = MarketNormalizer(registry())
+        normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=1,
+                stream="book",
+            )
+        )
+        gap = normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [["99.99", "2"]], "asks": []},
+                sequence=3,
+                stream="book",
+            )
+        )
+        self.assertIn("SEQUENCE_GAP", gap.quality_flags)
+        self.assertIn("UNVERIFIED_BOOK_STATE", gap.quality_flags)
+
+        later_delta = normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [], "asks": [["100.01", "2"]]},
+                sequence=4,
+                stream="book",
+            )
+        )
+        self.assertIn("UNVERIFIED_BOOK_STATE", later_delta.quality_flags)
+
+        snapshot = normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.98", "1"]], "asks": [["100.02", "1"]]},
+                sequence=5,
+                stream="book",
+            )
+        )
+        self.assertNotIn("UNVERIFIED_BOOK_STATE", snapshot.quality_flags)
+
+        recovered = normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [["99.98", "2"]], "asks": []},
+                sequence=6,
+                stream="book",
+            )
+        )
+        self.assertNotIn("UNVERIFIED_BOOK_STATE", recovered.quality_flags)
+
+    def test_out_of_order_snapshot_cannot_clear_unverified_book_state(self):
+        normalizer = MarketNormalizer(registry())
+        normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=1,
+                stream="book",
+            )
+        )
+        normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [["99.99", "2"]], "asks": []},
+                sequence=3,
+                stream="book",
+            )
+        )
+        stale_snapshot = normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.97", "1"]], "asks": [["100.03", "1"]]},
+                sequence=2,
+                stream="book",
+            )
+        )
+        self.assertIn("OUT_OF_ORDER", stale_snapshot.quality_flags)
+
+        next_delta = normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [], "asks": [["100.03", "2"]]},
+                sequence=4,
+                stream="book",
+            )
+        )
+        self.assertIn("UNVERIFIED_BOOK_STATE", next_delta.quality_flags)
+
+
 if __name__ == "__main__":
     unittest.main()

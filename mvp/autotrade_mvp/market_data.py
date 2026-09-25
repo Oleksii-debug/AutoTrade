@@ -204,6 +204,7 @@ class MarketNormalizer:
         self._max_available_age = max_available_age
         self._last_sequence: dict[tuple[str, str, str, str], int] = {}
         self._seen_sequence: dict[tuple[str, str, str, str, int], tuple[str, str]] = {}
+        self._unverified_book_streams: set[tuple[str, str, str, str]] = set()
 
     @staticmethod
     def _instrument_version_id(instrument: InstrumentVersion) -> str:
@@ -417,6 +418,22 @@ class MarketNormalizer:
                     if last is None
                     else max(last, update.source_sequence)
                 )
+
+        if update.kind == "BOOK_DELTA" and (
+            "SEQUENCE_GAP" in flags or "OUT_OF_ORDER" in flags
+        ):
+            self._unverified_book_streams.add(stream_key)
+
+        if (
+            update.kind == "BOOK_SNAPSHOT"
+            and update.source_sequence is not None
+            and "DUPLICATE" not in flags
+            and "OUT_OF_ORDER" not in flags
+        ):
+            self._unverified_book_streams.discard(stream_key)
+
+        if update.kind == "BOOK_DELTA" and stream_key in self._unverified_book_streams:
+            flags.add("UNVERIFIED_BOOK_STATE")
 
         identity_material = "|".join(
             [

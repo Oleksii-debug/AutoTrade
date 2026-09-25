@@ -80,6 +80,7 @@ class ScientificQualificationInput:
     economic_claim: str
     holdout_used_for_tuning: bool = False
     future_information_used_for_routing: bool = False
+    population_coverage_hash: str | None = None
 
     def __post_init__(self) -> None:
         _sha256_identity(self.candidate_hash, "candidate_hash")
@@ -95,6 +96,11 @@ class ScientificQualificationInput:
             raise TypeError("holdout_used_for_tuning must be boolean")
         if not isinstance(self.future_information_used_for_routing, bool):
             raise TypeError("future_information_used_for_routing must be boolean")
+        if self.population_coverage_hash is not None:
+            _sha256_identity(
+                self.population_coverage_hash,
+                "population_coverage_hash",
+            )
         ids = [gate.gate_id for gate in self.gates]
         if len(ids) != len(set(ids)):
             raise ValueError("duplicate qualification gate")
@@ -163,6 +169,19 @@ def qualify_scientific_learning(
         elif gate.status == "INCONCLUSIVE":
             reasons.append("SCIENCE.GATE_INCONCLUSIVE:" + gate_id)
 
+    retention_gate = by_id.get("retention")
+    if evidence.population_coverage_hash is None:
+        checks.append(("population_coverage", "INCONCLUSIVE"))
+        reasons.append("SCIENCE.POPULATION_COVERAGE_MISSING")
+    elif (
+        retention_gate is None
+        or evidence.population_coverage_hash not in retention_gate.evidence_hashes
+    ):
+        checks.append(("population_coverage", "FAIL"))
+        reasons.append("SCIENCE.POPULATION_COVERAGE_NOT_BOUND_TO_RETENTION")
+    else:
+        checks.append(("population_coverage", "PASS"))
+
     if evidence.holdout_used_for_tuning:
         checks.append(("holdout_usage", "FAIL"))
         reasons.append("SCIENCE.HOLDOUT_MISUSE")
@@ -203,6 +222,7 @@ def qualify_scientific_learning(
             "claim": evidence.economic_claim,
             "holdout_used_for_tuning": evidence.holdout_used_for_tuning,
             "future_information_used_for_routing": evidence.future_information_used_for_routing,
+            "population_coverage_hash": evidence.population_coverage_hash,
             "gates": [
                 {
                     "gate_id": gate.gate_id,

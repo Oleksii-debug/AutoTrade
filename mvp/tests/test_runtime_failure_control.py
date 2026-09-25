@@ -202,6 +202,33 @@ class RuntimeRecoveryTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             controller.validate_sender(owner.owner_id, owner.epoch)
 
+    def test_owner_transfer_cannot_self_assert_reconciliation(self):
+        controller, _ = self._ready()
+        controller.set_storage_writable(False)
+        controller.set_storage_writable(True)
+        self.assertFalse(controller.provider_reconciled)
+        self.assertEqual(controller.state, HostState.RECOVERING)
+
+        with self.assertRaisesRegex(
+            PermissionError,
+            "recorded current reconciliation",
+        ):
+            controller.transfer_owner(
+                new_owner_id="host-b",
+                old_sender_fenced=True,
+                reconciled=True,
+            )
+        self.assertEqual(controller.owner.owner_id, "host-a")
+        self.assertEqual(controller.owner.epoch, 1)
+
+        controller.record_reconciliation(consistent=True)
+        transferred = controller.transfer_owner(
+            new_owner_id="host-b",
+            old_sender_fenced=True,
+            reconciled=True,
+        )
+        self.assertEqual(transferred.owner_id, "host-b")
+
     def test_new_owner_must_reconcile_again_before_sending(self):
         controller, _ = self._ready()
         new_owner = controller.transfer_owner(

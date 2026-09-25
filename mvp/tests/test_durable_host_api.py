@@ -262,6 +262,91 @@ class JournalBackedHostApiTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "rewrites a terminal"):
             self.store().snapshot()
 
+    def test_restart_rejects_malformed_persisted_operation_arrays(self):
+        cases = (
+            ("remaining_uncertainty", [123]),
+            ("affected_refs", [123]),
+            ("evidence", ["not-an-object"]),
+        )
+        for field, bad_value in cases:
+            with self.subTest(field=field), TemporaryDirectory() as directory:
+                path = f"{directory}/journal.sqlite3"
+                journal = JournalStore(path)
+                store = JournalBackedHostCommandStore(
+                    journal,
+                    account_id="paper-account-1",
+                    environment="PAPER",
+                    session_validator=lambda session, actor: (
+                        session,
+                        actor,
+                    ) in self.sessions,
+                    now=lambda: "2026-09-24T18:00:00Z",
+                )
+                accepted = store.submit(self.command())
+                payload = {
+                    "operation_id": accepted.operation_id,
+                    "phase": "RUNNING",
+                    "remaining_uncertainty": ["provider_response_pending"],
+                    "affected_refs": ["order:provider-1"],
+                    "evidence": [{"kind": "provider-observation"}],
+                }
+                payload[field] = bad_value
+                journal.append_event(
+                    {
+                        "event_id": f"malformed-{field}",
+                        "event_type": "OPERATION_UPDATED",
+                        "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
+                        "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                        "aggregate_version": "2",
+                        "payload": payload,
+                        "payload_hash": payload_digest(payload),
+                        "committed_at": "2026-09-24T18:00:01Z",
+                    }
+                )
+                restarted = JournalBackedHostCommandStore(
+                    JournalStore(path),
+                    account_id="paper-account-1",
+                    environment="PAPER",
+                    session_validator=lambda session, actor: (
+                        session,
+                        actor,
+                    ) in self.sessions,
+                    now=lambda: "2026-09-24T18:00:02Z",
+                )
+                with self.assertRaisesRegex(ValueError, "Host journal"):
+                    restarted.snapshot()
+
+    def test_restart_rejects_non_object_command_acceptance_evidence(self):
+        journal = JournalStore(self.path)
+        payload = {
+            "command_id": "manual-command",
+            "operation_id": "manual-operation",
+            "action": "BLOCK_NEW_EXPOSURE",
+            "actor": "alice",
+            "account_id": "paper-account-1",
+            "environment": "PAPER",
+            "phase": "QUEUED",
+            "started_at": "2026-09-24T18:00:00Z",
+            "updated_at": "2026-09-24T18:00:00Z",
+            "affected_refs": [],
+            "evidence": ["silently-droppable-before-hardening"],
+            "remaining_uncertainty": ["financial_outcome_not_completed"],
+        }
+        journal.append_event(
+            {
+                "event_id": "malformed-command-evidence",
+                "event_type": "COMMAND_ACCEPTED",
+                "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
+                "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                "aggregate_version": "1",
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+                "committed_at": "2026-09-24T18:00:00Z",
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "evidence"):
+            self.store().snapshot()
+
     def test_terminal_transition_is_persisted_and_cannot_be_rewritten(self):
         store = self.store()
         accepted = store.submit(self.command())

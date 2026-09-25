@@ -118,6 +118,20 @@ class InstrumentRegistryTests(unittest.TestCase):
         with self.assertRaises(InstrumentNotFound):
             registry.resolve("simulated", "simulated-venue", "OLD", when(7))
 
+    def test_uuid_identity_aliases_are_canonicalized_before_registry_use(self):
+        braced = spot(instrument_id="{" + A + "}")
+        uppercase = spot(instrument_id=A.upper())
+        self.assertEqual(braced.instrument_id, A)
+        self.assertEqual(uppercase.instrument_id, A)
+
+        registry = InstrumentRegistry()
+        registry.add(braced)
+        # The alternate UUID spelling is the same immutable identity/version,
+        # not a second instrument history.
+        registry.add(uppercase)
+        self.assertEqual(registry.exact(f"{A}@1").instrument_id, A)
+        self.assertEqual(len(registry.versions(A)), 1)
+
     def test_retired_symbol_can_be_reused_only_after_nonoverlap(self):
         registry = InstrumentRegistry()
         registry.add(spot(symbol="OLD"))
@@ -279,6 +293,15 @@ class InstrumentRegistryTests(unittest.TestCase):
             spot(metadata_evidence=({**evidence, "sha256": "bad"},))
         with self.assertRaisesRegex(InstrumentRegistryError, "observed_at"):
             spot(metadata_evidence=({**evidence, "observed_at": "2026-01-01T00:00:00+00:00"},))
+
+    def test_metadata_artifact_uuid_alias_is_canonicalized(self):
+        evidence = {
+            "artifact_id": "{" + B + "}",
+            "sha256": "sha256:" + "a" * 64,
+            "observed_at": "2026-01-01T00:00:00Z",
+        }
+        instrument = spot(metadata_evidence=(evidence,))
+        self.assertEqual(instrument.metadata_evidence[0]["artifact_id"], B)
 
     def test_future_cannot_use_option_payoff(self):
         with self.assertRaisesRegex(

@@ -18,13 +18,19 @@ from mvp.autotrade_mvp.durable_settlement import (
     settlement_rule_evidence_metadata,
     settlement_rule_evidence_receipt,
 )
-from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+from mvp.autotrade_mvp.persistence import (
+    JournalStore,
+    canonical_json,
+    payload_digest,
+)
 from mvp.autotrade_mvp.fill_accounting import (
     ProjectedFillEvidence,
     build_provider_fill_financial_plan,
+    build_provider_fill_transaction,
 )
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
+    _legacy_book_id,
     _provider_fill_binding_aggregate_id,
     _provider_fill_binding_payload,
     commit_economic_batch_with_reservation_consumption,
@@ -263,6 +269,155 @@ class ProviderFillBindingEnvironmentTests(unittest.TestCase):
                 provider_execution_id="execution-1",
             ),
         )
+
+
+    def test_bybit_economic_book_requires_exact_provider_environment(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "requires explicit provider_environment",
+            ):
+                DurableProviderEconomicBook(
+                    store,
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                )
+
+    def test_bybit_testnet_and_demo_have_distinct_economic_truth(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            testnet_book = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            demo_book = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="DEMO",
+            )
+            projected = ProjectedFillEvidence.create(
+                fill_id="fill-1",
+                provider_execution_id="execution-1",
+                intent_id="intent-1",
+                client_order_id="client-1",
+                side="BUY",
+                quantity="1",
+                price="100",
+            )
+            testnet_fill = ProviderFillEvidence.create(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                provider_execution_id="execution-1",
+                client_order_id="client-1",
+                instrument="BTCUSDT",
+                quantity="1",
+                price="100",
+                fee_currency="USDT",
+                trade_time="2026-09-25T09:00:00Z",
+                side="BUY",
+            )
+            demo_fill = replace(testnet_fill, provider_environment="DEMO")
+
+            testnet_transaction = build_provider_fill_transaction(
+                book=testnet_book,
+                provider_id="BYBIT",
+                projected_fill=projected,
+                provider_fill=testnet_fill,
+                expected_instrument="BTCUSDT",
+                settlement_currency="USDT",
+                observed_at="2026-09-25T09:00:01Z",
+            )
+            demo_transaction = build_provider_fill_transaction(
+                book=demo_book,
+                provider_id="BYBIT",
+                projected_fill=projected,
+                provider_fill=demo_fill,
+                expected_instrument="BTCUSDT",
+                settlement_currency="USDT",
+                observed_at="2026-09-25T09:00:01Z",
+            )
+
+            self.assertNotEqual(testnet_book.book_id, demo_book.book_id)
+            self.assertNotEqual(
+                testnet_transaction.transaction_id,
+                demo_transaction.transaction_id,
+            )
+            self.assertNotEqual(
+                testnet_transaction.cause_event_id,
+                demo_transaction.cause_event_id,
+            )
+            self.assertNotEqual(
+                testnet_transaction.economic_order_key,
+                demo_transaction.economic_order_key,
+            )
+
+            testnet_plan = testnet_book.prepare_batch_mutation(
+                (testnet_transaction,),
+                committed_at="2026-09-25T09:00:02Z",
+            )
+            demo_plan = demo_book.prepare_batch_mutation(
+                (demo_transaction,),
+                committed_at="2026-09-25T09:00:02Z",
+            )
+            self.assertNotEqual(testnet_plan.batch_digest, demo_plan.batch_digest)
+            self.assertNotEqual(
+                testnet_plan.envelope["event_id"],
+                demo_plan.envelope["event_id"],
+            )
+            self.assertEqual(
+                testnet_plan.request["provider_environment"], "TESTNET"
+            )
+            self.assertEqual(demo_plan.request["provider_environment"], "DEMO")
+
+            self.assertTrue(testnet_book.append(testnet_transaction))
+            self.assertTrue(demo_book.append(demo_transaction))
+            self.assertFalse(testnet_book.append(testnet_transaction))
+            self.assertFalse(demo_book.append(demo_transaction))
+
+    def test_legacy_bybit_paper_economic_state_fails_closed_before_rekey(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            legacy_book_id = _legacy_book_id(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+            )
+            legacy_payload = {"legacy_scope": "BYBIT/PAPER"}
+            store.append_event(
+                {
+                    "event_id": "legacy-bybit-economic-event",
+                    "event_type": "EconomicTransactionBatchBooked",
+                    "aggregate_type": "economic_book",
+                    "aggregate_id": legacy_book_id,
+                    "aggregate_version": "1",
+                    "payload": legacy_payload,
+                    "payload_hash": payload_digest(legacy_payload),
+                    "committed_at": "2026-09-25T08:59:59Z",
+                }
+            )
+
+            for provider_environment in ("TESTNET", "DEMO"):
+                with self.subTest(provider_environment=provider_environment):
+                    with self.assertRaisesRegex(
+                        AccountingConflict,
+                        "legacy ambiguous provider economic-book state",
+                    ):
+                        DurableProviderEconomicBook(
+                            store,
+                            provider_id="BYBIT",
+                            account_id="bybit-account",
+                            environment="PAPER",
+                            provider_environment=provider_environment,
+                        )
 
 
 class AtomicFillFinancialCommitTests(unittest.TestCase):

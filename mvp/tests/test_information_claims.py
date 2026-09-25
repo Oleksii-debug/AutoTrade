@@ -114,6 +114,84 @@ class InformationClaimTests(unittest.TestCase):
         store.add(new)
         self.assertEqual(store.revisions("corp"), (old, new))
 
+    def test_direct_source_document_cannot_bypass_provenance_invariants(self):
+        with self.assertRaisesRegex(ValueError, "unsupported source_kind"):
+            SourceDocument(
+                source_id="source",
+                source_revision="r1",
+                source_kind="EXECUTE_ORDER",
+                title="title",
+                passage="passage",
+                published_at=BASE,
+                available_at=BASE,
+                rights_basis="quotation-and-hash-only",
+                locator="p1",
+            )
+        with self.assertRaisesRegex(ValueError, "timezone-aware"):
+            SourceDocument(
+                source_id="source",
+                source_revision="r1",
+                source_kind="NEWS",
+                title="title",
+                passage="passage",
+                published_at=datetime(2026, 1, 1),
+                available_at=BASE,
+                rights_basis="quotation-and-hash-only",
+                locator="p1",
+            )
+        with self.assertRaisesRegex(ValueError, "cannot precede"):
+            SourceDocument(
+                source_id="source",
+                source_revision="r1",
+                source_kind="NEWS",
+                title="title",
+                passage="passage",
+                published_at=BASE,
+                available_at=BASE - timedelta(seconds=1),
+                rights_basis="quotation-and-hash-only",
+                locator="p1",
+            )
+
+        offset = timezone(timedelta(hours=2))
+        normalized = SourceDocument(
+            source_id=" source ",
+            source_revision=" r1 ",
+            source_kind="news",
+            title=" title ",
+            passage=" passage ",
+            published_at=datetime(2026, 1, 1, 2, tzinfo=offset),
+            available_at=datetime(2026, 1, 1, 3, tzinfo=offset),
+            rights_basis=" quotation-and-hash-only ",
+            locator=" p1 ",
+        )
+        self.assertEqual(normalized.source_id, "source")
+        self.assertEqual(normalized.source_kind, "NEWS")
+        self.assertEqual(normalized.published_at, BASE)
+        self.assertEqual(normalized.available_at, BASE + timedelta(hours=1))
+
+    def test_build_claim_rejects_source_document_duck_typing_bypass(self):
+        forged = type(
+            "ForgedSourceDocument",
+            (),
+            {
+                "source_id": "source",
+                "source_revision": "r1",
+                "source_kind": "NEWS",
+                "passage": "passage",
+                "published_at": BASE,
+                "available_at": BASE,
+                "rights_basis": "quotation-and-hash-only",
+                "locator": "p1",
+            },
+        )()
+        with self.assertRaisesRegex(ValueError, "SourceDocument"):
+            ClaimStore.build_claim(
+                forged,
+                subject="X",
+                predicate="state",
+                value="up",
+            )
+
     def test_mutated_authority_flag_is_rejected_at_claim_boundary(self):
         store = ClaimStore()
         claim = store.build_claim(doc("a", "r1", "plain"), subject="X", predicate="state", value="up")

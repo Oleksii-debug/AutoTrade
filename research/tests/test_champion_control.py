@@ -283,6 +283,32 @@ class ChampionRegistryTests(unittest.TestCase):
                     existing_position_policy=None,
                 )
 
+    def test_holdout_peek_after_locked_evaluation_invalidates_promotion(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            candidate = approval(science)
+            evidence = science.locked_evaluation(candidate.evaluation_id)
+            science.record_holdout_access(
+                candidate.protocol_id,
+                holdout_id=evidence.holdout_id,
+                purpose="post-evaluation manual inspection",
+            )
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "remain untouched",
+            ):
+                registry.promote(
+                    candidate,
+                    expected_generation=0,
+                    now=BASE,
+                    open_position_count=0,
+                    existing_position_policy=None,
+                )
+
     def test_self_asserted_trial_log_without_registered_trial_cannot_promote(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")

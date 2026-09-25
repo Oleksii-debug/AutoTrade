@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROVENANCE = ROOT / "provenance" / "release-dependency-manifest.json"
 FIXED_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
+CANONICAL_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 FORBIDDEN_BASENAMES = {
     ".env",
     "credentials.json",
@@ -147,6 +148,212 @@ def _entry_metadata(relative: str, data: bytes) -> dict[str, object]:
     }
 
 
+def _canonical_digest(value: object, *, name: str) -> str:
+    digest = _required_text(value, name=name)
+    if CANONICAL_SHA256.fullmatch(digest) is None:
+        raise BundleError(f"{name} must be a canonical lowercase sha256: digest")
+    return digest
+
+
+def _composition_component(
+    value: object,
+    *,
+    index: int,
+) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise BundleError(f"composition components[{index}] must be an object")
+    required = {"component_id", "kind", "path", "version", "sha256"}
+    if set(value) != required:
+        missing = sorted(required - set(value))
+        extra = sorted(set(value) - required)
+        detail = []
+        if missing:
+            detail.append("missing=" + ",".join(missing))
+        if extra:
+            detail.append("extra=" + ",".join(extra))
+        raise BundleError(
+            f"composition components[{index}] has invalid fields"
+            + (": " + "; ".join(detail) if detail else "")
+        )
+    component_id = _required_text(value["component_id"], name="component_id")
+    kind = _required_text(value["kind"], name="kind")
+    version = _required_text(value["version"], name="component version")
+    path = _required_text(value["path"], name="component path")
+    pure = PurePosixPath(path)
+    if pure.is_absolute() or ".." in pure.parts or pure.as_posix() != path:
+        raise BundleError(f"composition component path is unsafe: {path}")
+    _windows_path_key(path)
+    return {
+        "component_id": component_id,
+        "kind": kind,
+        "path": path,
+        "version": version,
+        "sha256": _canonical_digest(value["sha256"], name="component sha256"),
+    }
+
+
+def _load_composition(
+    path: Path,
+    *,
+    source_sha: str,
+    files: list[tuple[str, Path, bytes]],
+) -> tuple[dict[str, object], str]:
+    try:
+        raw = path.read_bytes()
+        value = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise BundleError("Windows composition manifest is missing or invalid") from error
+    if not isinstance(value, dict):
+        raise BundleError("Windows composition manifest must be an object")
+
+    required = {
+        "schema_version",
+        "product",
+        "source_sha",
+        "dependency_lock_sha256",
+        "sbom_sha256",
+        "schema_compatibility",
+        "runtime",
+        "components",
+    }
+    if set(value) != required:
+        missing = sorted(required - set(value))
+        extra = sorted(set(value) - required)
+        detail = []
+        if missing:
+            detail.append("missing=" + ",".join(missing))
+        if extra:
+            detail.append("extra=" + ",".join(extra))
+        raise BundleError(
+            "Windows composition manifest has invalid fields"
+            + (": " + "; ".join(detail) if detail else "")
+        )
+
+    if value["schema_version"] != "1.0.0":
+        raise BundleError("unsupported Windows composition schema_version")
+    if value["product"] != "AutoTrade":
+        raise BundleError("Windows composition product must be AutoTrade")
+    composition_sha = _required_text(value["source_sha"], name="composition source_sha").lower()
+    if SOURCE_SHA.fullmatch(composition_sha) is None:
+        raise BundleError("composition source_sha must be an exact 40-character Git SHA")
+    if composition_sha != source_sha:
+        raise BundleError("composition source_sha does not match bundle source_sha")
+
+    schema_range = value["schema_compatibility"]
+    if not isinstance(schema_range, dict) or set(schema_range) != {"minimum", "maximum"}:
+        raise BundleError(
+            "composition schema_compatibility must contain exactly minimum and maximum"
+        )
+    normalized_schema_range = {
+        "minimum": _required_text(schema_range["minimum"], name="schema minimum"),
+        "maximum": _required_text(schema_range["maximum"], name="schema maximum"),
+    }
+
+    runtime = value["runtime"]
+    if not isinstance(runtime, dict) or set(runtime) != {
+        "architecture",
+        "runtime_identifier",
+        "minimum_windows_version",
+    }:
+        raise BundleError(
+            "composition runtime must contain architecture, runtime_identifier, "
+            "minimum_windows_version"
+        )
+    normalized_runtime = {
+        "architecture": _required_text(runtime["architecture"], name="runtime architecture"),
+        "runtime_identifier": _required_text(
+            runtime["runtime_identifier"], name="runtime identifier"
+        ),
+        "minimum_windows_version": _required_text(
+            runtime["minimum_windows_version"], name="minimum Windows version"
+        ),
+    }
+    expected_rid = {
+        "x64": "win-x64",
+        "arm64": "win-arm64",
+    }.get(normalized_runtime["architecture"])
+    if expected_rid is None:
+        raise BundleError("composition runtime architecture must be x64 or arm64")
+    if normalized_runtime["runtime_identifier"] != expected_rid:
+        raise BundleError(
+            "composition runtime_identifier does not match runtime architecture"
+        )
+
+    components_raw = value["components"]
+    if not isinstance(components_raw, list) or not components_raw:
+        raise BundleError("composition components must be a non-empty array")
+    components = [
+        _composition_component(item, index=index)
+        for index, item in enumerate(components_raw)
+    ]
+
+    ids: set[str] = set()
+    paths: set[str] = set()
+    for component in components:
+        component_id = component["component_id"]
+        component_path = component["path"]
+        if component_id in ids:
+            raise BundleError(f"duplicate composition component_id: {component_id}")
+        if component_path in paths:
+            raise BundleError(f"duplicate composition component path: {component_path}")
+        ids.add(component_id)
+        paths.add(component_path)
+
+    staged = {
+        relative: "sha256:" + sha256(data).hexdigest()
+        for relative, _, data in files
+    }
+    declared = {component["path"]: component["sha256"] for component in components}
+    missing = sorted(set(staged) - set(declared))
+    extra = sorted(set(declared) - set(staged))
+    if missing or extra:
+        detail = []
+        if missing:
+            detail.append("undeclared staging files=" + ",".join(missing))
+        if extra:
+            detail.append("declared files absent from staging=" + ",".join(extra))
+        raise BundleError("composition/staging file set mismatch: " + "; ".join(detail))
+    for relative, digest in staged.items():
+        if declared[relative] != digest:
+            raise BundleError(
+                f"composition digest does not match staged file: {relative}"
+            )
+
+    dependency_lock_sha256 = _canonical_digest(
+        value["dependency_lock_sha256"],
+        name="dependency_lock_sha256",
+    )
+    sbom_sha256 = _canonical_digest(value["sbom_sha256"], name="sbom_sha256")
+    by_kind: dict[str, list[dict[str, str]]] = {}
+    for component in components:
+        by_kind.setdefault(component["kind"], []).append(component)
+    for kind, expected_digest in (
+        ("dependency-lock", dependency_lock_sha256),
+        ("sbom", sbom_sha256),
+    ):
+        matching = by_kind.get(kind, [])
+        if len(matching) != 1:
+            raise BundleError(
+                f"composition requires exactly one {kind} component"
+            )
+        if matching[0]["sha256"] != expected_digest:
+            raise BundleError(
+                f"composition {kind} digest does not match declared component"
+            )
+
+    normalized = {
+        "schema_version": "1.0.0",
+        "product": "AutoTrade",
+        "source_sha": composition_sha,
+        "dependency_lock_sha256": dependency_lock_sha256,
+        "sbom_sha256": sbom_sha256,
+        "schema_compatibility": normalized_schema_range,
+        "runtime": normalized_runtime,
+        "components": sorted(components, key=lambda item: item["path"]),
+    }
+    return normalized, "sha256:" + sha256(raw).hexdigest()
+
+
 def _write_entry(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
     info = zipfile.ZipInfo(name, date_time=FIXED_TIMESTAMP)
     info.compress_type = zipfile.ZIP_STORED
@@ -164,6 +371,7 @@ def build_bundle(
     source_sha: str,
     mode: str,
     provenance_path: Path = DEFAULT_PROVENANCE,
+    composition_path: Path | None = None,
 ) -> dict[str, object]:
     normalized_version = _required_text(version, name="version")
     normalized_sha = _required_text(source_sha, name="source_sha").lower()
@@ -214,6 +422,19 @@ def build_bundle(
             )
 
     files = _collect(staging)
+    composition = None
+    composition_sha256 = None
+    if composition_path is not None:
+        composition, composition_sha256 = _load_composition(
+            composition_path,
+            source_sha=normalized_sha,
+            files=files,
+        )
+    elif mode == "release":
+        raise BundleError(
+            "release bundle requires an exact Windows composition manifest"
+        )
+
     manifest = {
         "schema_version": "1.0.0",
         "product": "AutoTrade",
@@ -223,6 +444,8 @@ def build_bundle(
         "release_eligible": mode == "release" and provenance["release_eligible"] is True,
         "trading_authority_granted_by_artifact": False,
         "provenance_sha256": provenance_sha256,
+        "composition_sha256": composition_sha256,
+        "composition": composition,
         "provenance_blockers": [
             item.get("code", "UNKNOWN")
             for item in blockers
@@ -286,6 +509,7 @@ def main() -> int:
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--mode", required=True, choices=("diagnostics", "release"))
     parser.add_argument("--provenance", type=Path, default=DEFAULT_PROVENANCE)
+    parser.add_argument("--composition", type=Path)
     args = parser.parse_args()
     try:
         result = build_bundle(
@@ -295,6 +519,7 @@ def main() -> int:
             source_sha=args.source_sha,
             mode=args.mode,
             provenance_path=args.provenance,
+            composition_path=args.composition,
         )
     except BundleError as error:
         print(str(error), file=sys.stderr)

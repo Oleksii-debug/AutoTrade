@@ -1,6 +1,6 @@
 import unittest
 
-from mvp.autotrade_mvp.host_api import EventGap, HostCommandStore
+from mvp.autotrade_mvp.host_api import EventGap, HostCommandStore, operation_result_payload
 
 
 class HostCommandStateTests(unittest.TestCase):
@@ -84,6 +84,25 @@ class HostCommandStateTests(unittest.TestCase):
         self.assertEqual(self.store.state_version, 0)
         self.assertEqual(self.store.cursor, 0)
 
+    def test_internal_operation_version_does_not_drift_canonical_payload(self):
+        accepted = self.store.submit(self.command())
+        operation = self.store.get_operation(accepted.operation_id)
+        self.assertEqual(operation.state_version, "1")
+        payload = operation_result_payload(operation)
+        self.assertNotIn("state_version", payload)
+        self.assertEqual(
+            set(payload),
+            {
+                "operation_id",
+                "phase",
+                "started_at",
+                "updated_at",
+                "affected_refs",
+                "evidence",
+                "remaining_uncertainty",
+            },
+        )
+
     def test_operation_completion_is_separate_versioned_transition(self):
         accepted = self.store.submit(self.command())
         completed = self.store.update_operation(accepted.operation_id, "SUCCEEDED")
@@ -92,6 +111,45 @@ class HostCommandStateTests(unittest.TestCase):
         self.assertEqual(self.store.snapshot()["state_version"], "2")
         with self.assertRaises(ValueError):
             self.store.update_operation(accepted.operation_id, "FAILED")
+
+    def test_unknown_preserves_uncertainty_and_can_only_resolve_terminally(self):
+        accepted = self.store.submit(self.command())
+        unknown = self.store.update_operation(
+            accepted.operation_id,
+            "UNKNOWN",
+            remaining_uncertainty=("provider_outcome_unresolved",),
+        )
+        self.assertEqual(unknown.phase, "UNKNOWN")
+        self.assertEqual(
+            unknown.remaining_uncertainty,
+            ("provider_outcome_unresolved",),
+        )
+        event = self.store.events_after("1")[0]
+        self.assertEqual(
+            event.payload["remaining_uncertainty"],
+            ["provider_outcome_unresolved"],
+        )
+        with self.assertRaisesRegex(ValueError, "only resolve"):
+            self.store.update_operation(
+                accepted.operation_id,
+                "RUNNING",
+                remaining_uncertainty=("still_unknown",),
+            )
+
+        resolved = self.store.update_operation(accepted.operation_id, "SUCCEEDED")
+        self.assertEqual(resolved.phase, "SUCCEEDED")
+        self.assertEqual(resolved.remaining_uncertainty, ())
+
+    def test_unknown_requires_uncertainty_and_terminal_cannot_hide_it(self):
+        accepted = self.store.submit(self.command())
+        with self.assertRaisesRegex(ValueError, "preserve remaining uncertainty"):
+            self.store.update_operation(accepted.operation_id, "UNKNOWN")
+        with self.assertRaisesRegex(ValueError, "cannot retain unresolved uncertainty"):
+            self.store.update_operation(
+                accepted.operation_id,
+                "FAILED",
+                remaining_uncertainty=("provider_outcome_unresolved",),
+            )
 
     def test_resumable_events_return_only_newer_items(self):
         accepted = self.store.submit(self.command())

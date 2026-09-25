@@ -1,4 +1,9 @@
+from hashlib import sha256
+from tempfile import TemporaryDirectory
 import unittest
+from uuid import NAMESPACE_URL, uuid5
+
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 from mvp.autotrade_mvp.supply_chain_qualification import (
     ComponentEvidence,
@@ -9,13 +14,30 @@ from mvp.autotrade_mvp.supply_chain_qualification import (
 
 
 R = "1" * 40
-H = "sha256:" + "a" * 64
-H2 = "sha256:" + "b" * 64
+DATA_A = b"supply-chain-artifact-a"
+DATA_B = b"supply-chain-artifact-b"
+H = "sha256:" + sha256(DATA_A).hexdigest()
+H2 = "sha256:" + sha256(DATA_B).hexdigest()
+DATA_BY_HASH = {H: DATA_A, H2: DATA_B}
+
+
+def artifact_id(label):
+    return str(uuid5(NAMESPACE_URL, "supply-chain-test:" + label))
+
+
+SBOM_ID = artifact_id("sbom")
+PROVENANCE_ID = artifact_id("provenance")
+LOCK_ID = artifact_id("dependency-lock")
+COMPONENT_ID = artifact_id("component:example")
+RIGHTS_ID = artifact_id("rights:model-local")
+EXCEPTION_ID = artifact_id("exception:risk-acceptance-17")
+EXCEPTION_ID_2 = artifact_id("exception:risk-acceptance-18")
 
 
 def component(**overrides):
     values = dict(
         component_id="pkg:pypi/example@1.0",
+        artifact_id=COMPONENT_ID,
         version="1.0",
         declared_artifact_hash=H,
         observed_artifact_hash=H,
@@ -32,8 +54,9 @@ def component(**overrides):
 
 
 def rights(**overrides):
+    artifact_label = overrides.pop("artifact_id", None)
     values = dict(
-        artifact_id="model:local",
+        artifact_id=RIGHTS_ID if artifact_label is None else artifact_id(artifact_label),
         artifact_hash=H,
         use_scope="redistribute",
         rights_status="APPROVED",
@@ -48,8 +71,11 @@ def evidence(comp=None, model_rights=None, **overrides):
     values = dict(
         release_commit_sha=R,
         built_from_commit_sha=R,
+        sbom_artifact_id=SBOM_ID,
         sbom_hash=H,
+        provenance_artifact_id=PROVENANCE_ID,
         provenance_hash=H,
+        dependency_lock_artifact_id=LOCK_ID,
         dependency_lock_hash=H,
         sbom_reviewed_for_release_sha=R,
         provenance_reviewed_for_release_sha=R,
@@ -63,15 +89,114 @@ def evidence(comp=None, model_rights=None, **overrides):
     return SupplyChainEvidence(**values)
 
 
-def _trusted_evidence_verifier(_evidence):
-    return True
-
-
-def qualify(value):
-    return qualify_supply_chain(
-        value,
-        evidence_verifier=_trusted_evidence_verifier,
+def _publish(
+    store,
+    *,
+    artifact_id_value,
+    artifact_hash,
+    media_type,
+    release_sha,
+    metadata,
+):
+    data = DATA_BY_HASH[artifact_hash]
+    store.publish_bytes(
+        artifact_id=artifact_id_value,
+        data=data,
+        media_type=media_type,
+        rights={"storage": True, "export": False},
+        source_refs=[f"git:{release_sha}"],
+        metadata=metadata,
     )
+
+
+def qualify(value, *, omit_artifact_ids=(), corrupt_artifact_id=None):
+    with TemporaryDirectory() as directory:
+        store = ArtifactStore(directory)
+        entries = [
+            (
+                value.sbom_artifact_id,
+                value.sbom_hash,
+                "application/vnd.autotrade.sbom",
+                {"evidence_kind": "SBOM", "release_sha": value.release_commit_sha},
+            ),
+            (
+                value.provenance_artifact_id,
+                value.provenance_hash,
+                "application/vnd.autotrade.provenance",
+                {
+                    "evidence_kind": "PROVENANCE",
+                    "release_sha": value.release_commit_sha,
+                },
+            ),
+            (
+                value.dependency_lock_artifact_id,
+                value.dependency_lock_hash,
+                "application/vnd.autotrade.dependency-lock",
+                {
+                    "evidence_kind": "DEPENDENCY_LOCK",
+                    "release_sha": value.release_commit_sha,
+                },
+            ),
+        ]
+        for item in value.components:
+            entries.append(
+                (
+                    item.artifact_id,
+                    item.observed_artifact_hash,
+                    "application/vnd.autotrade.distributed-component",
+                    {
+                        "evidence_kind": "DISTRIBUTED_COMPONENT",
+                        "component_id": item.component_id,
+                        "version": item.version,
+                        "release_sha": value.release_commit_sha,
+                    },
+                )
+            )
+            if item.advisory_status == "ALLOWLISTED":
+                entries.append(
+                    (
+                        item.advisory_exception_id,
+                        item.advisory_exception_hash,
+                        "application/vnd.autotrade.advisory-exception",
+                        {
+                            "evidence_kind": "ADVISORY_EXCEPTION",
+                            "component_id": item.component_id,
+                            "release_sha": value.release_commit_sha,
+                        },
+                    )
+                )
+        for item in value.model_data_rights:
+            entries.append(
+                (
+                    item.artifact_id,
+                    item.artifact_hash,
+                    "application/vnd.autotrade.rights-evidence",
+                    {
+                        "evidence_kind": "MODEL_DATA_RIGHTS",
+                        "use_scope": item.use_scope,
+                        "release_sha": value.release_commit_sha,
+                    },
+                )
+            )
+
+        for aid, digest, media_type, metadata in entries:
+            if aid in omit_artifact_ids:
+                continue
+            _publish(
+                store,
+                artifact_id_value=aid,
+                artifact_hash=digest,
+                media_type=media_type,
+                release_sha=value.release_commit_sha,
+                metadata=metadata,
+            )
+
+        if corrupt_artifact_id is not None:
+            manifest = store.load_manifest(corrupt_artifact_id)
+            digest = manifest["sha256"].removeprefix("sha256:")
+            (store.objects / digest[:2] / digest).write_bytes(b"corrupt")
+
+        return qualify_supply_chain(value, evidence_store=store)
 
 
 class SupplyChainQualificationTests(unittest.TestCase):
@@ -79,23 +204,47 @@ class SupplyChainQualificationTests(unittest.TestCase):
         result = qualify_supply_chain(evidence())
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertFalse(result.release_authority)
-        self.assertIn("SUPPLY_CHAIN.EVIDENCE_UNVERIFIED", result.reason_codes)
+        self.assertIn("SUPPLY_CHAIN.EVIDENCE_STORE_MISSING", result.reason_codes)
 
-    def test_broken_external_evidence_verifier_fails_closed(self):
-        def broken(_evidence):
-            raise RuntimeError("artifact evidence unavailable")
+    def test_arbitrary_callback_cannot_self_approve_supply_chain(self):
+        with self.assertRaisesRegex(TypeError, "evidence_store must be ArtifactStore"):
+            qualify_supply_chain(
+                evidence(),
+                evidence_store=lambda _evidence: True,
+            )
 
-        result = qualify_supply_chain(
-            evidence(),
-            evidence_verifier=broken,
+    def test_missing_or_corrupt_exact_artifact_fails_closed(self):
+        value = evidence()
+        missing = qualify(value, omit_artifact_ids={value.sbom_artifact_id})
+        self.assertEqual(missing.status, "INCONCLUSIVE")
+        self.assertIn(
+            "SUPPLY_CHAIN.IMMUTABLE_ARTIFACT_UNVERIFIED:sbom",
+            missing.reason_codes,
         )
-        self.assertEqual(result.status, "INCONCLUSIVE")
-        self.assertIn("SUPPLY_CHAIN.EVIDENCE_UNVERIFIED", result.reason_codes)
 
-    def test_exact_release_complete_evidence_passes_without_release_authority(self):
+        corrupt = qualify(value, corrupt_artifact_id=value.sbom_artifact_id)
+        self.assertEqual(corrupt.status, "INCONCLUSIVE")
+        self.assertIn(
+            "SUPPLY_CHAIN.IMMUTABLE_ARTIFACT_UNVERIFIED:sbom",
+            corrupt.reason_codes,
+        )
+
+    def test_caller_populated_store_proves_integrity_but_not_independent_trust(self):
         result = qualify(evidence())
-        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertFalse(result.release_authority)
+        self.assertIn(
+            ("immutable_evidence_bundle", "PASS"),
+            result.checks,
+        )
+        self.assertIn(
+            ("independent_evidence_trust", "INCONCLUSIVE"),
+            result.checks,
+        )
+        self.assertIn(
+            "SUPPLY_CHAIN.TRUST_ANCHOR_UNAVAILABLE",
+            result.reason_codes,
+        )
 
     def test_unlicensed_component_blocks_release_qualification(self):
         result = qualify(evidence(component(license_status="BLOCKED")))
@@ -117,6 +266,51 @@ class SupplyChainQualificationTests(unittest.TestCase):
         unknown = qualify(evidence(component(advisory_status="UNKNOWN")))
         self.assertEqual(blocked.status, "FAIL")
         self.assertEqual(unknown.status, "INCONCLUSIVE")
+
+    def test_allowlisted_advisory_requires_immutable_exception_evidence(self):
+        with self.assertRaisesRegex(ValueError, "advisory_exception_id"):
+            component(advisory_status="ALLOWLISTED")
+        with self.assertRaisesRegex(ValueError, "advisory_exception_hash"):
+            component(
+                advisory_status="ALLOWLISTED",
+                advisory_exception_id=EXCEPTION_ID,
+            )
+        with self.assertRaisesRegex(ValueError, "must be a UUID"):
+            component(
+                advisory_status="ALLOWLISTED",
+                advisory_exception_id=" " + EXCEPTION_ID + " ",
+                advisory_exception_hash=H2,
+            )
+
+        allowlisted = component(
+            advisory_status="ALLOWLISTED",
+            advisory_exception_id=EXCEPTION_ID,
+            advisory_exception_hash=H2,
+        )
+        result = qualify(evidence(comp=allowlisted))
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertIn(
+            "SUPPLY_CHAIN.TRUST_ANCHOR_UNAVAILABLE",
+            result.reason_codes,
+        )
+
+        changed = component(
+            advisory_status="ALLOWLISTED",
+            advisory_exception_id=EXCEPTION_ID_2,
+            advisory_exception_hash=H2,
+        )
+        self.assertNotEqual(
+            result.qualification_id,
+            qualify(evidence(comp=changed)).qualification_id,
+        )
+
+    def test_non_allowlisted_advisory_rejects_stale_exception_fields(self):
+        with self.assertRaisesRegex(ValueError, "only for ALLOWLISTED"):
+            component(
+                advisory_status="CLEAR",
+                advisory_exception_id=EXCEPTION_ID,
+                advisory_exception_hash=H2,
+            )
 
     def test_architecture_time_review_cannot_approve_another_release(self):
         result = qualify(evidence(component(reviewed_for_release_sha="2" * 40)))
@@ -170,8 +364,11 @@ class SupplyChainQualificationTests(unittest.TestCase):
             SupplyChainEvidence(
                 release_commit_sha=R,
                 built_from_commit_sha=R,
+                sbom_artifact_id=SBOM_ID,
                 sbom_hash=H,
+                provenance_artifact_id=PROVENANCE_ID,
                 provenance_hash=H,
+                dependency_lock_artifact_id=LOCK_ID,
                 dependency_lock_hash=H,
                 sbom_reviewed_for_release_sha=R,
                 provenance_reviewed_for_release_sha=R,

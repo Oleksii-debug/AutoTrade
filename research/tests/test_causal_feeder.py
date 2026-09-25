@@ -7,6 +7,7 @@ from autotrade_research.evaluation.replay.feeder import (
     CausalDataset,
     CausalEvent,
     CausalFeeder,
+    CausalObservation,
     CausalReplayError,
     FeederCheckpoint,
 )
@@ -314,9 +315,7 @@ class CausalFeederTests(unittest.TestCase):
         with self.assertRaisesRegex(CausalReplayError, "future event"):
             CausalDataView(
                 simulation_time=datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc),
-                manifest_sha256=MANIFEST,
-                dataset_sha256="sha256:" + ("2" * 64),
-                events=(future,),
+                events=(CausalObservation.from_event(future),),
             )
 
     def test_strategy_view_rejects_duplicate_or_reordered_events(self):
@@ -327,27 +326,33 @@ class CausalFeederTests(unittest.TestCase):
         with self.assertRaisesRegex(CausalReplayError, "duplicate event"):
             CausalDataView(
                 simulation_time=simulation_time,
-                manifest_sha256=MANIFEST,
-                dataset_sha256="sha256:" + ("2" * 64),
-                events=(first, first),
+                events=(
+                    CausalObservation.from_event(first),
+                    CausalObservation.from_event(first),
+                ),
             )
         with self.assertRaisesRegex(CausalReplayError, "deterministic causal order"):
             CausalDataView(
                 simulation_time=simulation_time,
-                manifest_sha256=MANIFEST,
-                dataset_sha256="sha256:" + ("2" * 64),
-                events=(second, first),
+                events=(
+                    CausalObservation.from_event(second),
+                    CausalObservation.from_event(first),
+                ),
             )
 
         valid = CausalDataView(
             simulation_time=simulation_time,
-            manifest_sha256=MANIFEST,
-            dataset_sha256="sha256:" + ("2" * 64),
-            events=(first, second),
+            events=(
+                CausalObservation.from_event(first),
+                CausalObservation.from_event(second),
+            ),
         )
-        self.assertEqual(valid.events, (first, second))
+        self.assertEqual(
+            [item.event_id for item in valid.events],
+            ["first", "second"],
+        )
 
-    def test_view_digest_binds_dataset_cutoff_and_resume_equivalence(self):
+    def test_privileged_input_evidence_binds_dataset_cutoff_and_resume(self):
         dataset = CausalDataset.create(
             manifest_sha256=MANIFEST,
             events=[
@@ -357,31 +362,30 @@ class CausalFeederTests(unittest.TestCase):
         )
         feeder = CausalFeeder(dataset, start_time="2026-01-01T10:00:00Z")
         first_view = feeder.view()
+        first_evidence = feeder.input_evidence()
         checkpoint = feeder.checkpoint()
 
-        self.assertEqual(first_view.manifest_sha256, dataset.manifest_sha256)
-        self.assertEqual(first_view.dataset_sha256, dataset.dataset_sha256)
+        self.assertFalse(hasattr(first_view, "manifest_sha256"))
+        self.assertFalse(hasattr(first_view, "dataset_sha256"))
+        self.assertEqual(first_evidence.manifest_sha256, dataset.manifest_sha256)
+        self.assertEqual(first_evidence.dataset_sha256, dataset.dataset_sha256)
 
         resumed = CausalFeeder.restore(dataset=dataset, checkpoint=checkpoint)
-        self.assertEqual(resumed.view().digest, first_view.digest)
-
-        feeder.advance_to("2026-01-01T10:01:00Z")
-        later_view = feeder.view()
-        self.assertNotEqual(later_view.digest, first_view.digest)
+        self.assertEqual(resumed.view(), first_view)
+        self.assertEqual(resumed.input_evidence().digest, first_evidence.digest)
 
         same_dataset_same_events_later_cutoff = CausalFeeder(
             dataset,
             start_time="2026-01-01T10:00:30Z",
-        ).view()
-        self.assertEqual(same_dataset_same_events_later_cutoff.events, first_view.events)
-        self.assertEqual(
-            same_dataset_same_events_later_cutoff.dataset_sha256,
-            first_view.dataset_sha256,
         )
+        self.assertEqual(same_dataset_same_events_later_cutoff.view().events, first_view.events)
         self.assertNotEqual(
-            same_dataset_same_events_later_cutoff.digest,
-            first_view.digest,
+            same_dataset_same_events_later_cutoff.input_evidence().digest,
+            first_evidence.digest,
         )
+
+        feeder.advance_to("2026-01-01T10:01:00Z")
+        self.assertNotEqual(feeder.input_evidence().digest, first_evidence.digest)
 
     def test_restore_rejects_tampered_published_prefix(self):
         dataset = CausalDataset.create(
@@ -430,8 +434,12 @@ class CausalFeederTests(unittest.TestCase):
             [item.event_id for item in feeder.advance_to("2026-01-01T10:01:00Z")],
             ["macro-release"],
         )
+        visible = feeder.view().events[0]
+        self.assertFalse(hasattr(visible, "ingested_at"))
+        self.assertFalse(hasattr(visible, "dataset_sha256"))
+        self.assertEqual(visible.available_at, datetime(2026, 1, 1, 10, 1, tzinfo=timezone.utc))
         self.assertEqual(
-            feeder.view().events[0].ingested_at,
+            dataset.events[0].ingested_at,
             datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
         )
 

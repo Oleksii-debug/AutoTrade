@@ -34,6 +34,7 @@ def correction_evidence_time(evidence_ref):
 
 def reconciliation_evidence(episode_id):
     return {
+        "episode_id": episode_id,
         "checkpoint_event_id": f"checkpoint-{episode_id}",
         "checkpoint_payload_hash": H3,
         "checkpoint_aggregate_id": f"account-reconciliation:{episode_id}",

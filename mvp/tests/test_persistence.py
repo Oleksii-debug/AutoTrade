@@ -1424,6 +1424,40 @@ class JournalStoreTests(unittest.TestCase):
                     projection_name="portfolio"
                 )
 
+    def test_global_projection_checkpoint_cut_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            second = event("evt-2", 2, {"kind": "fill", "quantity": "2"})
+            store.append_event(second)
+            self.assertTrue(
+                store.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=2,
+                    state={"net": "3"},
+                )
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE global_projection_checkpoints "
+                    "SET journal_sequence = 1 WHERE projection_name = ?",
+                    ("portfolio",),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "hash does not match identity, cut, and state",
+            ):
+                JournalStore(path).load_global_projection_checkpoint(
+                    projection_name="portfolio"
+                )
+
     def test_v6_upgrade_adds_global_projection_checkpoint_without_losing_journal(self):
         class V6JournalStore(JournalStore):
             SCHEMA_VERSION = 6

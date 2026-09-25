@@ -606,13 +606,67 @@ class DurableModelCallOrchestrator:
             "input_digest": spec.input_digest,
             "policy_id": spec.policy_id,
             "pricing_evidence_id": spec.pricing_evidence_id,
+            "pricing_evidence_digest": pricing.evidence_digest,
             "pricing_as_of": spec.pricing_as_of,
+            "pricing_valid_until": pricing.valid_until,
+            "cost_currency": spec.cost_currency,
             "result_schema_id": spec.result_schema_id,
+            "cost_currency": spec.cost_currency,
             "fallback_index": str(spec.fallback_index),
         }
         if spec.fallback_parent_attempt_id is not None:
             context["fallback_parent_attempt_id"] = spec.fallback_parent_attempt_id
         return context
+
+    def _pricing_evidence(
+        self,
+        spec: ModelCallSpec,
+        descriptors: tuple[ModelDescriptor, ...],
+    ) -> PricingEvidenceSnapshot:
+        try:
+            snapshot = self.pricing_evidence_resolver(spec, descriptors)
+        except Exception as error:
+            raise ModelCallError(
+                "pricing evidence could not be resolved before route admission"
+            ) from error
+        if not isinstance(snapshot, PricingEvidenceSnapshot):
+            raise ModelCallError(
+                "pricing evidence resolver did not return PricingEvidenceSnapshot"
+            )
+        if snapshot.evidence_id != spec.pricing_evidence_id:
+            raise ModelCallError("pricing evidence identity does not match call spec")
+        if snapshot.as_of != spec.pricing_as_of:
+            raise ModelCallError("pricing evidence as-of does not match call spec")
+        if snapshot.cost_currency != spec.cost_currency:
+            raise ModelCallError("pricing evidence currency does not match call spec")
+        now = datetime.fromisoformat(self._now().replace("Z", "+00:00"))
+        as_of = datetime.fromisoformat(snapshot.as_of.replace("Z", "+00:00"))
+        valid_until = datetime.fromisoformat(
+            snapshot.valid_until.replace("Z", "+00:00")
+        )
+        if as_of > now:
+            raise ModelCallError("pricing evidence is from the future")
+        if now > valid_until:
+            raise ModelCallError("pricing evidence has expired")
+        expected_keys = {
+            (item.provider_id, item.model_id, item.revision) for item in descriptors
+        }
+        evidence_keys = {item.key for item in snapshot.quotes}
+        if expected_keys != evidence_keys:
+            raise ModelCallError(
+                "pricing evidence does not exactly cover routing descriptors"
+            )
+        for descriptor in descriptors:
+            quote = snapshot.quote_for(
+                descriptor.provider_id,
+                descriptor.model_id,
+                descriptor.revision,
+            )
+            if quote.estimated_cost != descriptor.estimated_cost:
+                raise ModelCallError(
+                    "descriptor estimated cost conflicts with sealed pricing evidence"
+                )
+        return snapshot
 
     @staticmethod
     def _selected_descriptor(
@@ -646,6 +700,7 @@ class DurableModelCallOrchestrator:
         spec: ModelCallSpec,
         decision: RouteDecision,
         descriptor: ModelDescriptor,
+        pricing: PricingEvidenceSnapshot,
     ) -> dict[str, object]:
         context = self._reservation_context(spec)
         return {
@@ -786,13 +841,18 @@ class DurableModelCallOrchestrator:
         if not events:
             raise ModelCallError("model-call attempt disappeared")
         last = events[-1]
-        if last.get("event_type") in {
-            "ModelCallNotSent",
-            "ModelCallUnknown",
-            "ModelCallObserved",
-        }:
-            self._ensure_terminal_budget(last)
-            return self._outcome_from_terminal(last, route=decision)
+        terminal = next(
+            (
+                event
+                for event in reversed(events)
+                if event.get("event_type")
+                in {"ModelCallNotSent", "ModelCallUnknown", "ModelCallObserved"}
+            ),
+            None,
+        )
+        if terminal is not None:
+            self._ensure_terminal_budget(terminal)
+            return self._outcome_from_terminal(terminal, route=decision)
         if last.get("event_type") == "ModelCallPrepared":
             return ModelCallOutcome(
                 "PREPARED",
@@ -851,6 +911,7 @@ class DurableModelCallOrchestrator:
         spec: ModelCallSpec,
         decision: RouteDecision,
         descriptor: ModelDescriptor,
+        pricing: PricingEvidenceSnapshot,
     ) -> ModelCallBinding:
         return ModelCallBinding(
             attempt_id=attempt_id,
@@ -866,11 +927,58 @@ class DurableModelCallOrchestrator:
             remote=descriptor.remote,
             reserved_cost=decision.reserved_cost,
             pricing_evidence_id=spec.pricing_evidence_id,
+            pricing_evidence_digest=pricing.evidence_digest,
             pricing_as_of=spec.pricing_as_of,
+            cost_currency=spec.cost_currency,
             result_schema_id=spec.result_schema_id,
             fallback_parent_attempt_id=spec.fallback_parent_attempt_id,
             fallback_index=spec.fallback_index,
         )
+
+    @staticmethod
+    def _observation_digest(
+        observation: ModelCallObservation,
+        binding: ModelCallBinding,
+    ) -> str:
+        material = {
+            "attempt_id": binding.attempt_id,
+            "provider_id": observation.provider_id,
+            "model_id": observation.model_id,
+            "revision": observation.revision,
+            "observed_at": observation.observed_at,
+            "incurred_cost": str(observation.incurred_cost),
+            "estimated_unbilled": str(observation.estimated_unbilled),
+            "output_digest": payload_digest(observation.output),
+            "provider_request_id": observation.provider_request_id,
+            "provider_response_id": observation.provider_response_id,
+            "usage_id": observation.usage_id,
+            "billing_id": observation.billing_id,
+        }
+        return payload_digest(material)
+
+    def _verified_observation_evidence(
+        self,
+        observation: ModelCallObservation,
+        binding: ModelCallBinding,
+    ) -> ModelObservationEvidence:
+        try:
+            evidence = self.observation_evidence_resolver(observation, binding)
+        except Exception as error:
+            raise ModelCallError(
+                "model usage/response evidence could not be authenticated"
+            ) from error
+        if not isinstance(evidence, ModelObservationEvidence):
+            raise ModelCallError(
+                "observation evidence resolver did not return ModelObservationEvidence"
+            )
+        if evidence.attempt_id != binding.attempt_id:
+            raise ModelCallError("observation evidence attempt identity mismatch")
+        expected = self._observation_digest(observation, binding)
+        if evidence.observation_digest != expected:
+            raise ModelCallError(
+                "observation evidence does not bind exact usage/response fields"
+            )
+        return evidence
 
     def execute(
         self,
@@ -913,6 +1021,9 @@ class DurableModelCallOrchestrator:
             )
 
         materialized = tuple(descriptors)
+        pricing = None
+        if getattr(policy.mode, "value", None) != "ZERO":
+            pricing = self._pricing_evidence(spec, materialized)
         decision = self.budget.admit_route(
             policy,
             request,
@@ -928,6 +1039,8 @@ class DurableModelCallOrchestrator:
                 decision.reason,
             )
         descriptor = self._selected_descriptor(decision, materialized)
+        if pricing is None:
+            raise ModelCallError("admitted model route lacks sealed pricing evidence")
         active = self.budget.active_reservation(attempt_id)
         if active is None or active != decision.reserved_cost:
             raise ModelCallError(
@@ -939,6 +1052,7 @@ class DurableModelCallOrchestrator:
             spec=spec,
             decision=decision,
             descriptor=descriptor,
+            pricing=pricing,
         )
         events = self._events(attempt_id)
         if events:
@@ -1014,6 +1128,7 @@ class DurableModelCallOrchestrator:
             spec=spec,
             decision=decision,
             descriptor=descriptor,
+            pricing=pricing,
         )
         try:
             observation = call(binding, cancelled)
@@ -1105,6 +1220,33 @@ class DurableModelCallOrchestrator:
                 route=decision,
             )
 
+        try:
+            observation_evidence = self._verified_observation_evidence(
+                observation,
+                binding,
+            )
+        except ModelCallError as error:
+            payload = {
+                "attempt_id": attempt_id,
+                "reason": "observation_evidence_invalid:" + str(error),
+                "estimated_unbilled": str(decision.reserved_cost),
+            }
+            self._append(
+                attempt_id=attempt_id,
+                event_type="ModelCallUnknown",
+                version=3,
+                payload=payload,
+            )
+            self.budget.settle(
+                attempt_id,
+                incurred="0",
+                estimated_unbilled=decision.reserved_cost,
+            )
+            return self._outcome_from_terminal(
+                self._events(attempt_id)[-1],
+                route=decision,
+            )
+
         total = observation.incurred_cost + observation.estimated_unbilled
         if total > decision.reserved_cost:
             # Do not pretend an over-ceiling observation is safely settled.
@@ -1152,6 +1294,13 @@ class DurableModelCallOrchestrator:
             "provider_response_id": observation.provider_response_id,
             "usage_id": observation.usage_id,
             "billing_id": observation.billing_id,
+            "observation_evidence_id": observation_evidence.evidence_id,
+            "observation_evidence_digest": observation_evidence.evidence_digest,
+            "observation_evidence_issuer": observation_evidence.issuer,
+            "observation_digest": observation_evidence.observation_digest,
+            "pricing_evidence_id": spec.pricing_evidence_id,
+            "pricing_evidence_digest": pricing.evidence_digest,
+            "cost_currency": spec.cost_currency,
             "incurred_cost": str(observation.incurred_cost),
             "estimated_unbilled": str(observation.estimated_unbilled),
             "result_digest": result_digest,
@@ -1259,21 +1408,91 @@ class DurableModelCallOrchestrator:
     ) -> bool:
         attempt = _canonical_text(attempt_id, name="attempt_id")
         billing = _canonical_text(billing_id, name="billing_id")
+        normalized = _exact_decimal(billed, name="billed")
         events = self._events(attempt)
-        if not events or events[-1].get("event_type") != "ModelCallObserved":
+        observed = next(
+            (
+                event
+                for event in reversed(events)
+                if event.get("event_type") == "ModelCallObserved"
+            ),
+            None,
+        )
+        if observed is None:
             raise ModelCallError(
                 "billing reconciliation requires an observed model call"
             )
-        payload = events[-1].get("payload")
+        payload = observed.get("payload")
         if not isinstance(payload, Mapping):
             raise ModelCallError("durable observed model-call payload is invalid")
         if payload.get("billing_id") != billing:
             raise ModelCallError(
                 "billing identity does not match the observed model call"
             )
-        normalized = _exact_decimal(billed, name="billed")
+        try:
+            evidence = self.billing_evidence_resolver(
+                attempt,
+                billing,
+                normalized,
+                payload,
+            )
+        except Exception as error:
+            raise ModelCallError(
+                "billing evidence could not be authenticated"
+            ) from error
+        if not isinstance(evidence, BillingEvidence):
+            raise ModelCallError(
+                "billing evidence resolver did not return BillingEvidence"
+            )
+        if (
+            evidence.attempt_id != attempt
+            or evidence.billing_id != billing
+            or evidence.billed != normalized
+            or evidence.provider_id != payload.get("provider_id")
+            or evidence.model_id != payload.get("model_id")
+            or evidence.revision != payload.get("revision")
+            or evidence.cost_currency != payload.get("cost_currency")
+        ):
+            raise ModelCallError(
+                "billing evidence scope does not match the observed model call"
+            )
+
+        evidence_payload = {
+            "attempt_id": attempt,
+            "billing_id": billing,
+            "provider_id": evidence.provider_id,
+            "model_id": evidence.model_id,
+            "revision": evidence.revision,
+            "billed": str(evidence.billed),
+            "cost_currency": evidence.cost_currency,
+            "observed_at": evidence.observed_at,
+            "evidence_id": evidence.evidence_id,
+            "evidence_digest": evidence.evidence_digest,
+            "issuer": evidence.issuer,
+        }
+        prior = [
+            event
+            for event in events
+            if event.get("event_type") == "ModelBillingEvidenceObserved"
+            and isinstance(event.get("payload"), Mapping)
+            and event["payload"].get("billing_id") == billing
+        ]
+        if prior:
+            if len(prior) != 1 or prior[0].get("payload") != evidence_payload:
+                raise ModelCallError(
+                    "billing identity was reused with conflicting immutable evidence"
+                )
+        else:
+            self._append(
+                attempt_id=attempt,
+                event_type="ModelBillingEvidenceObserved",
+                version=len(events) + 1,
+                payload=evidence_payload,
+            )
+
         return self.budget.reconcile_unbilled(
             billing_id=billing,
             request_id=attempt,
             billed=normalized,
         )
+

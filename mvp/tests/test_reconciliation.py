@@ -595,13 +595,21 @@ class ReconciliationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "attempt_id is required"):
             UnknownSubmission(
                 attempt_id=" ",
+                intent_id="intent-direct-invalid",
                 client_order_id="client-1",
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
                 started_at="2026-09-24T18:00:00Z",
             )
         with self.assertRaisesRegex(ValueError, "must include timezone"):
             UnknownSubmission(
                 attempt_id="attempt-1",
+                intent_id="intent-direct-invalid-time",
                 client_order_id="client-1",
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
                 started_at="2026-09-24T18:00:00",
             )
 

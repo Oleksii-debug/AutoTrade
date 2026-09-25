@@ -372,6 +372,25 @@ class JournalStore:
             raise ValueError(f"{name} must be non-empty text")
         return value.strip()
 
+    @staticmethod
+    def _decode_event_row(row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            payload = json.loads(row["payload_json"])
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ValueError("journal event payload is not valid JSON") from error
+        if payload_digest(payload) != row["payload_hash"]:
+            raise ValueError("journal event payload hash does not match stored payload")
+        return {
+            "event_id": row["event_id"],
+            "event_type": row["event_type"],
+            "aggregate_type": row["aggregate_type"],
+            "aggregate_id": row["aggregate_id"],
+            "aggregate_version": row["aggregate_version"],
+            "payload": payload,
+            "payload_hash": row["payload_hash"],
+            "committed_at": row["committed_at"],
+        }
+
     def get_event(self, event_id: str) -> dict[str, Any] | None:
         event_id = self._require_text(event_id, "event_id")
         with self._connect() as connection:
@@ -385,16 +404,7 @@ class JournalStore:
             ).fetchone()
         if row is None:
             return None
-        return {
-            "event_id": row["event_id"],
-            "event_type": row["event_type"],
-            "aggregate_type": row["aggregate_type"],
-            "aggregate_id": row["aggregate_id"],
-            "aggregate_version": row["aggregate_version"],
-            "payload": json.loads(row["payload_json"]),
-            "payload_hash": row["payload_hash"],
-            "committed_at": row["committed_at"],
-        }
+        return self._decode_event_row(row)
 
     def next_aggregate_version(self, aggregate_type: str, aggregate_id: str) -> int:
         aggregate_type = self._require_text(aggregate_type, "aggregate_type")
@@ -528,19 +538,7 @@ class JournalStore:
                 """,
                 (aggregate_type, aggregate_id),
             ).fetchall()
-        return [
-            {
-                "event_id": row["event_id"],
-                "event_type": row["event_type"],
-                "aggregate_type": row["aggregate_type"],
-                "aggregate_id": row["aggregate_id"],
-                "aggregate_version": row["aggregate_version"],
-                "payload": json.loads(row["payload_json"]),
-                "payload_hash": row["payload_hash"],
-                "committed_at": row["committed_at"],
-            }
-            for row in rows
-        ]
+        return [self._decode_event_row(row) for row in rows]
 
     def save_projection_checkpoint(
         self,
@@ -690,24 +688,69 @@ class JournalStore:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT outbox_id, event_id, topic, payload_json, created_at
+                SELECT
+                    outbox.outbox_id,
+                    outbox.event_id,
+                    outbox.topic,
+                    outbox.payload_json AS outbox_payload_json,
+                    outbox.created_at,
+                    events.event_type,
+                    events.aggregate_type,
+                    events.aggregate_id,
+                    events.aggregate_version,
+                    events.payload_json AS event_payload_json,
+                    events.payload_hash,
+                    events.committed_at
                 FROM outbox
-                WHERE delivered_at IS NULL
-                ORDER BY created_at, outbox_id
+                JOIN events ON events.event_id = outbox.event_id
+                WHERE outbox.delivered_at IS NULL
+                ORDER BY outbox.created_at, outbox.outbox_id
                 LIMIT ?
                 """,
                 (limit,),
             ).fetchall()
-        return [
-            {
-                "outbox_id": row["outbox_id"],
+        pending: list[dict[str, Any]] = []
+        for row in rows:
+            event_row = {
                 "event_id": row["event_id"],
-                "topic": row["topic"],
-                "payload": json.loads(row["payload_json"]),
-                "created_at": row["created_at"],
+                "event_type": row["event_type"],
+                "aggregate_type": row["aggregate_type"],
+                "aggregate_id": row["aggregate_id"],
+                "aggregate_version": row["aggregate_version"],
+                "payload_json": row["event_payload_json"],
+                "payload_hash": row["payload_hash"],
+                "committed_at": row["committed_at"],
             }
-            for row in rows
-        ]
+            event = self._decode_event_row(event_row)
+            try:
+                outbox_payload = json.loads(row["outbox_payload_json"])
+            except (json.JSONDecodeError, TypeError) as error:
+                raise ValueError("outbox payload is not valid JSON") from error
+            expected_envelope = {
+                "event_id": event["event_id"],
+                "event_type": event["event_type"],
+                "aggregate_type": event["aggregate_type"],
+                "aggregate_id": event["aggregate_id"],
+                "aggregate_version": str(event["aggregate_version"]),
+                "payload": event["payload"],
+                "payload_hash": event["payload_hash"],
+                "committed_at": event["committed_at"],
+            }
+            for key, expected in expected_envelope.items():
+                if outbox_payload.get(key) != expected:
+                    raise ValueError(
+                        "outbox payload does not match authoritative journal event"
+                    )
+            pending.append(
+                {
+                    "outbox_id": row["outbox_id"],
+                    "event_id": row["event_id"],
+                    "topic": row["topic"],
+                    "payload": outbox_payload,
+                    "created_at": row["created_at"],
+                }
+            )
+        return pending
 
     def mark_outbox_delivered(self, outbox_id: str) -> bool:
         outbox_id = self._require_text(outbox_id, "outbox_id")

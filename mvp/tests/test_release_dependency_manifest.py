@@ -236,6 +236,7 @@ class ReleaseDependencyManifestTests(unittest.TestCase):
             "license": "MIT",
             "adoption_state": "CANDIDATE",
             "source_import_allowed": "AFTER_QUALIFICATION",
+            "release_distribution_state": "BLOCKED",
         }
         components, unresolved = normalize_inspected_components(
             {"components": [base]}
@@ -272,12 +273,96 @@ class ReleaseDependencyManifestTests(unittest.TestCase):
             "license": "Apache-2.0",
             "adoption_state": "QUALIFICATION_PENDING",
             "source_import_allowed": "AFTER_QUALIFICATION",
+            "release_distribution_state": "BLOCKED",
         }
         components, unresolved = normalize_inspected_components(
             {"components": [component]}
         )
         self.assertEqual(components[0]["revision"], "c" * 64)
         self.assertEqual(unresolved, [])
+
+    def test_machine_release_distribution_state_is_preserved_and_blocks_manifest(self):
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        inspected = manifest["inspected_components"]
+        self.assertTrue(inspected)
+        self.assertTrue(
+            all(
+                component["release_distribution_state"] == "BLOCKED"
+                for component in inspected
+            )
+        )
+        blockers = {
+            item["code"]: item
+            for item in manifest["blocking_issues"]
+        }
+        release_blocker = blockers["COMPONENT_RELEASE_DISTRIBUTION_BLOCKED"]
+        self.assertEqual(
+            release_blocker["components"],
+            sorted(component["name"] for component in inspected),
+        )
+
+    def test_component_provenance_rejects_missing_or_invalid_release_state(self):
+        base = {
+            "name": "Component State",
+            "repository": "owner/state",
+            "revision": "d" * 40,
+            "license": "MIT",
+            "adoption_state": "CANDIDATE",
+            "source_import_allowed": "AFTER_QUALIFICATION",
+        }
+        with self.assertRaisesRegex(
+            ValueError,
+            "release_distribution_state",
+        ):
+            normalize_inspected_components({"components": [base]})
+
+        for invalid in ("READY", "approved", "BLOCKED ", ""):
+            with self.subTest(invalid=invalid):
+                candidate = dict(base)
+                candidate["release_distribution_state"] = invalid
+                with self.assertRaises(ValueError):
+                    normalize_inspected_components({"components": [candidate]})
+
+    def test_release_approved_component_requires_resolved_rights_and_three_digests(self):
+        approved = {
+            "name": "Component Approved",
+            "repository": "owner/approved",
+            "revision": "e" * 40,
+            "license": "MIT",
+            "adoption_state": "QUALIFIED",
+            "source_import_allowed": "QUALIFIED",
+            "release_distribution_state": "APPROVED",
+        }
+
+        unresolved = dict(approved)
+        unresolved["license"] = "UNRESOLVED_FIRST_PARTY_RIGHTS_RECORD"
+        with self.assertRaisesRegex(ValueError, "unresolved license"):
+            normalize_inspected_components({"components": [unresolved]})
+
+        fields = (
+            "dependency_graph_sha256",
+            "notice_sha256",
+            "advisory_review_sha256",
+        )
+        for missing in fields:
+            with self.subTest(missing=missing):
+                candidate = dict(approved)
+                for field in fields:
+                    candidate[field] = "sha256:" + ("1" * 64)
+                del candidate[missing]
+                with self.assertRaisesRegex(ValueError, missing):
+                    normalize_inspected_components({"components": [candidate]})
+
+        accepted = dict(approved)
+        for index, field in enumerate(fields, start=1):
+            accepted[field] = "sha256:" + (str(index) * 64)
+        components, unresolved_names = normalize_inspected_components(
+            {"components": [accepted]}
+        )
+        self.assertEqual(unresolved_names, [])
+        self.assertEqual(components[0]["release_distribution_state"], "APPROVED")
+        for field in fields:
+            self.assertEqual(components[0][field], accepted[field])
 
     def test_dependency_manifest_never_upgrades_candidate_to_release_approval(self):
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
@@ -292,6 +377,12 @@ class ReleaseDependencyManifestTests(unittest.TestCase):
         )
         self.assertTrue(
             candidates["Autosport first-party source"]["license"].startswith("UNRESOLVED_")
+        )
+        self.assertTrue(
+            all(
+                candidate["release_distribution_state"] == "BLOCKED"
+                for candidate in candidates.values()
+            )
         )
 
     def test_no_secret_like_material_is_recorded(self):

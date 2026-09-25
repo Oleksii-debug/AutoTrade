@@ -155,6 +155,90 @@ class _NoOffsetTZ(tzinfo):
 
 
 class ChampionRegistryTests(unittest.TestCase):
+    def test_trial_payload_tamper_cannot_rebind_promotion_candidate(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registered = science.register_protocol(protocol())
+            original_candidate = "candidate-original"
+            promoted_candidate = "candidate-forged"
+            science.record_trial(
+                registered.protocol_id,
+                status="COMPLETED",
+                payload={
+                    "candidate_id": original_candidate,
+                    "artifact_hash": digest(original_candidate),
+                },
+            )
+            trial_state = science.completeness(registered.protocol_id)
+            valid_until = BASE + timedelta(days=1)
+            result = {
+                "candidate_id": promoted_candidate,
+                "artifact_hash": digest(promoted_candidate),
+                "evaluation_status": "PASS",
+                "retention_passed": True,
+                "risk_passed": True,
+                "authority_scope_id": "paper-scope",
+                "evidence_valid_until": valid_until.isoformat(),
+                "reproducible": True,
+                "causal_audit_passed": True,
+                "financial_invariants_passed": True,
+                "trial_log_complete": True,
+                "recorded_trial_count": trial_state["recorded_trials"],
+                "trial_budget": trial_state["trial_budget"],
+                "trial_log_hash": trial_state["trial_log_hash"],
+            }
+            locked = science.register_evaluation(
+                registered.protocol_id,
+                holdout_id="holdout-forged-trial-binding",
+                result=result,
+            )
+            forged_payload = {
+                "candidate_id": promoted_candidate,
+                "artifact_hash": digest(promoted_candidate),
+            }
+            with science._connect() as con:
+                con.execute(
+                    "UPDATE trials SET payload_json=? WHERE protocol_id=?",
+                    (
+                        __import__("json").dumps(
+                            forged_payload,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        registered.protocol_id,
+                    ),
+                )
+            approval_value = CandidateApproval.create(
+                candidate_id=promoted_candidate,
+                artifact_hash=digest(promoted_candidate),
+                evidence_id="evidence:forged-trial-binding",
+                evidence_valid_until=valid_until,
+                evaluation_status="PASS",
+                retention_passed=True,
+                risk_passed=True,
+                authority_scope_id="paper-scope",
+                protocol_id=registered.protocol_id,
+                protocol_hash=registered.protocol_hash,
+                evaluation_id=locked["evaluation_id"],
+                evaluation_result_hash=locked["result_hash"],
+            )
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "trial payload integrity mismatch",
+            ):
+                registry.promote(
+                    approval_value,
+                    expected_generation=0,
+                    now=BASE,
+                    open_position_count=0,
+                    existing_position_policy=None,
+                )
+            self.assertEqual(registry.state().generation, 0)
+
     def test_promotion_with_unused_trial_budget_requires_registered_stop_evidence(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")

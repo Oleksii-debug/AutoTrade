@@ -162,6 +162,199 @@ class BinanceSpotOrderIntent:
 
 
 @dataclass(frozen=True)
+class BinanceSpotSymbolRules:
+    """Versioned exchangeInfo symbol filters required before order preparation."""
+
+    instrument_version: str
+    symbol: str
+    source_sha256: str
+    lot_min_qty: Decimal
+    lot_max_qty: Decimal
+    lot_step_size: Decimal
+    market_min_qty: Decimal | None
+    market_max_qty: Decimal | None
+    market_step_size: Decimal | None
+    price_min: Decimal
+    price_max: Decimal
+    tick_size: Decimal
+    min_notional: Decimal | None
+    max_notional: Decimal | None
+    min_notional_applies_to_market: bool
+    max_notional_applies_to_market: bool
+
+    @classmethod
+    def from_exchange_info(
+        cls,
+        *,
+        instrument_version: str,
+        symbol_payload: Mapping[str, object],
+    ) -> "BinanceSpotSymbolRules":
+        if not isinstance(symbol_payload, Mapping):
+            raise TypeError("symbol_payload must be a mapping")
+        instrument = _text(instrument_version, name="instrument_version")
+        symbol = _text(symbol_payload.get("symbol"), name="symbol")
+        if symbol != symbol.upper():
+            raise BinanceSpotAdapterError("exchangeInfo symbol must be uppercase")
+        filters = symbol_payload.get("filters")
+        if isinstance(filters, (str, bytes)) or not isinstance(filters, list):
+            raise BinanceSpotAdapterError("exchangeInfo filters must be an array")
+        by_type: dict[str, Mapping[str, object]] = {}
+        for item in filters:
+            if not isinstance(item, Mapping):
+                raise BinanceSpotAdapterError("exchangeInfo filter must be an object")
+            kind = _text(item.get("filterType"), name="filterType")
+            if kind in by_type:
+                raise BinanceSpotAdapterError(f"duplicate exchangeInfo filter: {kind}")
+            by_type[kind] = item
+        for required in ("PRICE_FILTER", "LOT_SIZE"):
+            if required not in by_type:
+                raise BinanceSpotAdapterError(
+                    f"exchangeInfo is missing required {required} filter"
+                )
+
+        price_filter = by_type["PRICE_FILTER"]
+        lot_filter = by_type["LOT_SIZE"]
+        price_min = _decimal(price_filter.get("minPrice"), name="minPrice")
+        price_max = _decimal(price_filter.get("maxPrice"), name="maxPrice")
+        tick_size = _decimal(price_filter.get("tickSize"), name="tickSize", positive=True)
+        lot_min = _decimal(lot_filter.get("minQty"), name="minQty", positive=True)
+        lot_max = _decimal(lot_filter.get("maxQty"), name="maxQty", positive=True)
+        lot_step = _decimal(lot_filter.get("stepSize"), name="stepSize", positive=True)
+        if lot_min > lot_max:
+            raise BinanceSpotAdapterError("LOT_SIZE minQty exceeds maxQty")
+        if price_min < 0 or price_max < 0 or (price_max and price_min > price_max):
+            raise BinanceSpotAdapterError("PRICE_FILTER bounds are invalid")
+
+        market_min = market_max = market_step = None
+        market_filter = by_type.get("MARKET_LOT_SIZE")
+        if market_filter is not None:
+            raw_min = _decimal(market_filter.get("minQty"), name="market minQty")
+            raw_max = _decimal(market_filter.get("maxQty"), name="market maxQty")
+            raw_step = _decimal(market_filter.get("stepSize"), name="market stepSize")
+            if raw_min < 0 or raw_max < 0 or raw_step < 0:
+                raise BinanceSpotAdapterError("MARKET_LOT_SIZE values cannot be negative")
+            if raw_max and raw_min > raw_max:
+                raise BinanceSpotAdapterError("MARKET_LOT_SIZE minQty exceeds maxQty")
+            market_min = raw_min if raw_min > 0 else None
+            market_max = raw_max if raw_max > 0 else None
+            market_step = raw_step if raw_step > 0 else None
+
+        min_notional = max_notional = None
+        min_market = max_market = False
+        if "NOTIONAL" in by_type:
+            item = by_type["NOTIONAL"]
+            min_notional = _decimal(item.get("minNotional"), name="minNotional", positive=True)
+            raw_max = _decimal(item.get("maxNotional"), name="maxNotional")
+            if raw_max < 0:
+                raise BinanceSpotAdapterError("maxNotional cannot be negative")
+            max_notional = raw_max if raw_max > 0 else None
+            min_market = bool(item.get("applyMinToMarket", False))
+            max_market = bool(item.get("applyMaxToMarket", False))
+        elif "MIN_NOTIONAL" in by_type:
+            item = by_type["MIN_NOTIONAL"]
+            min_notional = _decimal(item.get("minNotional"), name="minNotional", positive=True)
+            min_market = bool(item.get("applyToMarket", False))
+
+        canonical = json.dumps(
+            symbol_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        return cls(
+            instrument_version=instrument,
+            symbol=symbol,
+            source_sha256="sha256:" + sha256(canonical).hexdigest(),
+            lot_min_qty=lot_min,
+            lot_max_qty=lot_max,
+            lot_step_size=lot_step,
+            market_min_qty=market_min,
+            market_max_qty=market_max,
+            market_step_size=market_step,
+            price_min=price_min,
+            price_max=price_max,
+            tick_size=tick_size,
+            min_notional=min_notional,
+            max_notional=max_notional,
+            min_notional_applies_to_market=min_market,
+            max_notional_applies_to_market=max_market,
+        )
+
+    @staticmethod
+    def _require_step(value: Decimal, step: Decimal, *, name: str) -> None:
+        if value % step != 0:
+            raise BinanceSpotAdapterError(
+                f"{name} is not an exact multiple of exchangeInfo step"
+            )
+
+    def validate(
+        self,
+        intent: BinanceSpotOrderIntent,
+        *,
+        market_reference_price=None,
+    ) -> None:
+        if self.instrument_version != intent.instrument_version:
+            raise BinanceSpotAdapterError(
+                "exchangeInfo rules instrument version does not match intent"
+            )
+        if self.symbol != intent.symbol:
+            raise BinanceSpotAdapterError("exchangeInfo rules symbol does not match intent")
+
+        if intent.order_type == "MARKET" and any(
+            item is not None
+            for item in (self.market_min_qty, self.market_max_qty, self.market_step_size)
+        ):
+            min_qty = self.market_min_qty
+            max_qty = self.market_max_qty
+            step = self.market_step_size
+        else:
+            min_qty = self.lot_min_qty
+            max_qty = self.lot_max_qty
+            step = self.lot_step_size
+        if min_qty is not None and intent.quantity < min_qty:
+            raise BinanceSpotAdapterError("quantity is below exchangeInfo minimum")
+        if max_qty is not None and intent.quantity > max_qty:
+            raise BinanceSpotAdapterError("quantity exceeds exchangeInfo maximum")
+        if step is not None:
+            self._require_step(intent.quantity, step, name="quantity")
+
+        effective_price = intent.price
+        if intent.order_type == "LIMIT":
+            if effective_price is None:
+                raise BinanceSpotAdapterError("LIMIT price is required")
+            if self.price_min > 0 and effective_price < self.price_min:
+                raise BinanceSpotAdapterError("price is below exchangeInfo minimum")
+            if self.price_max > 0 and effective_price > self.price_max:
+                raise BinanceSpotAdapterError("price exceeds exchangeInfo maximum")
+            self._require_step(effective_price, self.tick_size, name="price")
+        elif (
+            self.min_notional_applies_to_market
+            or self.max_notional_applies_to_market
+        ):
+            if market_reference_price is None:
+                raise BinanceSpotAdapterError(
+                    "market notional filter requires causal reference price"
+                )
+            effective_price = _decimal(
+                market_reference_price,
+                name="market_reference_price",
+                positive=True,
+            )
+
+        if effective_price is not None:
+            notional = intent.quantity * effective_price
+            if self.min_notional is not None and (
+                intent.order_type == "LIMIT" or self.min_notional_applies_to_market
+            ) and notional < self.min_notional:
+                raise BinanceSpotAdapterError("notional is below exchangeInfo minimum")
+            if self.max_notional is not None and (
+                intent.order_type == "LIMIT" or self.max_notional_applies_to_market
+            ) and notional > self.max_notional:
+                raise BinanceSpotAdapterError("notional exceeds exchangeInfo maximum")
+
+
+@dataclass(frozen=True)
 class BinanceSpotPreparedRequest:
     endpoint: str
     body: Mapping[str, str]
@@ -176,7 +369,9 @@ def prepare_order_request(
     *,
     client_order_id: str,
     capability: CapabilitySnapshot,
+    symbol_rules: BinanceSpotSymbolRules,
     at: datetime,
+    market_reference_price=None,
 ) -> BinanceSpotPreparedRequest:
     """Prepare but never sign/send a Spot order.
 
@@ -188,6 +383,8 @@ def prepare_order_request(
         raise TypeError("intent must be BinanceSpotOrderIntent")
     if not isinstance(capability, CapabilitySnapshot):
         raise TypeError("capability must be CapabilitySnapshot")
+    if not isinstance(symbol_rules, BinanceSpotSymbolRules):
+        raise TypeError("symbol_rules must be BinanceSpotSymbolRules")
     point = _utc(at, name="at")
     client_id = validate_client_order_id(client_order_id)
     if capability.provider_id.upper() != "BINANCE":
@@ -201,6 +398,11 @@ def prepare_order_request(
         permission_scope="ORDER_WRITE",
     ):
         raise BinanceSpotAdapterError("exact capability evidence does not admit this order")
+
+    symbol_rules.validate(
+        intent,
+        market_reference_price=market_reference_price,
+    )
 
     body: dict[str, str] = {
         "symbol": intent.symbol,

@@ -596,7 +596,7 @@ class IndependentRiskTests(unittest.TestCase):
             rule for rule in missing.rules if rule.rule == "liquidity_participation"
         )
         self.assertFalse(missing_rule.passed)
-        self.assertEqual(missing_rule.observed, "UNKNOWN")
+        self.assertEqual(missing_rule.observed, "MISSING:ABC")
 
         oversized = evaluate_risk(
             intent,
@@ -1043,6 +1043,38 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertEqual(evidenced.net_leverage, Decimal("0.75"))
         self.assertEqual(evidenced.worst_stress_loss, Decimal("75"))
         self.assertTrue(evidenced.admitted)
+
+    def test_existing_derivative_position_without_equivalent_exposure_fails_closed(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                instrument_type="EQUITY",
+            ),
+            context(
+                positions={"ABC": "0", "XYZ": "10"},
+                marks={"ABC": "100", "XYZ": "1"},
+                instrument_types={"XYZ": "OPTION"},
+                equivalent_exposure_per_unit={"ABC": "100"},
+                stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.10"},),
+            ),
+            policy(
+                max_single_notional="10000",
+                max_gross_leverage="10",
+                max_net_leverage="10",
+            ),
+        )
+        rule = next(
+            item
+            for item in decision.rules
+            if item.rule == "derivative_equivalent_exposure"
+        )
+        self.assertFalse(rule.passed)
+        self.assertEqual(rule.observed, "MISSING:XYZ")
+        self.assertFalse(decision.admitted)
 
     def test_derivative_equivalent_exposure_can_reverse_direction_for_put_delta(self):
         decision = evaluate_risk(

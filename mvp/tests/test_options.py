@@ -347,6 +347,8 @@ class OptionRiskEvidenceTests(unittest.TestCase):
             evidence,
             instrument="OPT:CALL",
             at=datetime(2026, 9, 25, 18, 30, tzinfo=timezone.utc),
+            maximum_calculation_age=timedelta(hours=2),
+            maximum_market_age=timedelta(hours=2),
         )
 
     def test_stress_scenarios_allow_zero_underlying_but_reject_negative_price(self):
@@ -466,18 +468,24 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                 evidence,
                 instrument="OPT:CALL",
                 at=at(17),
+                maximum_calculation_age=timedelta(hours=2),
+                maximum_market_age=timedelta(hours=2),
             )
         with self.assertRaisesRegex(OptionError, "stale"):
             require_current_option_risk(
                 evidence,
                 instrument="OPT:CALL",
                 at=at(19),
+                maximum_calculation_age=timedelta(hours=2),
+                maximum_market_age=timedelta(hours=2),
             )
         with self.assertRaisesRegex(OptionError, "another instrument"):
             require_current_option_risk(
                 evidence,
                 instrument="OPT:PUT",
                 at=datetime(2026, 9, 25, 18, 30, tzinfo=timezone.utc),
+                maximum_calculation_age=timedelta(hours=2),
+                maximum_market_age=timedelta(hours=2),
             )
 
 
@@ -511,13 +519,79 @@ class OptionRiskEvidenceTests(unittest.TestCase):
             evidence,
             instrument="OPT:CALL",
             at=datetime(2026, 9, 25, 18, 59, tzinfo=timezone.utc),
+            maximum_calculation_age=timedelta(hours=2),
+            maximum_market_age=timedelta(hours=2),
         )
         with self.assertRaisesRegex(OptionError, "market evidence is stale"):
             require_current_option_risk(
                 evidence,
                 instrument="OPT:CALL",
                 at=datetime(2026, 9, 25, 19, 1, tzinfo=timezone.utc),
+                maximum_calculation_age=timedelta(hours=2),
+                maximum_market_age=timedelta(hours=2),
             )
+
+    def test_consumer_policy_caps_producer_declared_option_risk_ttl(self):
+        evidence = OptionRiskEvidence(
+            instrument="OPT:CALL",
+            model_id="scenario-greeks",
+            model_version="1.2.0",
+            source_sha="a" * 40,
+            input_digest="sha256:" + "b" * 64,
+            schema_version=1,
+            market_as_of=at(17),
+            calculated_at=datetime(2026, 9, 25, 17, 30, tzinfo=timezone.utc),
+            expires_at=datetime(2026, 9, 26, 17, 30, tzinfo=timezone.utc),
+            maximum_market_age=timedelta(days=1),
+            delta="0.52",
+            gamma="0.03",
+            vega="12.5",
+            theta="-4.2",
+            rho="1.1",
+            scenarios=(
+                OptionScenarioResult(
+                    scenario_id="stress",
+                    underlying_price="80",
+                    implied_volatility="0.55",
+                    pnl="-725.25",
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(OptionError, "calculation exceeds independent policy age"):
+            require_current_option_risk(
+                evidence,
+                instrument="OPT:CALL",
+                at=datetime(2026, 9, 25, 19, 31, tzinfo=timezone.utc),
+                maximum_calculation_age=timedelta(hours=2),
+                maximum_market_age=timedelta(hours=4),
+            )
+        with self.assertRaisesRegex(OptionError, "market evidence exceeds independent policy age"):
+            require_current_option_risk(
+                evidence,
+                instrument="OPT:CALL",
+                at=datetime(2026, 9, 25, 19, 0, tzinfo=timezone.utc),
+                maximum_calculation_age=timedelta(hours=2),
+                maximum_market_age=timedelta(hours=1),
+            )
+
+    def test_consumer_option_risk_freshness_policy_requires_positive_timedeltas(self):
+        evidence = self._risk()
+        for calculation_age, market_age in (
+            (timedelta(0), timedelta(hours=1)),
+            (timedelta(hours=1), timedelta(0)),
+        ):
+            with self.subTest(
+                calculation_age=calculation_age,
+                market_age=market_age,
+            ):
+                with self.assertRaisesRegex(OptionError, "positive timedelta"):
+                    require_current_option_risk(
+                        evidence,
+                        instrument="OPT:CALL",
+                        at=datetime(2026, 9, 25, 18, 30, tzinfo=timezone.utc),
+                        maximum_calculation_age=calculation_age,
+                        maximum_market_age=market_age,
+                    )
 
     def test_market_snapshot_cannot_be_stale_when_risk_is_calculated(self):
         with self.assertRaisesRegex(OptionError, "stale at calculation"):

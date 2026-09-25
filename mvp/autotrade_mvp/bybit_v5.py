@@ -61,6 +61,11 @@ _DERIVATIVE_ORDER_SCOPE_BY_FAMILY: Mapping[str, str] = {
     "LINEAR_DERIVATIVES": "BYBIT.LINEAR.ORDER.WRITE",
     "INVERSE_DERIVATIVES": "BYBIT.INVERSE.ORDER.WRITE",
 }
+_CAPABILITY_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT: Mapping[str, str] = {
+    "MAINNET": "LIVE",
+    "TESTNET": "PAPER",
+    "DEMO": "PAPER",
+}
 
 
 def _text(value: object, *, name: str) -> str:
@@ -225,6 +230,7 @@ def _position_idx_from_capability(
     at: datetime,
     account_id: str,
     instrument_version: str,
+    provider_environment: str,
     product_family: str,
     side: str,
     order_type: str,
@@ -250,6 +256,22 @@ def _position_idx_from_capability(
     if capability.instrument_version != instrument:
         raise ProviderCoreError(
             "capability instrument version does not match target instrument"
+        )
+    provider_env = _text(
+        provider_environment,
+        name="provider_environment",
+    ).upper()
+    try:
+        expected_capability_environment = (
+            _CAPABILITY_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT[provider_env]
+        )
+    except KeyError as error:
+        raise ProviderCoreError(
+            "Bybit provider_environment must be MAINNET, TESTNET or DEMO"
+        ) from error
+    if capability.environment != expected_capability_environment:
+        raise ProviderCoreError(
+            "capability environment does not match target Bybit environment"
         )
 
     family = _text(product_family, name="product_family").upper()
@@ -303,6 +325,7 @@ def build_order_payload(
     capability_at: datetime | None = None,
     account_id: str | None = None,
     instrument_version: str | None = None,
+    provider_environment: str | None = None,
 ) -> dict[str, Any]:
     """Translate a bounded canonical order into a Bybit V5 request payload.
 
@@ -346,15 +369,22 @@ def build_order_payload(
     }
     effective_position_idx: int | None = None
     if derivative_family:
-        if capability_at is None or account_id is None or instrument_version is None:
+        if (
+            capability_at is None
+            or account_id is None
+            or instrument_version is None
+            or provider_environment is None
+        ):
             raise ProviderCoreError(
-                "Bybit derivative orders require verified account/category capability context"
+                "Bybit derivative orders require verified "
+                "account/category/environment capability context"
             )
         effective_position_idx = _position_idx_from_capability(
             capability=capability,
             at=capability_at,
             account_id=account_id,
             instrument_version=instrument_version,
+            provider_environment=provider_environment,
             product_family=family,
             side=normalized_side,
             order_type=normalized_type,

@@ -75,6 +75,7 @@ class SecurityBoundary:
     _ROLES = {"OWNER", "OPERATOR", "RESEARCHER", "OBSERVER"}
     _EXECUTION_ROLES = {"OWNER", "OPERATOR"}
     _HOST_COMMAND_ROLES = {"OWNER", "OPERATOR"}
+    _OWNER_ONLY_HOST_ACTIONS = {"SET_AUTHORITY", "REVOKE_AUTHORITY"}
     _CREDENTIAL_PURPOSES = {"TRADE", "READ"}
 
     def __init__(
@@ -126,7 +127,9 @@ class SecurityBoundary:
         if ttl_seconds <= 0 or ttl_seconds > 3600:
             raise ValueError("Session lifetime is outside the permitted bound")
         if self._session_authorizer is None:
-            raise PermissionError("Session authentication verifier is unavailable")
+            raise PermissionError(
+                "Session authentication verifier is unavailable"
+            )
         try:
             authenticated = self._session_authorizer(
                 normalized_subject,
@@ -178,17 +181,33 @@ class SecurityBoundary:
                 raise PermissionError("Role is not authorized")
         return session
 
-    def validate_host_session(self, token: str, actor: str) -> bool:
-        """Validate identity and role for the state-mutating host command layer.
+    def validate_host_session(
+        self,
+        token: str,
+        actor: str,
+        origin: str,
+        action: str,
+    ) -> bool:
+        """Validate identity, current origin and action-aware host mutation role.
 
-        Read-only RESEARCHER/OBSERVER sessions must use read surfaces; they cannot
-        become mutation authority merely by presenting a valid bearer token.
+        Read-only RESEARCHER/OBSERVER sessions must use read surfaces. Authority
+        grant/revoke commands are Owner-only; other mutations may also be admitted
+        for Operator and still require their normal server-side policy/capability
+        checks outside this authentication boundary.
         """
         try:
             normalized_actor = _required_text(actor, name="actor")
+            normalized_origin = _authenticated_origin(origin)
+            normalized_action = _required_text(action, name="action").upper()
+            required_roles = (
+                {"OWNER"}
+                if normalized_action in self._OWNER_ONLY_HOST_ACTIONS
+                else self._HOST_COMMAND_ROLES
+            )
             session = self.validate_session(
                 token,
-                required_roles=self._HOST_COMMAND_ROLES,
+                required_roles=required_roles,
+                origin=normalized_origin,
             )
         except (ValueError, PermissionError, RuntimeError):
             return False

@@ -9,6 +9,7 @@ from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
     QualificationEvidence,
     QuotaBucket,
+    WriteOutcome,
     classify_write_outcome,
     provider_definition,
 )
@@ -122,6 +123,24 @@ class ProviderCoreTests(unittest.TestCase):
         self.assertEqual(unknown.status, "UNKNOWN")
         self.assertFalse(unknown.retry_same_economic_action)
         self.assertTrue(unknown.reconciliation_required)
+
+    def test_direct_write_outcome_cannot_bypass_send_state_invariants(self):
+        invalid_cases = (
+            ("UNKNOWN", True, True),
+            ("UNKNOWN", False, False),
+            ("NOT_SENT", False, False),
+            ("ACKNOWLEDGED", True, False),
+            ("REJECTED", False, True),
+        )
+        for status, retry, reconcile in invalid_cases:
+            with self.subTest(status=status), self.assertRaisesRegex(
+                ProviderCoreError,
+                "send-state invariant",
+            ):
+                WriteOutcome(status, retry, reconcile)
+
+        with self.assertRaisesRegex(ProviderCoreError, "boolean"):
+            WriteOutcome("UNKNOWN", 0, True)
 
     def test_only_never_sent_write_is_retryable_as_same_action(self):
         outcome = classify_write_outcome(

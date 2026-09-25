@@ -35,6 +35,15 @@ def _positive(value, *, name: str, allow_zero: bool = False) -> Decimal:
     return result
 
 
+def _decimal_text(value: Decimal) -> str:
+    if value == 0:
+        return "0"
+    rendered = format(value, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered
+
+
 def _identity_key(value, *, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} keys must be non-empty strings")
@@ -51,6 +60,52 @@ def _normalize_mapping(values, *, name: str, parser) -> dict[str, Decimal]:
             raise ValueError(f"{name} keys must be unique after normalization")
         normalized[key] = parser(raw_value, key)
     return normalized
+
+
+def normalize_reservation_requirements(
+    values: Mapping[str, object],
+) -> tuple[tuple[str, Decimal], ...]:
+    """Canonical exact worst-case reservation delta bound to one risk decision."""
+
+    normalized = _normalize_mapping(
+        values,
+        name="reservation_requirements",
+        parser=lambda value, resource: _positive(
+            value,
+            name=f"reservation_requirements[{resource}]",
+        ),
+    )
+    if not normalized:
+        raise ValueError("reservation_requirements must not be empty")
+    return tuple(sorted(normalized.items()))
+
+
+def reservation_requirements_payload(
+    values: tuple[tuple[str, Decimal], ...] | Mapping[str, object],
+) -> dict[str, str]:
+    if isinstance(values, Mapping):
+        normalized = normalize_reservation_requirements(values)
+    else:
+        if (
+            not isinstance(values, tuple)
+            or not values
+            or any(
+                not isinstance(item, tuple) or len(item) != 2
+                for item in values
+            )
+        ):
+            raise TypeError(
+                "reservation requirements must be a canonical tuple or mapping"
+            )
+        normalized = normalize_reservation_requirements(dict(values))
+        if normalized != values:
+            raise ValueError(
+                "reservation requirements tuple is not canonical"
+            )
+    return {
+        resource: _decimal_text(amount)
+        for resource, amount in normalized
+    }
 
 
 def _normalize_text_mapping(values, *, name: str) -> dict[str, str]:
@@ -543,6 +598,7 @@ class RiskDecision:
     state_version: int | None = None
     policy_version: int | None = None
     reservation_version: int | None = None
+    reservation_requirements: tuple[tuple[str, Decimal], ...] | None = None
     capability_snapshot_id: str | None = None
     evaluated_at: str | None = None
     valid_until: str | None = None
@@ -591,6 +647,7 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
         decision.state_version,
         decision.policy_version,
         decision.reservation_version,
+        decision.reservation_requirements,
         decision.capability_snapshot_id,
         decision.evaluated_at,
         decision.valid_until,
@@ -603,6 +660,9 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
             "state_version": decision.state_version,
             "policy_version": decision.policy_version,
             "reservation_version": decision.reservation_version,
+            "reservation_requirements": reservation_requirements_payload(
+                decision.reservation_requirements
+            ),
             "capability_snapshot_id": decision.capability_snapshot_id,
             "evaluated_at": decision.evaluated_at,
             "valid_until": decision.valid_until,
@@ -623,6 +683,7 @@ def bind_risk_decision(
     state_version: int,
     policy_version: int,
     reservation_version: int,
+    reservation_requirements: Mapping[str, object],
     capability_snapshot_id: str,
     evaluated_at: str,
     valid_until: str,
@@ -658,6 +719,9 @@ def bind_risk_decision(
         or reservation_version < 0
     ):
         raise ValueError("reservation_version must be a non-negative integer")
+    requirements = normalize_reservation_requirements(
+        reservation_requirements
+    )
     evaluated = _risk_binding_text(evaluated_at, name="evaluated_at")
     valid = _risk_binding_text(valid_until, name="valid_until")
     if _risk_binding_instant(evaluated, name="evaluated_at") >= _risk_binding_instant(
@@ -672,6 +736,7 @@ def bind_risk_decision(
         state_version=state_version,
         policy_version=policy_version,
         reservation_version=reservation_version,
+        reservation_requirements=requirements,
         capability_snapshot_id=capability,
         evaluated_at=evaluated,
         valid_until=valid,
@@ -705,6 +770,7 @@ def evaluate_bound_risk(
     intent_hash: str,
     policy_version: int,
     reservation_version: int,
+    reservation_requirements: Mapping[str, object],
     capability_snapshot_id: str,
     evaluated_at: str,
     valid_until: str,
@@ -716,6 +782,7 @@ def evaluate_bound_risk(
         state_version=context.state_version,
         policy_version=policy_version,
         reservation_version=reservation_version,
+        reservation_requirements=reservation_requirements,
         capability_snapshot_id=capability_snapshot_id,
         evaluated_at=evaluated_at,
         valid_until=valid_until,

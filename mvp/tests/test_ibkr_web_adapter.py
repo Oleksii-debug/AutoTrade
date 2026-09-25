@@ -691,6 +691,9 @@ class IbkrWebAdapterTests(unittest.TestCase):
             fee_currency="USD",
             trade_time="2026-09-24T20:00:01Z",
         )
+        self.assertEqual(fill.provider_id, "IBKR")
+        self.assertEqual(fill.account_id, "U1234567")
+        self.assertEqual(fill.environment, "PAPER")
         self.assertEqual(fill.provider_execution_id, "0001.123.01")
         self.assertEqual(fill.client_order_id, "at-ibkr-1")
         self.assertEqual(fill.quantity, Decimal("0.5"))
@@ -720,6 +723,9 @@ class IbkrWebAdapterTests(unittest.TestCase):
             fee_currency_by_execution_id={"0001.123.01": "USD"},
         )
         self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0].provider_id, "IBKR")
+        self.assertEqual(fills[0].account_id, "U1234567")
+        self.assertEqual(fills[0].environment, "PAPER")
         self.assertEqual(fills[0].provider_execution_id, "0001.123.01")
         self.assertEqual(fills[0].client_order_id, "at-ibkr-1")
         self.assertEqual(fills[0].quantity, Decimal("0.5"))
@@ -782,6 +788,26 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 expected_account_id="U1234567",
                 instrument_versions_by_conid={265598: "AAPL:v1"},
                 fee_currency_by_execution_id={"exec-1": "USD"},
+            )
+
+    def test_reconciliation_fill_rejects_noncanonical_environment(self):
+        execution = IbkrExecutionEvidence.create(
+            execution_id="0001.998.01",
+            permanent_order_id=778898,
+            account_id="U1234567",
+            quantity="1",
+            price="100",
+        )
+        with self.assertRaisesRegex(ValueError, "environment"):
+            execution_to_reconciliation_fill(
+                execution,
+                environment="UNKNOWN_ENV",
+                client_order_id="at-ibkr-env",
+                expected_account_id="U1234567",
+                instrument="AAPL-CONID-265598:v1",
+                fee_amount="0",
+                fee_currency="USD",
+                trade_time="2026-09-24T20:00:01Z",
             )
 
     def test_execution_cannot_cross_account_boundary_during_reconciliation(self):

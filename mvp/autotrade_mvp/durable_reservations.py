@@ -779,6 +779,14 @@ class DurableReservationBook:
                 "durable reconciliation checkpoint hash does not match receipt"
             )
         if (
+            reconciliation_payload.get("provider_id") != provider_name
+            or reconciliation_payload.get("account_id") != self.account_id
+            or reconciliation_payload.get("environment") != self.environment
+        ):
+            raise ReservationConflict(
+                "durable reconciliation checkpoint scope does not match reservation"
+            )
+        if (
             reconciliation_payload.get("complete") is not True
             or reconciliation_payload.get("snapshot_consistent") is not True
             or reconciliation_payload.get("blocking_resources") != []

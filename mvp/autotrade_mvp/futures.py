@@ -96,12 +96,6 @@ class FuturesContract:
             "settlement_currency",
             _text(self.settlement_currency, "settlement_currency"),
         )
-        if self.evidence_ref is not None:
-            object.__setattr__(
-                self,
-                "evidence_ref",
-                _text(self.evidence_ref, "evidence_ref"),
-            )
         for name in ("last_trade_at", "delivery_cutoff", "expiry"):
             object.__setattr__(self, name, _utc(getattr(self, name), name))
         if not self.last_trade_at <= self.expiry:

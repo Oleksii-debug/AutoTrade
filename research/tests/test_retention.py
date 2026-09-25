@@ -35,7 +35,7 @@ def policy(**overrides):
 
 class RetentionTests(unittest.TestCase):
     def test_direct_regime_metric_construction_cannot_bypass_invariants(self):
-        with self.assertRaisesRegex(TypeError, "exact decimal"):
+        with self.assertRaisesRegex(TypeError, "Decimal, string or integer input"):
             RegimeMetric(
                 regime="old",
                 champion_net_score=0.10,

@@ -8,7 +8,7 @@ then the in-memory OrderBookProjection is rebuilt from that immutable history.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Mapping, Sequence
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -977,7 +977,12 @@ class DurableOrderBookProjection:
             raise OrderProjectionConflict(
                 "canonical ExecutionFill instrument differs from target order"
             )
-        if _text(execution_fill.get("side"), name="side").upper() != order.side:
+        fill_side = _text(execution_fill.get("side"), name="side")
+        if fill_side not in {"BUY", "SELL"}:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill side must be BUY or SELL"
+            )
+        if fill_side != order.side:
             raise OrderProjectionConflict(
                 "canonical ExecutionFill side differs from target order"
             )
@@ -1019,7 +1024,20 @@ class DurableOrderBookProjection:
             raise OrderProjectionConflict(
                 "canonical ExecutionFill evidence must be an array"
             )
-        _text(execution_fill.get("settlement_date"), name="settlement_date")
+        settlement_date = _text(
+            execution_fill.get("settlement_date"),
+            name="settlement_date",
+        )
+        try:
+            parsed_settlement_date = date.fromisoformat(settlement_date)
+        except ValueError as error:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill settlement_date must be an ISO calendar date"
+            ) from error
+        if parsed_settlement_date.isoformat() != settlement_date:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill settlement_date must be canonical YYYY-MM-DD"
+            )
 
         correction_reference = execution_fill.get("correction_reference")
         if correction_reference is not None:

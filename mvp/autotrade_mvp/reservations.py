@@ -226,6 +226,116 @@ class ReservationBook:
         self._records[current.reservation_id] = updated
         return updated
 
+
+    def export_state(self) -> dict[str, object]:
+        """Return exact restart state without binary numeric coercion."""
+
+        return {
+            "schema_version": 1,
+            "records": [
+                {
+                    "reservation_id": record.reservation_id,
+                    "intent_id": record.intent_id,
+                    "original": {
+                        key: format(value, "f")
+                        for key, value in sorted(record.original.items())
+                    },
+                    "remaining": {
+                        key: format(value, "f")
+                        for key, value in sorted(record.remaining.items())
+                    },
+                    "consumed": {
+                        key: format(value, "f")
+                        for key, value in sorted(record.consumed.items())
+                    },
+                    "state": record.state,
+                    "resolution_evidence": record.resolution_evidence,
+                }
+                for record in sorted(
+                    self._records.values(),
+                    key=lambda item: item.reservation_id,
+                )
+            ],
+        }
+
+    @classmethod
+    def restore_state(cls, payload: Mapping[str, object]) -> "ReservationBook":
+        """Restore fail-closed and preserve UNKNOWN/working reservations."""
+
+        if not isinstance(payload, Mapping) or payload.get("schema_version") != 1:
+            raise ReservationConflict("Unsupported reservation state schema")
+        rows = payload.get("records")
+        if not isinstance(rows, list):
+            raise ReservationConflict("Reservation state records must be a list")
+        book = cls()
+        seen_intents: set[str] = set()
+        for row in rows:
+            if not isinstance(row, Mapping):
+                raise ReservationConflict("Reservation state record must be an object")
+            required = {
+                "reservation_id",
+                "intent_id",
+                "original",
+                "remaining",
+                "consumed",
+                "state",
+                "resolution_evidence",
+            }
+            if set(row) != required:
+                raise ReservationConflict("Reservation state record shape is invalid")
+            rid = _text(row["reservation_id"], name="reservation_id")
+            iid = _text(row["intent_id"], name="intent_id")
+            if rid in book._records or iid in seen_intents:
+                raise ReservationConflict("Reservation restart state contains duplicate identity")
+            original = _amounts(row["original"])
+            remaining = _amounts(row["remaining"], allow_zero=True)
+            consumed = _amounts(row["consumed"], allow_zero=True)
+            if set(original) != set(remaining) or set(original) != set(consumed):
+                raise ReservationConflict("Reservation restart resources do not match")
+            if any(
+                remaining[key] + consumed[key] != original[key]
+                for key in original
+            ):
+                raise ReservationConflict("Reservation restart amounts violate conservation")
+            state = _text(row["state"], name="state").upper()
+            if state not in ACTIVE_STATES | TERMINAL_STATES:
+                raise ReservationConflict("Reservation restart state is unsupported")
+            evidence = row["resolution_evidence"]
+            if state in ACTIVE_STATES:
+                if evidence is not None:
+                    raise ReservationConflict(
+                        "Active reservation cannot carry terminal resolution evidence"
+                    )
+            else:
+                evidence = _text(evidence, name="resolution_evidence")
+                if any(value != 0 for value in remaining.values()):
+                    raise ReservationConflict(
+                        "Terminal reservation cannot retain reserved remainder"
+                    )
+                if state == "FILLED" and any(
+                    consumed[key] != original[key] for key in original
+                ):
+                    raise ReservationConflict(
+                        "FILLED restart state must consume the entire reservation"
+                    )
+                if state in {"REJECTED", "PROVEN_ABSENT"} and any(
+                    value != 0 for value in consumed.values()
+                ):
+                    raise ReservationConflict(
+                        f"{state} restart state cannot contain consumed exposure"
+                    )
+            book._records[rid] = ReservationSnapshot(
+                reservation_id=rid,
+                intent_id=iid,
+                original=MappingProxyType(dict(original)),
+                remaining=MappingProxyType(dict(remaining)),
+                consumed=MappingProxyType(dict(consumed)),
+                state=state,
+                resolution_evidence=evidence,
+            )
+            seen_intents.add(iid)
+        return book
+
     def active(self) -> tuple[ReservationSnapshot, ...]:
         return tuple(
             record

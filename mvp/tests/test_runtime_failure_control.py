@@ -87,6 +87,40 @@ class RuntimeRecoveryTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             controller.set_storage_writable("true")
 
+    def test_reconciliation_consistency_requires_real_boolean(self):
+        controller = RecoveryController()
+        controller.start("host-a")
+        with self.assertRaisesRegex(TypeError, "consistent"):
+            controller.record_reconciliation(consistent="false")
+        self.assertEqual(controller.state, HostState.RECOVERING)
+
+    def test_clock_trust_requires_real_boolean_and_cannot_truthiness_bypass_block(self):
+        controller, owner = self._ready()
+        controller.set_clock_trusted(False)
+        self.assertEqual(controller.state, HostState.BLOCKED)
+        with self.assertRaisesRegex(TypeError, "trusted"):
+            controller.set_clock_trusted("false")
+        self.assertEqual(controller.state, HostState.BLOCKED)
+        with self.assertRaisesRegex(PermissionError, "ready"):
+            controller.validate_admission(owner.epoch)
+
+    def test_owner_transfer_authority_flags_require_real_booleans(self):
+        controller, _ = self._ready()
+        with self.assertRaisesRegex(TypeError, "old_sender_fenced"):
+            controller.transfer_owner(
+                new_owner_id="host-b",
+                old_sender_fenced="true",
+                reconciled=True,
+            )
+        with self.assertRaisesRegex(TypeError, "reconciled"):
+            controller.transfer_owner(
+                new_owner_id="host-b",
+                old_sender_fenced=True,
+                reconciled="true",
+            )
+        self.assertEqual(controller.owner.owner_id, "host-a")
+        self.assertEqual(controller.owner.epoch, 1)
+
     def test_clock_jump_blocks_until_clock_is_requalified(self):
         controller, owner = self._ready()
         controller.set_clock_trusted(False)

@@ -378,6 +378,18 @@ class HistoricalVintageTests(unittest.TestCase):
             "created_at": "2026-01-01T00:00:01Z",
         }
 
+    def test_manifest_cannot_claim_future_availability_cutoff(self):
+        with TemporaryDirectory() as directory:
+            registry = HistoricalVintageRegistry(Path(directory))
+            manifest = self._manifest(str(uuid4()), 1, "future-cutoff")
+            manifest["availability_policy"]["cutoff"] = "2026-01-01T00:00:02Z"
+            manifest["created_at"] = "2026-01-01T00:00:01Z"
+            with self.assertRaisesRegex(
+                HistoricalDataError,
+                "cutoff cannot be later than dataset creation",
+            ):
+                registry.commit(manifest)
+
     def test_manifest_cannot_claim_creation_before_source_evidence(self):
         with TemporaryDirectory() as directory:
             registry = HistoricalVintageRegistry(Path(directory))

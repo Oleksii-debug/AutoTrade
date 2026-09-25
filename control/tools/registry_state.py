@@ -124,6 +124,10 @@ def _canonical_request(request: Mapping[str, Any]) -> dict[str, Any]:
         raise RegistryProtocolError("request must be an object")
     if "lease_until" in request:
         raise RegistryProtocolError("lease_until is service-issued and must not be supplied by request")
+    if "admission_evidence" in request:
+        raise RegistryProtocolError(
+            "admission_evidence is service-issued and must not be supplied by request"
+        )
     mode = _require_text(request, "claim_mode")
     if mode not in ALLOWED_MODES:
         raise RegistryProtocolError(
@@ -181,6 +185,48 @@ def _canonical_service_identity(value: Mapping[str, Any] | None) -> dict[str, An
         "authorized_account_id": _require_text(value, "authorized_account_id"),
         "authentication_binding_digest": digest,
         "allowed_claim_modes": sorted(allowed),
+    }
+
+
+def _canonical_admission_evidence(
+    value: Mapping[str, Any] | None,
+    *,
+    evaluated_at: str | None = None,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise RegistryProtocolError("admission_evidence must be an object")
+    bank_revision = _require_text(value, "bank_revision")
+    if (
+        len(bank_revision) not in {40, 64}
+        or any(ch not in "0123456789abcdef" for ch in bank_revision)
+    ):
+        raise RegistryProtocolError("bank_revision must be a canonical lowercase Git object id")
+    readiness = _require_text(value, "readiness")
+    if readiness != "READY":
+        raise RegistryProtocolError("mutating claim requires READY work package evidence")
+    if value.get("dependencies_satisfied") is not True:
+        raise RegistryProtocolError("mutating claim requires satisfied dependency evidence")
+    if value.get("blocking_findings_clear") is not True:
+        raise RegistryProtocolError("mutating claim requires clear blocking-finding evidence")
+    digest = _require_text(value, "evidence_digest")
+    if (
+        not digest.startswith("sha256:")
+        or len(digest) != 71
+        or any(ch not in "0123456789abcdef" for ch in digest[7:])
+    ):
+        raise RegistryProtocolError("evidence_digest must be canonical sha256:<64 lowercase hex>")
+
+    if evaluated_at is None:
+        evaluated_at = _require_text(value, "evaluated_at")
+    canonical_evaluated_at = format_instant(parse_instant(evaluated_at))
+    return {
+        "work_package_id": _require_text(value, "work_package_id"),
+        "bank_revision": bank_revision,
+        "readiness": readiness,
+        "dependencies_satisfied": True,
+        "blocking_findings_clear": True,
+        "evidence_digest": digest,
+        "evaluated_at": canonical_evaluated_at,
     }
 
 
@@ -248,6 +294,11 @@ def _validate_registry(registry: Mapping[str, Any]) -> None:
             raise RegistryProtocolError("claim owner identity account binding mismatch")
         if canonical_request["claim_mode"] not in owner_identity["allowed_claim_modes"]:
             raise RegistryProtocolError("claim owner identity is not authorized for claim mode")
+        stored_admission = claim.get("admission_evidence")
+        if canonical_request["claim_mode"] in MUTATING_MODES:
+            _canonical_admission_evidence(stored_admission)
+        elif stored_admission is not None:
+            _canonical_admission_evidence(stored_admission)
         lease_until = claim.get("lease_until")
         if not isinstance(lease_until, str):
             raise RegistryProtocolError("claim lease_until must be service-issued ISO-8601 text")
@@ -289,6 +340,7 @@ def claim(
     expected_generation: int,
     now: str,
     service_identity: Mapping[str, Any] | None = None,
+    admission_evidence: Mapping[str, Any] | None = None,
     lease_ttl_seconds: int = MAX_LEASE_TTL_SECONDS,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     _validate_registry(registry)
@@ -299,6 +351,17 @@ def claim(
         raise RegistryProtocolError("service identity is not bound to request account")
     if canonical["claim_mode"] not in canonical_owner["allowed_claim_modes"]:
         raise RegistryProtocolError("service identity is not authorized for claim mode")
+    canonical_admission = None
+    if canonical["claim_mode"] in MUTATING_MODES:
+        canonical_admission = _canonical_admission_evidence(
+            admission_evidence,
+            evaluated_at=format_instant(resolved_now),
+        )
+    elif admission_evidence is not None:
+        canonical_admission = _canonical_admission_evidence(
+            admission_evidence,
+            evaluated_at=format_instant(resolved_now),
+        )
     if (
         canonical["claim_mode"] in MUTATING_MODES
         and registry.get("mode") != REGISTRY_MODE_ENABLED
@@ -328,6 +391,16 @@ def claim(
                 raise RegistryProtocolError("request_id reuse with different claim payload")
             if existing.get("owner_identity") != canonical_owner:
                 raise RegistryProtocolError("request_id replay by different service identity")
+            existing_admission = existing.get("admission_evidence")
+            if canonical_admission is not None:
+                existing_core = dict(existing_admission or {})
+                existing_core.pop("evaluated_at", None)
+                replay_core = dict(canonical_admission)
+                replay_core.pop("evaluated_at", None)
+                if existing_core != replay_core:
+                    raise RegistryProtocolError(
+                        "request_id replay with different admission evidence"
+                    )
             return deepcopy(dict(registry)), deepcopy(dict(existing))
 
     _require_generation(registry, expected_generation)
@@ -352,6 +425,7 @@ def claim(
         **canonical,
         "original_request": deepcopy(canonical),
         "owner_identity": deepcopy(canonical_owner),
+        "admission_evidence": deepcopy(canonical_admission),
         "lease_until": lease_until,
         "lease_ttl_seconds": lease_ttl_seconds,
         "status": "ACTIVE",

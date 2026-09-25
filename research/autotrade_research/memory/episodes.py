@@ -800,7 +800,11 @@ class ExperienceMemory:
             rows = con.execute("SELECT * FROM episodes ORDER BY episode_id").fetchall()
             for row in rows:
                 verified = self._verified_episode(row)
-                if verified["cutoff"] > cutoff or verified["decision"] > cutoff:
+                if (
+                    verified["cutoff"] > cutoff
+                    or verified["decision"] > cutoff
+                    or verified["created"] > cutoff
+                ):
                     continue
                 if normalized_task is not None and verified["task"] != normalized_task:
                     continue
@@ -895,7 +899,11 @@ class ExperienceMemory:
             if row is None:
                 raise KeyError(identifier)
             verified = self._verified_episode(row)
-            if verified["cutoff"] > cutoff or verified["decision"] > cutoff:
+            if (
+                verified["cutoff"] > cutoff
+                or verified["decision"] > cutoff
+                or verified["created"] > cutoff
+            ):
                 raise PermissionError("episode is not causally available at information_cutoff")
             if not self._permission_allowed(
                 verified["permission_class"],

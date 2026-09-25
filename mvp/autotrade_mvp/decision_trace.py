@@ -59,11 +59,11 @@ def _normalized_key(value: object) -> str:
 
 _EMBEDDED_SECRET_PATTERNS = (
     re.compile(
-        r"(?i)\\b(authorization|proxy-authorization)\\s*[:=]\\s*(bearer|basic)\\s+[^\\s,;]+"
+        r"(?i)\b(authorization|proxy-authorization)\s*[:=]\s*(bearer|basic)\s+[^\s,;]+"
     ),
     re.compile(
-        r"(?i)\\b(api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|"
-        r"client[_-]?secret|password)\\s*[:=]\\s*([^&\\s;,]+)"
+        r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|"
+        r"client[_-]?secret|password)\s*[:=]\s*([^&\s;,]+)"
     ),
 )
 _PRIVATE_KEY_MARKERS = (

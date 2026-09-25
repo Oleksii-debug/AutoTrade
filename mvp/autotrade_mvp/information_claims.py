@@ -476,18 +476,23 @@ def ingest_claims(
     *,
     subject: str,
     predicate: str,
-    value_by_revision: dict[str, str],
+    value_by_source_revision: dict[tuple[str, str], str],
 ) -> ClaimStore:
     store = ClaimStore()
     for document in documents:
-        if document.source_revision not in value_by_revision:
-            raise ValueError("every source revision requires an explicit extracted value")
+        if not isinstance(document, SourceDocument):
+            raise ValueError("documents must contain only SourceDocument values")
+        source_revision = (document.source_id, document.source_revision)
+        if source_revision not in value_by_source_revision:
+            raise ValueError(
+                "every source identity and revision requires an explicit extracted value"
+            )
         store.add(
             store.build_claim(
                 document,
                 subject=subject,
                 predicate=predicate,
-                value=value_by_revision[document.source_revision],
+                value=value_by_source_revision[source_revision],
             )
         )
     return store

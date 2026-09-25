@@ -313,6 +313,21 @@ class WhiteBitPreparedRequest:
         object.__setattr__(self, "capability_snapshot_id", capability_snapshot_id)
         object.__setattr__(self, "documentation_refs", refs)
 
+    def to_guarded_dispatch_request(self) -> Mapping[str, object]:
+        """Project provider preparation into the canonical persisted send payload.
+
+        Account/environment/documentation remain dispatcher submission-scope or
+        provenance evidence; only immutable provider bytes plus capability
+        identity enter the request hash consumed by GuardedDispatcher.
+        """
+        return MappingProxyType(
+            {
+                "endpoint": self.endpoint,
+                "body": dict(self.body),
+                "capability_snapshot_id": self.capability_snapshot_id,
+            }
+        )
+
 
 @dataclass(frozen=True)
 class WhiteBitMarketRules:
@@ -460,9 +475,10 @@ def prepare_order_request(
 ) -> WhiteBitPreparedRequest:
     """Translate an admitted intent without sending it.
 
-    `request` and `nonce` are intentionally not added here. A transport wrapper
-    must add provider authentication fields after the guarded dispatcher's final
-    send barrier, so a stale signed payload cannot become a second send authority.
+    `request` and `nonce` are intentionally not added here. The shared guarded
+    transport allocates nonce and signs inside the attempt before the final send
+    barrier, then performs exactly one outbound send immediately after that guard.
+    Signed payload bytes are never a reusable or durable send authority.
     """
 
     if not isinstance(intent, WhiteBitOrderIntent):

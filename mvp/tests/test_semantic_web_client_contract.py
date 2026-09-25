@@ -360,6 +360,76 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("await refreshSnapshot();", js)
         self.assertNotIn('action: "REFRESH_STATE"', js)
 
+    def test_host_safety_commands_fail_closed_by_authenticated_role(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn(
+            'BLOCK_NEW_EXPOSURE: new Set(["OWNER", "OPERATOR"])',
+            js,
+        )
+        self.assertIn(
+            'REVOKE_AUTHORITY: new Set(["OWNER"])',
+            js,
+        )
+        self.assertIn(
+            'role: requiredText(permissionSummary.role, "permission_summary.role")',
+            js,
+        )
+        self.assertIn("function roleCanSubmitAction(role, action)", js)
+        self.assertIn("function syncHostActionOptions(role)", js)
+        self.assertIn("option.disabled = !allowed", js)
+        self.assertIn(
+            "The authenticated role has no permitted host safety command. "
+            "Commands remain blocked.",
+            js,
+        )
+        self.assertIn('value="BLOCK_NEW_EXPOSURE"', html)
+        self.assertIn('value="REVOKE_AUTHORITY"', html)
+        self.assertNotIn('value="SET_AUTHORITY"', html)
+
+    def test_action_change_rechecks_role_before_enabling_submit(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn(
+            'byId("host-action").addEventListener("change", () => {',
+            js,
+        )
+        self.assertIn(
+            "const effectiveAction = state.pendingCommand !== null",
+            js,
+        )
+        self.assertIn(
+            "roleCanSubmitAction(state.sessionIdentity.role, effectiveAction)",
+            js,
+        )
+        self.assertIn(
+            "setCommandAvailability(state.snapshotReady && "
+            "state.sessionIdentity !== null);",
+            js,
+        )
+
+    def test_pending_owner_command_is_not_retried_after_role_downgrade(self):
+        js = APP.read_text(encoding="utf-8")
+        submit = js.index("async function submitCommand(event)")
+        payload = js.index("const payload = commandForSubmission(action)", submit)
+        role_fence = js.index(
+            "if (recovering && !roleCanSubmitAction(",
+            submit,
+        )
+        self.assertLess(role_fence, payload)
+        self.assertIn(
+            "state.pendingCommand.action",
+            js[role_fence:payload],
+        )
+        self.assertIn(
+            "The authenticated role no longer permits the unresolved command.",
+            js[role_fence:payload],
+        )
+        self.assertIn(
+            "the browser will not retry it.",
+            js[role_fence:payload],
+        )
+        self.assertIn("setCommandAvailability(false)", js[role_fence:payload])
+
     def test_keyboard_and_high_contrast_rules_are_explicit(self):
         css = CSS.read_text(encoding="utf-8")
         self.assertIn(".skip-link:focus", css)

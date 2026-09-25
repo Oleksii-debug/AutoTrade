@@ -203,6 +203,7 @@ class AlpacaPreparedRequest:
     environment: str
     capability_snapshot_id: str
     documentation_refs: tuple[str, ...]
+    capability_snapshot_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         endpoint = _text(self.endpoint, name="endpoint")
@@ -224,11 +225,29 @@ class AlpacaPreparedRequest:
         )
         if not refs:
             raise AlpacaAdapterError("documentation_refs must not be empty")
+        raw_snapshot_ids = (
+            self.capability_snapshot_ids
+            if self.capability_snapshot_ids
+            else (capability_snapshot_id,)
+        )
+        if not isinstance(raw_snapshot_ids, tuple):
+            raise TypeError("capability_snapshot_ids must be a tuple")
+        snapshot_ids = tuple(
+            _text(value, name="capability_snapshot_id")
+            for value in raw_snapshot_ids
+        )
+        if len(snapshot_ids) != len(set(snapshot_ids)):
+            raise AlpacaAdapterError("capability_snapshot_ids must be unique")
+        if capability_snapshot_id not in snapshot_ids:
+            raise AlpacaAdapterError(
+                "primary capability_snapshot_id must be included in capability_snapshot_ids"
+            )
         object.__setattr__(self, "endpoint", endpoint)
         object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
         object.__setattr__(self, "account_id", account)
         object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "capability_snapshot_id", capability_snapshot_id)
+        object.__setattr__(self, "capability_snapshot_ids", snapshot_ids)
         object.__setattr__(self, "documentation_refs", refs)
 
 
@@ -856,4 +875,8 @@ def prepare_mleg_order_request(
         environment=first_capability.environment,
         capability_snapshot_id=first_capability.snapshot_id,
         documentation_refs=tuple(ALPACA_DOCS.values()) + (_ALPACA_MLEG_DOC,),
+        capability_snapshot_ids=tuple(
+            capabilities[leg.instrument_version].snapshot_id
+            for leg in intent.legs
+        ),
     )

@@ -1707,6 +1707,7 @@ class AuthorityService:
         instrument_id: str,
         instrument_version: int,
         capability_snapshot_id: str,
+        action: str,
         notional,
         reservation_book: DurableReservationBook,
         availability_evidence: Mapping[str, Any],
@@ -1723,6 +1724,10 @@ class AuthorityService:
 
         point = _instant(now, name="now")
         env = _text(environment, name="environment").upper()
+        if _text(action, name="action").upper() != "ORDER.SUBMIT":
+            raise AuthorityConflict(
+                "allocation-originated authority is valid only for ORDER.SUBMIT"
+            )
         account = _text(account_id, name="account_id")
         provider = _text(
             availability_evidence.get("provider_id"),
@@ -1767,14 +1772,25 @@ class AuthorityService:
 
             snapshot_id = expected_capabilities[symbol]
             try:
-                snapshot = self.capability_registry.require_snapshot(
-                    snapshot_id,
+                bound_snapshot = self.capability_registry.exact(
+                    snapshot_id
+                )
+                snapshot = self.capability_registry.require_verified(
+                    provider_id=bound_snapshot.provider_id,
+                    account_id=bound_snapshot.account_id,
+                    entity_id=bound_snapshot.entity_id,
+                    environment=bound_snapshot.environment,
+                    instrument_version=bound_snapshot.instrument_version,
                     at=point,
                 )
             except (CapabilityError, ValueError) as error:
                 raise AuthorityConflict(
                     f"allocation capability {symbol} cannot be resolved canonically"
                 ) from error
+            if snapshot.snapshot_id != snapshot_id:
+                raise AuthorityConflict(
+                    f"allocation capability {symbol} was superseded after proposal"
+                )
             if (
                 snapshot.provider_id.upper() != provider
                 or snapshot.account_id != account
@@ -2241,6 +2257,7 @@ class AuthorityService:
                     instrument_id=instrument_id,
                     instrument_version=instrument_version,
                     capability_snapshot_id=capability,
+                    action=action,
                     notional=notional,
                     reservation_book=reservation_book,
                     availability_evidence=availability_evidence,

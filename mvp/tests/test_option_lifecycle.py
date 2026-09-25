@@ -99,6 +99,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         self._evidence = {}
         self.authority = self._authority(
@@ -701,6 +702,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         restarted = self._authority(
             registry=self.registry,
@@ -837,6 +839,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         self.assertEqual(restarted.position(f"{OPTION_ID}@1"), Decimal("0"))
         self.assertEqual(restarted.position("ABC"), Decimal("-200"))
@@ -853,6 +856,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         authority = self._authority(
             registry=registry,
@@ -884,6 +888,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         authority = self._authority(
             registry=registry,
@@ -916,6 +921,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         authority = self._authority(
             registry=registry,
@@ -951,6 +957,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         authority = self._authority(
             registry=registry,
@@ -1007,6 +1014,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         authority = self._authority(
             registry=registry,

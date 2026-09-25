@@ -770,6 +770,8 @@ def reconcile_account(
             "snapshot_consistency must be SnapshotConsistencyEvidence"
         )
     snapshot_window_covered = False
+    snapshot_started: datetime | None = None
+    snapshot_completed: datetime | None = None
     if snapshot_consistency is not None:
         if (
             snapshot_consistency.provider_id != provider_scope
@@ -930,13 +932,22 @@ def reconcile_account(
             submission_time <= trade_time <= end
             for trade_time in matching_fill_times
         )
+        working_snapshot_is_causal = bool(
+            provider_working is not None
+            and snapshot_is_consistent
+            and snapshot_started is not None
+            and snapshot_started >= submission_time
+        )
         if causal_execution_observed:
             outcome = "OBSERVED_EXECUTION"
             reason = "provider_execution_observed_after_submission"
-        elif provider_working is not None:
+        elif working_snapshot_is_causal:
             outcome = "OBSERVED_WORKING_ORDER"
-            reason = "provider_working_orders_contains_client_order_id"
+            reason = "provider_working_order_observed_in_post_submission_snapshot"
             provider_order_ids = (provider_working.provider_order_id,)
+        elif provider_working is not None:
+            outcome = "UNKNOWN"
+            reason = "provider_working_order_snapshot_not_causal_for_submission"
         elif submission.client_order_id in provider_client_ids:
             outcome = "UNKNOWN"
             reason = "matching_provider_execution_outside_submission_window"

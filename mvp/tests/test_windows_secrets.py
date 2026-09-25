@@ -393,6 +393,190 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
             )
 
 
+class CredentialReattachmentManifestTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "credentials.json"
+        self.vault = ProtectedCredentialVault(
+            self.path,
+            protector=DeterministicProtector(),
+        )
+
+    def test_export_contains_only_non_secret_reattachment_metadata(self):
+        trade = self.vault.register(
+            handle_id="cred-trade",
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="TRADE",
+            secret_value="original-trade-secret",
+        )
+        trade = self.vault.rotate(
+            trade,
+            execution_identity="windows-user-1",
+            new_secret_value="rotated-trade-secret",
+        )
+        read = self.vault.register(
+            handle_id="cred-read",
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="READ",
+            secret_value="read-secret-value",
+        )
+        self.vault.revoke(read, execution_identity="windows-user-1")
+
+        manifest = self.vault.export_reattachment_manifest()
+        encoded = json.dumps(manifest, sort_keys=True)
+
+        self.assertFalse(manifest["contains_secrets"])
+        self.assertEqual(
+            manifest["restore_mode"],
+            "EXPLICIT_REATTACHMENT_REQUIRED",
+        )
+        self.assertNotIn("ciphertext", encoded)
+        self.assertNotIn("owner_identity", encoded)
+        self.assertNotIn("windows-user-1", encoded)
+        self.assertNotIn("original-trade-secret", encoded)
+        self.assertNotIn("rotated-trade-secret", encoded)
+        self.assertNotIn("read-secret-value", encoded)
+
+        requirements = ProtectedCredentialVault.validate_reattachment_manifest(
+            manifest
+        )
+        by_id = {
+            item.handle.handle_id: item
+            for item in requirements
+        }
+        self.assertEqual(set(by_id), {"cred-read", "cred-trade"})
+        self.assertEqual(by_id["cred-trade"].handle, trade)
+        self.assertTrue(by_id["cred-trade"].was_active)
+        self.assertEqual(by_id["cred-read"].handle.generation, 1)
+        self.assertFalse(by_id["cred-read"].was_active)
+
+    def test_manifest_validation_is_side_effect_free_and_cannot_restore_authority(self):
+        handle = self.vault.register(
+            handle_id="cred-trade",
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="TRADE",
+            secret_value="trade-secret",
+        )
+        manifest = self.vault.export_reattachment_manifest()
+
+        fresh_path = Path(self.directory.name) / "fresh.json"
+        fresh = ProtectedCredentialVault(
+            fresh_path,
+            protector=DeterministicProtector(),
+        )
+        before = fresh_path.read_bytes()
+        requirements = fresh.validate_reattachment_manifest(manifest)
+        self.assertEqual(fresh_path.read_bytes(), before)
+        self.assertEqual(requirements[0].handle, handle)
+
+        with self.assertRaises(PermissionError):
+            fresh.resolve(
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            )
+
+    def test_manifest_is_deterministic_across_restart_and_identity_change(self):
+        self.vault.register(
+            handle_id="cred-trade",
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="TRADE",
+            secret_value="trade-secret",
+        )
+        expected = self.vault.export_reattachment_manifest()
+
+        restarted = ProtectedCredentialVault(
+            self.path,
+            protector=DeterministicProtector(),
+        )
+        self.assertEqual(
+            restarted.export_reattachment_manifest(),
+            expected,
+        )
+
+        foreign_identity = ProtectedCredentialVault(
+            self.path,
+            protector=CannotDecryptProtector(),
+        )
+        self.assertEqual(
+            foreign_identity.export_reattachment_manifest(),
+            expected,
+        )
+        with self.assertRaisesRegex(PermissionError, "cannot be decrypted"):
+            foreign_identity.resolve(
+                ProtectedCredentialVault.validate_reattachment_manifest(
+                    expected
+                )[0].handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            )
+
+    def test_validator_rejects_secret_bearing_or_authority_bearing_manifest(self):
+        self.vault.register(
+            handle_id="cred-trade",
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="TRADE",
+            secret_value="trade-secret",
+        )
+        manifest = self.vault.export_reattachment_manifest()
+
+        bad_cases = []
+
+        value = json.loads(json.dumps(manifest))
+        value["contains_secrets"] = True
+        bad_cases.append(value)
+
+        value = json.loads(json.dumps(manifest))
+        value["restore_mode"] = "RESTORE_CREDENTIALS"
+        bad_cases.append(value)
+
+        value = json.loads(json.dumps(manifest))
+        value["source_vault_format_version"] = 1
+        bad_cases.append(value)
+
+        value = json.loads(json.dumps(manifest))
+        value["records"][0]["ciphertext"] = "must-not-be-accepted"
+        bad_cases.append(value)
+
+        value = json.loads(json.dumps(manifest))
+        value["records"][0]["handle"]["purpose"] = "WITHDRAWAL"
+        bad_cases.append(value)
+
+        value = json.loads(json.dumps(manifest))
+        value["records"][0]["handle"]["environment"] = "PRODUCTION"
+        bad_cases.append(value)
+
+        value = json.loads(json.dumps(manifest))
+        value["records"].append(json.loads(json.dumps(value["records"][0])))
+        bad_cases.append(value)
+
+        for bad in bad_cases:
+            with self.subTest(bad=bad), self.assertRaises(SecretVaultError):
+                ProtectedCredentialVault.validate_reattachment_manifest(bad)
+
+
 @unittest.skipUnless(sys.platform == "win32", "Windows DPAPI qualification runs on Windows CI")
 class WindowsDpapiTests(unittest.TestCase):
     def test_current_user_round_trip_with_scope_entropy(self):

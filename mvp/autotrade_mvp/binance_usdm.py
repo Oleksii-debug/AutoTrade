@@ -369,7 +369,15 @@ def parse_account_trades(
         raise BinanceUsdmAdapterError("trade rows must be an array")
     if not isinstance(instrument_versions, Mapping):
         raise BinanceUsdmAdapterError("instrument_versions must be a mapping")
-    client_map = client_ids_by_order_id or {}
+    normalized_instruments: dict[str, str] = {}
+    for symbol, instrument_version in instrument_versions.items():
+        provider_symbol = _provider_symbol(symbol, name="instrument_versions symbol")
+        normalized_instruments[provider_symbol] = _text(
+            instrument_version,
+            name="instrument_version",
+        )
+
+    client_map = {} if client_ids_by_order_id is None else client_ids_by_order_id
     if not isinstance(client_map, Mapping):
         raise BinanceUsdmAdapterError(
             "client_ids_by_order_id must be a mapping"
@@ -394,7 +402,7 @@ def parse_account_trades(
             )
 
         symbol = _provider_symbol(raw.get("symbol"), name=f"trade[{index}].symbol")
-        if symbol not in instrument_versions:
+        if symbol not in normalized_instruments:
             raise BinanceUsdmAdapterError(
                 f"unmapped Binance USD-M symbol: {symbol}"
             )
@@ -428,7 +436,7 @@ def parse_account_trades(
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=_text(
-                instrument_versions[symbol], name="instrument_version"
+                normalized_instruments[symbol], name="instrument_version"
             ),
             quantity=raw.get("qty"),
             price=raw.get("price"),

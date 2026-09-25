@@ -164,6 +164,45 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
                     arguments={"nested": {"value": value}},
                 )
 
+    def test_host_tool_allowlist_rejects_normalized_name_collision(self):
+        with self.assertRaisesRegex(
+            ResearchBoundaryError,
+            "unique after normalization",
+        ):
+            ResearchToolBoundary(
+                {
+                    "statistics": (
+                        ResearchCapability.COMPUTE_STATISTICS,
+                    ),
+                    " statistics ": (
+                        ResearchCapability.READ_MARKET_EVIDENCE,
+                    ),
+                }
+            )
+
+    def test_host_tool_allowlist_requires_typed_unique_capabilities(self):
+        with self.assertRaisesRegex(
+            ResearchBoundaryError,
+            "ResearchCapability values",
+        ):
+            ResearchToolBoundary(
+                {
+                    "statistics": ("COMPUTE_STATISTICS",),
+                }
+            )
+        with self.assertRaisesRegex(
+            ResearchBoundaryError,
+            "capabilities must be unique",
+        ):
+            ResearchToolBoundary(
+                {
+                    "statistics": (
+                        ResearchCapability.COMPUTE_STATISTICS,
+                        ResearchCapability.COMPUTE_STATISTICS,
+                    ),
+                }
+            )
+
     def test_unknown_tool_is_rejected_even_when_requested_capability_is_safe(self):
         with self.assertRaisesRegex(PermissionError, "not allowlisted"):
             self.boundary().admit(

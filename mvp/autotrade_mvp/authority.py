@@ -849,6 +849,14 @@ class AuthorityService:
                     ),
                     account_id=record.account_id,
                     environment=record.environment,
+                    host_id=_text(
+                        availability_evidence.get("checkpoint_host_id"),
+                        name="checkpoint_host_id",
+                    ),
+                    owner_epoch=_text(
+                        availability_evidence.get("checkpoint_owner_epoch"),
+                        name="checkpoint_owner_epoch",
+                    ),
                     resources=tuple(sorted(risk_requirements)),
                     now=record.admitted_at,
                     max_age_seconds=availability_evidence.get(
@@ -1185,6 +1193,8 @@ class AuthorityService:
         reservation_available,
         reservation_checkpoint_event_id: str,
         reservation_provider_id: str,
+        reservation_host_id: str,
+        reservation_owner_epoch: str,
         reservation_max_age_seconds,
         now: str,
         confirmation_id: str | None = None,
@@ -1292,6 +1302,14 @@ class AuthorityService:
                 reservation_provider_id,
                 name="reservation_provider_id",
             ).upper()
+            host_id = _text(
+                reservation_host_id,
+                name="reservation_host_id",
+            )
+            owner_epoch = _text(
+                reservation_owner_epoch,
+                name="reservation_owner_epoch",
+            )
             max_age = _decimal(
                 reservation_max_age_seconds,
                 name="reservation_max_age_seconds",
@@ -1326,6 +1344,8 @@ class AuthorityService:
                     durable_evidence.get("checkpoint_event_id")
                     != checkpoint_event_id
                     or durable_evidence.get("provider_id") != provider_id
+                    or durable_evidence.get("checkpoint_host_id") != host_id
+                    or durable_evidence.get("checkpoint_owner_epoch") != owner_epoch
                     or durable_evidence.get("max_age_seconds")
                     != normalized_max_age
                 ):
@@ -1343,6 +1363,8 @@ class AuthorityService:
                     provider_id=provider_id,
                     account_id=account_id,
                     environment=environment,
+                    host_id=host_id,
+                    owner_epoch=owner_epoch,
                     resources=tuple(sorted(normalized_requirements)),
                     now=now,
                     max_age_seconds=normalized_max_age,

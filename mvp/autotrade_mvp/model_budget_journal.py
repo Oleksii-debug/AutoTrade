@@ -117,9 +117,21 @@ class DurableModelBudget:
             try:
                 self.journal.append_event(envelope)
             except ValueError:
-                # Another process may have initialized the same aggregate after
-                # our read. Replay below determines whether the ceiling agrees.
-                pass
+                # A concurrent process may have won the deterministic
+                # initialization event_id after our empty read. Only suppress
+                # the error when durable truth proves that exact initialization
+                # payload already exists. Contract/malformed-envelope errors
+                # must propagate instead of being misreported as a missing init.
+                concurrent = self.journal.get_event(envelope["event_id"])
+                if (
+                    concurrent is None
+                    or concurrent["event_type"] != "ModelBudgetInitialized"
+                    or concurrent["aggregate_type"] != _AGGREGATE_TYPE
+                    or concurrent["aggregate_id"] != self.budget_id
+                    or concurrent["aggregate_version"] != 1
+                    or concurrent["payload"] != payload
+                ):
+                    raise
 
         rebuilt = self._replay()
         if rebuilt.snapshot().ceiling != self._ceiling:
@@ -141,7 +153,7 @@ class DurableModelBudget:
             "event_type": event_type,
             "aggregate_type": _AGGREGATE_TYPE,
             "aggregate_id": self.budget_id,
-            "aggregate_version": version,
+            "aggregate_version": str(version),
             "payload": payload,
             "payload_hash": payload_digest(payload),
             "committed_at": self._clock(),

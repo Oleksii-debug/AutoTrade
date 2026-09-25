@@ -380,6 +380,7 @@ def build_population_coverage(
         raise TypeError(
             "population must be a canonical CoveragePopulationSnapshot from ExperienceMemory"
         )
+    population.verify_integrity()
     candidate = _sha_identity(candidate_hash, name="candidate_hash")
     protocol = _sha_identity(frozen_protocol_hash, name="frozen_protocol_hash")
     snapshot = _sha_identity(population.root_hash, name="population root_hash")

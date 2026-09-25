@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -10,6 +11,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import sqlite3
+from types import MappingProxyType
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -41,7 +43,7 @@ def _reject_binary_float(value: Any, *, path: str = "$") -> None:
         raise TypeError(
             f"binary float is not permitted in immutable experience evidence: {path}"
         )
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         for key, item in value.items():
             _reject_binary_float(item, path=f"{path}.{key}")
     elif isinstance(value, (list, tuple)):
@@ -49,9 +51,39 @@ def _reject_binary_float(value: Any, *, path: str = "$") -> None:
             _reject_binary_float(item, path=f"{path}[{index}]")
 
 
+def _canonical_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _canonical_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_value(item) for item in value]
+    return value
+
+
+def _deep_freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {
+                key: _deep_freeze(item)
+                for key, item in value.items()
+            }
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(item) for item in value)
+    return value
+
+
 def _canonical(value: Any) -> str:
     _reject_binary_float(value)
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    return json.dumps(
+        _canonical_value(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
 
 
 def _hash(value: Any) -> str:
@@ -110,7 +142,7 @@ class CoveragePopulationSnapshot:
     permission_classes: tuple[str, ...]
     task: str | None
     instrument_family: str | None
-    rows: tuple[dict[str, Any], ...]
+    rows: tuple[Mapping[str, Any], ...]
     eligible_count: int
     root_hash: str
 
@@ -141,8 +173,13 @@ class CoveragePopulationSnapshot:
             raise MemoryIntegrityError("coverage instrument_family is not canonical")
         if not isinstance(self.rows, tuple):
             raise MemoryIntegrityError("coverage rows must be an immutable tuple")
-        if any(not isinstance(row, dict) for row in self.rows):
+        if any(not isinstance(row, Mapping) for row in self.rows):
             raise MemoryIntegrityError("coverage rows must contain canonical mappings")
+        object.__setattr__(
+            self,
+            "rows",
+            tuple(_deep_freeze(row) for row in self.rows),
+        )
         if (
             not isinstance(self.eligible_count, int)
             or isinstance(self.eligible_count, bool)
@@ -155,6 +192,11 @@ class CoveragePopulationSnapshot:
             raise MemoryIntegrityError("coverage rows require episode identities")
         if len(set(episode_ids)) != len(episode_ids):
             raise MemoryIntegrityError("coverage rows contain duplicate episode identities")
+        self.verify_integrity()
+
+    def verify_integrity(self) -> None:
+        """Recompute the canonical population root at every trust boundary."""
+
         expected = _hash(
             {
                 "schema_version": 1,

@@ -139,6 +139,48 @@ class PopulationCoverageTests(unittest.TestCase):
                     instrument_family="equity",
                 )
 
+    def test_population_snapshot_rows_are_deeply_immutable(self):
+        with TemporaryDirectory() as directory:
+            store, _negative, _no_trade = self._store_with_negative_and_no_trade(directory)
+            snapshot = store.coverage_population_snapshot(
+                causal_cutoff=CUTOFF,
+                granted_permissions={"research"},
+                task="research",
+                instrument_family="equity",
+            )
+            with self.assertRaises(TypeError):
+                snapshot.rows[0]["episode_id"] = "forged"
+            with self.assertRaises(TypeError):
+                snapshot.rows[0]["effective_payload"]["outcome"]["class"] = "POSITIVE"
+            with self.assertRaises(TypeError):
+                snapshot.rows[0]["effective_payload"]["evidence_refs"][0] = "artifact:forged"
+
+    def test_consumer_rehash_rejects_bypassed_stale_population_root(self):
+        with TemporaryDirectory() as directory:
+            store, negative, no_trade = self._store_with_negative_and_no_trade(directory)
+            snapshot = store.coverage_population_snapshot(
+                causal_cutoff=CUTOFF,
+                granted_permissions={"research"},
+                task="research",
+                instrument_family="equity",
+            )
+            forged_rows = tuple(dict(row) for row in snapshot.rows)
+            forged_rows[0]["episode_id"] = "99999999-9999-4999-8999-999999999999"
+            object.__setattr__(snapshot, "rows", forged_rows)
+            with self.assertRaisesRegex(ValueError, "population root"):
+                build_population_coverage(
+                    snapshot,
+                    candidate_hash=H1,
+                    frozen_protocol_hash=H2,
+                    input_snapshot_hash=snapshot.root_hash,
+                    causal_cutoff=CUTOFF,
+                    permission_classes=["research"],
+                    included_episode_ids=[negative, no_trade],
+                    exclusions={},
+                    task="research",
+                    instrument_family="equity",
+                )
+
     def test_arbitrary_input_snapshot_hash_cannot_replace_memory_root(self):
         with TemporaryDirectory() as directory:
             store, negative, no_trade = self._store_with_negative_and_no_trade(directory)

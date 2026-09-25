@@ -457,6 +457,7 @@ def _economic_transactions(
     transition: Transition,
     *,
     is_revision: bool,
+    exact_retry: bool,
 ) -> tuple[JournalTransaction, ...]:
     if evidence.kind not in _SUPPORTED_DURABLE_KINDS:
         raise AccountingConflict(
@@ -467,11 +468,70 @@ def _economic_transactions(
     replacement = _dividend_transaction(evidence, transition)
 
     if not is_revision:
-        if active:
+        if active and not exact_retry:
             raise AccountingConflict(
                 "corporate action already has active economics without source revision history"
             )
+        if exact_retry and replacement is None and active:
+            raise AccountingConflict(
+                "zero-effect corporate-action retry conflicts with active economics"
+            )
         return () if replacement is None else (replacement,)
+
+    if exact_retry:
+        expected_reversal_id = _transaction_id(evidence, suffix="reversal")
+        expected_replacement_id = _transaction_id(evidence, suffix="effect")
+        all_transactions = tuple(economic_book.transactions)
+        committed_reversal = next(
+            (item for item in all_transactions if item.transaction_id == expected_reversal_id),
+            None,
+        )
+        committed_replacement = next(
+            (item for item in all_transactions if item.transaction_id == expected_replacement_id),
+            None,
+        )
+        if committed_reversal is None:
+            raise AccountingConflict(
+                "revised corporate-action evidence exists without its reversal economics"
+            )
+        original_id = committed_reversal.reverses_transaction_id
+        original = next(
+            (item for item in all_transactions if item.transaction_id == original_id),
+            None,
+        )
+        if original is None:
+            raise AccountingConflict(
+                "corporate-action correction reversal lacks original economics"
+            )
+        rebuilt_reversal = reverse_transaction(
+            original,
+            transaction_id=expected_reversal_id,
+            cause_event_id=committed_reversal.cause_event_id,
+            observed_at=evidence.observed_at,
+        )
+        if rebuilt_reversal != committed_reversal:
+            raise AccountingConflict(
+                "corporate-action correction reversal conflicts with durable economics"
+            )
+        if replacement is None:
+            if committed_replacement is not None:
+                raise AccountingConflict(
+                    "zero-effect correction conflicts with durable replacement economics"
+                )
+            return (rebuilt_reversal,)
+        rebuilt_replacement = _dividend_transaction(
+            evidence,
+            transition,
+            corrects_transaction_id=original.transaction_id,
+            economic_effective_at=original.economic_effective_at,
+            economic_order_key=original.economic_order_key,
+        )
+        assert rebuilt_replacement is not None
+        if committed_replacement is None or committed_replacement != rebuilt_replacement:
+            raise AccountingConflict(
+                "corporate-action correction replacement conflicts with durable economics"
+            )
+        return rebuilt_reversal, rebuilt_replacement
 
     if len(active) > 1:
         raise AccountingConflict("corporate action has ambiguous active economic history")
@@ -547,12 +607,13 @@ def commit_provider_corporate_action(
     history = _source_history(store, aggregate_id)
     source_payload = _evidence_payload(evidence)
     exact_retry, previous_revision = _validate_revision(history, source_payload)
-    is_revision = previous_revision is not None and previous_revision != evidence.revision
+    is_revision = source_payload.get("supersedes_revision") is not None
     transactions = _economic_transactions(
         economic_book,
         evidence,
         transition,
         is_revision=is_revision,
+        exact_retry=exact_retry,
     )
 
     economic_plan = (

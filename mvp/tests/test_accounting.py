@@ -446,5 +446,48 @@ class AccountingFoundationTests(unittest.TestCase):
             )
 
 
+    def test_atomic_batch_is_all_or_nothing_and_exact_retry_is_idempotent(self):
+        book = EconomicBook()
+        usd = book_external_cash_flow(
+            transaction_id="batch-usd",
+            cause_event_id="batch-cash-usd",
+            currency="USD",
+            amount="10",
+        )
+        eur = book_external_cash_flow(
+            transaction_id="batch-eur",
+            cause_event_id="batch-cash-eur",
+            currency="EUR",
+            amount="5",
+        )
+
+        self.assertTrue(book.append_batch((usd, eur)))
+        committed_digest = book.audit_digest()
+        self.assertFalse(book.append_batch((usd, eur)))
+        self.assertEqual(book.audit_digest(), committed_digest)
+        self.assertEqual(len(book.transactions), 2)
+
+        gbp = book_external_cash_flow(
+            transaction_id="batch-gbp",
+            cause_event_id="batch-cash-gbp",
+            currency="GBP",
+            amount="7",
+        )
+        conflicting_eur = book_external_cash_flow(
+            transaction_id="batch-eur",
+            cause_event_id="batch-cash-eur-conflict",
+            currency="EUR",
+            amount="6",
+        )
+        before = book.transactions
+        before_digest = book.audit_digest()
+        with self.assertRaises(AccountingConflict):
+            book.append_batch((gbp, conflicting_eur))
+        self.assertEqual(book.transactions, before)
+        self.assertEqual(book.audit_digest(), before_digest)
+        self.assertEqual(book.cash("GBP"), Decimal("0"))
+
+
+
 if __name__ == "__main__":
     unittest.main()

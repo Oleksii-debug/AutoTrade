@@ -242,6 +242,29 @@ class DurableOrderProjectionTests(unittest.TestCase):
                     committed_at=T2,
                     execution_fill={**base_fill, "settlement_date": "2026-02-30"},
                 )
+
+            before_invalid_evidence = len(
+                store.load_events("order_projection_book", book.aggregate_id)
+            )
+            invalid_evidence = {
+                "artifact_id": str(uuid4()),
+                "sha256": "sha256:" + "a" * 64,
+                "source_uri": "not a canonical URI",
+                "observed_at": T2,
+            }
+            with self.assertRaisesRegex(ValueError, "source_uri must be an absolute URI"):
+                book.ingest_execution_fill(
+                    event_key="invalid-evidence-uri",
+                    client_order_id="c1",
+                    committed_at=T2,
+                    execution_fill={**base_fill, "evidence": [invalid_evidence]},
+                )
+            self.assertEqual(
+                len(store.load_events("order_projection_book", book.aggregate_id)),
+                before_invalid_evidence,
+            )
+            restarted = durable(store)
+            self.assertEqual(restarted.order("c1").filled_quantity, Decimal("0"))
             self.assertEqual(book.order("c1").filled_quantity, Decimal("0"))
 
     def test_canonical_execution_fill_correction_uses_existing_fill_lineage(self):

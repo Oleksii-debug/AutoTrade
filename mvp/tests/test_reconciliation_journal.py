@@ -22,6 +22,9 @@ from mvp.autotrade_mvp.reconciliation_journal import (
 
 def snapshot():
     return SnapshotConsistencyEvidence(
+        provider_id="TEST_PROVIDER",
+        account_id="test-account",
+        environment="PAPER",
         mode="ATOMIC",
         query_started_at="2026-09-24T17:00:00Z",
         query_completed_at="2026-09-24T19:00:00Z",
@@ -32,6 +35,7 @@ def fill():
     return ProviderFillEvidence.create(
         provider_id="TEST_PROVIDER",
         account_id="test-account",
+        environment="PAPER",
         provider_execution_id="e1",
         client_order_id="c1",
         instrument="ABC",
@@ -46,6 +50,7 @@ def reconciliation(**overrides):
     values = dict(
         provider_id="TEST_PROVIDER",
         account_id="test-account",
+        environment="PAPER",
         local_cash={"USD": "900"},
         provider_cash={"USD": "900"},
         local_positions={"ABC": "1"},
@@ -75,12 +80,16 @@ class ReconciliationJournalTests(unittest.TestCase):
                 reconciliation_id="acct-1",
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
+            host_id="test-host",
+            owner_epoch="epoch-1",
             )
             second = record_reconciliation_checkpoint(
                 store,
                 reconciliation_id="acct-1",
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
+            host_id="test-host",
+            owner_epoch="epoch-1",
             )
 
             self.assertEqual(first["event_id"], second["event_id"])
@@ -98,6 +107,9 @@ class ReconciliationJournalTests(unittest.TestCase):
             latest = load_latest_reconciliation_checkpoint(
                 reopened,
                 reconciliation_id="acct-1",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
             )
             self.assertEqual(latest["event_id"], first["event_id"])
             self.assertEqual(
@@ -113,12 +125,16 @@ class ReconciliationJournalTests(unittest.TestCase):
                 reconciliation_id="acct-1",
                 result=reconciliation(provider_cash={"USD": "899.50"}),
                 observed_at="2026-09-24T19:00:00Z",
+            host_id="test-host",
+            owner_epoch="epoch-1",
             )
             record_reconciliation_checkpoint(
                 store,
                 reconciliation_id="acct-1",
                 result=reconciliation(),
                 observed_at="2026-09-24T19:01:00Z",
+            host_id="test-host",
+            owner_epoch="epoch-1",
             )
             events = store.load_events("account_reconciliation", "acct-1")
             self.assertEqual(
@@ -134,6 +150,10 @@ class ReconciliationJournalTests(unittest.TestCase):
             store = JournalStore(path)
             aggregate_id = "submission-attempt:scoped-proof"
             prepared_payload = {
+                "intent_id": "intent-scoped-1",
+                "provider": "TEST_PROVIDER",
+                "account_id": "test-account",
+                "environment": "PAPER",
                 "client_order_id": "client-scoped-1",
                 "prepared_at": "2026-09-24T18:00:00Z",
             }
@@ -188,6 +208,10 @@ class ReconciliationJournalTests(unittest.TestCase):
             store = JournalStore(Path(directory) / "journal.sqlite3")
             unknown = UnknownSubmission.create(
                 attempt_id="attempt-unknown",
+                intent_id="intent-unknown",
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
                 client_order_id="client-unknown",
                 started_at="2026-09-24T18:00:00Z",
             )
@@ -201,9 +225,16 @@ class ReconciliationJournalTests(unittest.TestCase):
                 reconciliation_id="acct-1",
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
+            host_id="test-host",
+            owner_epoch="epoch-1",
             )
             self.assertEqual(
-                unresolved_attempt_ids_from_checkpoint(checkpoint),
+                unresolved_attempt_ids_from_checkpoint(
+                    checkpoint,
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                ),
                 ("attempt-unknown",),
             )
 
@@ -216,6 +247,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                     ProviderActivityEvidence.create(
                         provider_id="TEST_PROVIDER",
                         account_id="test-account",
+                        environment="PAPER",
                         activity_id="manual-cash-1",
                         activity_type="CASH_ADJUSTMENT",
                         origin="MANUAL",
@@ -230,6 +262,8 @@ class ReconciliationJournalTests(unittest.TestCase):
                 reconciliation_id="acct-activity",
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
+            host_id="test-host",
+            owner_epoch="epoch-1",
             )
             self.assertEqual(
                 checkpoint["payload"]["unexpected_provider_activity_ids"],
@@ -240,7 +274,12 @@ class ReconciliationJournalTests(unittest.TestCase):
                 ["manual-cash-1"],
             )
             self.assertEqual(
-                unresolved_provider_activity_ids_from_checkpoint(checkpoint),
+                unresolved_provider_activity_ids_from_checkpoint(
+                    checkpoint,
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                ),
                 ("manual-cash-1",),
             )
 
@@ -248,9 +287,17 @@ class ReconciliationJournalTests(unittest.TestCase):
             latest = load_latest_reconciliation_checkpoint(
                 reopened,
                 reconciliation_id="acct-activity",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
             )
             self.assertEqual(
-                unresolved_provider_activity_ids_from_checkpoint(latest),
+                unresolved_provider_activity_ids_from_checkpoint(
+                    latest,
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                ),
                 ("manual-cash-1",),
             )
             self.assertIn(
@@ -269,9 +316,16 @@ class ReconciliationJournalTests(unittest.TestCase):
                 reconciliation_id="acct-missing-activity",
                 result=result,
                 observed_at="2026-09-24T19:00:00Z",
+            host_id="test-host",
+            owner_epoch="epoch-1",
             )
             self.assertEqual(
-                unresolved_provider_activity_ids_from_checkpoint(checkpoint),
+                unresolved_provider_activity_ids_from_checkpoint(
+                    checkpoint,
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                ),
                 ("expected-activity",),
             )
 
@@ -280,6 +334,9 @@ class ReconciliationJournalTests(unittest.TestCase):
             unresolved_provider_activity_ids_from_checkpoint(
                 {
                     "payload": {
+                        "provider_id": "TEST_PROVIDER",
+                        "account_id": "test-account",
+                        "environment": "PAPER",
                         "unexpected_provider_activity_ids": "not-a-list",
                         "missing_local_provider_activity_ids": [],
                     }
@@ -290,22 +347,38 @@ class ReconciliationJournalTests(unittest.TestCase):
     def test_corrupt_null_identities_fail_closed_in_checkpoint_recovery(self):
         malformed_submission = {
             "payload": {
+                "provider_id": "TEST_PROVIDER",
+                "account_id": "test-account",
+                "environment": "PAPER",
                 "submission_resolutions": [
                     {"attempt_id": None, "outcome": "UNKNOWN"}
                 ]
             }
         }
         with self.assertRaises(ValueError):
-            unresolved_attempt_ids_from_checkpoint(malformed_submission)
+            unresolved_attempt_ids_from_checkpoint(
+                malformed_submission,
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+            )
 
         malformed_activity = {
             "payload": {
+                "provider_id": "TEST_PROVIDER",
+                "account_id": "test-account",
+                "environment": "PAPER",
                 "unexpected_provider_activity_ids": [None],
                 "missing_local_provider_activity_ids": [],
             }
         }
         with self.assertRaises(ValueError):
-            unresolved_provider_activity_ids_from_checkpoint(malformed_activity)
+            unresolved_provider_activity_ids_from_checkpoint(
+                malformed_activity,
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+            )
 
 
 if __name__ == "__main__":

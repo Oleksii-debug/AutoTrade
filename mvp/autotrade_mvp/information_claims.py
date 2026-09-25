@@ -337,6 +337,7 @@ class ClaimStore:
     def __init__(self):
         self._claims: list[InformationClaim] = []
         self._by_id: dict[str, InformationClaim] = {}
+        self._history_by_id: dict[str, InformationClaim] = {}
         self._syndication: dict[str, str] = {}
 
     @property
@@ -395,11 +396,20 @@ class ClaimStore:
     def add(self, claim: InformationClaim) -> tuple[InformationClaim, bool]:
         if claim.permission_effect != "NONE" or claim.untrusted_content is not True:
             raise ValueError("information claims cannot grant authority")
-        existing = self._by_id.get(claim.claim_id)
-        if existing is not None:
-            if existing != claim:
+        existing_history = self._history_by_id.get(claim.claim_id)
+        if existing_history is not None:
+            if existing_history != claim:
                 raise ValueError("claim identity conflict")
-            return existing, False
+            canonical_id = self._syndication.get(claim.syndication_key)
+            if canonical_id is not None:
+                return self._by_id[canonical_id], False
+            return existing_history, False
+
+        # Provenance history and the canonical deduplicated claim view have
+        # different responsibilities. Every distinct source revision is
+        # retained here even when syndicated content is represented only once
+        # in snapshots and decision inputs.
+        self._history_by_id[claim.claim_id] = claim
 
         duplicate_id = self._syndication.get(claim.syndication_key)
         if duplicate_id is not None:
@@ -451,7 +461,11 @@ class ClaimStore:
         identifier = _text(source_id, name="source_id")
         return tuple(
             sorted(
-                (item for item in self._claims if item.source_id == identifier),
+                (
+                    item
+                    for item in self._history_by_id.values()
+                    if item.source_id == identifier
+                ),
                 key=lambda item: (item.available_at, item.source_revision, item.claim_id),
             )
         )

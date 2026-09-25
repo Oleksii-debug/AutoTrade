@@ -169,19 +169,24 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
 {
     private readonly HttpClient _httpClient;
     private readonly IEmergencyHostSessionProvider _sessionProvider;
+    private readonly IEmergencyPendingCommandStore _pendingCommandStore;
     private readonly SemaphoreSlim _commandGate = new(1, 1);
     private PendingCommand? _pendingCommand;
 
     public AuthenticatedEmergencyHostClient(
         HttpClient httpClient,
         Uri baseUri,
-        IEmergencyHostSessionProvider sessionProvider)
+        IEmergencyHostSessionProvider sessionProvider,
+        IEmergencyPendingCommandStore? pendingCommandStore = null)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         _sessionProvider = sessionProvider
             ?? throw new ArgumentNullException(nameof(sessionProvider));
+        _pendingCommandStore = pendingCommandStore
+            ?? new VolatileEmergencyPendingCommandStore();
         BaseUri = ValidateBaseUri(baseUri);
         _httpClient.BaseAddress = BaseUri;
+        _pendingCommand = LoadPendingCommand();
     }
 
     public Uri BaseUri { get; }
@@ -232,7 +237,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                     AccountId: snapshot.Status.AccountId,
                     Environment: snapshot.Status.Environment,
                     ExpectedStateVersion: snapshot.Status.StateVersion);
-                _pendingCommand = pending;
+                PersistPendingCommand(pending);
             }
 
             using HttpRequestMessage request = CreateRequest(
@@ -288,7 +293,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                 {
                     if (!recoveringUncertainCommand)
                     {
-                        _pendingCommand = null;
+                        ClearPendingCommandOrThrow();
                     }
                     else
                     {
@@ -330,7 +335,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                     string operationId = CanonicalGuid(
                         RequiredString(result, "operation_id"),
                         "operation_id");
-                    _pendingCommand = null;
+                    bool recoveryRecordCleared = TryClearPendingCommand();
                     try
                     {
                         EmergencyOperationStatus operation = await GetOperationAsync(
@@ -342,7 +347,11 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                             inFlightActions: operation.InFlightActions,
                             operationId: operationId,
                             message: "The host accepted the emergency command as operation "
-                                + operationId + ".");
+                                + operationId
+                                + (recoveryRecordCleared
+                                    ? "."
+                                    : ". The secure local recovery record could not be cleared; "
+                                        + "a later Block action will recover this same command before any new command is created."));
                     }
                     catch (OperationCanceledException)
                     {
@@ -355,7 +364,10 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                             durableBlockConfirmed: false,
                             inFlightActions: InFlightActionState.Unknown,
                             operationId: operationId,
-                            message: "The host accepted the emergency command, but its current operation phase could not be recovered.");
+                            message: "The host accepted the emergency command, but its current operation phase could not be recovered."
+                                + (recoveryRecordCleared
+                                    ? string.Empty
+                                    : " The secure local recovery record remains and will force exact command recovery before any new command."));
                     }
                 }
 
@@ -363,7 +375,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                 {
                     if (!recoveringUncertainCommand)
                     {
-                        _pendingCommand = null;
+                        ClearPendingCommandOrThrow();
                     }
                     else
                     {
@@ -392,6 +404,120 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         {
             _commandGate.Release();
         }
+    }
+
+    private void PersistPendingCommand(PendingCommand pending)
+    {
+        string payload = JsonSerializer.Serialize(
+            new
+            {
+                schema_version = "1",
+                command_id = pending.CommandId,
+                idempotency_key = pending.IdempotencyKey,
+                actor = pending.Actor,
+                session = pending.Session,
+                account_id = pending.AccountId,
+                environment = pending.Environment,
+                expected_state_version = pending.ExpectedStateVersion,
+            });
+        _pendingCommandStore.Save(payload);
+        _pendingCommand = pending;
+    }
+
+    private PendingCommand? LoadPendingCommand()
+    {
+        string? payload = _pendingCommandStore.Load();
+        if (payload is null)
+        {
+            return null;
+        }
+
+        JsonElement value;
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(payload);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidOperationException(
+                    "Persisted emergency command must be a JSON object.");
+            }
+
+            value = document.RootElement.Clone();
+        }
+        catch (JsonException error)
+        {
+            throw new InvalidOperationException(
+                "Persisted emergency command is not valid JSON.",
+                error);
+        }
+
+        string[] expectedFields =
+        [
+            "schema_version",
+            "command_id",
+            "idempotency_key",
+            "actor",
+            "session",
+            "account_id",
+            "environment",
+            "expected_state_version",
+        ];
+        string[] actualFields = value.EnumerateObject()
+            .Select(property => property.Name)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+        string[] canonicalFields = expectedFields
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+        if (!actualFields.SequenceEqual(canonicalFields, StringComparer.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Persisted emergency command has an unexpected schema.");
+        }
+
+        if (!string.Equals(
+                RequiredString(value, "schema_version"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Persisted emergency command schema version is unsupported.");
+        }
+
+        return new PendingCommand(
+            CommandId: CanonicalGuid(
+                RequiredString(value, "command_id"),
+                "command_id"),
+            IdempotencyKey: CanonicalGuid(
+                RequiredString(value, "idempotency_key"),
+                "idempotency_key"),
+            Actor: RequiredString(value, "actor"),
+            Session: RequiredString(value, "session"),
+            AccountId: RequiredString(value, "account_id"),
+            Environment: RequiredString(value, "environment"),
+            ExpectedStateVersion: CanonicalSequence(
+                RequiredString(value, "expected_state_version"),
+                "expected_state_version"));
+    }
+
+    private bool TryClearPendingCommand()
+    {
+        try
+        {
+            _pendingCommandStore.Clear();
+            _pendingCommand = null;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void ClearPendingCommandOrThrow()
+    {
+        _pendingCommandStore.Clear();
+        _pendingCommand = null;
     }
 
     public async Task<EmergencyOperationStatus> GetOperationAsync(
@@ -782,11 +908,14 @@ internal static class DesktopHostClientFactory
             {
                 Timeout = TimeSpan.FromSeconds(10),
             };
+            string canonicalCredentialTarget = credentialTarget.Trim();
             return new AuthenticatedEmergencyHostClient(
                 httpClient,
                 uri,
                 new WindowsCredentialManagerSessionProvider(
-                    credentialTarget.Trim()));
+                    canonicalCredentialTarget),
+                new WindowsCredentialManagerPendingCommandStore(
+                    canonicalCredentialTarget + ":pending-emergency-command-v1"));
         }
         catch (Exception error) when (
             error is ArgumentException

@@ -259,6 +259,178 @@ internal static class Program
             "client sent unresolved command with a different session instead of failing closed");
     }
     
+    static async Task UncertainCommandSurvivesDesktopRestartTest()
+    {
+        const string token = "session-token-restart";
+        MutableSessionProvider sessions =
+            new(new EmergencyHostSession("owner", token));
+        MemoryPendingCommandStore pendingStore = new();
+        List<string> commandBodies = [];
+        int posts = 0;
+        int stateReads = 0;
+        const string operationId = "44444444-4444-4444-4444-444444444444";
+
+        DelegateHandler handler = new(async (request, _, cancellationToken) =>
+        {
+            AssertAuth(request, token);
+            if (request.Method == HttpMethod.Get
+                && request.RequestUri!.AbsolutePath == "/api/v1/state")
+            {
+                stateReads++;
+                return Json(HttpStatusCode.OK, Snapshot("11"));
+            }
+
+            if (request.Method == HttpMethod.Post
+                && request.RequestUri!.AbsolutePath == "/api/v1/commands")
+            {
+                posts++;
+                string body = await request.Content!.ReadAsStringAsync(cancellationToken);
+                commandBodies.Add(body);
+                if (posts == 1)
+                {
+                    throw new HttpRequestException(
+                        "response lost after durable host acceptance");
+                }
+
+                using JsonDocument parsed = JsonDocument.Parse(body);
+                return Json(
+                    HttpStatusCode.OK,
+                    new
+                    {
+                        command_id =
+                            parsed.RootElement.GetProperty("command_id").GetString(),
+                        status = "ACCEPTED",
+                        state_version = "12",
+                        reason_codes = Array.Empty<string>(),
+                        field_errors = Array.Empty<object>(),
+                        operation_id = operationId,
+                    });
+            }
+
+            if (request.Method == HttpMethod.Get
+                && request.RequestUri!.AbsolutePath
+                    == "/api/v1/operations/" + operationId)
+            {
+                return Json(
+                    HttpStatusCode.OK,
+                    new
+                    {
+                        operation_id = operationId,
+                        phase = "QUEUED",
+                        started_at = NowUtc(),
+                        updated_at = NowUtc(),
+                        affected_refs = Array.Empty<string>(),
+                        evidence = Array.Empty<object>(),
+                        remaining_uncertainty = new[]
+                        {
+                            "provider_in_flight_state_unknown",
+                        },
+                    });
+            }
+
+            throw new InvalidOperationException(
+                "unexpected request " + request.RequestUri);
+        });
+
+        AuthenticatedEmergencyHostClient firstProcess = new(
+            new HttpClient(handler),
+            new Uri("http://127.0.0.1:8765/"),
+            sessions,
+            pendingStore);
+        await Check.ThrowsAsync<EmergencyCommandUncertainException>(
+            () => firstProcess.BlockNewExposureAsync(CancellationToken.None),
+            "lost first response must persist an unresolved command");
+        Check.True(
+            pendingStore.Payload is not null,
+            "uncertain command was not persisted before restart");
+
+        AuthenticatedEmergencyHostClient restartedProcess = new(
+            new HttpClient(handler),
+            new Uri("http://127.0.0.1:8765/"),
+            sessions,
+            pendingStore);
+        EmergencyCommandResult recovered =
+            await restartedProcess.BlockNewExposureAsync(CancellationToken.None);
+
+        Check.True(recovered.Accepted, "restart did not recover durable acceptance");
+        Check.True(posts == 2, "restart recovery did not perform one exact retry");
+        Check.True(
+            stateReads == 1,
+            "restart recovery fetched a fresh snapshot and risked retargeting the unresolved command");
+        Check.True(
+            commandBodies.Count == 2
+                && commandBodies[0] == commandBodies[1],
+            "restart changed the persisted command bytes");
+        Check.True(
+            pendingStore.Payload is null,
+            "accepted command did not clear the secure recovery record");
+    }
+
+    static async Task RestartedCommandCannotRetargetSessionTest()
+    {
+        const string originalToken = "session-token-restart-original";
+        MutableSessionProvider sessions =
+            new(new EmergencyHostSession("owner", originalToken));
+        MemoryPendingCommandStore pendingStore = new();
+        int posts = 0;
+
+        DelegateHandler handler = new(async (request, _, cancellationToken) =>
+        {
+            if (request.Method == HttpMethod.Get)
+            {
+                AssertAuth(request, originalToken);
+                return Json(HttpStatusCode.OK, Snapshot());
+            }
+
+            posts++;
+            await request.Content!.ReadAsStringAsync(cancellationToken);
+            throw new HttpRequestException("response unknown");
+        });
+
+        AuthenticatedEmergencyHostClient firstProcess = new(
+            new HttpClient(handler),
+            new Uri("http://127.0.0.1:8765/"),
+            sessions,
+            pendingStore);
+        await Check.ThrowsAsync<EmergencyCommandUncertainException>(
+            () => firstProcess.BlockNewExposureAsync(CancellationToken.None),
+            "first process must retain ambiguous send");
+
+        sessions.Session =
+            new EmergencyHostSession("owner", "replacement-session-token");
+        AuthenticatedEmergencyHostClient restartedProcess = new(
+            new HttpClient(handler),
+            new Uri("http://127.0.0.1:8765/"),
+            sessions,
+            pendingStore);
+        await Check.ThrowsAsync<EmergencyCommandUncertainException>(
+            () => restartedProcess.BlockNewExposureAsync(CancellationToken.None),
+            "restart must not retarget persisted command to a new session");
+        Check.True(
+            posts == 1,
+            "restart sent a persisted command under a replacement session");
+    }
+
+    static void CorruptPersistedCommandFailsClosedTest()
+    {
+        MemoryPendingCommandStore pendingStore = new()
+        {
+            Payload = "{\"schema_version\":\"1\",\"command_id\":\"not-a-uuid\"}",
+        };
+        MutableSessionProvider sessions =
+            new(new EmergencyHostSession("owner", "session-token-corrupt"));
+
+        Check.Throws<InvalidOperationException>(
+            () => _ = new AuthenticatedEmergencyHostClient(
+                new HttpClient(new DelegateHandler(
+                    (_, _, _) => throw new InvalidOperationException(
+                        "corrupt persisted state must fail before transport"))),
+                new Uri("http://127.0.0.1:8765/"),
+                sessions,
+                pendingStore),
+            "corrupt persisted emergency command must fail closed at startup");
+    }
+
     static async Task SnapshotBearerEchoFailsClosedTest()
     {
         const string token = "session-token-secret-must-never-echo";
@@ -353,6 +525,9 @@ internal static class Program
         await CanonicalStatusAndOperationTest();
         await AmbiguousPostExactRetryTest();
         await UncertainCommandCannotRetargetSessionTest();
+        await UncertainCommandSurvivesDesktopRestartTest();
+        await RestartedCommandCannotRetargetSessionTest();
+        CorruptPersistedCommandFailsClosedTest();
         await ScopeAndCanonicalResponseFailureTest();
         await SnapshotBearerEchoFailsClosedTest();
         Console.WriteLine("Desktop authenticated host-client contract tests passed.");
@@ -364,6 +539,21 @@ internal static class Check
     public static void True(bool condition, string message)
     {
         if (!condition) throw new InvalidOperationException(message);
+    }
+
+    public static void Throws<T>(Action action, string message)
+        where T : Exception
+    {
+        try
+        {
+            action();
+        }
+        catch (T)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(message);
     }
 
     public static async Task ThrowsAsync<T>(Func<Task> action, string message)
@@ -411,5 +601,22 @@ internal sealed class DelegateHandler : HttpMessageHandler
     {
         int call = Interlocked.Increment(ref _count);
         return _handler(request, call, cancellationToken);
+    }
+}
+
+internal sealed class MemoryPendingCommandStore : IEmergencyPendingCommandStore
+{
+    public string? Payload { get; set; }
+
+    public string? Load() => Payload;
+
+    public void Save(string payload)
+    {
+        Payload = payload;
+    }
+
+    public void Clear()
+    {
+        Payload = null;
     }
 }

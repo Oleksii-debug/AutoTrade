@@ -336,6 +336,15 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js,
         )
 
+    def test_urgent_announcement_bursts_preserve_every_event_in_one_live_update(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("pendingUrgentAnnouncements: []", js)
+        self.assertIn("urgentAnnouncementTimer: null", js)
+        self.assertIn("state.pendingUrgentAnnouncements.push(message)", js)
+        self.assertIn("const pending = state.pendingUrgentAnnouncements", js)
+        self.assertIn('announceLiveText("urgent-status", pending.join(" "))', js)
+        self.assertNotIn("new Set(state.pendingUrgentAnnouncements)", js)
+
     def test_polite_aggregation_does_not_drop_identical_material_events(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("const pending = state.pendingAnnouncements", js)

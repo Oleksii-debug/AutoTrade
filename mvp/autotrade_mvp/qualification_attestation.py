@@ -7,7 +7,7 @@ import binascii
 from hashlib import sha256
 import json
 import re
-from typing import Iterable
+from typing import Iterable, Mapping
 from uuid import UUID
 
 from research.autotrade_research.artifacts.store import (
@@ -36,6 +36,30 @@ def _canonical_json(value: object) -> bytes:
         ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")
+
+
+def _strict_mapping(
+    value: object,
+    *,
+    name: str,
+    keys: frozenset[str],
+) -> Mapping[str, object]:
+    if type(value) is not dict:
+        raise QualificationTrustError(f"{name} must be a JSON object")
+    actual = frozenset(value)
+    if actual != keys:
+        missing = sorted(keys - actual)
+        extra = sorted(actual - keys)
+        raise QualificationTrustError(
+            f"{name} fields mismatch: missing={missing} extra={extra}"
+        )
+    return value
+
+
+def _strict_list(value: object, *, name: str) -> list[object]:
+    if type(value) is not list:
+        raise QualificationTrustError(f"{name} must be a JSON array")
+    return value
 
 
 def _text(value: str, *, name: str) -> str:
@@ -513,6 +537,189 @@ class SignedQualificationAttestation:
             )
         if not decoded:
             raise QualificationTrustError("signature is empty")
+
+
+def qualification_trust_policy_payload(
+    policy: QualificationTrustPolicy,
+) -> dict[str, object]:
+    if not isinstance(policy, QualificationTrustPolicy):
+        raise TypeError("policy must be QualificationTrustPolicy")
+    return {
+        "policy_version": policy.policy_version,
+        "roots": [root.canonical() for root in policy.roots],
+    }
+
+
+def parse_qualification_trust_policy(
+    value: object,
+) -> QualificationTrustPolicy:
+    payload = _strict_mapping(
+        value,
+        name="qualification trust policy",
+        keys=frozenset({"policy_version", "roots"}),
+    )
+    roots_raw = _strict_list(payload["roots"], name="qualification trust roots")
+    roots: list[TrustRoot] = []
+    root_keys = frozenset(
+        {
+            "allowed_scopes",
+            "producer_id",
+            "public_exponent",
+            "public_modulus_hex",
+            "revoked_at",
+            "root_id",
+            "valid_from",
+            "valid_until",
+            "verification_method",
+            "verifier_id",
+        }
+    )
+    scope_keys = frozenset({"domain", "gate"})
+    for index, raw_root in enumerate(roots_raw):
+        root_payload = _strict_mapping(
+            raw_root,
+            name=f"qualification trust root[{index}]",
+            keys=root_keys,
+        )
+        scopes_raw = _strict_list(
+            root_payload["allowed_scopes"],
+            name=f"qualification trust root[{index}].allowed_scopes",
+        )
+        scopes = tuple(
+            QualificationScope(
+                **_strict_mapping(
+                    raw_scope,
+                    name=f"qualification trust root[{index}].allowed_scopes[{scope_index}]",
+                    keys=scope_keys,
+                )
+            )
+            for scope_index, raw_scope in enumerate(scopes_raw)
+        )
+        root = TrustRoot(
+            producer_id=root_payload["producer_id"],
+            verifier_id=root_payload["verifier_id"],
+            public_modulus_hex=root_payload["public_modulus_hex"],
+            public_exponent=root_payload["public_exponent"],
+            allowed_scopes=scopes,
+            valid_from=root_payload["valid_from"],
+            valid_until=root_payload["valid_until"],
+            revoked_at=root_payload["revoked_at"],
+            verification_method=root_payload["verification_method"],
+        )
+        if root_payload["root_id"] != root.root_id:
+            raise QualificationTrustError(
+                f"qualification trust root[{index}] root_id mismatch"
+            )
+        roots.append(root)
+    return QualificationTrustPolicy(
+        policy_version=payload["policy_version"],
+        roots=tuple(roots),
+    )
+
+
+def parse_signed_qualification_attestation(
+    value: object,
+) -> SignedQualificationAttestation:
+    receipt_payload = _strict_mapping(
+        value,
+        name="signed qualification attestation",
+        keys=frozenset({"attestation", "signature_b64"}),
+    )
+    attestation_payload = _strict_mapping(
+        receipt_payload["attestation"],
+        name="qualification attestation",
+        keys=frozenset(
+            {
+                "attestation_id",
+                "completed_at",
+                "domain",
+                "evidence_refs",
+                "gate",
+                "harness_version",
+                "package_id",
+                "producer_id",
+                "protocol_id",
+                "protocol_version",
+                "release_artifact_id",
+                "release_artifact_sha256",
+                "requirement_ids",
+                "result",
+                "runner_id",
+                "schema_version",
+                "signed_at",
+                "source_sha",
+                "started_at",
+                "trust_root_id",
+                "unresolved_limits",
+                "verification_method",
+                "verifier_id",
+            }
+        ),
+    )
+    evidence_raw = _strict_list(
+        attestation_payload["evidence_refs"],
+        name="qualification attestation.evidence_refs",
+    )
+    evidence_keys = frozenset(
+        {
+            "artifact_id",
+            "evidence_kind",
+            "media_type",
+            "sha256",
+            "source_sha",
+        }
+    )
+    evidence_refs = tuple(
+        EvidenceArtifactRef(
+            **_strict_mapping(
+                raw_ref,
+                name=f"qualification attestation.evidence_refs[{index}]",
+                keys=evidence_keys,
+            )
+        )
+        for index, raw_ref in enumerate(evidence_raw)
+    )
+    requirements = _strict_list(
+        attestation_payload["requirement_ids"],
+        name="qualification attestation.requirement_ids",
+    )
+    limits = _strict_list(
+        attestation_payload["unresolved_limits"],
+        name="qualification attestation.unresolved_limits",
+    )
+    attestation = QualificationAttestation(
+        attestation_id=attestation_payload["attestation_id"],
+        source_sha=attestation_payload["source_sha"],
+        domain=attestation_payload["domain"],
+        gate=attestation_payload["gate"],
+        package_id=attestation_payload["package_id"],
+        protocol_id=attestation_payload["protocol_id"],
+        protocol_version=attestation_payload["protocol_version"],
+        requirement_ids=tuple(requirements),
+        evidence_refs=evidence_refs,
+        producer_id=attestation_payload["producer_id"],
+        verifier_id=attestation_payload["verifier_id"],
+        trust_root_id=attestation_payload["trust_root_id"],
+        runner_id=attestation_payload["runner_id"],
+        harness_version=attestation_payload["harness_version"],
+        started_at=attestation_payload["started_at"],
+        completed_at=attestation_payload["completed_at"],
+        signed_at=attestation_payload["signed_at"],
+        result=attestation_payload["result"],
+        unresolved_limits=tuple(limits),
+        release_artifact_id=attestation_payload["release_artifact_id"],
+        release_artifact_sha256=attestation_payload["release_artifact_sha256"],
+        schema_version=attestation_payload["schema_version"],
+        verification_method=attestation_payload["verification_method"],
+    )
+    if attestation.canonical_payload() != dict(attestation_payload):
+        raise QualificationTrustError(
+            "qualification attestation is not in canonical serialized form"
+        )
+    return SignedQualificationAttestation(
+        attestation=attestation,
+        signature_b64=receipt_payload["signature_b64"],
+    )
 
 
 @dataclass(frozen=True)

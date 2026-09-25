@@ -1233,7 +1233,9 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             seed = AuthorityService(store)
-            seed.register_policy(\n                policy(autonomous=True, environments={"SIMULATION"})\n            )
+            seed.register_policy(
+                policy(autonomous=True, environments={"SIMULATION"})
+            )
 
             stale = AuthorityService(store)
             revoker = AuthorityService(store)

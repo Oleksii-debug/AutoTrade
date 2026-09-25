@@ -131,6 +131,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             "effective_at",
             "provider_revision",
             "underlying_price",
+            "cash_settlement_amount",
             "corrects_external_event_id",
         }
         if set(payload) != required:
@@ -159,6 +160,11 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                 None
                 if payload["underlying_price"] is None
                 else Decimal(payload["underlying_price"])
+            ),
+            cash_settlement_amount=(
+                None
+                if payload["cash_settlement_amount"] is None
+                else Decimal(payload["cash_settlement_amount"])
             ),
             corrects_external_event_id=payload["corrects_external_event_id"],
         )
@@ -214,6 +220,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         observed_at: datetime = utc(12, 18, 19, 1),
         provider_revision: str = "provider-r1",
         underlying_price: str | None = None,
+        cash_settlement_amount: str | None = None,
         corrects_external_event_id: str | None = None,
         instrument_version: str = f"{OPTION_ID}@1",
         provider_id: str = "BYBIT",
@@ -243,6 +250,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             "effective_at": utc(12, 18, 19).isoformat().replace("+00:00", "Z"),
             "provider_revision": provider_revision,
             "underlying_price": underlying_price,
+            "cash_settlement_amount": cash_settlement_amount,
             "corrects_external_event_id": corrects_external_event_id,
         }
         source = observe_authenticated_json_response(
@@ -404,7 +412,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             evidence["parser_id"],
             "autotrade.option-lifecycle.sealed-json",
         )
-        self.assertEqual(evidence["parser_version"], "1.0.0")
+        self.assertEqual(evidence["parser_version"], "1.1.0")
         self.assertRegex(
             evidence["parser_contract_digest"],
             r"^sha256:[0-9a-f]{64}$",
@@ -612,7 +620,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             1,
         )
 
-    def test_cash_expiry_is_derived_from_bound_price_evidence(self):
+    def test_cash_expiry_uses_bound_final_settlement_not_generic_price(self):
         self.seed_option_position("1")
         registry = InstrumentRegistry(
             versions=(option_version(settlement_method="CASH", strike="100"),)
@@ -631,7 +639,11 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         result = authority.apply(
             self.evidence(
                 event_kind="EXPIRY",
-                underlying_price="112",
+                # Deliberately inconsistent generic price: if this were used,
+                # the call would be OTM and settle to zero. Financial authority
+                # is the sealed final provider settlement amount instead.
+                underlying_price="90",
+                cash_settlement_amount="1200",
             )
         )
 
@@ -639,6 +651,41 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         self.assertEqual(book.position(f"{OPTION_ID}@1"), Decimal("0"))
         self.assertEqual(book.cash("USD"), Decimal("1199"))
         self.assertEqual(len(book.transactions), 2)
+
+    def test_cash_settlement_without_final_provider_amount_fails_before_mutation(self):
+        self.seed_option_position("1")
+        registry = InstrumentRegistry(
+            versions=(option_version(settlement_method="CASH", strike="100"),)
+        )
+        book = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+        )
+        authority = self._authority(
+            registry=registry,
+            economic_book=book,
+        )
+        before = tuple(book.transactions)
+
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "final cash_settlement_amount",
+        ):
+            authority.apply(
+                self.evidence(
+                    event_kind="EXPIRY",
+                    underlying_price="112",
+                    cash_settlement_amount=None,
+                )
+            )
+
+        self.assertEqual(tuple(book.transactions), before)
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", authority.aggregate_id),
+            [],
+        )
 
     def test_otm_cash_expiry_is_durable_lifecycle_fact_without_zero_transaction(self):
         self.seed_option_position("1")
@@ -657,7 +704,8 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         observation = self.evidence(
             event_kind="EXPIRY",
-            underlying_price="90",
+            underlying_price="112",
+            cash_settlement_amount="0",
         )
 
         first = authority.apply(observation)

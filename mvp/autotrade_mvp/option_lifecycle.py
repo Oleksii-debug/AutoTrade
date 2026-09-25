@@ -28,7 +28,6 @@ from .options import (
     OptionError,
     book_cash_option_settlement,
     book_physical_option_settlement,
-    expiration_cash_settlement,
     physical_exercise_obligation,
 )
 from .persistence import JournalStore, payload_digest
@@ -40,7 +39,7 @@ _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 _EVENT_KINDS = frozenset({"EXERCISE", "ASSIGNMENT", "EXPIRY"})
 _OPTION_LIFECYCLE_PARSER_ID = "autotrade.option-lifecycle.sealed-json"
-_OPTION_LIFECYCLE_PARSER_VERSION = "1.0.0"
+_OPTION_LIFECYCLE_PARSER_VERSION = "1.1.0"
 _OPTION_LIFECYCLE_PARSER_CONTRACT_DIGEST = payload_digest(
     {
         "parser_id": _OPTION_LIFECYCLE_PARSER_ID,
@@ -55,6 +54,7 @@ _OPTION_LIFECYCLE_PARSER_CONTRACT_DIGEST = payload_digest(
             "effective_at",
             "provider_revision",
             "underlying_price",
+            "cash_settlement_amount",
             "corrects_external_event_id",
         ],
         "financial_binding": "EXACT_SEALED_PAYLOAD",
@@ -95,6 +95,7 @@ def _canonical_observation_from_sealed_response(
         "effective_at",
         "provider_revision",
         "underlying_price",
+        "cash_settlement_amount",
         "corrects_external_event_id",
     }
     if set(payload) != required:
@@ -127,6 +128,14 @@ def _canonical_observation_from_sealed_response(
             if payload["underlying_price"] is None
             else _decimal(payload["underlying_price"], "underlying_price")
         )
+        cash_settlement_amount = (
+            None
+            if payload["cash_settlement_amount"] is None
+            else _decimal(
+                payload["cash_settlement_amount"],
+                "cash_settlement_amount",
+            )
+        )
     except (InvalidOperation, TypeError, ValueError) as error:
         raise OptionLifecycleError(
             "provider lifecycle payload contains invalid financial values"
@@ -152,6 +161,7 @@ def _canonical_observation_from_sealed_response(
             "provider_revision",
         ),
         underlying_price=underlying_price,
+        cash_settlement_amount=cash_settlement_amount,
         corrects_external_event_id=(
             None
             if payload["corrects_external_event_id"] is None
@@ -229,6 +239,7 @@ class OptionLifecycleObservation:
     raw_evidence_digest: str
     provider_revision: str
     underlying_price: Decimal | None = None
+    cash_settlement_amount: Decimal | None = None
     corrects_external_event_id: str | None = None
 
     def __post_init__(self) -> None:
@@ -318,6 +329,9 @@ def canonical_option_lifecycle_observation(
         "raw_evidence_digest": observation.raw_evidence_digest,
         "provider_revision": observation.provider_revision,
         "underlying_price": _decimal_text(observation.underlying_price),
+        "cash_settlement_amount": _decimal_text(
+            observation.cash_settlement_amount
+        ),
         "corrects_external_event_id": observation.corrects_external_event_id,
     }
 
@@ -445,6 +459,10 @@ def _economic_transaction(
     ]
 
     if contract.settlement_method == "PHYSICAL":
+        if observation.cash_settlement_amount is not None:
+            raise OptionLifecycleError(
+                "physical lifecycle evidence cannot carry cash_settlement_amount"
+            )
         # Physical expiry alone is not evidence that delivery occurred.  It
         # retires only the option inventory. Explicit EXERCISE/ASSIGNMENT adds
         # the delivery obligations.
@@ -460,15 +478,14 @@ def _economic_transaction(
             )
             postings.extend(base.postings)
     else:
-        if observation.underlying_price is None:
+        if observation.cash_settlement_amount is None:
             raise OptionLifecycleError(
-                "cash-settled lifecycle event requires provider/reference underlying_price evidence"
+                "cash-settled lifecycle event requires sealed final cash_settlement_amount"
             )
-        amount = expiration_cash_settlement(
-            contract,
-            signed_contracts=observation.signed_contracts,
-            underlying_price=observation.underlying_price,
-        )
+        # A generic spot/underlying/mark price is not financial authority for
+        # venue-defined cash settlement. The sealed lifecycle response must
+        # provide the provider/clearing final signed settlement amount itself.
+        amount = observation.cash_settlement_amount
         if amount != 0:
             base = book_cash_option_settlement(
                 transaction_id=transaction_id,

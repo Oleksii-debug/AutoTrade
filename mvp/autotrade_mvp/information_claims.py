@@ -54,15 +54,16 @@ def _syndication_digest(
     predicate: str,
     value: str,
     passage_hash: str,
-    published_at: datetime,
 ) -> str:
+    # Syndication identity is semantic-content identity, not an outlet clock.
+    # Publication/availability remain committed in each claim's evidence and
+    # determine which representative was causally visible first.
     return _canonical_json_digest(
         {
             "subject": subject,
             "predicate": predicate,
             "value": value,
             "passage_hash": passage_hash,
-            "published_at": published_at.isoformat(),
         }
     )
 
@@ -223,7 +224,6 @@ class InformationClaim:
             predicate=self.predicate,
             value=self.value,
             passage_hash=self.passage_hash,
-            published_at=self.published_at,
         )
         if self.syndication_key != expected_syndication_key:
             raise ValueError("syndication_key identity mismatch")
@@ -363,7 +363,6 @@ class ClaimStore:
             predicate=normalized_predicate,
             value=normalized_value,
             passage_hash=passage_hash,
-            published_at=document.published_at,
         )
         conflict_key = _conflict_digest(
             subject=normalized_subject,

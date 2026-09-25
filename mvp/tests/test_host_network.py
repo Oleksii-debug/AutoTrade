@@ -78,7 +78,7 @@ class HostNetworkTests(unittest.TestCase):
             "permission_summary": {
                 "actor": principal.actor,
                 "session": principal.session,
-                "role": "OWNER",
+                "role": principal.role,
             },
             "connection_freshness": {
                 "host": "CURRENT",
@@ -187,6 +187,7 @@ class HostNetworkTests(unittest.TestCase):
         self.assertEqual(payload["environment"], "PAPER")
         self.assertEqual(payload["state_version"], "0")
         self.assertEqual(payload["permission_summary"]["actor"], "owner")
+        self.assertEqual(payload["permission_summary"]["role"], "OWNER")
         self.assertEqual(
             payload["permission_summary"]["session"],
             public_session_reference(self.owner.token),

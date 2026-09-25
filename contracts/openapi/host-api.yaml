@@ -6,7 +6,7 @@ info:
 servers:
   - url: https://localhost
 paths:
-  /v1/state:
+  /api/v1/state:
     get:
       operationId: getState
       responses:
@@ -16,7 +16,7 @@ paths:
             application/json:
               schema:
                 $ref: ../jsonschema/ui.schema.json#/$defs/UiSnapshot
-  /v1/commands:
+  /api/v1/commands:
     post:
       operationId: submitCommand
       requestBody:
@@ -38,7 +38,7 @@ paths:
             application/json:
               schema:
                 $ref: ../jsonschema/ui.schema.json#/$defs/CommandResult
-  /v1/operations/{operation_id}:
+  /api/v1/operations/{operation_id}:
     get:
       operationId: getOperation
       parameters:
@@ -55,7 +55,7 @@ paths:
             application/json:
               schema:
                 $ref: ../jsonschema/ui.schema.json#/$defs/OperationResult
-  /v1/events:
+  /api/v1/events:
     get:
       operationId: streamEvents
       parameters:
@@ -66,12 +66,12 @@ paths:
             type: string
       responses:
         "200":
-          description: Resumable projection event stream; a detected cursor gap requires /v1/state resnapshot
+          description: Resumable projection event stream; a detected cursor gap requires /api/v1/state resnapshot
           content:
             text/event-stream:
               schema:
                 type: string
-  /v1/health:
+  /api/v1/health:
     get:
       operationId: getHealth
       responses:

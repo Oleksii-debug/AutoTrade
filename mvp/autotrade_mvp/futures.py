@@ -63,6 +63,14 @@ def _fraction(value: Decimal) -> Fraction:
     return Fraction(integer, 10 ** (-exponent))
 
 
+def _decimal_identity(value: Decimal) -> str:
+    normalized = _decimal(value, "decimal identity")
+    if normalized == 0:
+        return "0"
+    text = format(normalized.normalize(), "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
 @dataclass(frozen=True)
 class FuturesContract:
     instrument: str
@@ -428,7 +436,7 @@ def settlement_identity_digest(evidence: FuturesSettlementEvidence) -> str:
         "effective_at": evidence.effective_at.isoformat(),
         "sequence": evidence.sequence,
         "revision": evidence.revision,
-        "settlement_price": format(evidence.settlement_price, "f"),
+        "settlement_price": _decimal_identity(evidence.settlement_price),
         "price_currency": evidence.price_currency,
         "settlement_currency": evidence.settlement_currency,
     }
@@ -689,8 +697,7 @@ def settle_and_book_inverse_variation_margin(
         raise FuturesError("inverse settlement booking requires an INVERSE futures contract")
     if not isinstance(settlement, FuturesSettlementEvidence):
         raise FuturesError("immutable FuturesSettlementEvidence is required")
-    if settlement.instrument != contract.instrument:
-        raise FuturesError("settlement instrument/version does not match contract")
+    _require_settlement_contract(contract, settlement.scope, settlement)
     if settlement.price_currency != contract.quote_currency:
         raise FuturesError("settlement price currency does not match contract")
     if settlement.settlement_currency != contract.settlement_currency:

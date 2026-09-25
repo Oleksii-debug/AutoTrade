@@ -188,13 +188,14 @@ def openapi_security_surface(
     *,
     schema_base_uri: str,
 ) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
-    """Return semantic global auth requirements and named security schemes.
+    """Return canonical global auth requirements and named security schemes.
 
-    OpenAPI's top-level security requirement applies to every operation unless
-    explicitly overridden.  Security-scheme definitions live outside paths, so
-    operation-only comparison would miss authentication weakening or header
-    identity changes.  This parser intentionally covers only those two semantic
-    surfaces and does not introduce a second YAML authority.
+    OpenAPI top-level security is an unordered list of alternative Security
+    Requirement Objects. Keys inside each requirement are AND-ed, so their
+    mapping order is also non-semantic. Security-scheme objects are mappings:
+    mapping-property order is ignored recursively while sequence order remains
+    represented explicitly. This remains a narrow surface parser rather than a
+    second general YAML authority.
     """
 
     openapi = manifest.get("openapi")
@@ -205,18 +206,35 @@ def openapi_security_surface(
         raise ValueError("manifest openapi.path must be non-empty text")
     lines = (root / relative).read_text(encoding="utf-8").splitlines()
 
-    def normalize(line: str) -> str | None:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            return None
-        if stripped.startswith(("description:", "summary:")):
-            return None
+    def normalize_scalar(value: str) -> str:
+        normalized = value.strip()
         if schema_base_uri:
-            stripped = stripped.replace(
+            normalized = normalized.replace(
                 schema_base_uri.rstrip("/") + "/",
                 "{SCHEMA_BASE}/",
             )
-        return stripped
+        return normalized
+
+    def normalize_scope(value: str) -> str:
+        value = normalize_scalar(value)
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            return value[1:-1]
+        return value
+
+    def inline_scopes(raw: str) -> list[str] | None:
+        value = raw.strip()
+        if not value:
+            return None
+        if value == "[]":
+            return []
+        if not (value.startswith("[") and value.endswith("]")):
+            raise ValueError(
+                "OpenAPI security requirement scopes must be an array"
+            )
+        inner = value[1:-1].strip()
+        if not inner:
+            return []
+        return [normalize_scope(item) for item in inner.split(",")]
 
     default_security: tuple[str, ...] = ()
     for index, line in enumerate(lines):
@@ -227,16 +245,93 @@ def openapi_security_surface(
         if inline:
             # Missing top-level security and explicit security: [] are both
             # unauthenticated defaults under OpenAPI semantics.
-            default_security = () if inline == "[]" else ("security: " + inline,)
+            if inline == "[]":
+                default_security = ()
+            else:
+                raise ValueError(
+                    "inline top-level OpenAPI security must be [] or use block form"
+                )
             break
-        values: list[str] = []
+
+        requirements: list[str] = []
+        current: list[tuple[str, list[str] | None]] | None = None
+        current_scope_index: int | None = None
+
+        def finish_requirement() -> None:
+            nonlocal current, current_scope_index
+            if current is None:
+                return
+            canonical: list[tuple[str, tuple[str, ...]]] = []
+            seen: set[str] = set()
+            for scheme, scopes in current:
+                if scheme in seen:
+                    raise ValueError(
+                        f"duplicate scheme in OpenAPI security requirement: {scheme}"
+                    )
+                seen.add(scheme)
+                if scopes is None:
+                    raise ValueError(
+                        f"OpenAPI security requirement {scheme} has no scope array"
+                    )
+                canonical.append((scheme, tuple(sorted(scopes))))
+            requirements.append(
+                json.dumps(
+                    sorted(canonical),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+            current = None
+            current_scope_index = None
+
         for nested in lines[index + 1 :]:
             if nested and not nested.startswith(" ") and not nested.lstrip().startswith("#"):
                 break
-            normalized = normalize(nested)
-            if normalized is not None:
-                values.append(normalized)
-        default_security = tuple(values)
+            if not nested.strip() or nested.lstrip().startswith("#"):
+                continue
+            first = re.fullmatch(
+                r"  - ([A-Za-z0-9_.-]+):\s*(.*)",
+                nested,
+            )
+            if first:
+                finish_requirement()
+                current = [(first.group(1), inline_scopes(first.group(2)))]
+                current_scope_index = 0
+                continue
+            additional = re.fullmatch(
+                r"    ([A-Za-z0-9_.-]+):\s*(.*)",
+                nested,
+            )
+            if additional:
+                if current is None:
+                    raise ValueError(
+                        "OpenAPI security requirement member appeared before a requirement"
+                    )
+                current.append(
+                    (additional.group(1), inline_scopes(additional.group(2)))
+                )
+                current_scope_index = len(current) - 1
+                continue
+            scope_item = re.fullmatch(r"      -\s+(.+?)\s*", nested)
+            if scope_item:
+                if current is None or current_scope_index is None:
+                    raise ValueError(
+                        "OpenAPI security scope appeared before a scheme"
+                    )
+                scheme, scopes = current[current_scope_index]
+                if scopes is not None:
+                    raise ValueError(
+                        f"OpenAPI security requirement {scheme} mixes inline and block scopes"
+                    )
+                scopes = []
+                current[current_scope_index] = (scheme, scopes)
+                scopes.append(normalize_scope(scope_item.group(1)))
+                continue
+            raise ValueError(
+                f"unsupported OpenAPI top-level security syntax: {nested.strip()}"
+            )
+        finish_requirement()
+        default_security = tuple(sorted(requirements))
         break
 
     try:
@@ -260,7 +355,7 @@ def openapi_security_surface(
     schemes: dict[str, list[str]] = {}
     current_scheme: str | None = None
     for line in lines[security_index + 1 :]:
-        if line.strip() == "" or line.lstrip().startswith("#"):
+        if not line.strip() or line.lstrip().startswith("#"):
             continue
         indent = len(line) - len(line.lstrip(" "))
         if indent <= 2:
@@ -278,12 +373,87 @@ def openapi_security_surface(
             raise ValueError("OpenAPI security scheme content appeared before a scheme")
         if indent < 6:
             raise ValueError("invalid OpenAPI security scheme indentation")
-        normalized = normalize(line)
-        if normalized is not None:
-            schemes[current_scheme].append(normalized)
+        schemes[current_scheme].append(line)
+
+    def canonicalize_scheme(block: list[str]) -> tuple[str, ...]:
+        records: list[str] = []
+        stack: list[tuple[int, str]] = []
+        sequence_counts: dict[tuple[tuple[str, ...], int], int] = {}
+        skip_annotation_indent: int | None = None
+
+        for raw_line in block:
+            if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+                continue
+            indent = len(raw_line) - len(raw_line.lstrip(" "))
+            stripped = raw_line.strip()
+
+            if skip_annotation_indent is not None:
+                if indent > skip_annotation_indent:
+                    continue
+                skip_annotation_indent = None
+
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+            parent = tuple(key for _, key in stack)
+
+            if stripped.startswith("- "):
+                sequence_key = (parent, indent)
+                sequence_index = sequence_counts.get(sequence_key, 0)
+                sequence_counts[sequence_key] = sequence_index + 1
+                records.append(
+                    json.dumps(
+                        [
+                            "sequence",
+                            list(parent),
+                            sequence_index,
+                            normalize_scalar(stripped[2:]),
+                        ],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+                continue
+
+            mapping = re.fullmatch(r"([A-Za-z0-9_.$-]+):\s*(.*)", stripped)
+            if mapping is None:
+                records.append(
+                    json.dumps(
+                        ["scalar", list(parent), indent, normalize_scalar(stripped)],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+                continue
+
+            key, value = mapping.groups()
+            if key in {"description", "summary"}:
+                if not value or value.startswith(("|", ">")):
+                    skip_annotation_indent = indent
+                continue
+
+            path = [*parent, key]
+            if value:
+                records.append(
+                    json.dumps(
+                        ["mapping", path, normalize_scalar(value)],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+            else:
+                records.append(
+                    json.dumps(
+                        ["container", path],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+                stack.append((indent, key))
+
+        return tuple(sorted(records))
 
     return default_security, {
-        name: tuple(values)
+        name: canonicalize_scheme(values)
         for name, values in schemes.items()
     }
 

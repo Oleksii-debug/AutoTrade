@@ -456,15 +456,15 @@ class BackupRestoreTests(unittest.TestCase):
             state, artifacts = self._build_sources(root)
             backup = create_backup(state, artifacts, root / "backup")
             destination = root / "restored"
-            original_copy = shutil.copy2
+            original_copy = _copy_file_durable
             calls = 0
 
-            def interrupted(source, target, *args, **kwargs):
+            def interrupted(source, target):
                 nonlocal calls
                 calls += 1
                 if calls == 2:
                     raise OSError("simulated interruption")
-                return original_copy(source, target, *args, **kwargs)
+                return original_copy(source, target)
 
             verified_manifest = verify_backup(backup)
             with (
@@ -473,7 +473,7 @@ class BackupRestoreTests(unittest.TestCase):
                     return_value=verified_manifest,
                 ),
                 patch(
-                    "mvp.autotrade_mvp.backup.shutil.copy2",
+                    "mvp.autotrade_mvp.backup._copy_file_durable",
                     side_effect=interrupted,
                 ),
             ):

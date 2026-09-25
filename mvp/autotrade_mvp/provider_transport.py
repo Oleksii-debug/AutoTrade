@@ -970,12 +970,8 @@ class WhiteBitHttpTransport:
             credential_plaintext = None
 
         final_guard()
-        raw = self.wire_client.send(signed)
-        if not isinstance(raw, bytes):
-            raise ProviderTransportError(
-                "WhiteBIT order wire client must return exact response bytes"
-            )
-        return ExactJsonTransportResponse(raw)
+        wire_response = self.wire_client.send(signed)
+        return _exact_trading_response(wire_response)
 
 
 @dataclass(frozen=True)
@@ -1256,12 +1252,8 @@ class AlpacaTradingHttpTransport:
             credential_plaintext = None
 
         final_guard()
-        raw = self.wire_client.send(signed)
-        if not isinstance(raw, bytes):
-            raise ProviderTransportError(
-                "Alpaca order wire client must return exact response bytes"
-            )
-        return ExactJsonTransportResponse(raw)
+        wire_response = self.wire_client.send(signed)
+        return _exact_trading_response(wire_response)
 
 
 @dataclass(frozen=True)

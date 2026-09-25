@@ -591,6 +591,7 @@ class JournalStore:
             raise ValueError("journal event payload hash does not match stored payload")
 
         row_keys = set(row.keys())
+        decoded_envelope: dict[str, Any] = {}
         if "envelope_json" in row_keys:
             raw_envelope = row["envelope_json"]
             if not isinstance(raw_envelope, str):
@@ -620,16 +621,24 @@ class JournalStore:
                     raise ValueError(
                         "journal event envelope conflicts with core journal event"
                     )
-        return {
-            "event_id": row["event_id"],
-            "event_type": row["event_type"],
-            "aggregate_type": row["aggregate_type"],
-            "aggregate_id": row["aggregate_id"],
-            "aggregate_version": row["aggregate_version"],
-            "payload": payload,
-            "payload_hash": row["payload_hash"],
-            "committed_at": row["committed_at"],
-        }
+            decoded_envelope = dict(envelope)
+
+        # Preserve validated envelope metadata for recovery/audit callers while
+        # making the normalized database core authoritative for duplicated
+        # fields (notably aggregate_version, which is persisted as an integer).
+        decoded_envelope.update(
+            {
+                "event_id": row["event_id"],
+                "event_type": row["event_type"],
+                "aggregate_type": row["aggregate_type"],
+                "aggregate_id": row["aggregate_id"],
+                "aggregate_version": row["aggregate_version"],
+                "payload": payload,
+                "payload_hash": row["payload_hash"],
+                "committed_at": row["committed_at"],
+            }
+        )
+        return decoded_envelope
 
     def get_event(self, event_id: str) -> dict[str, Any] | None:
         event_id = self._require_text(event_id, "event_id")

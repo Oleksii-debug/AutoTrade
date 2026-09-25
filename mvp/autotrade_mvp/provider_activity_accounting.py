@@ -860,6 +860,19 @@ def _prepare_provider_fill_correction_binding(
             last_request.get("reservation_cut_digest"),
             name="reservation_cut_digest",
         )
+        stored_additional_raw = last_request.get("additional_usage")
+        if not isinstance(stored_additional_raw, Mapping):
+            raise AccountingConflict(
+                "existing provider fill correction additional usage is invalid"
+            )
+        stored_additional = (
+            {}
+            if not stored_additional_raw
+            else _positive_usage_map(
+                stored_additional_raw,
+                name="existing provider fill correction additional usage",
+            )
+        )
         return PreparedProviderFillCorrectionBinding(
             aggregate_id=aggregate_id,
             envelope=None,
@@ -871,7 +884,7 @@ def _prepare_provider_fill_correction_binding(
                 ],
             },
             aggregate_version=len(events),
-            additional_usage_items=(),
+            additional_usage_items=tuple(sorted(stored_additional.items())),
             reservation_cut_digest=cut,
             already_committed=True,
         )

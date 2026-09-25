@@ -375,7 +375,6 @@ class JournalStore:
                         # A hashless legacy row has no such authority, so it is
                         # accepted only when the full envelope is reconstructable
                         # from the core journal row.
-                        migrated_event_ids: set[str] = set()
                         for row in connection.execute(
                             """
                             SELECT
@@ -458,7 +457,6 @@ class JournalStore:
                                 "WHERE event_id = ?",
                                 (raw_outbox_payload, row["event_id"]),
                             )
-                            migrated_event_ids.add(str(row["event_id"]))
                             envelope_hash = _outbox_envelope_digest(
                                 str(row["topic"]),
                                 raw_outbox_payload,
@@ -634,6 +632,7 @@ class JournalStore:
         if supplied_hash != expected_hash:
             raise ValueError("payload_hash does not match payload")
         payload_json = canonical_json(payload)
+        envelope_json = canonical_json(envelope)
         committed_at = self._require_text(envelope.get("committed_at"), "committed_at")
         if outbox_topic is not None:
             outbox_topic = self._require_text(outbox_topic, "outbox_topic")
@@ -650,6 +649,10 @@ class JournalStore:
                     and existing["payload_json"] == payload_json
                     and existing["payload_hash"] == supplied_hash
                     and existing["committed_at"] == committed_at
+                    and (
+                        self.SCHEMA_VERSION < 5
+                        or existing["envelope_json"] == envelope_json
+                    )
                 )
                 existing_outbox = connection.execute(
                     "SELECT topic, payload_json, envelope_hash "
@@ -657,7 +660,7 @@ class JournalStore:
                     (event_id,),
                 ).fetchone()
                 expected_outbox_payload = (
-                    canonical_json(envelope) if outbox_topic is not None else None
+                    envelope_json if outbox_topic is not None else None
                 )
                 expected_outbox_hash = (
                     _outbox_envelope_digest(
@@ -699,26 +702,48 @@ class JournalStore:
                     f"aggregate_version must be {expected_version} for {aggregate_type}/{aggregate_id}"
                 )
 
-            connection.execute(
-                """
-                INSERT INTO events(
-                    event_id, event_type, aggregate_type, aggregate_id,
-                    aggregate_version, payload_json, payload_hash, committed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event_id,
-                    event_type,
-                    aggregate_type,
-                    aggregate_id,
-                    aggregate_version,
-                    payload_json,
-                    supplied_hash,
-                    committed_at,
-                ),
-            )
+            if self.SCHEMA_VERSION >= 5:
+                connection.execute(
+                    """
+                    INSERT INTO events(
+                        event_id, event_type, aggregate_type, aggregate_id,
+                        aggregate_version, payload_json, payload_hash, committed_at,
+                        envelope_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        event_type,
+                        aggregate_type,
+                        aggregate_id,
+                        aggregate_version,
+                        payload_json,
+                        supplied_hash,
+                        committed_at,
+                        envelope_json,
+                    ),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO events(
+                        event_id, event_type, aggregate_type, aggregate_id,
+                        aggregate_version, payload_json, payload_hash, committed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        event_type,
+                        aggregate_type,
+                        aggregate_id,
+                        aggregate_version,
+                        payload_json,
+                        supplied_hash,
+                        committed_at,
+                    ),
+                )
             if outbox_topic is not None:
-                outbox_payload = canonical_json(envelope)
+                outbox_payload = envelope_json
                 outbox_id = "outbox-" + sha256(event_id.encode("utf-8")).hexdigest()[:32]
                 outbox_hash = _outbox_envelope_digest(
                     outbox_topic,
@@ -921,7 +946,8 @@ class JournalStore:
                     events.aggregate_version,
                     events.payload_json AS event_payload_json,
                     events.payload_hash,
-                    events.committed_at
+                    events.committed_at,
+                    events.envelope_json AS event_envelope_json
                 FROM outbox
                 JOIN events ON events.event_id = outbox.event_id
                 WHERE outbox.delivered_at IS NULL
@@ -958,7 +984,16 @@ class JournalStore:
                 raise ValueError("outbox payload is not valid JSON") from error
             if canonical_json(outbox_payload) != raw_outbox_payload:
                 raise ValueError("outbox payload is not canonical JSON")
-            expected_envelope = {
+            raw_authoritative_envelope = row["event_envelope_json"]
+            if not isinstance(raw_authoritative_envelope, str):
+                raise ValueError("journal event envelope authority is missing")
+            try:
+                authoritative_envelope = json.loads(raw_authoritative_envelope)
+            except (json.JSONDecodeError, TypeError) as error:
+                raise ValueError("journal event envelope is not valid JSON") from error
+            if canonical_json(authoritative_envelope) != raw_authoritative_envelope:
+                raise ValueError("journal event envelope is not canonical JSON")
+            core_envelope = {
                 "event_id": event["event_id"],
                 "event_type": event["event_type"],
                 "aggregate_type": event["aggregate_type"],
@@ -968,9 +1003,14 @@ class JournalStore:
                 "payload_hash": event["payload_hash"],
                 "committed_at": event["committed_at"],
             }
-            if outbox_payload != expected_envelope:
+            for key, expected in core_envelope.items():
+                if authoritative_envelope.get(key) != expected:
+                    raise ValueError(
+                        "journal event envelope conflicts with core journal event"
+                    )
+            if raw_outbox_payload != raw_authoritative_envelope:
                 raise ValueError(
-                    "outbox payload does not match authoritative journal event"
+                    "outbox payload does not match authoritative journal event envelope"
                 )
             pending.append(
                 {
@@ -1021,7 +1061,8 @@ class JournalStore:
                         events.aggregate_version,
                         events.payload_json AS event_payload_json,
                         events.payload_hash,
-                        events.committed_at
+                        events.committed_at,
+                        events.envelope_json AS event_envelope_json
                     FROM outbox
                     JOIN events ON events.event_id = outbox.event_id
                     WHERE outbox.outbox_id = ?
@@ -1062,7 +1103,16 @@ class JournalStore:
                     raise ValueError("outbox payload is not valid JSON") from error
                 if canonical_json(outbox_payload) != raw_outbox_payload:
                     raise ValueError("outbox payload is not canonical JSON")
-                expected_envelope = {
+                raw_authoritative_envelope = row["event_envelope_json"]
+                if not isinstance(raw_authoritative_envelope, str):
+                    raise ValueError("journal event envelope authority is missing")
+                try:
+                    authoritative_envelope = json.loads(raw_authoritative_envelope)
+                except (json.JSONDecodeError, TypeError) as error:
+                    raise ValueError("journal event envelope is not valid JSON") from error
+                if canonical_json(authoritative_envelope) != raw_authoritative_envelope:
+                    raise ValueError("journal event envelope is not canonical JSON")
+                core_envelope = {
                     "event_id": event["event_id"],
                     "event_type": event["event_type"],
                     "aggregate_type": event["aggregate_type"],
@@ -1072,9 +1122,14 @@ class JournalStore:
                     "payload_hash": event["payload_hash"],
                     "committed_at": event["committed_at"],
                 }
-                if outbox_payload != expected_envelope:
+                for key, expected in core_envelope.items():
+                    if authoritative_envelope.get(key) != expected:
+                        raise ValueError(
+                            "journal event envelope conflicts with core journal event"
+                        )
+                if raw_outbox_payload != raw_authoritative_envelope:
                     raise ValueError(
-                        "outbox payload does not match authoritative journal event"
+                        "outbox payload does not match authoritative journal event envelope"
                     )
 
                 if row["delivered_at"] is not None:
@@ -1288,6 +1343,7 @@ class JournalStore:
                     "payload_hash": supplied_hash,
                     "committed_at": committed_at,
                     "outbox_topic": outbox_topic,
+                    "envelope_json": canonical_json(envelope),
                     "outbox_payload": canonical_json(envelope),
                 }
             )
@@ -1362,24 +1418,46 @@ class JournalStore:
 
                 appended: list[AppendResult] = []
                 for item in prepared:
-                    connection.execute(
-                        """
-                        INSERT INTO events(
-                            event_id, event_type, aggregate_type, aggregate_id,
-                            aggregate_version, payload_json, payload_hash, committed_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            item["event_id"],
-                            item["event_type"],
-                            item["aggregate_type"],
-                            item["aggregate_id"],
-                            item["aggregate_version"],
-                            item["payload_json"],
-                            item["payload_hash"],
-                            item["committed_at"],
-                        ),
-                    )
+                    if self.SCHEMA_VERSION >= 5:
+                        connection.execute(
+                            """
+                            INSERT INTO events(
+                                event_id, event_type, aggregate_type, aggregate_id,
+                                aggregate_version, payload_json, payload_hash,
+                                committed_at, envelope_json
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                item["event_id"],
+                                item["event_type"],
+                                item["aggregate_type"],
+                                item["aggregate_id"],
+                                item["aggregate_version"],
+                                item["payload_json"],
+                                item["payload_hash"],
+                                item["committed_at"],
+                                item["envelope_json"],
+                            ),
+                        )
+                    else:
+                        connection.execute(
+                            """
+                            INSERT INTO events(
+                                event_id, event_type, aggregate_type, aggregate_id,
+                                aggregate_version, payload_json, payload_hash, committed_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                item["event_id"],
+                                item["event_type"],
+                                item["aggregate_type"],
+                                item["aggregate_id"],
+                                item["aggregate_version"],
+                                item["payload_json"],
+                                item["payload_hash"],
+                                item["committed_at"],
+                            ),
+                        )
                     if item["outbox_topic"] is not None:
                         outbox_id = "outbox-" + sha256(
                             item["event_id"].encode("utf-8")

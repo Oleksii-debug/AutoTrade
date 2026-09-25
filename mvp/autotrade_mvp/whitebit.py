@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Mapping
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import UUID
 import base64
 import hashlib
 import hmac
@@ -586,6 +586,8 @@ def parse_submission_result(
     env = _text(environment, name="environment").upper()
     point = _instant(observed_at, name="observed_at")
 
+    if type(transport_ambiguous) is not bool:
+        raise WhiteBitAdapterError("transport_ambiguous must be boolean")
     if transport_ambiguous:
         if response_body is not None or http_status is not None:
             raise WhiteBitAdapterError(
@@ -681,16 +683,86 @@ def parse_submission_result(
     )
 
 
+def _canonical_evidence_ref(
+    value: Mapping[str, object],
+    *,
+    expected_sha256: str,
+    expected_observed_at: datetime,
+) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise WhiteBitAdapterError("response evidence must be a mapping")
+    allowed = {"artifact_id", "sha256", "observed_at", "source_uri", "rights_id"}
+    extra = sorted(set(value) - allowed)
+    if extra:
+        raise WhiteBitAdapterError(
+            "response evidence contains unsupported fields: " + ", ".join(extra)
+        )
+    try:
+        artifact_id = str(
+            UUID(_text(str(value.get("artifact_id", "")), name="artifact_id"))
+        )
+    except (ValueError, TypeError, AttributeError) as error:
+        raise WhiteBitAdapterError(
+            "response evidence artifact_id must be a UUID"
+        ) from error
+
+    digest = _text(str(value.get("sha256", "")), name="sha256")
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+        raise WhiteBitAdapterError(
+            "response evidence sha256 must be canonical SHA-256"
+        )
+    if digest != expected_sha256:
+        raise WhiteBitAdapterError(
+            "response evidence digest does not match authoritative provider response"
+        )
+
+    observed_raw = _text(str(value.get("observed_at", "")), name="observed_at")
+    try:
+        observed = datetime.fromisoformat(observed_raw.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise WhiteBitAdapterError(
+            "response evidence observed_at must be ISO timestamp"
+        ) from error
+    if observed.tzinfo is None or observed.utcoffset() is None:
+        raise WhiteBitAdapterError(
+            "response evidence observed_at must be timezone-aware"
+        )
+    canonical_observed = observed.astimezone(timezone.utc)
+    if canonical_observed != _instant(expected_observed_at, name="observed_at"):
+        raise WhiteBitAdapterError(
+            "response evidence observed_at does not match local response observation"
+        )
+
+    source = _text(str(value.get("source_uri", "")), name="source_uri")
+    if not source.startswith("https://whitebit.com/"):
+        raise WhiteBitAdapterError(
+            "response evidence source_uri must be an HTTPS whitebit.com provider endpoint"
+        )
+
+    normalized = {
+        "artifact_id": artifact_id,
+        "sha256": digest,
+        "source_uri": source,
+        "observed_at": canonical_observed.isoformat().replace("+00:00", "Z"),
+    }
+    rights_id = value.get("rights_id")
+    if rights_id is not None:
+        normalized["rights_id"] = _text(str(rights_id), name="rights_id")
+    return normalized
+
+
 def canonical_submission_result(
     result: WhiteBitSubmissionResult,
     *,
-    source_uri: str,
+    response_evidence: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Project the rich WhiteBIT attempt DTO onto canonical SubmissionResult.
 
     Account/environment/local observation remain durable SubmissionAttempt facts.
     The current provider DTO has no independent provider-receive timestamp, so
     this boundary deliberately omits provider_received_at instead of inventing it.
+    Authoritative ACK/REJECT requires a real immutable response EvidenceRef; this
+    function never fabricates an artifact identity from a digest.
     """
 
     if not isinstance(result, WhiteBitSubmissionResult):
@@ -707,11 +779,6 @@ def canonical_submission_result(
         raise WhiteBitAdapterError(
             "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
         )
-    source = _text(source_uri, name="source_uri")
-    if not source.startswith("https://whitebit.com/"):
-        raise WhiteBitAdapterError(
-            "canonical WhiteBIT response evidence requires an HTTPS whitebit.com source_uri"
-        )
 
     base: dict[str, object] = {
         "attempt_id": attempt_id,
@@ -725,6 +792,7 @@ def canonical_submission_result(
             or result.provider_order_id is not None
             or result.rejection_code is not None
             or result.rejection_message is not None
+            or response_evidence is not None
         ):
             raise WhiteBitAdapterError(
                 "UNKNOWN submission cannot claim authoritative provider response evidence"
@@ -742,16 +810,16 @@ def canonical_submission_result(
         raise WhiteBitAdapterError(
             "authoritative WhiteBIT outcome requires response digest and HTTP status"
         )
+    if response_evidence is None:
+        raise WhiteBitAdapterError(
+            "authoritative WhiteBIT outcome requires immutable response EvidenceRef"
+        )
     evidence = [
-        {
-            "artifact_id": str(
-                uuid5(NAMESPACE_URL, f"{source}#{result.response_sha256}")
-            ),
-            "sha256": result.response_sha256,
-            "source_uri": source,
-            "observed_at": _utc_text(result.observed_at, name="observed_at"),
-            "rights_id": "provider-observation-whitebit",
-        }
+        _canonical_evidence_ref(
+            response_evidence,
+            expected_sha256=result.response_sha256,
+            expected_observed_at=result.observed_at,
+        )
     ]
 
     if result.outcome == "ACKNOWLEDGED":
@@ -783,14 +851,14 @@ def canonical_submission_result(
             raise WhiteBitAdapterError(
                 "REJECTED outcome cannot claim provider_order_id"
             )
-        reason = (
-            f"WHITEBIT_{_text(result.rejection_code, name='rejection_code')}"
-            if result.rejection_code is not None
-            else "WHITEBIT_REJECTED"
-        )
+        if result.rejection_code is None or result.rejection_message is None:
+            raise WhiteBitAdapterError(
+                "REJECTED canonical submission requires rejection code and message"
+            )
         base.update(
             {
-                "reason_code": reason,
+                "reason_code": "WHITEBIT_"
+                + _text(result.rejection_code, name="rejection_code"),
                 "evidence": evidence,
                 "retry_disposition": "NEVER",
             }
@@ -798,7 +866,6 @@ def canonical_submission_result(
         return base
 
     raise WhiteBitAdapterError("unsupported submission outcome")
-
 
 @dataclass(frozen=True)
 class WhiteBitOrderSnapshot:

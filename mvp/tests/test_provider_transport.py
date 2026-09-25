@@ -10,6 +10,11 @@ from mvp.autotrade_mvp.capabilities import (
     EvidenceVerification,
     derive_capability_snapshot,
 )
+from mvp.autotrade_mvp.alpaca import (
+    AlpacaOrderIntent,
+    guarded_order_projection as alpaca_guarded_order_projection,
+    prepare_order_request as prepare_alpaca_order_request,
+)
 from mvp.autotrade_mvp.binance_spot import parse_account_trades
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -19,9 +24,11 @@ from mvp.autotrade_mvp.provider_core import (
     prepare_authenticated_read_query,
 )
 from mvp.autotrade_mvp.provider_transport import (
+    ALPACA_ENDPOINT_POLICIES,
     BINANCE_SPOT_ENDPOINT_POLICIES,
     AuthenticatedReadHttpRequest,
     AuthenticatedReadWireResponse,
+    AlpacaTradingHttpTransport,
     BinanceSpotAuthenticatedReadSigner,
     BinanceSpotAuthenticatedReadTransport,
     BinanceSpotHttpTransport,
@@ -113,6 +120,84 @@ def trade_handle(*, environment="PAPER", account_id="acct-1"):
         environment=environment,
         purpose="TRADE",
         generation=1,
+    )
+
+
+def alpaca_trade_handle(*, environment="PAPER", account_id="acct-alpaca"):
+    return PersistentCredentialHandle(
+        handle_id="cred-alpaca-trade",
+        account_id=account_id,
+        provider="ALPACA",
+        environment=environment,
+        purpose="TRADE",
+        generation=1,
+    )
+
+
+ALPACA_NOW = datetime(2026, 9, 25, 10, 0, tzinfo=timezone.utc)
+ALPACA_SNAPSHOT_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+_ALPACA_ARTIFACT_IDS = {
+    "DOCUMENTED": "51111111-1111-4111-8111-111111111111",
+    "API": "52222222-2222-4222-8222-222222222222",
+    "ACCOUNT": "53333333-3333-4333-8333-333333333333",
+    "INSTRUMENT": "54444444-4444-4444-8444-444444444444",
+}
+
+
+def verified_alpaca_capability():
+    observed = ALPACA_NOW - timedelta(minutes=1)
+    expires = ALPACA_NOW + timedelta(minutes=10)
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            provider_id="ALPACA",
+            account_id="acct-alpaca",
+            entity_id="entity-alpaca",
+            environment="PAPER",
+            instrument_version="AAPL@1",
+            observed_at=observed,
+            expires_at=expires,
+            supported_order_types=frozenset({"LIMIT"}),
+            time_in_force=frozenset({"DAY"}),
+            permission_scopes=frozenset({"ORDER_WRITE"}),
+            position_mode="NET",
+            native_protection=frozenset(),
+            rate_limit_policy_id="alpaca-paper-v1",
+            data_entitlements=frozenset({"ORDERS"}),
+            evidence_ref={
+                "artifact_id": _ALPACA_ARTIFACT_IDS[source],
+                "sha256": "sha256:" + "b" * 64,
+                "observed_at": observed.isoformat().replace("+00:00", "Z"),
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    return derive_capability_snapshot(
+        snapshot_id=ALPACA_SNAPSHOT_ID,
+        claims=claims,
+        observed_at=ALPACA_NOW,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    )
+
+
+def alpaca_prepared_request(client_order_id="at-alpaca-1"):
+    intent = AlpacaOrderIntent.create(
+        instrument_version="AAPL@1",
+        asset_class="EQUITY",
+        symbol="AAPL",
+        side="BUY",
+        order_type="LIMIT",
+        time_in_force="DAY",
+        quantity=Decimal("1"),
+        limit_price=Decimal("200.25"),
+    )
+    return prepare_alpaca_order_request(
+        intent,
+        client_order_id=client_order_id,
+        account_id="acct-alpaca",
+        environment="PAPER",
+        capability=verified_alpaca_capability(),
+        at=ALPACA_NOW,
     )
 
 
@@ -252,6 +337,158 @@ def prepared_request(client_order_id, *, capability_snapshot_id="cap-1"):
         },
         "capability_snapshot_id": capability_snapshot_id,
     }
+
+
+class AlpacaProviderTransportTests(unittest.TestCase):
+    def make_transport(self, *, events, wire=None, quota_gate=None):
+        resolver = FakeSecretResolver(events)
+        transport = AlpacaTradingHttpTransport(
+            policy=ALPACA_ENDPOINT_POLICIES["PAPER"],
+            account_id="acct-alpaca",
+            capability_snapshot_id=ALPACA_SNAPSHOT_ID,
+            secret_resolver=resolver,
+            credential_handle=alpaca_trade_handle(),
+            session_token="session-token",
+            origin="https://localhost",
+            execution_identity="host-owner",
+            quota_gate=quota_gate,
+            wire_client=wire or RecordingWire(events),
+        )
+        return transport, resolver
+
+    def test_alpaca_paper_transport_binds_exact_scope_and_guarded_send(self):
+        events = []
+        wire = RecordingWire(events, response=b'{"id":"order-1","status":"accepted"}')
+
+        def quota(provider, account, environment, purpose):
+            events.append("quota")
+            self.assertEqual(
+                (provider, account, environment, purpose),
+                ("ALPACA", "acct-alpaca", "PAPER", "ORDER_WRITE"),
+            )
+
+        transport, resolver = self.make_transport(
+            events=events,
+            wire=wire,
+            quota_gate=quota,
+        )
+        prepared = alpaca_prepared_request()
+        projection = alpaca_guarded_order_projection(prepared)
+        response = transport(
+            "at-alpaca-1",
+            projection,
+            lambda: events.append("guard"),
+        )
+
+        self.assertEqual(response.payload["id"], "order-1")
+        self.assertEqual(events, ["quota", "resolve", "guard", "wire"])
+        self.assertEqual(len(resolver.calls), 1)
+        self.assertEqual(len(wire.requests), 1)
+        request = wire.requests[0]
+        self.assertEqual(
+            request.url,
+            "https://paper-api.alpaca.markets/v2/orders",
+        )
+        self.assertEqual(request.method, "POST")
+        self.assertEqual(request.headers["APCA-API-KEY-ID"], "api-key-SECRET")
+        self.assertEqual(
+            request.headers["APCA-API-SECRET-KEY"],
+            "signing-SECRET",
+        )
+        self.assertEqual(
+            json.loads(request.body.decode("utf-8")),
+            dict(prepared.body),
+        )
+
+    def test_alpaca_final_guard_failure_has_zero_outbound_requests(self):
+        events = []
+        wire = RecordingWire(events)
+        transport, resolver = self.make_transport(events=events, wire=wire)
+
+        def blocked():
+            events.append("guard")
+            raise PermissionError("authority revoked")
+
+        with self.assertRaisesRegex(PermissionError, "authority revoked"):
+            transport(
+                "at-alpaca-1",
+                alpaca_guarded_order_projection(alpaca_prepared_request()),
+                blocked,
+            )
+        self.assertEqual(events, ["resolve", "guard"])
+        self.assertEqual(len(resolver.calls), 1)
+        self.assertEqual(wire.requests, [])
+
+    def test_alpaca_scope_and_digest_mismatch_fail_before_secret_or_wire(self):
+        mutations = (
+            ("account_id", "other-account", "account mismatch"),
+            ("environment", "LIVE", "environment mismatch"),
+            ("capability_snapshot_id", "other-cap", "capability snapshot mismatch"),
+            ("body_sha256", "sha256:" + "0" * 64, "body digest mismatch"),
+        )
+        for field, value, message in mutations:
+            with self.subTest(field=field):
+                events = []
+                wire = RecordingWire(events)
+                transport, resolver = self.make_transport(events=events, wire=wire)
+                request = dict(
+                    alpaca_guarded_order_projection(alpaca_prepared_request())
+                )
+                request[field] = value
+                if field == "capability_snapshot_id":
+                    request["capability_snapshot_ids"] = [value]
+                with self.assertRaisesRegex(
+                    ProviderTransportScopeError,
+                    message,
+                ):
+                    transport(
+                        "at-alpaca-1",
+                        request,
+                        lambda: events.append("guard"),
+                    )
+                self.assertEqual(events, [])
+                self.assertEqual(resolver.calls, [])
+                self.assertEqual(wire.requests, [])
+
+    def test_alpaca_rejects_binary_float_before_secret_or_wire(self):
+        events = []
+        wire = RecordingWire(events)
+        transport, resolver = self.make_transport(events=events, wire=wire)
+        request = dict(
+            alpaca_guarded_order_projection(alpaca_prepared_request())
+        )
+        request["body"] = dict(request["body"])
+        request["body"]["limit_price"] = 200.25
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "binary floating",
+        ):
+            transport(
+                "at-alpaca-1",
+                request,
+                lambda: events.append("guard"),
+            )
+        self.assertEqual(events, [])
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
+
+    def test_alpaca_wrong_scoped_trade_handle_is_rejected(self):
+        events = []
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "provider/environment/purpose mismatch",
+        ):
+            AlpacaTradingHttpTransport(
+                policy=ALPACA_ENDPOINT_POLICIES["PAPER"],
+                account_id="acct-alpaca",
+                capability_snapshot_id=ALPACA_SNAPSHOT_ID,
+                secret_resolver=FakeSecretResolver(events),
+                credential_handle=alpaca_trade_handle(environment="LIVE"),
+                session_token="session-token",
+                origin="https://localhost",
+                execution_identity="host-owner",
+                wire_client=RecordingWire(events),
+            )
 
 
 class WhiteBitProviderTransportTests(unittest.TestCase):

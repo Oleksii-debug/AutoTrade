@@ -243,6 +243,26 @@ WHITEBIT_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
 )
 
 
+ALPACA_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
+    MappingProxyType(
+        {
+            "PAPER": ProviderEndpointPolicy(
+                provider_id="ALPACA",
+                environment="PAPER",
+                base_url="https://paper-api.alpaca.markets",
+                allowed_hosts=frozenset({"paper-api.alpaca.markets"}),
+            ),
+            "LIVE": ProviderEndpointPolicy(
+                provider_id="ALPACA",
+                environment="LIVE",
+                base_url="https://api.alpaca.markets",
+                allowed_hosts=frozenset({"api.alpaca.markets"}),
+            ),
+        }
+    )
+)
+
+
 @dataclass(frozen=True)
 class AuthenticatedReadEndpointRule:
     surface: Surface
@@ -902,6 +922,292 @@ class WhiteBitHttpTransport:
         if not isinstance(raw, bytes):
             raise ProviderTransportError(
                 "WhiteBIT order wire client must return exact response bytes"
+            )
+        return ExactJsonTransportResponse(raw)
+
+
+@dataclass(frozen=True)
+class AlpacaTradingCredential:
+    api_key: str
+    api_secret: str
+
+    @classmethod
+    def parse(cls, plaintext: object) -> "AlpacaTradingCredential":
+        if not isinstance(plaintext, str) or not plaintext:
+            raise ProviderTransportScopeError(
+                "Alpaca credential material is unavailable"
+            )
+        try:
+            value = json.loads(plaintext)
+        except json.JSONDecodeError as error:
+            raise ProviderTransportScopeError(
+                "Alpaca credential material has invalid format"
+            ) from error
+        if not isinstance(value, dict) or set(value) != {
+            "api_key",
+            "api_secret",
+        }:
+            raise ProviderTransportScopeError(
+                "Alpaca credential material must contain exact api_key/api_secret fields"
+            )
+        return cls(
+            api_key=_canonical_text(value["api_key"], name="api_key"),
+            api_secret=_canonical_text(value["api_secret"], name="api_secret"),
+        )
+
+
+def _reject_binary_float(value: object, *, path: str = "body") -> None:
+    if isinstance(value, float):
+        raise ProviderTransportScopeError(
+            f"{path} must not contain binary floating financial values"
+        )
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            _reject_binary_float(item, path=f"{path}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _reject_binary_float(item, path=f"{path}[{index}]")
+
+
+class AlpacaTradingHttpTransport:
+    """GuardedDispatcher-compatible Alpaca Trading API order transport.
+
+    Authentication, host selection and quota admission complete before the
+    dispatcher's final guard. Exactly one POST occurs after that guard. Any
+    post-guard transport ambiguity propagates to GuardedDispatcher as UNKNOWN.
+    """
+
+    ORDER_ENDPOINT = "/v2/orders"
+
+    def __init__(
+        self,
+        *,
+        policy: ProviderEndpointPolicy,
+        account_id: str,
+        capability_snapshot_id: str,
+        secret_resolver: ProviderSecretResolver,
+        credential_handle: PersistentCredentialHandle,
+        session_token: str,
+        origin: str,
+        execution_identity: str,
+        quota_gate: QuotaGate | None = None,
+        wire_client: ProviderWireClient | None = None,
+    ) -> None:
+        if not isinstance(policy, ProviderEndpointPolicy):
+            raise TypeError("policy must be ProviderEndpointPolicy")
+        if policy.provider_id != "ALPACA":
+            raise ProviderTransportScopeError(
+                "Alpaca Trading transport requires ALPACA policy"
+            )
+        if not isinstance(credential_handle, PersistentCredentialHandle):
+            raise TypeError(
+                "credential_handle must be PersistentCredentialHandle"
+            )
+        if (
+            credential_handle.provider != policy.provider_id
+            or credential_handle.environment != policy.environment
+            or credential_handle.purpose != "TRADE"
+        ):
+            raise ProviderTransportScopeError(
+                "credential handle provider/environment/purpose mismatch"
+            )
+        account = _canonical_text(account_id, name="account_id")
+        if credential_handle.account_id != account:
+            raise ProviderTransportScopeError(
+                "credential handle account mismatch"
+            )
+        if not hasattr(secret_resolver, "resolve_for_execution"):
+            raise TypeError(
+                "secret_resolver must implement resolve_for_execution"
+            )
+        if quota_gate is not None and not callable(quota_gate):
+            raise TypeError("quota_gate must be callable or None")
+        if wire_client is not None and not hasattr(wire_client, "send"):
+            raise TypeError("wire_client must implement send")
+
+        self.policy = policy
+        self.account_id = account
+        self.capability_snapshot_id = _canonical_text(
+            capability_snapshot_id, name="capability_snapshot_id"
+        )
+        self.secret_resolver = secret_resolver
+        self.credential_handle = credential_handle
+        self.session_token = _canonical_text(
+            session_token, name="session_token"
+        )
+        self.origin = _canonical_text(origin, name="origin")
+        self.execution_identity = _canonical_text(
+            execution_identity, name="execution_identity"
+        )
+        self.quota_gate = quota_gate
+        self.wire_client = wire_client or UrllibJsonWireClient()
+
+    @staticmethod
+    def _prepared_fields(
+        request: Mapping[str, Any],
+    ) -> tuple[str, Mapping[str, object], str, str, str, str]:
+        if not isinstance(request, Mapping):
+            raise ProviderTransportScopeError(
+                "prepared provider request must be a mapping"
+            )
+        expected = {
+            "endpoint",
+            "body",
+            "account_id",
+            "environment",
+            "capability_snapshot_id",
+            "capability_snapshot_ids",
+            "instrument_versions",
+            "body_sha256",
+        }
+        if set(request) != expected:
+            raise ProviderTransportScopeError(
+                "prepared Alpaca request fields are not canonical"
+            )
+        endpoint = _canonical_text(request["endpoint"], name="endpoint")
+        if endpoint != AlpacaTradingHttpTransport.ORDER_ENDPOINT:
+            raise ProviderTransportScopeError(
+                "Alpaca transport received an unsupported endpoint"
+            )
+        body = request["body"]
+        if not isinstance(body, Mapping) or not body:
+            raise ProviderTransportScopeError(
+                "prepared Alpaca request body must be a non-empty mapping"
+            )
+        _reject_binary_float(body)
+        account = _canonical_text(request["account_id"], name="account_id")
+        environment = _canonical_environment(request["environment"])
+        capability = _canonical_text(
+            request["capability_snapshot_id"],
+            name="capability_snapshot_id",
+        )
+        raw_capabilities = request["capability_snapshot_ids"]
+        raw_instruments = request["instrument_versions"]
+        if (
+            not isinstance(raw_capabilities, (list, tuple))
+            or not raw_capabilities
+            or not isinstance(raw_instruments, (list, tuple))
+            or not raw_instruments
+            or len(raw_capabilities) != len(raw_instruments)
+        ):
+            raise ProviderTransportScopeError(
+                "Alpaca capability and instrument bindings must be aligned non-empty sequences"
+            )
+        capabilities = tuple(
+            _canonical_text(value, name="capability_snapshot_id")
+            for value in raw_capabilities
+        )
+        if capability not in capabilities:
+            raise ProviderTransportScopeError(
+                "primary Alpaca capability snapshot is not in the prepared binding"
+            )
+        for value in raw_instruments:
+            _canonical_text(value, name="instrument_version")
+
+        rendered = json.dumps(
+            dict(body),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        digest = _canonical_text(request["body_sha256"], name="body_sha256")
+        actual_digest = "sha256:" + sha256(rendered).hexdigest()
+        if digest != actual_digest:
+            raise ProviderTransportScopeError(
+                "prepared Alpaca request body digest mismatch"
+            )
+        return (
+            endpoint,
+            MappingProxyType(dict(body)),
+            account,
+            environment,
+            capability,
+            actual_digest,
+        )
+
+    def __call__(
+        self,
+        client_order_id: str,
+        request: Mapping[str, Any],
+        final_guard: Callable[[], None],
+    ) -> ExactJsonTransportResponse:
+        if not callable(final_guard):
+            raise TypeError("final_guard must be callable")
+        client_id = _canonical_text(
+            client_order_id, name="client_order_id"
+        )
+        endpoint, body, account, environment, capability, _digest = (
+            self._prepared_fields(request)
+        )
+        if account != self.account_id:
+            raise ProviderTransportScopeError(
+                "prepared request account mismatch"
+            )
+        if environment != self.policy.environment:
+            raise ProviderTransportScopeError(
+                "prepared request environment mismatch"
+            )
+        if capability != self.capability_snapshot_id:
+            raise ProviderTransportScopeError(
+                "prepared request capability snapshot mismatch"
+            )
+        if body.get("client_order_id") != client_id:
+            raise ProviderTransportScopeError(
+                "prepared request client order identity mismatch"
+            )
+
+        if self.quota_gate is not None:
+            self.quota_gate(
+                self.policy.provider_id,
+                self.account_id,
+                self.policy.environment,
+                "ORDER_WRITE",
+            )
+
+        credential_plaintext = self.secret_resolver.resolve_for_execution(
+            self.session_token,
+            origin=self.origin,
+            handle=self.credential_handle,
+            execution_identity=self.execution_identity,
+            account_id=self.account_id,
+            provider=self.policy.provider_id,
+            environment=self.policy.environment,
+            purpose="TRADE",
+        )
+        try:
+            credential = AlpacaTradingCredential.parse(
+                credential_plaintext
+            )
+            exact_body = json.dumps(
+                dict(body),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+            signed = SignedHttpRequest(
+                method="POST",
+                url=self.policy.absolute_url(endpoint),
+                headers=MappingProxyType(
+                    {
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                        "APCA-API-KEY-ID": credential.api_key,
+                        "APCA-API-SECRET-KEY": credential.api_secret,
+                    }
+                ),
+                body=exact_body,
+                timeout_seconds=self.policy.timeout_seconds,
+            )
+        finally:
+            credential_plaintext = None
+
+        final_guard()
+        raw = self.wire_client.send(signed)
+        if not isinstance(raw, bytes):
+            raise ProviderTransportError(
+                "Alpaca order wire client must return exact response bytes"
             )
         return ExactJsonTransportResponse(raw)
 

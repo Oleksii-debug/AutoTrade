@@ -1124,7 +1124,6 @@ class AlpacaTradingHttpTransport:
         self.capability_snapshot_id = _canonical_text(
             capability_snapshot_id, name="capability_snapshot_id"
         )
-        self.capability_registry = capability_registry
         self.secret_resolver = secret_resolver
         self.credential_handle = credential_handle
         self.session_token = _canonical_text(
@@ -1176,7 +1175,6 @@ class AlpacaTradingHttpTransport:
             request["capability_snapshot_id"],
             name="capability_snapshot_id",
         )
-        entity_id = _canonical_text(request["entity_id"], name="entity_id")
         raw_capabilities = request["capability_snapshot_ids"]
         raw_instruments = request["instrument_versions"]
         if (

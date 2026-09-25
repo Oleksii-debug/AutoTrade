@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 import zipfile
 
-from tools.build_windows_bundle import BundleError, build_bundle
+from tools.build_windows_bundle import BundleError, _windows_path_key, build_bundle
 
 
 SOURCE_SHA = "a" * 40
@@ -339,30 +339,16 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             )
 
     def test_windows_reserved_and_trailing_dot_paths_are_rejected(self):
-        reserved = self.staging / "CON.txt"
-        reserved.write_bytes(b"reserved")
         with self.assertRaisesRegex(BundleError, "reserved device name"):
-            build_bundle(
-                staging=self.staging,
-                output=self.root / "reserved.zip",
-                version="0.1.0-dev",
-                source_sha=SOURCE_SHA,
-                mode="diagnostics",
-                provenance_path=self.provenance(eligible=False),
-            )
-        reserved.unlink()
-
-        trailing = self.staging / "report."
-        trailing.write_bytes(b"ambiguous")
+            _windows_path_key("CON.txt")
+        with self.assertRaisesRegex(BundleError, "reserved device name"):
+            _windows_path_key("nested/LPT9.log")
         with self.assertRaisesRegex(BundleError, "trailing space/dot"):
-            build_bundle(
-                staging=self.staging,
-                output=self.root / "trailing-dot.zip",
-                version="0.1.0-dev",
-                source_sha=SOURCE_SHA,
-                mode="diagnostics",
-                provenance_path=self.provenance(eligible=False),
-            )
+            _windows_path_key("nested/report.")
+        with self.assertRaisesRegex(BundleError, "trailing space/dot"):
+            _windows_path_key("nested/report ")
+        with self.assertRaisesRegex(BundleError, "alternate-data-stream"):
+            _windows_path_key("nested/report.txt:payload")
 
     def test_source_sha_and_empty_staging_are_rejected(self):
         with self.assertRaisesRegex(BundleError, "source_sha"):

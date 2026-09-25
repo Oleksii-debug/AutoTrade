@@ -307,6 +307,89 @@ class DurableReservationBookTests(unittest.TestCase):
         )
         self.assertEqual(restarted.total_reserved("CASH:USD"), Decimal("0"))
 
+    def test_terminal_release_rejects_cross_scope_reconciliation_after_restart(self):
+        book = self.book()
+        self.reserve(book)
+        book.mark_unknown(
+            command_id="cmd-unknown-cross-scope",
+            idempotency_key="idem-unknown-cross-scope",
+            reservation_id="r1",
+        )
+        self.create_unknown_attempt()
+        reconciliation = self.record_reconciliation_resolution()
+
+        cases = (
+            (
+                "provider_id",
+                "OTHER-PROVIDER",
+                "88888888-8888-4888-8888-888888888881",
+                "00000000-0000-4000-8000-000000000081",
+            ),
+            (
+                "account_id",
+                "other-account",
+                "88888888-8888-4888-8888-888888888882",
+                "00000000-0000-4000-8000-000000000082",
+            ),
+            (
+                "environment",
+                "LIVE",
+                "88888888-8888-4888-8888-888888888883",
+                "00000000-0000-4000-8000-000000000083",
+            ),
+        )
+        restart_evidence = None
+        for field, wrong_value, artifact_id, event_id in cases:
+            with self.subTest(field=field):
+                cross_payload = dict(reconciliation["payload"])
+                cross_payload[field] = wrong_value
+                cross_event = dict(reconciliation)
+                cross_event["event_id"] = event_id
+                cross_event["aggregate_id"] = "cross-scope-" + field
+                cross_event["aggregate_version"] = "1"
+                cross_event["payload"] = cross_payload
+                cross_event["payload_hash"] = payload_digest(cross_payload)
+                self.store.append_event(cross_event)
+                evidence = self.publish_resolution_evidence(
+                    artifact_id=artifact_id,
+                    reconciliation_event=cross_event,
+                )
+                if field == "account_id":
+                    restart_evidence = evidence
+                with self.assertRaisesRegex(
+                    ReservationConflict,
+                    "reconciliation checkpoint scope",
+                ):
+                    book.mark_terminal(
+                        command_id="cmd-terminal-cross-" + field,
+                        idempotency_key="idem-terminal-cross-" + field,
+                        reservation_id="r1",
+                        outcome="PROVEN_ABSENT",
+                        provider="SIMULATED",
+                        attempt_id="attempt-r1",
+                        resolution_evidence=evidence,
+                    )
+
+        restarted = self.book()
+        self.assertEqual(restarted.get("r1").state, "UNKNOWN")
+        self.assertEqual(restarted.total_reserved("CASH:USD"), Decimal("70"))
+        self.assertIsNotNone(restart_evidence)
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "reconciliation checkpoint scope",
+        ):
+            restarted.mark_terminal(
+                command_id="cmd-terminal-cross-restart",
+                idempotency_key="idem-terminal-cross-restart",
+                reservation_id="r1",
+                outcome="PROVEN_ABSENT",
+                provider="SIMULATED",
+                attempt_id="attempt-r1",
+                resolution_evidence=restart_evidence,
+            )
+        self.assertEqual(restarted.get("r1").state, "UNKNOWN")
+        self.assertEqual(restarted.total_reserved("CASH:USD"), Decimal("70"))
+
     def test_observed_execution_does_not_prove_full_fill_or_release_buffer(self):
         book = self.book()
         self.reserve(book, amount="70")

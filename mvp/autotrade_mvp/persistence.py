@@ -620,7 +620,7 @@ class JournalStore:
                     raise ValueError(
                         "journal event envelope conflicts with core journal event"
                     )
-        return {
+        decoded = {
             "event_id": row["event_id"],
             "event_type": row["event_type"],
             "aggregate_type": row["aggregate_type"],
@@ -630,6 +630,25 @@ class JournalStore:
             "payload_hash": row["payload_hash"],
             "committed_at": row["committed_at"],
         }
+        if "envelope_json" in row_keys:
+            # The full immutable envelope is authoritative for runtime metadata
+            # (environment, owner epoch, causation/correlation, evidence refs,
+            # etc.). Preserve those fields after integrity verification while
+            # retaining the historical load API's integer aggregate_version.
+            decoded = dict(envelope)
+            decoded.update(
+                {
+                    "event_id": row["event_id"],
+                    "event_type": row["event_type"],
+                    "aggregate_type": row["aggregate_type"],
+                    "aggregate_id": row["aggregate_id"],
+                    "aggregate_version": row["aggregate_version"],
+                    "payload": payload,
+                    "payload_hash": row["payload_hash"],
+                    "committed_at": row["committed_at"],
+                }
+            )
+        return decoded
 
     def get_event(self, event_id: str) -> dict[str, Any] | None:
         event_id = self._require_text(event_id, "event_id")

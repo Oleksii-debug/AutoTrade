@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Mapping
+from uuid import NAMESPACE_URL, UUID, uuid5
 import base64
 import hashlib
 import hmac
@@ -95,6 +96,11 @@ def _instant(value: datetime, *, name: str) -> datetime:
 
 def _decimal_text(value: Decimal) -> str:
     return format(value, "f")
+
+
+def _utc_text(value: datetime, *, name: str) -> str:
+    point = _instant(value, name=name)
+    return point.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def validate_client_order_id(value: str) -> str:
@@ -673,6 +679,125 @@ def parse_submission_result(
         "HTTP outcome is not qualified as definitive acceptance or rejection; "
         "record transport as UNKNOWN and reconcile"
     )
+
+
+def canonical_submission_result(
+    result: WhiteBitSubmissionResult,
+    *,
+    source_uri: str,
+) -> dict[str, object]:
+    """Project the rich WhiteBIT attempt DTO onto canonical SubmissionResult.
+
+    Account/environment/local observation remain durable SubmissionAttempt facts.
+    The current provider DTO has no independent provider-receive timestamp, so
+    this boundary deliberately omits provider_received_at instead of inventing it.
+    """
+
+    if not isinstance(result, WhiteBitSubmissionResult):
+        raise TypeError("result must be WhiteBitSubmissionResult")
+    try:
+        attempt_id = str(UUID(result.attempt_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise WhiteBitAdapterError(
+            "canonical SubmissionResult attempt_id must be a UUID"
+        ) from error
+
+    environment = _text(result.environment, name="environment").upper()
+    if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+        raise WhiteBitAdapterError(
+            "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
+        )
+    source = _text(source_uri, name="source_uri")
+    if not source.startswith("https://whitebit.com/"):
+        raise WhiteBitAdapterError(
+            "canonical WhiteBIT response evidence requires an HTTPS whitebit.com source_uri"
+        )
+
+    base: dict[str, object] = {
+        "attempt_id": attempt_id,
+        "outcome": result.outcome,
+        "client_order_id": result.client_order_id,
+    }
+    if result.outcome == "UNKNOWN":
+        if (
+            result.response_sha256 is not None
+            or result.http_status is not None
+            or result.provider_order_id is not None
+            or result.rejection_code is not None
+            or result.rejection_message is not None
+        ):
+            raise WhiteBitAdapterError(
+                "UNKNOWN submission cannot claim authoritative provider response evidence"
+            )
+        base.update(
+            {
+                "reason_code": "WHITEBIT_TRANSPORT_AMBIGUOUS",
+                "evidence": [],
+                "retry_disposition": "RECONCILE_FIRST",
+            }
+        )
+        return base
+
+    if result.response_sha256 is None or result.http_status is None:
+        raise WhiteBitAdapterError(
+            "authoritative WhiteBIT outcome requires response digest and HTTP status"
+        )
+    evidence = [
+        {
+            "artifact_id": str(
+                uuid5(NAMESPACE_URL, f"{source}#{result.response_sha256}")
+            ),
+            "sha256": result.response_sha256,
+            "source_uri": source,
+            "observed_at": _utc_text(result.observed_at, name="observed_at"),
+            "rights_id": "provider-observation-whitebit",
+        }
+    ]
+
+    if result.outcome == "ACKNOWLEDGED":
+        if result.http_status != 200:
+            raise WhiteBitAdapterError(
+                "ACKNOWLEDGED WhiteBIT outcome requires qualified HTTP 200 response"
+            )
+        if result.rejection_code is not None or result.rejection_message is not None:
+            raise WhiteBitAdapterError(
+                "ACKNOWLEDGED outcome cannot carry rejection evidence"
+            )
+        base.update(
+            {
+                "provider_order_id": _text(
+                    result.provider_order_id, name="provider_order_id"
+                ),
+                "evidence": evidence,
+                "retry_disposition": "NEVER",
+            }
+        )
+        return base
+
+    if result.outcome == "REJECTED":
+        if result.http_status != 422:
+            raise WhiteBitAdapterError(
+                "REJECTED WhiteBIT outcome requires qualified HTTP 422 response"
+            )
+        if result.provider_order_id is not None:
+            raise WhiteBitAdapterError(
+                "REJECTED outcome cannot claim provider_order_id"
+            )
+        reason = (
+            f"WHITEBIT_{_text(result.rejection_code, name='rejection_code')}"
+            if result.rejection_code is not None
+            else "WHITEBIT_REJECTED"
+        )
+        base.update(
+            {
+                "reason_code": reason,
+                "evidence": evidence,
+                "retry_disposition": "NEVER",
+            }
+        )
+        return base
+
+    raise WhiteBitAdapterError("unsupported submission outcome")
 
 
 @dataclass(frozen=True)

@@ -436,13 +436,12 @@ def parse_submission_response(
             raise AlpacaAdapterError(
                 "ambiguous transport must not fabricate a provider response"
             )
+        # Scope/time remain on the durable SubmissionAttempt. Transport
+        # ambiguity has no authoritative provider receive timestamp.
         return {
             "attempt_id": aid,
             "outcome": "UNKNOWN",
             "client_order_id": cid,
-            "provider_received_at": None,
-            "observed_at": when,
-            "provider_environment": env,
             "reason_code": "ALPACA_TRANSPORT_AMBIGUOUS",
             "evidence": [],
             "retry_disposition": "RECONCILE_FIRST",

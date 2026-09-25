@@ -22,6 +22,7 @@ from mvp.autotrade_mvp.reconciliation_journal import (
     record_reconciliation_checkpoint,
 )
 from mvp.autotrade_mvp.risk import RiskContext
+from mvp.tests.borrow_evidence_helpers import EvidencedBorrowJournal
 
 
 INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
@@ -161,7 +162,7 @@ class BorrowReconciliationTests(unittest.TestCase):
         self.temp = TemporaryDirectory()
         self.path = f"{self.temp.name}/journal.sqlite3"
         self.store = JournalStore(self.path)
-        self.journal = BorrowLifecycleJournal(self.store, resource())
+        self.journal = EvidencedBorrowJournal(self.store, resource())
 
     def tearDown(self):
         self.temp.cleanup()
@@ -245,7 +246,7 @@ class BorrowReconciliationTests(unittest.TestCase):
         self.record_clean_provider_truth()
         self.journal.record_recall(recall())
 
-        restarted = BorrowLifecycleJournal(
+        restarted = EvidencedBorrowJournal(
             JournalStore(self.path),
             resource(),
         )
@@ -274,7 +275,7 @@ class BorrowReconciliationTests(unittest.TestCase):
 
         # No ACK/timeout/attempted-close method exists on the borrow journal;
         # a restart therefore retains the provider obligation unchanged.
-        restarted_again = BorrowLifecycleJournal(
+        restarted_again = EvidencedBorrowJournal(
             JournalStore(self.path),
             resource(),
         )
@@ -288,7 +289,7 @@ class BorrowReconciliationTests(unittest.TestCase):
         self.journal.record_recall(recall())
         self.journal.record_recall_resolution(resolution(quantity="1"))
 
-        restarted = BorrowLifecycleJournal(
+        restarted = EvidencedBorrowJournal(
             JournalStore(self.path),
             resource(),
         )

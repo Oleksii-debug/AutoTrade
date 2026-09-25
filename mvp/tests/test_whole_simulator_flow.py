@@ -509,5 +509,66 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             )
 
 
+    def test_stable_client_order_id_dedupes_across_distinct_local_attempts(self):
+        provider = SimulatedProvider(account_id="sim-account", initial_cash="1000")
+        first_attempt = str(uuid4())
+        second_attempt = str(uuid4())
+
+        first = provider.submit_order(
+            attempt_id=first_attempt,
+            client_order_id="stable-economic-intent",
+            instrument_version=INSTRUMENT,
+            side="BUY",
+            quantity="1",
+            price="100",
+            now=NOW,
+            fill_immediately=False,
+        )
+        second = provider.submit_order(
+            attempt_id=second_attempt,
+            client_order_id="stable-economic-intent",
+            instrument_version=INSTRUMENT,
+            side="BUY",
+            quantity="1",
+            price="100",
+            now=LATER,
+            fill_immediately=True,
+        )
+
+        self.assertEqual(first["provider_order_id"], second["provider_order_id"])
+        self.assertEqual(first["attempt_id"], first_attempt)
+        self.assertEqual(second["attempt_id"], second_attempt)
+        self.assertEqual(len(provider.orders), 1)
+        self.assertEqual(len(provider._attempts), 2)
+        self.assertEqual(provider.activity_fills(), ())
+        self.assertEqual(provider.cash, Decimal("1000"))
+
+    def test_stable_client_order_id_rejects_changed_economics_across_attempts(self):
+        provider = SimulatedProvider(account_id="sim-account", initial_cash="1000")
+        provider.submit_order(
+            attempt_id=str(uuid4()),
+            client_order_id="stable-economic-intent-conflict",
+            instrument_version=INSTRUMENT,
+            side="BUY",
+            quantity="1",
+            price="100",
+            now=NOW,
+            fill_immediately=False,
+        )
+        with self.assertRaisesRegex(ValueError, "client_order_id"):
+            provider.submit_order(
+                attempt_id=str(uuid4()),
+                client_order_id="stable-economic-intent-conflict",
+                instrument_version=INSTRUMENT,
+                side="BUY",
+                quantity="2",
+                price="100",
+                now=LATER,
+                fill_immediately=False,
+            )
+        self.assertEqual(len(provider.orders), 1)
+        self.assertEqual(provider.activity_fills(), ())
+
+
 if __name__ == "__main__":
     unittest.main()

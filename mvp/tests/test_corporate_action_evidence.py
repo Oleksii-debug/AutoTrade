@@ -1,15 +1,19 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
+from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.corporate_action_evidence import (
+    CorporateActionEvidenceConflict,
     CorporateActionEvidenceError,
     CorporateActionObservation,
+    DurableCorporateActionEvidenceStore,
     resolve_authoritative_corporate_action,
 )
 from mvp.autotrade_mvp.corporate_actions import CorporateEvent
 from mvp.autotrade_mvp.instruments import InstrumentVersion
+from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
     Surface,
     observe_authenticated_json_response,
@@ -374,6 +378,241 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
         self.assertEqual(accepted.corrects_external_event_id, "corp-old")
         self.assertEqual(accepted.provider_revision, "2")
         self.assertIn(accepted.provenance_digest, accepted.event.source_revision)
+
+
+class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
+    def _accepted(
+        self,
+        *,
+        external_event_id="corp-1",
+        revision="1",
+        observed_offset=2,
+        corrects=None,
+    ):
+        source = sealed_dividend(
+            external_event_id=external_event_id,
+            revision=revision,
+            observed_offset=observed_offset,
+        )
+        if corrects is None:
+            return resolve(source)
+
+        def correction_normalizer(value):
+            item = normalize(value)
+            return CorporateActionObservation(
+                **{
+                    **item.__dict__,
+                    "corrects_external_event_id": corrects,
+                }
+            )
+
+        return resolve(source, normalizer=correction_normalizer)
+
+    def _store(self, path, *, account_id="acct-1"):
+        journal = JournalStore(path)
+        durable = DurableCorporateActionEvidenceStore(
+            journal,
+            provider_id="BINANCE",
+            account_id=account_id,
+            environment="PAPER",
+        )
+        return journal, durable
+
+    def test_evidence_is_exactly_once_across_restart(self):
+        accepted = self._accepted()
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            first = durable.record(accepted)
+            self.assertTrue(first.inserted)
+            self.assertEqual(first.aggregate_version, 1)
+
+            reopened, restarted = self._store(path)
+            replay = restarted.record(accepted)
+            self.assertFalse(replay.inserted)
+            self.assertEqual(replay.event_id, first.event_id)
+            self.assertEqual(replay.provenance_digest, first.provenance_digest)
+            events = reopened.load_events(
+                "corporate_action_evidence",
+                restarted.aggregate_id,
+            )
+            self.assertEqual(len(events), 1)
+            self.assertEqual(
+                events[0]["payload"]["evidence_ref"],
+                accepted.evidence_ref,
+            )
+            self.assertEqual(
+                events[0]["payload"]["provenance_digest"],
+                accepted.provenance_digest,
+            )
+
+    def test_durable_scope_mismatch_fails_before_journal_mutation(self):
+        accepted = self._accepted()
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path, account_id="other-account")
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceConflict, "durable scope"
+            ):
+                durable.record(accepted)
+            self.assertEqual(
+                journal.load_events(
+                    "corporate_action_evidence",
+                    durable.aggregate_id,
+                ),
+                [],
+            )
+
+    def test_same_external_identity_with_changed_evidence_conflicts(self):
+        original = self._accepted()
+        changed = self._accepted(
+            external_event_id="corp-1",
+            revision="2",
+            observed_offset=3,
+        )
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            durable.record(original)
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceConflict, "reused with changed evidence"
+            ):
+                durable.record(changed)
+            self.assertEqual(
+                len(
+                    journal.load_events(
+                        "corporate_action_evidence",
+                        durable.aggregate_id,
+                    )
+                ),
+                1,
+            )
+
+    def test_correction_requires_one_retained_target_and_fresh_evidence(self):
+        missing_target = self._accepted(
+            external_event_id="corp-2",
+            revision="2",
+            observed_offset=3,
+            corrects="corp-missing",
+        )
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceConflict, "target"
+            ):
+                durable.record(missing_target)
+            self.assertEqual(
+                journal.load_events(
+                    "corporate_action_evidence",
+                    durable.aggregate_id,
+                ),
+                [],
+            )
+
+            original = self._accepted()
+            durable.record(original)
+            correction = self._accepted(
+                external_event_id="corp-2",
+                revision="2",
+                observed_offset=3,
+                corrects="corp-1",
+            )
+            result = durable.record(correction)
+            self.assertTrue(result.inserted)
+            self.assertEqual(result.aggregate_version, 2)
+            self.assertEqual(result.corrects_external_event_id, "corp-1")
+
+            restarted_journal, restarted = self._store(path)
+            replay = restarted.record(correction)
+            self.assertFalse(replay.inserted)
+            self.assertEqual(replay.event_id, result.event_id)
+            self.assertEqual(
+                len(
+                    restarted_journal.load_events(
+                        "corporate_action_evidence",
+                        restarted.aggregate_id,
+                    )
+                ),
+                2,
+            )
+
+    def test_second_correction_for_same_provider_fact_is_rejected(self):
+        original = self._accepted()
+        correction = self._accepted(
+            external_event_id="corp-2",
+            revision="2",
+            observed_offset=3,
+            corrects="corp-1",
+        )
+        second = self._accepted(
+            external_event_id="corp-3",
+            revision="3",
+            observed_offset=4,
+            corrects="corp-1",
+        )
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            durable.record(original)
+            durable.record(correction)
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceConflict, "already has a correction"
+            ):
+                durable.record(second)
+            self.assertEqual(
+                len(
+                    journal.load_events(
+                        "corporate_action_evidence",
+                        durable.aggregate_id,
+                    )
+                ),
+                2,
+            )
+
+    def test_correction_cannot_change_immutable_action_identity(self):
+        original = self._accepted()
+        correction = self._accepted(
+            external_event_id="corp-2",
+            revision="2",
+            observed_offset=3,
+            corrects="corp-1",
+        )
+
+        changed_event = CorporateEvent.create(
+            event_id=correction.event.event_id,
+            instrument_id=correction.event.instrument_id,
+            instrument_version=correction.event.instrument_version,
+            kind="SPLIT",
+            effective_date=correction.event.effective_date,
+            effective_at=correction.event.effective_at,
+            source_revision=correction.event.source_revision,
+            source_sequence=correction.event.source_sequence,
+            payload={"numerator": "2", "denominator": "1"},
+        )
+        changed = type(correction)(
+            **{
+                **correction.__dict__,
+                "event": changed_event,
+            }
+        )
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            durable.record(original)
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceConflict, "immutable action identity"
+            ):
+                durable.record(changed)
+            self.assertEqual(
+                len(
+                    journal.load_events(
+                        "corporate_action_evidence",
+                        durable.aggregate_id,
+                    )
+                ),
+                1,
+            )
 
 
 if __name__ == "__main__":

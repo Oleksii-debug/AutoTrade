@@ -80,6 +80,8 @@ class JournalTransaction:
     reverses_transaction_id: str | None = None
     economic_effective_at: str | None = None
     economic_order_key: str | None = None
+    observed_at: str | None = None
+    corrects_transaction_id: str | None = None
 
 
 def _normalized_transaction(transaction: JournalTransaction) -> JournalTransaction:
@@ -113,6 +115,12 @@ def _normalized_transaction(transaction: JournalTransaction) -> JournalTransacti
             if transaction.economic_order_key is not None
             else None
         ),
+        observed_at=_instant(transaction.observed_at, field="observed_at"),
+        corrects_transaction_id=(
+            _name(transaction.corrects_transaction_id, field="corrects_transaction_id")
+            if transaction.corrects_transaction_id is not None
+            else None
+        ),
     )
 
 
@@ -128,12 +136,14 @@ def canonical_transaction(transaction: JournalTransaction) -> dict[str, object]:
     normalized = _normalized_transaction(transaction)
     validate_transaction(normalized)
     return {
-        "schema_version": "1.1.0",
+        "schema_version": "1.2.0",
         "transaction_id": normalized.transaction_id,
         "cause_event_id": normalized.cause_event_id,
         "reverses_transaction_id": normalized.reverses_transaction_id,
         "economic_effective_at": normalized.economic_effective_at,
         "economic_order_key": normalized.economic_order_key,
+        "observed_at": normalized.observed_at,
+        "corrects_transaction_id": normalized.corrects_transaction_id,
         "postings": [
             {
                 "ledger_account": item.ledger_account,
@@ -165,6 +175,28 @@ def validate_transaction(transaction: JournalTransaction) -> None:
         raise ValueError(
             "economic_effective_at and economic_order_key must be supplied together"
         )
+    observed = _instant(transaction.observed_at, field="observed_at")
+    if effective is not None and observed is not None:
+        if _instant_value(observed, field="observed_at") < _instant_value(
+            effective,
+            field="economic_effective_at",
+        ):
+            raise ValueError("observed_at cannot precede economic_effective_at")
+    if transaction.corrects_transaction_id is not None:
+        corrected_id = _name(
+            transaction.corrects_transaction_id,
+            field="corrects_transaction_id",
+        )
+        if corrected_id == transaction.transaction_id:
+            raise ValueError("transaction cannot correct itself")
+        if transaction.reverses_transaction_id is not None:
+            raise ValueError(
+                "transaction cannot both reverse and replace corrected economics"
+            )
+        if effective is None or order_key is None or observed is None:
+            raise ValueError(
+                "correction replacement requires economic ordering and observation evidence"
+            )
     if len(transaction.postings) < 2:
         raise ValueError("A journal transaction requires at least two postings")
     totals: dict[str, Decimal] = {}
@@ -186,6 +218,7 @@ class EconomicBook:
         self._by_id: dict[str, JournalTransaction] = {}
         self._by_cause_event_id: dict[str, JournalTransaction] = {}
         self._reversed_transaction_ids: set[str] = set()
+        self._replacement_by_corrected_id: dict[str, str] = {}
         for transaction in transactions:
             self.append(transaction)
 
@@ -225,11 +258,50 @@ class EconomicBook:
             )
             if normalized.postings != expected:
                 raise AccountingConflict("A reversal must exactly negate the original postings")
+
+        if normalized.corrects_transaction_id is not None:
+            corrected_id = normalized.corrects_transaction_id
+            corrected = self._by_id.get(corrected_id)
+            if corrected is None:
+                raise AccountingConflict("Cannot correct an unknown transaction")
+            if corrected_id not in self._reversed_transaction_ids:
+                raise AccountingConflict(
+                    "Correction replacement requires an explicit prior reversal"
+                )
+            existing_replacement = self._replacement_by_corrected_id.get(corrected_id)
+            if existing_replacement not in {None, transaction_id}:
+                raise AccountingConflict(
+                    "Corrected transaction already has a different replacement"
+                )
+            if (
+                corrected.economic_effective_at != normalized.economic_effective_at
+                or corrected.economic_order_key != normalized.economic_order_key
+            ):
+                raise AccountingConflict(
+                    "Correction replacement must preserve economic ordering identity"
+                )
+            reversal = next(
+                (
+                    item
+                    for item in self._transactions
+                    if item.reverses_transaction_id == corrected_id
+                ),
+                None,
+            )
+            if reversal is None or reversal.observed_at != normalized.observed_at:
+                raise AccountingConflict(
+                    "Correction reversal/replacement observation evidence does not match"
+                )
+
         self._by_id[transaction_id] = normalized
         self._by_cause_event_id[cause_event_id] = normalized
         self._transactions.append(normalized)
         if normalized.reverses_transaction_id is not None:
             self._reversed_transaction_ids.add(normalized.reverses_transaction_id)
+        if normalized.corrects_transaction_id is not None:
+            self._replacement_by_corrected_id[
+                normalized.corrects_transaction_id
+            ] = transaction_id
         return True
 
     def append_batch(self, transactions: Iterable[JournalTransaction]) -> bool:
@@ -257,6 +329,9 @@ class EconomicBook:
         self._by_id = candidate._by_id.copy()
         self._by_cause_event_id = candidate._by_cause_event_id.copy()
         self._reversed_transaction_ids = candidate._reversed_transaction_ids.copy()
+        self._replacement_by_corrected_id = (
+            candidate._replacement_by_corrected_id.copy()
+        )
         return True
 
     def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
@@ -390,6 +465,8 @@ def book_equity_fill(
     fee_currency: str | None = None,
     economic_effective_at: str | None = None,
     economic_order_key: str | None = None,
+    observed_at: str | None = None,
+    corrects_transaction_id: str | None = None,
 ) -> JournalTransaction:
     symbol = _name(instrument, field="instrument")
     settlement = _name(settlement_currency, field="settlement_currency")
@@ -424,6 +501,8 @@ def book_equity_fill(
         postings=tuple(items),
         economic_effective_at=economic_effective_at,
         economic_order_key=economic_order_key,
+        observed_at=observed_at,
+        corrects_transaction_id=corrects_transaction_id,
     )
     validate_transaction(transaction)
     return transaction
@@ -465,6 +544,7 @@ def reverse_transaction(
     *,
     transaction_id: str,
     cause_event_id: str,
+    observed_at: str | None = None,
 ) -> JournalTransaction:
     validate_transaction(original)
     transaction = JournalTransaction(
@@ -477,6 +557,7 @@ def reverse_transaction(
         reverses_transaction_id=original.transaction_id,
         economic_effective_at=original.economic_effective_at,
         economic_order_key=original.economic_order_key,
+        observed_at=observed_at,
     )
     validate_transaction(transaction)
     return transaction
@@ -652,16 +733,43 @@ def project_equity_position(
         for transaction in transactions
         if transaction.reverses_transaction_id is not None
     }
-    has_position_correction = any(
-        _canonical_equity_fill_terms(
+    position_corrections = [
+        transaction
+        for transaction in transactions
+        if transaction.reverses_transaction_id is not None
+        and _canonical_equity_fill_terms(
             by_id[transaction.reverses_transaction_id],
             instrument=symbol,
             settlement_currency=settlement,
         )
         is not None
-        for transaction in transactions
-        if transaction.reverses_transaction_id is not None
-    )
+    ]
+    has_position_correction = bool(position_corrections)
+    if has_position_correction:
+        for reversal in position_corrections:
+            corrected_id = reversal.reverses_transaction_id
+            assert corrected_id is not None
+            corrected = by_id[corrected_id]
+            replacements = [
+                item
+                for item in transactions
+                if item.corrects_transaction_id == corrected_id
+            ]
+            if len(replacements) != 1:
+                raise AccountingConflict(
+                    "Corrected FIFO history requires exactly one explicit replacement lineage"
+                )
+            replacement = replacements[0]
+            if (
+                replacement.economic_effective_at
+                != corrected.economic_effective_at
+                or replacement.economic_order_key
+                != corrected.economic_order_key
+                or replacement.observed_at != reversal.observed_at
+            ):
+                raise AccountingConflict(
+                    "Corrected FIFO lineage changed economic identity or observation evidence"
+                )
 
     active_fills: list[tuple[JournalTransaction, Decimal, Decimal]] = []
     for transaction in transactions:
@@ -789,4 +897,9 @@ def project_equity_position(
         unrealized_pnl=unrealized,
         mark_price=mark,
         lots=lots,
+        policy_version=(
+            "FIFO_GROSS_EFFECTIVE_V2"
+            if has_position_correction
+            else "FIFO_GROSS_V1"
+        ),
     )

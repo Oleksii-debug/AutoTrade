@@ -525,6 +525,8 @@ class AccountingFoundationTests(unittest.TestCase):
             price="101",
             economic_effective_at=original.economic_effective_at,
             economic_order_key=original.economic_order_key,
+            observed_at="2026-01-02T12:00:00Z",
+            corrects_transaction_id=original.transaction_id,
         )
         self.assertTrue(
             book.append_batch(
@@ -533,6 +535,7 @@ class AccountingFoundationTests(unittest.TestCase):
                         original,
                         transaction_id="buy-original-reversal",
                         cause_event_id="fill-buy-correction-reversal",
+                        observed_at="2026-01-02T12:00:00Z",
                     ),
                     replacement,
                 )
@@ -558,6 +561,45 @@ class AccountingFoundationTests(unittest.TestCase):
             ),
             projected,
         )
+
+    def test_corrected_fifo_fails_closed_without_explicit_replacement_lineage(self):
+        book = EconomicBook()
+        original = book_equity_fill(
+            transaction_id="buy-lineage",
+            cause_event_id="fill-buy-lineage",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="1",
+            price="100",
+            economic_effective_at="2026-01-01T10:00:00Z",
+            economic_order_key="provider:A:execution:lineage",
+        )
+        book.append(original)
+        reversal = reverse_transaction(
+            original,
+            transaction_id="buy-lineage-reversal",
+            cause_event_id="fill-buy-lineage-reversal",
+            observed_at="2026-01-02T10:00:00Z",
+        )
+        replacement = book_equity_fill(
+            transaction_id="buy-lineage-unbound",
+            cause_event_id="fill-buy-lineage-unbound",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="1",
+            price="101",
+            economic_effective_at=original.economic_effective_at,
+            economic_order_key=original.economic_order_key,
+        )
+        book.append_batch((reversal, replacement))
+        with self.assertRaisesRegex(AccountingConflict, "replacement lineage"):
+            project_equity_position(
+                book,
+                instrument="ABC",
+                settlement_currency="USD",
+            )
 
     def test_corrected_fifo_fails_closed_when_active_fill_lacks_order_evidence(self):
         book = EconomicBook()
@@ -594,6 +636,8 @@ class AccountingFoundationTests(unittest.TestCase):
             price="101",
             economic_effective_at=original.economic_effective_at,
             economic_order_key=original.economic_order_key,
+            observed_at="2026-01-02T12:00:00Z",
+            corrects_transaction_id=original.transaction_id,
         )
         book.append_batch(
             (

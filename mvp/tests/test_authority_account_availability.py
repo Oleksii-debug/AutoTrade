@@ -1,6 +1,8 @@
+from copy import deepcopy
 from decimal import Decimal
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.authority import (
     AuthorityConflict,
@@ -265,6 +267,65 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 reservations.total_reserved("CASH:USD"),
                 Decimal("0"),
             )
+
+    def test_resource_availability_requires_provider_provenance(self):
+        common = dict(
+            provider_id=PROVIDER_ID,
+            account_id=ACCOUNT_ID,
+            environment=ENVIRONMENT,
+            snapshot_id="availability-snapshot",
+            query_started_at="2026-09-24T18:00:00Z",
+            query_completed_at="2026-09-24T18:00:30Z",
+            valid_until="2026-09-24T18:02:00Z",
+            available_resources={"CASH:USD": "1000"},
+        )
+        with self.assertRaisesRegex(ValueError, "at least one evidence_ref"):
+            ResourceAvailabilityEvidence(**common, evidence_refs=())
+        with self.assertRaisesRegex(TypeError, "tuple of strings"):
+            ResourceAvailabilityEvidence(
+                **common,
+                evidence_refs=["provider:availability-snapshot"],
+            )
+        with self.assertRaisesRegex(ValueError, "must be unique"):
+            ResourceAvailabilityEvidence(
+                **common,
+                evidence_refs=("provider:same", " provider:same "),
+            )
+
+    def test_malformed_persisted_capacity_provenance_fails_before_reservation(self):
+        cases = (
+            ("empty", []),
+            ("wrong-type", "provider:availability-snapshot"),
+            ("duplicate", ["provider:same", " provider:same "]),
+        )
+        for label, bad_refs in cases:
+            with self.subTest(label=label), TemporaryDirectory() as directory:
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                authority = AuthorityService(store)
+                authority.register_policy(_policy())
+                checkpoint = _checkpoint(store)
+                reservations = DurableReservationBook(
+                    store,
+                    environment=ENVIRONMENT,
+                    account_id=ACCOUNT_ID,
+                )
+                tampered = deepcopy(checkpoint)
+                tampered["payload"]["resource_availability"][
+                    "evidence_refs"
+                ] = bad_refs
+
+                with patch.object(store, "get_event", return_value=tampered):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "resource availability evidence_refs",
+                    ):
+                        _admit(authority, reservations, checkpoint)
+
+                self.assertEqual(reservations.version, 0)
+                self.assertEqual(
+                    reservations.total_reserved("CASH:USD"),
+                    Decimal("0"),
+                )
 
     def test_stale_or_cross_account_checkpoint_fails_closed(self):
         with TemporaryDirectory() as directory:

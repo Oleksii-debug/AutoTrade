@@ -227,6 +227,12 @@ class ResourceAvailabilityEvidence:
             "available_resources",
             MappingProxyType(dict(sorted(normalized.items()))),
         )
+        if not isinstance(self.evidence_refs, tuple):
+            raise TypeError("evidence_refs must be a tuple of strings")
+        if not self.evidence_refs:
+            raise ValueError(
+                "resource availability requires at least one evidence_ref"
+            )
         refs: list[str] = []
         for reference in self.evidence_refs:
             ref = _text(reference, name="evidence_ref")

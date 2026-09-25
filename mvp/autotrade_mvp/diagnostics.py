@@ -33,7 +33,10 @@ def _normalized_key(value: object) -> str:
 
 _EMBEDDED_SECRET_PATTERNS = (
     re.compile(
-        r"(?i)\b(authorization|proxy-authorization)\s*[:=]\s*(bearer|basic)\s+[^\s,;]+"
+        r"(?i)\b(authorization|proxy-authorization)\s*[:=]\s*[^,;\r\n]+"
+    ),
+    re.compile(
+        r"(?i)\b(https?://)[^/@\s]+@"
     ),
     re.compile(
         r"(?i)\b(api[_-]?key|token|access[_-]?token|refresh[_-]?token|session|session[_-]?token|"
@@ -57,6 +60,8 @@ def _redact_embedded_secret_text(value: str) -> str:
             name = match.group(1)
             if name.lower() in {"authorization", "proxy-authorization"}:
                 return f"{name}: [REDACTED]"
+            if name.lower().startswith("http"):
+                return f"{name}[REDACTED]@"
             separator = "=" if "=" in match.group(0) else ":"
             return f"{name}{separator}[REDACTED]"
         redacted = pattern.sub(replacement, redacted)

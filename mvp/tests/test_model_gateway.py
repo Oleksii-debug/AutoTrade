@@ -90,6 +90,35 @@ class ModelGatewayTests(unittest.TestCase):
         )
         self.assertEqual(RouteStatus.NO_MODEL, decision.status)
 
+    def test_fixed_mode_cannot_bypass_policy_allowlist(self):
+        decision = route_model(
+            RoutingPolicy(
+                RoutingMode.FIXED,
+                fixed_model_id="fixed-but-not-approved",
+                allowed_model_ids=("approved-other",),
+                maximum_cost=Decimal("10"),
+            ),
+            request("fixed-but-not-approved", "approved-other"),
+            [
+                model(
+                    "fixed-but-not-approved",
+                    remote=False,
+                    cost="0",
+                    quality="1",
+                ),
+                model(
+                    "approved-other",
+                    remote=False,
+                    cost="0",
+                    quality="0.1",
+                ),
+            ],
+            now_utc=NOW,
+        )
+        self.assertEqual(RouteStatus.NO_MODEL, decision.status)
+        self.assertIsNone(decision.model_id)
+        self.assertEqual(decision.reason, "no_admissible_model")
+
     def test_fixed_mode_selects_only_fixed_model(self):
         decision = route_model(
             RoutingPolicy(

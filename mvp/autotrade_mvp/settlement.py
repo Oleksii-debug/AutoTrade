@@ -116,6 +116,10 @@ class SettlementBook:
                 raise SettlementConflict(
                     "settled obligation evidence cannot reference an unknown obligation"
                 )
+            if key in self._settlement_evidence:
+                raise SettlementConflict(
+                    "settled obligation evidence contains duplicate normalized obligation ids"
+                )
             self._settled_ids.add(key)
             self._settlement_evidence[key] = evidence
 

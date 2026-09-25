@@ -311,6 +311,7 @@ class SecurityBoundaryTests(unittest.TestCase):
             account_id="paper-account-1",
             environment="PAPER",
             session_validator=self.boundary.validate_host_session,
+            request_origin_provider=lambda: self.owner.origin,
         )
         command = {
             "command_id": "11111111-1111-1111-1111-111111111111",
@@ -339,6 +340,7 @@ class SecurityBoundaryTests(unittest.TestCase):
             account_id="paper-account-1",
             environment="PAPER",
             session_validator=self.boundary.validate_host_session,
+            request_origin_provider=lambda: self.owner.origin,
         )
         operator = self.boundary.create_session(
             subject="operator",
@@ -381,6 +383,77 @@ class SecurityBoundaryTests(unittest.TestCase):
             with self.subTest(role=role), self.assertRaises(PermissionError):
                 store.submit(command)
             self.assertEqual(store.state_version, 1)
+
+    def test_operator_cannot_grant_or_revoke_authority(self):
+        operator = self.boundary.create_session(
+            subject="operator",
+            role="OPERATOR",
+            origin=self.owner.origin,
+        )
+        current_session = [operator]
+        store = HostCommandStore(
+            account_id="paper-account-1",
+            environment="PAPER",
+            session_validator=self.boundary.validate_host_session,
+            request_origin_provider=lambda: self.owner.origin,
+        )
+
+        for index, action in enumerate(("SET_AUTHORITY", "REVOKE_AUTHORITY"), start=1):
+            command = {
+                "command_id": f"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb{index}",
+                "expected_state_version": "0",
+                "idempotency_key": f"owner-only-{action.lower()}",
+                "actor": current_session[0].subject,
+                "session": current_session[0].token,
+                "account_id": "paper-account-1",
+                "environment": "PAPER",
+                "action": action,
+                "payload": {},
+            }
+            with self.subTest(action=action), self.assertRaises(PermissionError):
+                store.submit(command)
+            self.assertEqual(store.state_version, 0)
+
+        current_session[0] = self.owner
+        owner_command = {
+            "command_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "expected_state_version": "0",
+            "idempotency_key": "owner-set-authority",
+            "actor": self.owner.subject,
+            "session": self.owner.token,
+            "account_id": "paper-account-1",
+            "environment": "PAPER",
+            "action": "SET_AUTHORITY",
+            "payload": {},
+        }
+        self.assertEqual(store.submit(owner_command).status, "ACCEPTED")
+
+    def test_host_mutation_is_bound_to_current_request_origin(self):
+        current_origin = ["https://evil.invalid"]
+        store = HostCommandStore(
+            account_id="paper-account-1",
+            environment="PAPER",
+            session_validator=self.boundary.validate_host_session,
+            request_origin_provider=lambda: current_origin[0],
+        )
+        command = {
+            "command_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "expected_state_version": "0",
+            "idempotency_key": "security-origin-binding",
+            "actor": "owner",
+            "session": self.owner.token,
+            "account_id": "paper-account-1",
+            "environment": "PAPER",
+            "action": "BLOCK_NEW_EXPOSURE",
+            "payload": {},
+        }
+        with self.assertRaises(PermissionError):
+            store.submit(command)
+        self.assertEqual(store.state_version, 0)
+
+        current_origin[0] = self.owner.origin
+        self.assertEqual(store.submit(command).status, "ACCEPTED")
+        self.assertEqual(store.state_version, 1)
 
     def test_revoked_session_cannot_be_reused(self):
         token = self.owner.token

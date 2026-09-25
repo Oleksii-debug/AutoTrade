@@ -27,6 +27,15 @@ _MAX_STRING_UTF8_BYTES = 1_048_576
 _MAX_INTEGER_BITS = 4_096
 
 
+def _utf8_size(value: str, *, label: str) -> int:
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise ResearchBoundaryError(
+            f"{label} must contain valid UTF-8 text"
+        ) from error
+
+
 class _FrozenDict(MappingABC[str, object]):
     """Read-only mapping with no mutable dict base class."""
 
@@ -95,7 +104,7 @@ def _freeze_proposal(
         for key, nested in value.items():
             if not isinstance(key, str):
                 raise ResearchBoundaryError(f"{label} object keys must be strings")
-            if len(key.encode("utf-8")) > _MAX_STRING_UTF8_BYTES:
+            if _utf8_size(key, label=f"{label} object key") > _MAX_STRING_UTF8_BYTES:
                 raise ResearchBoundaryError(
                     f"{label} object key exceeds maximum text size"
                 )
@@ -123,7 +132,7 @@ def _freeze_proposal(
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, str):
-        if len(value.encode("utf-8")) > _MAX_STRING_UTF8_BYTES:
+        if _utf8_size(value, label=f"{label} text value") > _MAX_STRING_UTF8_BYTES:
             raise ResearchBoundaryError(
                 f"{label} text value exceeds maximum size"
             )

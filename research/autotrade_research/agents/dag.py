@@ -80,6 +80,7 @@ class SpecialistSpec:
 @dataclass(frozen=True)
 class SpecialistRun:
     role_id: str
+    input_snapshot_id: str
     direction: Literal["LONG", "SHORT", "FLAT"]
     score: Decimal
     confidence: Decimal
@@ -90,6 +91,11 @@ class SpecialistRun:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "role_id", _text(self.role_id, "role_id"))
+        object.__setattr__(
+            self,
+            "input_snapshot_id",
+            _text(self.input_snapshot_id, "input_snapshot_id"),
+        )
         if self.direction not in {"LONG", "SHORT", "FLAT"}:
             raise SpecialistDagError("direction must be LONG, SHORT or FLAT")
         score = _decimal(self.score, "score")
@@ -118,6 +124,7 @@ class SpecialistRun:
 
 @dataclass(frozen=True)
 class DagPlan:
+    input_snapshot_id: str
     scheduled_roles: tuple[str, ...]
     skipped_roles: tuple[tuple[str, str], ...]
     reserved_cost: Decimal
@@ -139,18 +146,20 @@ class AggregatedProposal:
 def plan_specialists(
     specs: Iterable[SpecialistSpec],
     *,
+    input_snapshot_id: str,
     available_inputs: Iterable[str],
     total_budget,
 ) -> DagPlan:
     """Choose useful dependency-satisfied roles without exceeding the hard budget."""
 
+    snapshot_id = _text(input_snapshot_id, "input_snapshot_id")
     budget = _decimal(total_budget, "total_budget", non_negative=True)
     items = tuple(specs)
     by_id = {item.role_id: item for item in items}
     if len(by_id) != len(items):
         raise SpecialistDagError("specialist role ids must be unique")
 
-    available = set(available_inputs)
+    available = {_text(item, "available input") for item in available_inputs}
     scheduled: list[str] = []
     skipped: list[tuple[str, str]] = []
     reserved = Decimal("0")
@@ -188,6 +197,7 @@ def plan_specialists(
             raise SpecialistDagError("specialist dependency graph contains a cycle")
 
     return DagPlan(
+        snapshot_id,
         tuple(scheduled),
         tuple(skipped),
         reserved,
@@ -204,21 +214,22 @@ def aggregate_specialists(
     decision_deadline: datetime,
     blocking_critique_terms: Iterable[str] = (),
 ) -> AggregatedProposal:
-    """Aggregate by correlation group so cloned/correlated roles cannot outvote evidence."""
+    """Aggregate only outputs admitted by the exact canonical specialist plan."""
 
     deadline = _utc(decision_deadline, "decision_deadline")
-    by_id = {spec.role_id: spec for spec in specs}
+    spec_items = tuple(specs)
+    by_id = {spec.role_id: spec for spec in spec_items}
     if not by_id:
         raise SpecialistDagError("at least one specialist specification is required")
+    if len(by_id) != len(spec_items):
+        raise SpecialistDagError("specialist role ids must be unique")
     if not isinstance(plan, DagPlan):
-        raise SpecialistDagError("aggregation requires the exact DagPlan")
-    # Re-run the canonical planner from the context embedded in the plan.
-    # Merely checking reserved_cost is insufficient: a forged DagPlan could
-    # otherwise schedule a role whose required inputs or dependencies were
-    # never eligible.  Aggregation accepts only a plan that is exactly the
-    # deterministic output for the current specs, inputs and hard budget.
+        raise SpecialistDagError("plan must be a DagPlan")
+
+    snapshot_id = _text(plan.input_snapshot_id, "plan.input_snapshot_id")
     canonical_plan = plan_specialists(
-        by_id.values(),
+        spec_items,
+        input_snapshot_id=snapshot_id,
         available_inputs=plan.available_inputs,
         total_budget=plan.total_budget,
     )
@@ -226,20 +237,23 @@ def aggregate_specialists(
         raise SpecialistDagError(
             "DagPlan does not match canonical planner output for this context"
         )
-    scheduled_roles = set(plan.scheduled_roles)
-    if len(scheduled_roles) != len(plan.scheduled_roles):
+    scheduled = tuple(plan.scheduled_roles)
+    scheduled_set = set(scheduled)
+    if len(scheduled_set) != len(scheduled):
         raise SpecialistDagError("DagPlan scheduled roles must be unique")
-    unknown_scheduled = scheduled_roles - set(by_id)
+    unknown_scheduled = scheduled_set - set(by_id)
     if unknown_scheduled:
         raise SpecialistDagError(
             f"DagPlan contains unknown scheduled roles: {sorted(unknown_scheduled)}"
         )
     expected_reserved = sum(
-        (by_id[role_id].max_cost for role_id in scheduled_roles),
+        (by_id[role_id].max_cost for role_id in scheduled_set),
         Decimal("0"),
     )
     if plan.reserved_cost != expected_reserved:
-        raise SpecialistDagError("DagPlan reserved cost does not match scheduled roles")
+        raise SpecialistDagError(
+            "DagPlan reserved cost does not match scheduled roles"
+        )
 
     seen: set[str] = set()
     accepted: list[tuple[SpecialistSpec, SpecialistRun]] = []
@@ -254,8 +268,11 @@ def aggregate_specialists(
         if spec is None:
             rejected.append((run.role_id, "unknown_role"))
             continue
-        if run.role_id not in scheduled_roles:
+        if run.role_id not in scheduled_set:
             rejected.append((run.role_id, "not_scheduled"))
+            continue
+        if run.input_snapshot_id != snapshot_id:
+            rejected.append((run.role_id, "input_snapshot_mismatch"))
             continue
         if run.completed_at > deadline:
             rejected.append((run.role_id, "late"))
@@ -271,7 +288,7 @@ def aggregate_specialists(
             continue
         accepted.append((spec, run))
 
-    for role_id in plan.scheduled_roles:
+    for role_id in scheduled:
         if role_id not in seen:
             rejected.append((role_id, "missing_result"))
 

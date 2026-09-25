@@ -118,6 +118,8 @@ class RecoveryController:
     def record_reconciliation(self, *, consistent: bool, uncertainty: Iterable[str] = ()) -> None:
         if self.owner is None:
             raise RuntimeError("No active owner")
+        if type(consistent) is not bool:
+            raise TypeError("consistent must be a boolean")
         if not self.storage_writable:
             raise PermissionError(
                 "Reconciliation cannot establish readiness without durable journal"
@@ -145,6 +147,8 @@ class RecoveryController:
         self._recompute_state()
 
     def set_clock_trusted(self, trusted: bool) -> None:
+        if type(trusted) is not bool:
+            raise TypeError("trusted must be a boolean")
         self.clock_trusted = trusted
         if trusted:
             self.reason_codes.discard("clock_untrusted")
@@ -183,6 +187,10 @@ class RecoveryController:
             raise RuntimeError("No current owner to transfer")
         if not new_owner_id:
             raise ValueError("New owner identity is required")
+        if type(old_sender_fenced) is not bool:
+            raise TypeError("old_sender_fenced must be a boolean")
+        if type(reconciled) is not bool:
+            raise TypeError("reconciled must be a boolean")
         if new_owner_id == self.owner.owner_id:
             raise ValueError("New owner must differ from current owner")
         if not old_sender_fenced:

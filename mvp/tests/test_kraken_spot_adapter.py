@@ -542,7 +542,6 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                     "T-EXEC-1": {
                         "ordertxid": "OABC-D123-E456",
                         "pair": "XXBTZUSD",
-            "type": "buy",
                         "type": "buy",
                         "time": "1790280001.123456",
                         "price": "60000.25",
@@ -655,7 +654,6 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                     "T-EXEC-1": {
                         "ordertxid": "OABC-D123-E456",
                         "pair": "XXBTZUSD",
-            "type": "buy",
                         "type": "buy",
                         "time": "1790280001",
                         "price": "60000",
@@ -688,7 +686,6 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                     "T-EXEC-1": {
                         "ordertxid": "OABC-D123-E456",
                         "pair": "XXBTZUSD",
-            "type": "buy",
                         "type": "buy",
                         "time": 1790280001.25,
                         "price": "60000",
@@ -723,7 +720,6 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                     "T-SCOPE-1": {
                         "ordertxid": "O-SCOPE-1",
                         "pair": "XXBTZUSD",
-            "type": "buy",
                         "type": "buy",
                         "time": "1790280001",
                         "price": "60000",

@@ -1,7 +1,11 @@
 from pathlib import Path
 import unittest
 
-from tools.check_dependency_composition import (\n    audit_composition,\n    is_exact_python_requirement,\n    qualification_exit_code,\n)
+from tools.check_dependency_composition import (
+    audit_composition,
+    is_exact_python_requirement,
+    qualification_exit_code,
+)
 
 
 class DependencyCompositionGateTests(unittest.TestCase):

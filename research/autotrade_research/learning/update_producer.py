@@ -26,6 +26,7 @@ from uuid import UUID
 from ..artifacts.store import ArtifactStore
 from ..jobs import ResearchJobStore
 from ..memory.episodes import CoveragePopulationSnapshot, ExperienceMemory
+from ..science.registry import ProtocolRegistration, ScientificRegistry
 from .online import (
     OnlineUpdateDecision,
     OnlineUpdateEnvelope,
@@ -183,6 +184,7 @@ class UpdateProducerConfig:
     calibration_task: str
     test_evidence_refs: tuple[str, ...]
     instrument_family: str | None = None
+    protocol_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_sha", _git_sha(self.source_sha))
@@ -264,6 +266,12 @@ class UpdateProducerConfig:
                     self.instrument_family,
                     name="instrument_family",
                 ),
+            )
+        if self.protocol_id is not None:
+            object.__setattr__(
+                self,
+                "protocol_id",
+                _text(self.protocol_id, name="protocol_id"),
             )
 
 
@@ -347,7 +355,7 @@ def _load_checkpoint(
     *,
     config: UpdateProducerConfig,
     envelope: OnlineUpdateEnvelope,
-) -> tuple[str, _Checkpoint]:
+) -> tuple[str, _Checkpoint, datetime]:
     ref, manifest, payload = _artifact_ref(
         artifact_store,
         reference,
@@ -408,10 +416,14 @@ def _load_checkpoint(
         name: _decimal(raw_means[name], name=f"reference_feature_mean[{name}]")
         for name in names
     }
+    checkpoint_created_at = _time(
+        manifest.get("created_at"),
+        name="checkpoint created_at",
+    )
     return ref, _Checkpoint(
         parameters=MappingProxyType(parameters),
         reference_feature_means=MappingProxyType(means),
-    )
+    ), checkpoint_created_at
 
 
 def _verify_registered_evidence(
@@ -782,6 +794,7 @@ def _producer_config_evidence(config: UpdateProducerConfig) -> dict[str, Any]:
         "calibration_task": config.calibration_task,
         "test_evidence_refs": sorted(config.test_evidence_refs),
         "instrument_family": config.instrument_family,
+        "protocol_id": config.protocol_id,
     }
     return value
 
@@ -921,6 +934,64 @@ def _population_authority_reason(
     return None, manifest
 
 
+
+def _scientific_preregistration_reason(
+    scientific_registry: ScientificRegistry | None,
+    *,
+    config: UpdateProducerConfig,
+    calibration_population: CoveragePopulationSnapshot,
+    calibration_cutoff: datetime,
+    permission_classes: tuple[str, ...],
+    checkpoint_created_at: datetime,
+    update_manifest: PopulationCoverageManifest | None,
+    calibration_manifest: PopulationCoverageManifest | None,
+) -> tuple[str | None, ProtocolRegistration | None]:
+    """Verify independent, time-ordered preregistration for this update cut."""
+
+    if config.protocol_id is None or scientific_registry is None:
+        return "LEARNING.SCIENTIFIC_PREREGISTRATION_REQUIRED", None
+    if not isinstance(scientific_registry, ScientificRegistry):
+        raise TypeError("scientific_registry must be ScientificRegistry or None")
+    if update_manifest is None or calibration_manifest is None:
+        return None, None
+    if (
+        update_manifest.frozen_protocol_hash
+        != calibration_manifest.frozen_protocol_hash
+    ):
+        return None, None
+    try:
+        registration, protocol = scientific_registry.protocol_document(
+            config.protocol_id
+        )
+    except KeyError:
+        return "LEARNING.SCIENTIFIC_PREREGISTRATION_REQUIRED", None
+
+    scope = protocol.get("online_update_registration")
+    expected_scope = {
+        "schema_version": "1.0.0",
+        "calibration_population_root_hash": calibration_population.root_hash,
+        "calibration_cutoff": _iso(calibration_cutoff),
+        "update_task": config.update_task,
+        "calibration_task": config.calibration_task,
+        "instrument_family": config.instrument_family,
+        "permission_classes": list(permission_classes),
+        "feature_schema_hash": config.feature_schema_hash,
+        "label_version": config.label_version,
+        "source_sha": config.source_sha,
+    }
+    if not isinstance(scope, dict) or scope != expected_scope:
+        return "LEARNING.SCIENTIFIC_PREREGISTRATION_SCOPE_MISMATCH", None
+    if registration.protocol_hash != update_manifest.frozen_protocol_hash:
+        return "LEARNING.SCIENTIFIC_PREREGISTRATION_HASH_MISMATCH", None
+    registered_at = _time(
+        registration.created_at,
+        name="protocol registration created_at",
+    )
+    if registered_at >= checkpoint_created_at:
+        return "LEARNING.SCIENTIFIC_PREREGISTRATION_LATE", None
+    return None, registration
+
+
 def produce_bounded_online_update(
     *,
     memory: ExperienceMemory,
@@ -935,6 +1006,7 @@ def produce_bounded_online_update(
     granted_permissions: set[str],
     update_population_manifest: PopulationCoverageManifest | None = None,
     calibration_population_manifest: PopulationCoverageManifest | None = None,
+    scientific_registry: ScientificRegistry | None = None,
 ) -> ProducedOnlineUpdate:
     if not isinstance(memory, ExperienceMemory):
         raise TypeError("memory must be ExperienceMemory")
@@ -964,7 +1036,7 @@ def produce_bounded_online_update(
         )
     )
 
-    checkpoint_reference, checkpoint = _load_checkpoint(
+    checkpoint_reference, checkpoint, checkpoint_created_at = _load_checkpoint(
         artifact_store,
         checkpoint_ref,
         config=config,
@@ -1057,7 +1129,22 @@ def produce_bounded_online_update(
         )
     )
 
+    preregistration_reason, protocol_registration = (
+        _scientific_preregistration_reason(
+            scientific_registry,
+            config=config,
+            calibration_population=calibration_population,
+            calibration_cutoff=calibration_time,
+            permission_classes=canonical_permissions,
+            checkpoint_created_at=checkpoint_created_at,
+            update_manifest=verified_update_manifest,
+            calibration_manifest=verified_calibration_manifest,
+        )
+    )
+
     reasons: list[str] = []
+    if preregistration_reason is not None:
+        reasons.append(preregistration_reason)
     if update_population_reason is not None:
         reasons.append(update_population_reason)
     if calibration_population_reason is not None:
@@ -1183,6 +1270,16 @@ def produce_bounded_online_update(
             "updates_in_window": runtime_state.updates_in_window,
         },
         "granted_permissions": list(canonical_permissions),
+        "scientific_registration": (
+            None
+            if protocol_registration is None
+            else {
+                "protocol_id": protocol_registration.protocol_id,
+                "protocol_hash": protocol_registration.protocol_hash,
+                "registered_at": protocol_registration.created_at,
+                "checkpoint_created_at": _iso(checkpoint_created_at),
+            }
+        ),
         "checkpoint": {
             "artifact_ref": checkpoint_reference,
             "parameters": {

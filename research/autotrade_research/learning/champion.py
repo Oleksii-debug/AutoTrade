@@ -6,7 +6,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 import sqlite3
+
+from autotrade_research.science.registry import ScientificRegistry
 
 
 def _time(value: datetime, *, name: str) -> datetime:
@@ -21,6 +24,16 @@ def _text(value: str, *, name: str) -> str:
     return value.strip()
 
 
+_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _digest(value: str, *, name: str) -> str:
+    normalized = _text(value, name=name).lower()
+    if _SHA256.fullmatch(normalized) is None:
+        raise ValueError(f"{name} must be a canonical sha256 digest")
+    return normalized
+
+
 @dataclass(frozen=True)
 class CandidateApproval:
     candidate_id: str
@@ -31,11 +44,17 @@ class CandidateApproval:
     retention_passed: bool
     risk_passed: bool
     authority_scope_id: str
+    protocol_id: str
+    protocol_hash: str
+    evaluation_id: str
+    evaluation_result_hash: str
 
     @classmethod
     def create(cls, *, candidate_id: str, artifact_hash: str, evidence_id: str,
                evidence_valid_until: datetime, evaluation_status: str,
-               retention_passed: bool, risk_passed: bool, authority_scope_id: str) -> "CandidateApproval":
+               retention_passed: bool, risk_passed: bool, authority_scope_id: str,
+               protocol_id: str, protocol_hash: str, evaluation_id: str,
+               evaluation_result_hash: str) -> "CandidateApproval":
         status = _text(evaluation_status, name="evaluation_status").upper()
         if status not in {"PASS", "FAIL", "INCONCLUSIVE"}:
             raise ValueError("invalid evaluation_status")
@@ -43,13 +62,19 @@ class CandidateApproval:
             raise TypeError("retention_passed and risk_passed must be boolean")
         return cls(
             candidate_id=_text(candidate_id, name="candidate_id"),
-            artifact_hash=_text(artifact_hash, name="artifact_hash"),
+            artifact_hash=_digest(artifact_hash, name="artifact_hash"),
             evidence_id=_text(evidence_id, name="evidence_id"),
             evidence_valid_until=_time(evidence_valid_until, name="evidence_valid_until"),
             evaluation_status=status,
             retention_passed=retention_passed,
             risk_passed=risk_passed,
             authority_scope_id=_text(authority_scope_id, name="authority_scope_id"),
+            protocol_id=_text(protocol_id, name="protocol_id"),
+            protocol_hash=_digest(protocol_hash, name="protocol_hash"),
+            evaluation_id=_text(evaluation_id, name="evaluation_id"),
+            evaluation_result_hash=_digest(
+                evaluation_result_hash, name="evaluation_result_hash"
+            ),
         )
 
 
@@ -67,8 +92,11 @@ class PromotionConflict(RuntimeError):
 
 
 class ChampionRegistry:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, scientific_registry: ScientificRegistry):
+        if not isinstance(scientific_registry, ScientificRegistry):
+            raise TypeError("scientific_registry must be ScientificRegistry")
         self.path = Path(path)
+        self.scientific_registry = scientific_registry
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as con:
             con.executescript(
@@ -124,8 +152,7 @@ class ChampionRegistry:
             existing_position_policy=row["existing_position_policy"],
         )
 
-    @staticmethod
-    def _validate_approval(approval: CandidateApproval, now: datetime) -> None:
+    def _validate_approval(self, approval: CandidateApproval, now: datetime) -> None:
         current = _time(now, name="now")
         if approval.evaluation_status != "PASS":
             raise ValueError("candidate evaluation has not passed")
@@ -133,8 +160,21 @@ class ChampionRegistry:
             raise ValueError("candidate retention gate has not passed")
         if not approval.risk_passed:
             raise ValueError("candidate risk gate has not passed")
-        if current > approval.evidence_valid_until:
+        if current >= approval.evidence_valid_until:
             raise ValueError("candidate evidence has expired")
+        self.scientific_registry.verify_candidate_promotion_evidence(
+            evaluation_id=approval.evaluation_id,
+            protocol_id=approval.protocol_id,
+            protocol_hash=approval.protocol_hash,
+            result_hash=approval.evaluation_result_hash,
+            candidate_id=approval.candidate_id,
+            artifact_hash=approval.artifact_hash,
+            evaluation_status=approval.evaluation_status,
+            retention_passed=approval.retention_passed,
+            risk_passed=approval.risk_passed,
+            authority_scope_id=approval.authority_scope_id,
+            evidence_valid_until=approval.evidence_valid_until.isoformat(),
+        )
 
     def promote(self, approval: CandidateApproval, *, expected_generation: int, now: datetime,
                 open_position_count: int, existing_position_policy: str | None) -> RoutingState:
@@ -172,9 +212,23 @@ class ChampionRegistry:
 
     def rollback(self, *, target_generation: int, expected_generation: int, now: datetime,
                  open_position_count: int, existing_position_policy: str | None) -> RoutingState:
-        if target_generation < 1:
+        if (
+            not isinstance(target_generation, int)
+            or isinstance(target_generation, bool)
+            or target_generation < 1
+        ):
             raise ValueError("target_generation must reference a prior promoted generation")
-        if open_position_count < 0:
+        if (
+            not isinstance(expected_generation, int)
+            or isinstance(expected_generation, bool)
+            or expected_generation < 0
+        ):
+            raise ValueError("expected_generation must be non-negative")
+        if (
+            not isinstance(open_position_count, int)
+            or isinstance(open_position_count, bool)
+            or open_position_count < 0
+        ):
             raise ValueError("open_position_count must be non-negative")
         policy = existing_position_policy.strip() if isinstance(existing_position_policy, str) else None
         if open_position_count > 0 and not policy:

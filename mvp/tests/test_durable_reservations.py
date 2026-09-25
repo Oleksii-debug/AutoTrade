@@ -511,5 +511,32 @@ class DurableReservationBookTests(unittest.TestCase):
         self.assertEqual(book.version, 0)
 
 
+    def test_long_lived_reader_refreshes_after_external_reservation_mutation(self):
+        reader = self.book()
+        writer = DurableReservationBook(
+            JournalStore(self.path),
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        self.assertEqual(reader.total_reserved("CASH:USD"), Decimal("0"))
+        self.assertEqual(reader.active(), ())
+
+        writer.reserve(
+            command_id="cmd-external",
+            idempotency_key="idem-external",
+            reservation_id="r-external",
+            intent_id="i-external",
+            requirements={"CASH:USD": "70"},
+            available={"CASH:USD": "100"},
+        )
+
+        self.assertEqual(reader.total_reserved("CASH:USD"), Decimal("70"))
+        self.assertEqual(
+            [item.reservation_id for item in reader.active()],
+            ["r-external"],
+        )
+        self.assertEqual(reader.get("r-external").state, "WORKING")
+
+
 if __name__ == "__main__":
     unittest.main()

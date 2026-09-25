@@ -731,6 +731,7 @@ class AlpacaAdapterTests(unittest.TestCase):
             "id": "20190524113406977::fill-1",
             "order_id": order_id,
             "symbol": "AAPL",
+            "side": "buy",
             "qty": "1",
             "price": "220.10",
             "transaction_time": "2026-09-24T20:01:00Z",
@@ -752,6 +753,47 @@ class AlpacaAdapterTests(unittest.TestCase):
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].fee_amount, Decimal("0.01"))
         self.assertEqual((fills[0].account_id, fills[0].environment), ("paper-1", "PAPER"))
+        self.assertEqual((fills[0].side, fills[0].position_side), ("BUY", "BOTH"))
+        self.assertEqual(fills[0].evidence_refs, (observation.evidence_ref,))
+
+    def test_trade_activity_requires_provider_evidenced_side(self):
+        order_id = str(uuid4())
+        base = {
+            "activity_type": "FILL",
+            "id": "activity-side-1",
+            "order_id": order_id,
+            "symbol": "AAPL",
+            "qty": "1",
+            "price": "220.10",
+            "transaction_time": "2026-09-24T20:01:00Z",
+        }
+        with self.assertRaisesRegex(AlpacaAdapterError, "activity.side"):
+            parse_trade_activities(
+                bound_activity_response([base]),
+                instrument_versions={"AAPL": "AAPL:v1"},
+                client_ids_by_order_id={order_id: "at-side-1"},
+                fees_by_activity_id={base["id"]: ("0.01", "USD")},
+            )
+
+        invalid = dict(base, side="hold")
+        with self.assertRaisesRegex(AlpacaAdapterError, "activity side"):
+            parse_trade_activities(
+                bound_activity_response([invalid]),
+                instrument_versions={"AAPL": "AAPL:v1"},
+                client_ids_by_order_id={order_id: "at-side-1"},
+                fees_by_activity_id={base["id"]: ("0.01", "USD")},
+            )
+
+        sell = dict(base, side="sell")
+        sell_observation = bound_activity_response([sell])
+        fills = parse_trade_activities(
+            sell_observation,
+            instrument_versions={"AAPL": "AAPL:v1"},
+            client_ids_by_order_id={order_id: "at-side-1"},
+            fees_by_activity_id={base["id"]: ("0.01", "USD")},
+        )
+        self.assertEqual((fills[0].side, fills[0].position_side), ("SELL", "BOTH"))
+        self.assertEqual(fills[0].evidence_refs, (sell_observation.evidence_ref,))
 
     def test_trade_activity_scope_cannot_be_relabelled_after_provider_read(self):
         order_id = str(uuid4())
@@ -760,6 +802,7 @@ class AlpacaAdapterTests(unittest.TestCase):
             "id": "activity-scope-1",
             "order_id": order_id,
             "symbol": "AAPL",
+            "side": "buy",
             "qty": "1",
             "price": "220.10",
             "transaction_time": "2026-09-24T20:01:00Z",

@@ -81,10 +81,12 @@ def require_option_entitlement(
     intent: AlpacaOrderIntent,
     *,
     account: AlpacaOptionAccountEvidence,
+    account_id: str,
+    environment: str,
     required_level: int,
     at: datetime,
 ) -> AlpacaOrderIntent:
-    """Return the same intent only when fresh account evidence admits it."""
+    """Return the same intent only when exact scoped account evidence admits it."""
 
     if not isinstance(intent, AlpacaOrderIntent):
         raise TypeError("intent must be AlpacaOrderIntent")
@@ -92,6 +94,14 @@ def require_option_entitlement(
         raise AlpacaAdapterError("option entitlement can only qualify OPTION intents")
     if not isinstance(account, AlpacaOptionAccountEvidence):
         raise TypeError("account must be AlpacaOptionAccountEvidence")
+    expected_account = _text(account_id, name="account_id")
+    expected_environment = _text(environment, name="environment").upper()
+    if expected_environment not in {"PAPER", "LIVE"}:
+        raise AlpacaAdapterError("environment must be PAPER or LIVE")
+    if account.account_id != expected_account:
+        raise AlpacaAdapterError("Alpaca option entitlement account_id mismatch")
+    if account.environment != expected_environment:
+        raise AlpacaAdapterError("Alpaca option entitlement environment mismatch")
     if not account.admits(required_level=required_level, at=at):
         raise AlpacaAdapterError("fresh Alpaca account evidence does not admit this option intent")
     return intent

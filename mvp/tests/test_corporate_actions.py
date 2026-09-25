@@ -419,6 +419,40 @@ class CorporateSettlementTests(unittest.TestCase):
         self.assertEqual(book.instrument_version, first)
         self.assertEqual(book.state, state())
 
+    def test_replay_rejects_reverse_effective_date_before_mutation(self):
+        book = bound_book(state())
+        later = corporate_event(
+            event_id="later-dividend",
+            kind="CASH_DIVIDEND",
+            effective_date=date(2026, 3, 1),
+            source_revision="r2",
+            payload={"per_share": "1"},
+        )
+        earlier = corporate_event(
+            event_id="earlier-split",
+            kind="SPLIT",
+            effective_date=date(2026, 2, 1),
+            source_revision="r1",
+            payload={"numerator": 2, "denominator": 1},
+        )
+
+        first = book.apply(later)
+        state_after_later = book.state
+        with self.assertRaisesRegex(ValueError, "non-decreasing effective-date"):
+            book.apply(earlier)
+
+        self.assertEqual(book.state, state_after_later)
+        self.assertEqual(book.applied_event_ids, ("later-dividend",))
+        self.assertEqual(first.after, state_after_later)
+
+        with self.assertRaisesRegex(ValueError, "non-decreasing effective-date"):
+            CorporateActionBook.replay(
+                state(),
+                instrument_version=instrument(),
+                registry=InstrumentRegistry(versions=(instrument(),)),
+                events=(later, earlier),
+            )
+
     def test_split_then_symbol_change_replay_is_deterministic(self):
         first = instrument()
         second = instrument(

@@ -14,6 +14,8 @@ from hashlib import sha256
 import json
 from typing import Mapping, Sequence
 
+from ..memory.episodes import ExperienceMemory
+
 
 _OUTCOME_CLASSES = ("POSITIVE", "NEGATIVE", "NULL", "UNKNOWN", "PENDING")
 
@@ -355,11 +357,10 @@ class PopulationCoverageManifest:
 
 
 def build_population_coverage(
-    population: Sequence[Mapping[str, object]],
+    memory: ExperienceMemory,
     *,
     candidate_hash: str,
     frozen_protocol_hash: str,
-    input_snapshot_hash: str,
     causal_cutoff,
     permission_classes: Sequence[str],
     included_episode_ids: Sequence[str],
@@ -369,14 +370,16 @@ def build_population_coverage(
 ) -> PopulationCoverageManifest:
     """Build one deterministic manifest over the protocol-eligible population.
 
-    Population must come from ExperienceMemory.coverage_population or an
-    independently equivalent verified projection. Every eligible identity must
-    be either included or explicitly excluded with a non-empty protocol reason.
+    The eligible population is queried directly from canonical ExperienceMemory.
+    Caller-supplied row subsets and caller-asserted snapshot hashes are not
+    accepted. Every eligible identity must be included or explicitly excluded
+    with a non-empty protocol reason.
     """
 
+    if not isinstance(memory, ExperienceMemory):
+        raise TypeError("memory must be the canonical ExperienceMemory")
     candidate = _sha_identity(candidate_hash, name="candidate_hash")
     protocol = _sha_identity(frozen_protocol_hash, name="frozen_protocol_hash")
-    snapshot = _sha_identity(input_snapshot_hash, name="input_snapshot_hash")
     cutoff = _time(causal_cutoff, name="causal_cutoff")
 
     if isinstance(permission_classes, (str, bytes)):
@@ -392,6 +395,25 @@ def build_population_coverage(
         if instrument_family is None
         else _text(instrument_family, name="instrument_family")
     )
+
+    population_snapshot = memory.qualification_population_snapshot(
+        causal_cutoff=datetime.fromisoformat(cutoff),
+        granted_permissions=set(permissions),
+        task=normalized_task,
+        instrument_family=normalized_family,
+    )
+    population_snapshot.verify()
+    if population_snapshot.causal_cutoff != cutoff:
+        raise ValueError("canonical population snapshot cutoff does not match request")
+    if population_snapshot.permission_classes != permissions:
+        raise ValueError("canonical population snapshot permissions do not match request")
+    if (
+        population_snapshot.task != normalized_task
+        or population_snapshot.instrument_family != normalized_family
+    ):
+        raise ValueError("canonical population snapshot filters do not match request")
+    snapshot = population_snapshot.root_hash
+    population = population_snapshot.rows
 
     if isinstance(included_episode_ids, (str, bytes)):
         raise TypeError("included_episode_ids must be a collection")

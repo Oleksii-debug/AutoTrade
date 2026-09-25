@@ -68,6 +68,17 @@ class KrakenSpotContractTests(unittest.TestCase):
         self.assertNotIn("observed_at", unknown)
         self.validate_submission(unknown)
 
+        with self.assertRaisesRegex(ValueError, "environment"):
+            parse_spot_submission_response(
+                attempt_id=str(uuid4()),
+                client_order_id="spot-contract-invalid-env",
+                environment="MARS",
+                observed_at=NOW,
+                source_uri=SOURCE,
+                payload=None,
+                transport_ambiguous=True,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

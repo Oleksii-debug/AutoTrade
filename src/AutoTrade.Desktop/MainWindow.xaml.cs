@@ -67,6 +67,9 @@ public partial class MainWindow : Window
 
     private void ApplyHostStatus(EmergencyHostStatus status, bool announce)
     {
+        status = (status ?? throw new InvalidOperationException(
+            "Host status response was null.")).Validated();
+
         if (status.Connected)
         {
             _lastKnownConnectedStatus = status;

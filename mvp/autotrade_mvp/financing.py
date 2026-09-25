@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Literal
+from typing import Iterable, Literal
 
 from .accounting import JournalTransaction, posting, validate_transaction
 
@@ -86,7 +86,11 @@ class FinancingEvent:
         object.__setattr__(self, "kind", normalized_kind)
         object.__setattr__(self, "effective_at", effective)
         object.__setattr__(self, "available_at", available)
-        object.__setattr__(self, "unit", _text(self.unit, name="unit"))
+        object.__setattr__(
+            self,
+            "unit",
+            _text(self.unit, name="unit").upper(),
+        )
         object.__setattr__(self, "amount", charge)
         object.__setattr__(
             self,
@@ -153,9 +157,18 @@ class FinancingUpdate:
 class FinancingRevisionBook:
     """Append-only logical revision book for provider-evidenced financing."""
 
-    def __init__(self) -> None:
+    def __init__(self, history: Iterable[FinancingEvent] = ()) -> None:
         self._latest: dict[str, FinancingEvent] = {}
         self._final_charge: dict[str, Decimal] = {}
+        self._history: list[FinancingEvent] = []
+        for event in history:
+            self.record(event)
+
+    @property
+    def events(self) -> tuple[FinancingEvent, ...]:
+        """Immutable accepted provider revision history for restart replay."""
+
+        return tuple(self._history)
 
     def latest(self, charge_id: str) -> FinancingEvent | None:
         return self._latest.get(_text(charge_id, name="charge_id"))
@@ -204,6 +217,7 @@ class FinancingRevisionBook:
         self._latest[event.charge_id] = event
         if event.kind == "FINAL":
             self._final_charge[event.charge_id] = new_final
+        self._history.append(event)
         return FinancingUpdate(
             accepted=True,
             economic_delta=new_final - old_final,
@@ -230,7 +244,7 @@ def book_financing_delta(
     delta = _decimal(economic_delta, name="economic_delta")
     if delta == 0:
         raise FinancingError("zero financing delta has no economic posting")
-    charge_unit = _text(unit, name="unit")
+    charge_unit = _text(unit, name="unit").upper()
     source = _text(source_account, name="source_account")
     transaction = JournalTransaction(
         transaction_id=_text(transaction_id, name="transaction_id"),

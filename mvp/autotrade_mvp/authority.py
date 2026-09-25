@@ -2840,6 +2840,7 @@ class AuthorityService:
         now: str,
         reservation_availability_evidence: Mapping[str, Any] | None = None,
         allocation_binding: Mapping[str, Any] | None = None,
+        authoritative_risk_snapshot: Mapping[str, Any] | None = None,
         journal_sequence_cut: int | None = None,
         confirmation_id: str | None = None,
         risk_reducing: bool = False,
@@ -2875,6 +2876,28 @@ class AuthorityService:
             capability_snapshot_id, name="capability_snapshot_id"
         )
         rid = _text(reservation_id, name="reservation_id")
+        risk_snapshot_binding: dict[str, Any] | None = None
+        if authoritative_risk_snapshot is not None:
+            if not isinstance(authoritative_risk_snapshot, Mapping):
+                raise TypeError(
+                    "authoritative_risk_snapshot must be a mapping or None"
+                )
+            risk_snapshot_binding = dict(authoritative_risk_snapshot)
+            bound_snapshot_id = _text(
+                risk_snapshot_binding.get("snapshot_id"),
+                name="authoritative risk snapshot_id",
+            )
+            if (
+                risk_decision.authoritative_risk_snapshot_id
+                != bound_snapshot_id
+            ):
+                raise AuthorityConflict(
+                    "risk decision does not match authoritative risk snapshot"
+                )
+        elif risk_decision.authoritative_risk_snapshot_id is not None:
+            raise AuthorityConflict(
+                "risk decision authoritative snapshot evidence is missing"
+            )
         try:
             expected_risk_id = (
                 "risk:sha256:" + risk_decision_fingerprint(risk_decision)
@@ -2994,6 +3017,12 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "allocation evidence changed for an existing financial command"
                 )
+            if durable_risk_payload.get("authoritative_risk_snapshot") != (
+                risk_snapshot_binding
+            ):
+                raise AuthorityConflict(
+                    "authoritative risk snapshot changed for an existing financial command"
+                )
             return existing
 
         validate_bound_risk_decision(risk_decision, now=now)
@@ -3069,6 +3098,7 @@ class AuthorityService:
                 reservation_plan.request if reservation_plan is not None else None
             ),
             "reservation_availability_evidence": reservation_availability_evidence,
+            "authoritative_risk_snapshot": risk_snapshot_binding,
             "confirmation_id": candidate.confirmation_id,
             "risk_reducing": risk_reducing,
         }
@@ -3104,6 +3134,7 @@ class AuthorityService:
             "reservation_availability_evidence": reservation_availability_evidence,
             "journal_sequence_cut": journal_sequence_cut,
             "capability_snapshot_id": risk_decision.capability_snapshot_id,
+            "authoritative_risk_snapshot": risk_snapshot_binding,
             "evaluated_at": risk_decision.evaluated_at,
             "valid_until": risk_decision.valid_until,
             "verdict": "ALLOW" if risk_decision.admitted else "REJECT",

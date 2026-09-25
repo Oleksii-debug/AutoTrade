@@ -375,7 +375,7 @@ class AuthorityPersistenceTests(unittest.TestCase):
                 committed_at="2026-09-25T09:59:59Z",
             )
             self.assertFalse(retry.inserted)
-            self.assertEqual(retry.event["event_id"], first.event["event_id"])
+            self.assertEqual(retry.event_id, first.event_id)
             self.assertEqual(
                 len(store.load_events("financial-authority", "runtime-authority")),
                 2,

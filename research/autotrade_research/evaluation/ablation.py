@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from typing import Iterable
 
 
@@ -213,19 +213,24 @@ def summarize_ablation(target_component: str, pairs: Iterable[AblationPair]) -> 
     target_component = target_component.strip() if isinstance(target_component, str) else target_component
     selected = _validate_pairs(target_component, pairs)
     comparable = [pair for pair in selected if pair.utility_comparable]
-    utility_deltas = [pair.utility_delta for pair in comparable]
-    concrete_utility = [value for value in utility_deltas if value is not None]
 
-    def mean(values: list[Decimal]) -> Decimal | None:
-        if not values:
-            return None
-        return sum(values, Decimal("0")) / Decimal(len(values))
+    with localcontext() as context:
+        context.prec = 50
+        context.rounding = ROUND_HALF_EVEN
 
-    cost_values = [pair.cost_delta for pair in selected]
-    latency_values = [Decimal(pair.latency_delta_ms) for pair in selected]
-    mean_cost = mean(cost_values) or Decimal("0")
-    mean_latency = mean(latency_values) or Decimal("0")
-    mean_utility = mean(concrete_utility)
+        utility_deltas = [pair.utility_delta for pair in comparable]
+        concrete_utility = [value for value in utility_deltas if value is not None]
+
+        def mean(values: list[Decimal]) -> Decimal | None:
+            if not values:
+                return None
+            return sum(values, Decimal("0")) / Decimal(len(values))
+
+        cost_values = [pair.cost_delta for pair in selected]
+        latency_values = [Decimal(pair.latency_delta_ms) for pair in selected]
+        mean_cost = mean(cost_values) or Decimal("0")
+        mean_latency = mean(latency_values) or Decimal("0")
+        mean_utility = mean(concrete_utility)
 
     return AblationSummary(
         target_component=target_component,
@@ -264,12 +269,15 @@ def evaluate_incremental_value(
 
     target = target_component.strip() if isinstance(target_component, str) else target_component
     selected = _validate_pairs(target, pairs)
-    values = [
-        pair.net_value_delta
-        for pair in selected
-        if pair.utility_comparable and pair.net_value_delta is not None
-    ]
-    concrete = [value for value in values if value is not None]
+    with localcontext() as context:
+        context.prec = 50
+        context.rounding = ROUND_HALF_EVEN
+        values = [
+            pair.net_value_delta
+            for pair in selected
+            if pair.utility_comparable
+        ]
+        concrete = [value for value in values if value is not None]
     if len(concrete) < minimum_pairs:
         return AblationEvaluation(
             target_component=target,
@@ -283,13 +291,19 @@ def evaluate_incremental_value(
             reason="insufficient_comparable_matched_pairs",
         )
 
-    count = Decimal(len(concrete))
-    mean = sum(concrete, Decimal("0")) / count
-    squared = sum(((value - mean) * (value - mean) for value in concrete), Decimal("0"))
-    variance = squared / Decimal(len(concrete) - 1)
-    stddev = variance.sqrt()
-    standard_error = stddev / count.sqrt()
-    lower = mean - multiplier * standard_error
+    with localcontext() as context:
+        context.prec = 50
+        context.rounding = ROUND_HALF_EVEN
+        count = Decimal(len(concrete))
+        mean = sum(concrete, Decimal("0")) / count
+        squared = sum(
+            ((value - mean) * (value - mean) for value in concrete),
+            Decimal("0"),
+        )
+        variance = squared / Decimal(len(concrete) - 1)
+        stddev = variance.sqrt()
+        standard_error = stddev / count.sqrt()
+        lower = mean - multiplier * standard_error
     return AblationEvaluation(
         target_component=target,
         pair_count=len(concrete),

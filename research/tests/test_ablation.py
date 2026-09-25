@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone, tzinfo
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import unittest
 
 from autotrade_research.evaluation.ablation import (
@@ -395,6 +395,34 @@ class AblationTests(unittest.TestCase):
         self.assertEqual(result.status, "PASS")
         self.assertEqual(result.mean_net_incremental_value, Decimal("1.5"))
         self.assertEqual(result.lower_bound, Decimal("1.5"))
+
+    def test_scientific_aggregation_is_independent_of_ambient_decimal_context(self):
+        pairs = [
+            pair("ctx-1", "1.234567890123456789", full_cost="0.111111111111111111"),
+            pair("ctx-2", "2.345678901234567891", full_cost="0.222222222222222222"),
+            pair("ctx-3", "0.987654321987654321", full_cost="0.033333333333333333"),
+        ]
+        with localcontext() as context:
+            context.prec = 7
+            low_precision = evaluate_incremental_value(
+                "agent",
+                pairs,
+                minimum_pairs=3,
+                required_lower_bound=Decimal("0"),
+            )
+            low_summary = summarize_ablation("agent", pairs)
+        with localcontext() as context:
+            context.prec = 34
+            high_precision = evaluate_incremental_value(
+                "agent",
+                pairs,
+                minimum_pairs=3,
+                required_lower_bound=Decimal("0"),
+            )
+            high_summary = summarize_ablation("agent", pairs)
+
+        self.assertEqual(low_precision, high_precision)
+        self.assertEqual(low_summary, high_summary)
 
     def test_uncertain_mixed_result_fails_lower_bound(self):
         result = evaluate_incremental_value(

@@ -139,6 +139,19 @@ class VerticalSliceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 run_vertical_slice(["0.000000001"], directory)
 
+    def test_binary_float_financial_configuration_is_rejected(self):
+        cases = (
+            {"initial_cash": 10000.0},
+            {"order_quantity": 1.0},
+            {"max_abs_position": 10.0},
+            {"max_notional": 5000.0},
+            {"fee_rate": 0.001},
+        )
+        for kwargs in cases:
+            with self.subTest(kwargs=kwargs), TemporaryDirectory() as directory:
+                with self.assertRaises(TypeError):
+                    run_vertical_slice([100, 101, 102, 103], directory, **kwargs)
+
     def test_replay_verification_detects_tampered_evidence(self):
         with TemporaryDirectory() as directory:
             run_multi_episode([[100, 101, 102, 103], [103, 102, 101, 100]], directory)

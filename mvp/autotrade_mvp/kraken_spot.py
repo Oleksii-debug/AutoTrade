@@ -153,17 +153,52 @@ class KrakenSpotOrderIntent:
 class KrakenSpotPreparedRequest:
     endpoint: str
     body: Mapping[str, object]
+    account_id: str
+    environment: str
     capability_snapshot_id: str
     documentation_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
+        endpoint = _text(self.endpoint, name="endpoint")
+        if endpoint != "/0/private/AddOrder":
+            raise KrakenSpotAdapterError(
+                "prepared endpoint must be the canonical Kraken Spot AddOrder path"
+            )
+        if not isinstance(self.body, Mapping):
+            raise TypeError("body must be a mapping")
+        body = dict(self.body)
+        validate_spot_client_order_id(body.get("cl_ord_id"))
+        _text(body.get("pair"), name="pair")
+        account = _text(self.account_id, name="account_id")
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"PAPER", "LIVE"}:
+            raise KrakenSpotAdapterError("environment must be PAPER or LIVE")
+        capability_snapshot_id = _text(
+            self.capability_snapshot_id,
+            name="capability_snapshot_id",
+        )
+        if not isinstance(self.documentation_refs, tuple):
+            raise TypeError("documentation_refs must be a tuple")
+        refs = tuple(
+            _text(value, name="documentation_ref")
+            for value in self.documentation_refs
+        )
+        if not refs:
+            raise KrakenSpotAdapterError("documentation_refs must not be empty")
+        object.__setattr__(self, "endpoint", endpoint)
+        object.__setattr__(self, "body", MappingProxyType(body))
+        object.__setattr__(self, "account_id", account)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "capability_snapshot_id", capability_snapshot_id)
+        object.__setattr__(self, "documentation_refs", refs)
 
 
 def prepare_spot_order_request(
     intent: KrakenSpotOrderIntent,
     *,
     client_order_id: str,
+    account_id: str,
+    environment: str,
     capability: CapabilitySnapshot,
     at: datetime,
 ) -> KrakenSpotPreparedRequest:
@@ -179,8 +214,16 @@ def prepare_spot_order_request(
         raise TypeError("capability must be CapabilitySnapshot")
     point = _instant(at, name="at")
     client_id = validate_spot_client_order_id(client_order_id)
+    account = _text(account_id, name="account_id")
+    env = _text(environment, name="environment").upper()
+    if env not in {"PAPER", "LIVE"}:
+        raise KrakenSpotAdapterError("environment must be PAPER or LIVE")
     if capability.provider_id.upper() != "KRAKEN":
         raise KrakenSpotAdapterError("capability belongs to another provider")
+    if capability.account_id != account:
+        raise KrakenSpotAdapterError("capability account does not match target account")
+    if capability.environment.upper() != env:
+        raise KrakenSpotAdapterError("capability environment does not match target environment")
     if capability.instrument_version != intent.instrument_version:
         raise KrakenSpotAdapterError("capability instrument version does not match intent")
     if not capability.admits(
@@ -207,6 +250,8 @@ def prepare_spot_order_request(
     return KrakenSpotPreparedRequest(
         endpoint="/0/private/AddOrder",
         body=body,
+        account_id=account,
+        environment=env,
         capability_snapshot_id=capability.snapshot_id,
         documentation_refs=tuple(KRAKEN_SPOT_DOCS.values()),
     )
@@ -240,8 +285,12 @@ def _submission_evidence(
     source_uri: str,
 ) -> dict[str, str]:
     env = _text(environment, name="environment").upper()
+    if env != "LIVE":
+        raise KrakenSpotAdapterError(
+            "Kraken Spot provider submission evidence is qualified only for LIVE"
+        )
     source = _text(source_uri, name="source_uri")
-    if not source.startswith("https://") or not source.endswith("/0/private/AddOrder"):
+    if source != "https://api.kraken.com/0/private/AddOrder":
         raise KrakenSpotAdapterError(
             "source_uri must be the exact HTTPS Kraken Spot AddOrder endpoint"
         )
@@ -354,6 +403,7 @@ class KrakenSpotAbsenceEvidence:
     trades_complete: bool
     ledgers_complete: bool
     consistency_horizon_satisfied: bool
+    qualified_exclusion_semantics: bool = False
 
     def __post_init__(self) -> None:
         for field in (
@@ -363,21 +413,18 @@ class KrakenSpotAbsenceEvidence:
             "trades_complete",
             "ledgers_complete",
             "consistency_horizon_satisfied",
+            "qualified_exclusion_semantics",
         ):
             if type(getattr(self, field)) is not bool:
                 raise TypeError(f"{field} must be boolean")
+        if self.qualified_exclusion_semantics:
+            raise KrakenSpotAdapterError(
+                "Kraken Spot foundation cannot self-assert provider exclusion semantics"
+            )
 
     def verdict(self) -> str:
         if self.order_found:
             return "FOUND"
-        if (
-            self.open_orders_complete
-            and self.closed_orders_complete
-            and self.trades_complete
-            and self.ledgers_complete
-            and self.consistency_horizon_satisfied
-        ):
-            return "PROVEN_ABSENT"
         return "INCONCLUSIVE"
 
 

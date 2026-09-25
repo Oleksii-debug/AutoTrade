@@ -50,6 +50,40 @@ def capability(*, order_types=("MARKET", "LIMIT"), tif=("GTC", "IOC")):
 
 
 class KrakenSpotAdapterTests(unittest.TestCase):
+    def test_direct_prepared_request_fails_closed_on_scope_and_provenance(self):
+        base = {
+            "endpoint": "/0/private/AddOrder",
+            "body": {
+                "pair": "XBTUSD",
+                "cl_ord_id": "at-direct",
+            },
+            "account_id": "spot-account",
+            "environment": "PAPER",
+            "capability_snapshot_id": "cap-1",
+            "documentation_refs": ("https://docs.kraken.com/order",),
+        }
+        request = KrakenSpotPreparedRequest(**base)
+        self.assertEqual(request.environment, "PAPER")
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "endpoint"):
+            KrakenSpotPreparedRequest(**{**base, "endpoint": "/0/private/Withdraw"})
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "environment"):
+            KrakenSpotPreparedRequest(**{**base, "environment": "STAGING"})
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "capability_snapshot_id"):
+            KrakenSpotPreparedRequest(**{**base, "capability_snapshot_id": " "})
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "documentation_refs"):
+            KrakenSpotPreparedRequest(**{**base, "documentation_refs": ()})
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "client_order_id"):
+            KrakenSpotPreparedRequest(
+                **{**base, "body": {"pair": "XBTUSD", "cl_ord_id": ""}}
+            )
+        for field, value in (("cl_ord_id", None), ("cl_ord_id", 123), ("pair", True)):
+            with self.subTest(field=field, value=value), self.assertRaises(
+                KrakenSpotAdapterError
+            ):
+                KrakenSpotPreparedRequest(
+                    **{**base, "body": {**base["body"], field: value}}
+                )
+
     def test_limit_request_preserves_exact_decimal_and_has_no_nonce(self):
         intent = KrakenSpotOrderIntent.create(
             instrument_version="XBTUSD:v1",
@@ -62,15 +96,47 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         request = prepare_spot_order_request(
             intent,
             client_order_id="at-0123456789abcd",
+            account_id="spot-account",
+            environment="PAPER",
             capability=capability(),
             at=NOW,
         )
         self.assertEqual(request.endpoint, "/0/private/AddOrder")
+        self.assertEqual(request.account_id, "spot-account")
+        self.assertEqual(request.environment, "PAPER")
         self.assertEqual(request.body["volume"], "0.0100")
         self.assertEqual(request.body["price"], "60000.25")
         self.assertEqual(request.body["cl_ord_id"], "at-0123456789abcd")
         self.assertNotIn("nonce", request.body)
         self.assertNotIn("deadline", request.body)
+
+    def test_prepared_order_is_bound_to_exact_account_and_environment(self):
+        intent = KrakenSpotOrderIntent.create(
+            instrument_version="XBTUSD:v1",
+            pair="XBTUSD",
+            side="BUY",
+            order_type="MARKET",
+            volume="0.01",
+            time_in_force="IOC",
+        )
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "account"):
+            prepare_spot_order_request(
+                intent,
+                client_order_id="at-bind-account",
+                account_id="other-account",
+                environment="PAPER",
+                capability=capability(),
+                at=NOW,
+            )
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "environment"):
+            prepare_spot_order_request(
+                intent,
+                client_order_id="at-bind-env",
+                account_id="spot-account",
+                environment="LIVE",
+                capability=capability(),
+                at=NOW,
+            )
 
     def test_dispatcher_style_client_id_must_fit_free_text_limit(self):
         self.assertEqual(validate_spot_client_order_id("at-0123456789abcd"), "at-0123456789abcd")
@@ -118,6 +184,8 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             prepare_spot_order_request(
                 intent,
                 client_order_id="at-order-1",
+                account_id="spot-account",
+                environment="PAPER",
                 capability=capability(order_types=("MARKET",)),
                 at=NOW,
             )
@@ -185,6 +253,16 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 source_uri="http://example.invalid/0/private/AddOrder",
             )
 
+    def test_submission_provenance_rejects_spoofed_host_and_unqualified_environment(self):
+        payload = {"error": [], "result": {"txid": ["OABC-D123-E456"]}}
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "source_uri"):
+            self._parse_submission(
+                payload,
+                source_uri="https://example.invalid/0/private/AddOrder",
+            )
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "qualified only for LIVE"):
+            self._parse_submission(payload, environment="PAPER")
+
     def test_empty_txid_fails_closed(self):
         with self.assertRaisesRegex(KrakenSpotAdapterError, "transaction ids"):
             self._parse_submission({"error": [], "result": {"txid": []}})
@@ -200,7 +278,7 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         )
         self.assertEqual(evidence.verdict(), "INCONCLUSIVE")
 
-    def test_absence_requires_order_trade_ledger_and_horizon_coverage(self):
+    def test_complete_surfaces_do_not_self_qualify_provider_absence(self):
         evidence = KrakenSpotAbsenceEvidence(
             order_found=False,
             open_orders_complete=True,
@@ -209,7 +287,20 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             ledgers_complete=True,
             consistency_horizon_satisfied=True,
         )
-        self.assertEqual(evidence.verdict(), "PROVEN_ABSENT")
+        self.assertEqual(evidence.verdict(), "INCONCLUSIVE")
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "cannot self-assert provider exclusion semantics",
+        ):
+            KrakenSpotAbsenceEvidence(
+                order_found=False,
+                open_orders_complete=True,
+                closed_orders_complete=True,
+                trades_complete=True,
+                ledgers_complete=True,
+                consistency_horizon_satisfied=True,
+                qualified_exclusion_semantics=True,
+            )
 
     def test_derivatives_are_not_silently_claimed_by_spot_module(self):
         self.assertFalse(derivatives_supported_by_this_module())

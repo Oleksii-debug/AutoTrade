@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+import json
 from types import MappingProxyType
 from typing import Iterable, Mapping
 from uuid import UUID
@@ -22,6 +23,17 @@ def _decimal(value, *, name: str) -> Decimal:
     return result
 
 
+
+
+_REPORT_EVIDENCE_KINDS = frozenset({
+    "profile",
+    "trial_log",
+    "causal_audit",
+    "financial_invariants",
+    "retention",
+    "metrics",
+    "independent_review",
+})
 
 
 _REQUIRED_EVIDENCE_KINDS = frozenset({
@@ -491,6 +503,109 @@ class GateDecision:
 
 
 
+def _decimal_text(value: Decimal | None) -> str | None:
+    if value is None:
+        return None
+    if value == 0:
+        return "0"
+    return format(value.normalize(), "f")
+
+
+def gate_report_payload(
+    kind: str,
+    profile: GateProfile,
+    evidence: EvaluationEvidence,
+) -> bytes:
+    """Canonical semantic payload for PASS-critical scientific report artifacts."""
+
+    if kind not in _REPORT_EVIDENCE_KINDS:
+        raise ValueError("kind is not a scientific report evidence kind")
+    if not isinstance(profile, GateProfile):
+        raise TypeError("profile must be GateProfile")
+    if not isinstance(evidence, EvaluationEvidence):
+        raise TypeError("evidence must be EvaluationEvidence")
+
+    profile_id = profile.profile_id
+    if kind == "profile":
+        value = {
+            "profile_id": profile_id,
+            "minimum_net_advantage": _decimal_text(profile.minimum_net_advantage),
+            "max_drawdown": _decimal_text(profile.max_drawdown),
+            "max_adverse_cost_loss": _decimal_text(profile.max_adverse_cost_loss),
+            "min_power": _decimal_text(profile.min_power),
+            "primary_baseline_id": profile.primary_baseline_id,
+            "baseline_ids": list(profile.baseline_ids),
+            "selection_correction": profile.selection_correction,
+            "max_trials": profile.max_trials,
+            "required_regimes": list(profile.required_regimes),
+            "require_complete_trials": profile.require_complete_trials,
+            "require_causal_audit": profile.require_causal_audit,
+            "require_financial_invariants": profile.require_financial_invariants,
+        }
+    elif kind == "trial_log":
+        value = {
+            "profile_id": profile_id,
+            "complete": evidence.trial_log_complete,
+            "trials_attempted": evidence.trials_attempted,
+            "selection_correction_applied": evidence.selection_correction_applied,
+        }
+    elif kind == "causal_audit":
+        value = {
+            "profile_id": profile_id,
+            "passed": evidence.causal_audit_passed,
+        }
+    elif kind == "financial_invariants":
+        value = {
+            "profile_id": profile_id,
+            "passed": evidence.financial_invariants_passed,
+        }
+    elif kind == "retention":
+        value = {
+            "profile_id": profile_id,
+            "passed": evidence.retention_passed,
+        }
+    elif kind == "metrics":
+        value = {
+            "profile_id": profile_id,
+            "reproducible": evidence.reproducible,
+            "dependence_aware_lower_bound": _decimal_text(
+                evidence.dependence_aware_lower_bound
+            ),
+            "estimated_power": _decimal_text(evidence.estimated_power),
+            "net_advantage": _decimal_text(evidence.net_advantage),
+            "drawdown": _decimal_text(evidence.drawdown),
+            "adverse_cost_loss": _decimal_text(evidence.adverse_cost_loss),
+            "baseline_advantages": (
+                None
+                if evidence.baseline_advantages is None
+                else {
+                    key: _decimal_text(amount)
+                    for key, amount in sorted(evidence.baseline_advantages.items())
+                }
+            ),
+            "regime_coverage": (
+                None
+                if evidence.regime_coverage is None
+                else sorted(evidence.regime_coverage)
+            ),
+        }
+    else:
+        value = {
+            "profile_id": profile_id,
+            "profile_unchanged_after_results": (
+                evidence.profile_unchanged_after_results
+            ),
+            "status": "PASS",
+        }
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
 def _verify_evidence_bundle(
     profile: GateProfile,
     evidence: EvaluationEvidence,
@@ -512,7 +627,7 @@ def _verify_evidence_bundle(
         ref = refs[kind]
         try:
             manifest = artifact_store.load_manifest(ref.artifact_id)
-            artifact_store.read_bytes(ref.artifact_id)
+            payload = artifact_store.read_bytes(ref.artifact_id)
         except (FileNotFoundError, ArtifactIntegrityError, ValueError, OSError):
             return False
         if manifest.get("manifest_hash") is None:
@@ -529,6 +644,11 @@ def _verify_evidence_bundle(
         rights = manifest.get("rights")
         if not isinstance(rights, dict) or rights.get("storage") is not True:
             return False
+        if kind in _REPORT_EVIDENCE_KINDS:
+            if manifest.get("media_type") != "application/json":
+                return False
+            if payload != gate_report_payload(kind, profile, evidence):
+                return False
     return True
 
 

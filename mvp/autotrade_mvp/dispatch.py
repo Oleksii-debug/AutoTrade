@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5, uuid4
 
@@ -15,6 +16,15 @@ from .persistence import JournalStore, canonical_json, payload_digest
 
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
 TransportSend = Callable[[str, Mapping[str, Any], Callable[[], None]], Any]
+
+
+def _freeze_json(value: Any) -> Any:
+    """Recursively freeze a canonical JSON value before it reaches transport."""
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_json(item) for item in value)
+    return value
 
 
 class DispatchBlocked(RuntimeError):
@@ -282,6 +292,7 @@ class GuardedDispatcher:
         _instant(now)
         request_canonical = canonical_json(dict(request))
         request_dict = json.loads(request_canonical)
+        request_frozen = _freeze_json(request_dict)
         request_hash = "sha256:" + sha256(request_canonical.encode("utf-8")).hexdigest()
         client_order_id = stable_client_order_id(
             provider,
@@ -355,21 +366,9 @@ class GuardedDispatcher:
             if guard_called:
                 raise RuntimeError("final send guard may be consumed only once")
             guard_called = True
-            current_request_hash = "sha256:" + sha256(
-                canonical_json(request_dict).encode("utf-8")
-            ).hexdigest()
-            if current_request_hash != request_hash:
-                self._append(
-                    attempt_id=attempt_id,
-                    event_type="SubmissionBlocked",
-                    version=2,
-                    payload={
-                        "client_order_id": client_order_id,
-                        "reason": "request_changed_before_final_barrier",
-                    },
-                    now=now,
-                )
-                raise DispatchBlocked("request_changed_before_final_barrier")
+            # request_frozen is a recursively immutable canonical JSON snapshot.
+            # Transport cannot pass the barrier for one payload and then mutate
+            # the same object before its actual provider call.
             if final_barrier_clock is not None:
                 barrier_now = final_barrier_clock()
                 _instant(barrier_now)
@@ -409,7 +408,7 @@ class GuardedDispatcher:
             )
 
         try:
-            response = transport_send(client_order_id, request_dict, final_guard)
+            response = transport_send(client_order_id, request_frozen, final_guard)
         except DispatchBlocked as error:
             return DispatchOutcome("BLOCKED", client_order_id, None, str(error))
         except Exception as error:

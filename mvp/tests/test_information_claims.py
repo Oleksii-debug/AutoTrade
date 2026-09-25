@@ -14,7 +14,9 @@ from mvp.autotrade_mvp.information_claims import (
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-def doc(source, revision, passage, *, available=0, locator="p1", kind="NEWS"):
+def doc(source, revision, passage, *, available=0, ingested=None, locator="p1", kind="NEWS"):
+    available_at = BASE + timedelta(hours=available)
+    ingested_at = available_at if ingested is None else BASE + timedelta(hours=ingested)
     return SourceDocument.create(
         source_id=source,
         source_revision=revision,
@@ -22,7 +24,8 @@ def doc(source, revision, passage, *, available=0, locator="p1", kind="NEWS"):
         title="title",
         passage=passage,
         published_at=BASE,
-        available_at=BASE + timedelta(hours=available),
+        available_at=available_at,
+        ingested_at=ingested_at,
         rights_basis="quotation-and-hash-only",
         locator=locator,
     )
@@ -50,6 +53,7 @@ class InformationClaimTests(unittest.TestCase):
             passage="same syndicated passage",
             published_at=BASE,
             available_at=BASE,
+            ingested_at=BASE,
             rights_basis="quotation-and-hash-only",
             locator="p1",
         )
@@ -61,6 +65,7 @@ class InformationClaimTests(unittest.TestCase):
             passage="same syndicated passage",
             published_at=BASE + timedelta(minutes=5),
             available_at=BASE + timedelta(minutes=5),
+            ingested_at=BASE + timedelta(minutes=5),
             rights_basis="quotation-and-hash-only",
             locator="p1",
         )
@@ -139,6 +144,38 @@ class InformationClaimTests(unittest.TestCase):
         store.add(claim)
         self.assertEqual(store.available_at(BASE + timedelta(hours=2)), ())
         self.assertEqual(store.available_at(BASE + timedelta(hours=3)), (claim,))
+
+    def test_early_source_availability_is_invisible_until_ingested(self):
+        store = ClaimStore()
+        claim = store.build_claim(
+            doc("macro", "r1", "release", available=1, ingested=3, kind="MACRO"),
+            subject="CPI",
+            predicate="value",
+            value="2.1",
+        )
+        store.add(claim)
+        self.assertEqual(store.available_at(BASE + timedelta(hours=2)), ())
+        self.assertEqual(store.available_at(BASE + timedelta(hours=3)), (claim,))
+
+    def test_syndication_representative_uses_earliest_causal_visibility(self):
+        store = ClaimStore()
+        externally_earlier_but_ingested_late = store.build_claim(
+            doc("slow-feed", "r1", "same passage", available=1, ingested=4),
+            subject="X",
+            predicate="state",
+            value="up",
+        )
+        later_publication_but_ingested_earlier = store.build_claim(
+            doc("fast-feed", "r1", "same passage", available=2, ingested=2),
+            subject="X",
+            predicate="state",
+            value="up",
+        )
+        store.add(externally_earlier_but_ingested_late)
+        representative, inserted = store.add(later_publication_but_ingested_earlier)
+        self.assertFalse(inserted)
+        self.assertEqual(representative.claim_id, later_publication_but_ingested_earlier.claim_id)
+        self.assertEqual(store.available_at(BASE + timedelta(hours=2)), (later_publication_but_ingested_earlier,))
 
     def test_prompt_like_content_never_grants_permission(self):
         store = ClaimStore()
@@ -268,6 +305,7 @@ class InformationClaimTests(unittest.TestCase):
             passage=" passage ",
             published_at=datetime(2026, 1, 1, 2, tzinfo=offset),
             available_at=datetime(2026, 1, 1, 3, tzinfo=offset),
+            ingested_at=datetime(2026, 1, 1, 3, tzinfo=offset),
             rights_basis=" quotation-and-hash-only ",
             locator=" p1 ",
         )
@@ -287,6 +325,7 @@ class InformationClaimTests(unittest.TestCase):
                 "passage": "passage",
                 "published_at": BASE,
                 "available_at": BASE,
+                "ingested_at": BASE,
                 "rights_basis": "quotation-and-hash-only",
                 "locator": "p1",
             },

@@ -1,9 +1,14 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
 import unittest
 
-from research.autotrade_research.memory.episodes import ExperienceMemory, MemoryConflict
+from research.autotrade_research.memory.episodes import (
+    ExperienceMemory,
+    MemoryConflict,
+    MemoryIntegrityError,
+)
 
 
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -386,6 +391,267 @@ class ExperienceMemoryTests(unittest.TestCase):
                 granted_permissions={"research"},
             )
             self.assertEqual(historical[0]["corrections"], [])
+
+    def test_episode_payload_tamper_fails_closed_on_source_and_retrieve(self):
+        with TemporaryDirectory() as directory:
+            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("original"),
+            )
+            tampered = json.dumps(
+                payload("rewritten"),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            with store._connect() as con:
+                con.execute(
+                    "UPDATE episodes SET payload_json=? WHERE episode_id=?",
+                    (tampered, episode),
+                )
+            with self.assertRaisesRegex(MemoryIntegrityError, "episode integrity mismatch"):
+                store.source_episode(episode)
+            with self.assertRaisesRegex(MemoryIntegrityError, "episode integrity mismatch"):
+                store.retrieve(
+                    information_cutoff=BASE,
+                    granted_permissions={"research"},
+                )
+
+    def test_episode_metadata_tamper_cannot_hide_row_from_filtered_retrieval(self):
+        with TemporaryDirectory() as directory:
+            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload(),
+            )
+            with store._connect() as con:
+                con.execute(
+                    "UPDATE episodes SET task='other' WHERE episode_id=?",
+                    (episode,),
+                )
+            with self.assertRaisesRegex(MemoryIntegrityError, "episode integrity mismatch"):
+                store.retrieve(
+                    information_cutoff=BASE,
+                    granted_permissions={"research"},
+                    task="research",
+                )
+
+    def test_episode_hash_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload(),
+            )
+            with store._connect() as con:
+                con.execute(
+                    "UPDATE episodes SET episode_hash='sha256:deadbeef' WHERE episode_id=?",
+                    (episode,),
+                )
+            with self.assertRaises(MemoryIntegrityError):
+                store.source_episode(episode)
+
+    def test_correction_payload_and_hash_tamper_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.sqlite3"
+            store = ExperienceMemory(path)
+            episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("pending"),
+            )
+            correction_id, _ = store.append_correction(
+                episode,
+                available_at=BASE,
+                payload={
+                    "supersedes_fields": ["outcome"],
+                    "outcome": {"label": "reconciled"},
+                    "evidence_ref": "artifact:correction",
+                },
+            )
+            with store._connect() as con:
+                con.execute(
+                    "UPDATE corrections SET payload_json='{}' WHERE correction_id=?",
+                    (correction_id,),
+                )
+            with self.assertRaises(MemoryIntegrityError):
+                store.retrieve(
+                    information_cutoff=BASE,
+                    granted_permissions={"research"},
+                )
+
+            clean = ExperienceMemory(Path(directory) / "second.sqlite3")
+            episode2, _ = clean.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("pending"),
+            )
+            correction2, _ = clean.append_correction(
+                episode2,
+                available_at=BASE,
+                payload={
+                    "supersedes_fields": ["outcome"],
+                    "outcome": {"label": "reconciled"},
+                    "evidence_ref": "artifact:correction",
+                },
+            )
+            with clean._connect() as con:
+                con.execute(
+                    "UPDATE corrections SET correction_hash='sha256:deadbeef' WHERE correction_id=?",
+                    (correction2,),
+                )
+            with self.assertRaisesRegex(MemoryIntegrityError, "correction integrity mismatch"):
+                clean.retrieve(
+                    information_cutoff=BASE,
+                    granted_permissions={"research"},
+                )
+
+    def test_verified_correction_survives_reopen(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.sqlite3"
+            first = ExperienceMemory(path)
+            episode, _ = first.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("pending"),
+            )
+            first.append_correction(
+                episode,
+                available_at=BASE,
+                payload={
+                    "supersedes_fields": ["outcome"],
+                    "outcome": {"label": "reconciled"},
+                    "evidence_ref": "artifact:reopen",
+                },
+            )
+            reopened = ExperienceMemory(path)
+            item = reopened.retrieve(
+                information_cutoff=BASE,
+                granted_permissions={"research"},
+            )[0]
+            self.assertEqual(item["payload"]["outcome"]["label"], "pending")
+            self.assertEqual(item["corrections"][0]["outcome"]["label"], "reconciled")
+
+    def test_tombstone_tamper_and_unverified_legacy_null_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.sqlite3"
+            store = ExperienceMemory(path)
+            episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload(),
+            )
+            tombstone_id = store.tombstone(episode, reason="source rights revoked")
+            with store._connect() as con:
+                con.execute(
+                    "UPDATE tombstones SET reason='tampered reason' WHERE tombstone_id=?",
+                    (tombstone_id,),
+                )
+            with self.assertRaisesRegex(MemoryIntegrityError, "tombstone integrity mismatch"):
+                store.retrieve(
+                    information_cutoff=BASE,
+                    granted_permissions={"research"},
+                    include_tombstoned=True,
+                )
+
+            second = ExperienceMemory(Path(directory) / "legacy.sqlite3")
+            episode2, _ = second.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload(),
+            )
+            second.tombstone(episode2, reason="legacy row")
+            with second._connect() as con:
+                con.execute(
+                    "UPDATE tombstones SET tombstone_hash=NULL WHERE episode_id=?",
+                    (episode2,),
+                )
+            reopened = ExperienceMemory(Path(directory) / "legacy.sqlite3")
+            with reopened._connect() as con:
+                persisted = con.execute(
+                    "SELECT tombstone_hash FROM tombstones WHERE episode_id=?",
+                    (episode2,),
+                ).fetchone()
+                self.assertIsNone(persisted["tombstone_hash"])
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "legacy tombstone lacks integrity identity",
+            ):
+                reopened.retrieve(
+                    information_cutoff=BASE,
+                    granted_permissions={"research"},
+                    include_tombstoned=True,
+                )
+
+    def test_negative_and_no_trade_episodes_remain_visible(self):
+        with TemporaryDirectory() as directory:
+            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            negative = payload("loss")
+            negative["intended_action"] = {"side": "SELL"}
+            no_trade = payload("no-trade")
+            no_trade["intended_action"] = {"side": "NO_TRADE"}
+            store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=negative,
+            )
+            store.append_episode(
+                decision_time=BASE + timedelta(seconds=1),
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=no_trade,
+            )
+            retrieved = store.retrieve(
+                information_cutoff=BASE + timedelta(seconds=1),
+                granted_permissions={"research"},
+            )
+            self.assertEqual(
+                [item["payload"]["outcome"]["label"] for item in retrieved],
+                ["loss", "no-trade"],
+            )
 
     def test_tombstone_hides_episode_but_keeps_auditable_record(self):
         with TemporaryDirectory() as directory:

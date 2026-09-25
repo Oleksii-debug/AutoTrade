@@ -45,6 +45,46 @@ class MemoryConflict(ValueError):
     pass
 
 
+class MemoryIntegrityError(MemoryConflict):
+    """Persisted memory bytes no longer match their immutable identity."""
+
+
+def _stored_time(value: Any, *, name: str) -> datetime:
+    if not isinstance(value, str):
+        raise MemoryIntegrityError(f"{name} must be stored as text")
+    try:
+        parsed = datetime.fromisoformat(value)
+        normalized = _time(parsed, name=name).isoformat()
+    except (TypeError, ValueError) as error:
+        raise MemoryIntegrityError(f"{name} is not a valid stored timestamp") from error
+    if normalized != value:
+        raise MemoryIntegrityError(f"{name} is not canonical UTC time")
+    return parsed.astimezone(timezone.utc)
+
+
+def _stored_text(value: Any, *, name: str) -> str:
+    try:
+        normalized = _text(value, name=name)
+    except (TypeError, ValueError) as error:
+        raise MemoryIntegrityError(f"{name} is not valid stored text") from error
+    if normalized != value:
+        raise MemoryIntegrityError(f"{name} is not canonical stored text")
+    return normalized
+
+
+def _stored_json(value: Any, *, name: str) -> Any:
+    if not isinstance(value, str):
+        raise MemoryIntegrityError(f"{name} must be stored as JSON text")
+    try:
+        parsed = json.loads(value)
+        canonical = _canonical(parsed)
+    except (json.JSONDecodeError, TypeError, ValueError) as error:
+        raise MemoryIntegrityError(f"{name} is not valid canonical JSON") from error
+    if canonical != value:
+        raise MemoryIntegrityError(f"{name} is not canonical JSON")
+    return parsed
+
+
 class ExperienceMemory:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -97,6 +137,14 @@ class ExperienceMemory:
                     ON corrections(episode_id, available_at, created_at, correction_id)
                 """
             )
+            tombstone_columns = {
+                row["name"]
+                for row in con.execute("PRAGMA table_info(tombstones)").fetchall()
+            }
+            if "tombstone_hash" not in tombstone_columns:
+                # Deliberately nullable: pre-migration tombstones are not silently
+                # relabelled as cryptographically witnessed history.
+                con.execute("ALTER TABLE tombstones ADD COLUMN tombstone_hash TEXT")
 
     @contextmanager
     def _connect(self):
@@ -112,6 +160,113 @@ class ExperienceMemory:
             raise
         finally:
             con.close()
+
+    @staticmethod
+    def _verified_episode(row: sqlite3.Row) -> dict[str, Any]:
+        decision = _stored_time(row["decision_time"], name="decision_time")
+        cutoff = _stored_time(row["information_cutoff"], name="information_cutoff")
+        if cutoff > decision:
+            raise MemoryIntegrityError(
+                "persisted information cutoff cannot be after decision time"
+            )
+        task = _stored_text(row["task"], name="task")
+        regime = _stored_text(row["regime"], name="regime")
+        family = _stored_text(row["instrument_family"], name="instrument_family")
+        permission = _stored_text(row["permission_class"], name="permission_class")
+        payload = _stored_json(row["payload_json"], name="episode payload")
+        if not isinstance(payload, dict) or not payload:
+            raise MemoryIntegrityError("episode payload must be a non-empty object")
+        required = {
+            "evidence_refs",
+            "intended_action",
+            "actual_execution",
+            "outcome",
+            "costs",
+        }
+        if required - set(payload):
+            raise MemoryIntegrityError("episode payload is missing required fields")
+        if not isinstance(payload["evidence_refs"], list) or not payload["evidence_refs"]:
+            raise MemoryIntegrityError("episode evidence references are invalid")
+        expected = _hash(
+            {
+                "decision_time": row["decision_time"],
+                "information_cutoff": row["information_cutoff"],
+                "task": task,
+                "regime": regime,
+                "instrument_family": family,
+                "permission_class": permission,
+                "payload": payload,
+            }
+        )
+        if row["episode_hash"] != expected:
+            raise MemoryIntegrityError("episode integrity mismatch")
+        return {
+            "decision": decision,
+            "cutoff": cutoff,
+            "task": task,
+            "regime": regime,
+            "instrument_family": family,
+            "permission_class": permission,
+            "payload": payload,
+        }
+
+    @staticmethod
+    def _verified_correction(
+        row: sqlite3.Row,
+        *,
+        episode_id: str,
+    ) -> tuple[dict[str, Any], datetime]:
+        if row["episode_id"] != episode_id:
+            raise MemoryIntegrityError("correction episode binding mismatch")
+        payload = _stored_json(row["payload_json"], name="correction payload")
+        if not isinstance(payload, dict) or not payload:
+            raise MemoryIntegrityError("correction payload must be a non-empty object")
+        created = _stored_time(row["created_at"], name="correction created_at")
+        if row["available_at"] is None:
+            # Historical rows written before causal availability was added retain
+            # their original payload-only checksum. They are verified as legacy
+            # evidence rather than silently rewritten.
+            availability = created
+            expected = _hash(payload)
+        else:
+            availability = _stored_time(
+                row["available_at"],
+                name="correction available_at",
+            )
+            expected = _hash(
+                {
+                    "available_at": row["available_at"],
+                    "payload": payload,
+                }
+            )
+        if row["correction_hash"] != expected:
+            raise MemoryIntegrityError("correction integrity mismatch")
+        return payload, availability
+
+    @staticmethod
+    def _verified_tombstone(
+        row: sqlite3.Row,
+        *,
+        episode_id: str,
+    ) -> dict[str, str]:
+        if row["episode_id"] != episode_id:
+            raise MemoryIntegrityError("tombstone episode binding mismatch")
+        if row["tombstone_hash"] is None:
+            raise MemoryIntegrityError(
+                "legacy tombstone lacks integrity identity; explicit recovery is required"
+            )
+        reason = _stored_text(row["reason"], name="tombstone reason")
+        created = _stored_time(row["created_at"], name="tombstone created_at")
+        expected = _hash(
+            {
+                "episode_id": episode_id,
+                "reason": reason,
+                "created_at": row["created_at"],
+            }
+        )
+        if row["tombstone_hash"] != expected:
+            raise MemoryIntegrityError("tombstone integrity mismatch")
+        return {"reason": reason, "created_at": created.isoformat()}
 
     def append_episode(
         self,
@@ -231,15 +386,14 @@ class ExperienceMemory:
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             episode_row = con.execute(
-                "SELECT decision_time, payload_json FROM episodes WHERE episode_id=?",
+                "SELECT * FROM episodes WHERE episode_id=?",
                 (episode,),
             ).fetchone()
             if episode_row is None:
                 raise KeyError(episode)
-            episode_decision = datetime.fromisoformat(episode_row["decision_time"]).astimezone(
-                timezone.utc
-            )
-            source_payload = json.loads(episode_row["payload_json"])
+            verified_episode = self._verified_episode(episode_row)
+            episode_decision = verified_episode["decision"]
+            source_payload = verified_episode["payload"]
             unknown_supersedes = tuple(
                 field for field in supersedes if field not in source_payload
             )
@@ -321,13 +475,30 @@ class ExperienceMemory:
         episode = _identifier(episode_id)
         why = _text(reason, name="reason")
         identifier = _identifier()
+        created_at = datetime.now(timezone.utc).isoformat()
+        digest = _hash(
+            {
+                "episode_id": episode,
+                "reason": why,
+                "created_at": created_at,
+            }
+        )
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
-            if con.execute("SELECT 1 FROM episodes WHERE episode_id=?", (episode,)).fetchone() is None:
+            source = con.execute(
+                "SELECT * FROM episodes WHERE episode_id=?",
+                (episode,),
+            ).fetchone()
+            if source is None:
                 raise KeyError(episode)
+            self._verified_episode(source)
             con.execute(
-                "INSERT INTO tombstones(tombstone_id,episode_id,reason,created_at) VALUES(?,?,?,?)",
-                (identifier, episode, why, datetime.now(timezone.utc).isoformat()),
+                """
+                INSERT INTO tombstones(
+                    tombstone_id,episode_id,reason,created_at,tombstone_hash
+                ) VALUES(?,?,?,?,?)
+                """,
+                (identifier, episode, why, created_at, digest),
             )
             con.commit()
         return identifier
@@ -349,67 +520,97 @@ class ExperienceMemory:
         cutoff = _time(information_cutoff, name="information_cutoff")
         if not isinstance(granted_permissions, set):
             raise TypeError("granted_permissions must be a set")
-        query = "SELECT * FROM episodes WHERE information_cutoff <= ? AND decision_time <= ?"
-        args: list[Any] = [cutoff.isoformat(), cutoff.isoformat()]
-        for column, value in (
-            ("task", task),
-            ("regime", regime),
-            ("instrument_family", instrument_family),
-        ):
-            if value is not None:
-                query += f" AND {column}=?"
-                args.append(_text(value, name=column))
-        query += " ORDER BY decision_time, episode_id"
+        normalized_task = None if task is None else _text(task, name="task")
+        normalized_regime = None if regime is None else _text(regime, name="regime")
+        normalized_family = (
+            None
+            if instrument_family is None
+            else _text(instrument_family, name="instrument_family")
+        )
 
         results: list[dict[str, Any]] = []
         with self._connect() as con:
-            for row in con.execute(query, args).fetchall():
-                if not self._permission_allowed(row["permission_class"], granted_permissions):
+            # Verify immutable rows before applying metadata filters. A raw DB edit
+            # must not be able to hide a record merely by moving task/regime/time.
+            rows = con.execute("SELECT * FROM episodes ORDER BY episode_id").fetchall()
+            for row in rows:
+                verified = self._verified_episode(row)
+                if verified["cutoff"] > cutoff or verified["decision"] > cutoff:
                     continue
-                tombstones = con.execute(
+                if normalized_task is not None and verified["task"] != normalized_task:
+                    continue
+                if normalized_regime is not None and verified["regime"] != normalized_regime:
+                    continue
+                if (
+                    normalized_family is not None
+                    and verified["instrument_family"] != normalized_family
+                ):
+                    continue
+                if not self._permission_allowed(
+                    verified["permission_class"],
+                    granted_permissions,
+                ):
+                    continue
+
+                tombstone_rows = con.execute(
                     "SELECT * FROM tombstones WHERE episode_id=? ORDER BY created_at,tombstone_id",
                     (row["episode_id"],),
                 ).fetchall()
+                tombstones = [
+                    self._verified_tombstone(item, episode_id=row["episode_id"])
+                    for item in tombstone_rows
+                ]
                 if tombstones and not include_tombstoned:
                     continue
-                corrections = con.execute(
+
+                correction_rows = con.execute(
                     """
                     SELECT * FROM corrections
                     WHERE episode_id=?
-                      AND COALESCE(available_at, created_at) <= ?
                     ORDER BY COALESCE(available_at, created_at), created_at, correction_id
                     """,
-                    (row["episode_id"], cutoff.isoformat()),
+                    (row["episode_id"],),
                 ).fetchall()
+                visible_corrections: list[dict[str, Any]] = []
+                for correction_row in correction_rows:
+                    correction, available = self._verified_correction(
+                        correction_row,
+                        episode_id=row["episode_id"],
+                    )
+                    if available <= cutoff:
+                        visible_corrections.append(correction)
+
                 results.append(
                     {
                         "episode_id": row["episode_id"],
                         "episode_hash": row["episode_hash"],
                         "decision_time": row["decision_time"],
                         "information_cutoff": row["information_cutoff"],
-                        "task": row["task"],
-                        "regime": row["regime"],
-                        "instrument_family": row["instrument_family"],
-                        "permission_class": row["permission_class"],
-                        "payload": json.loads(row["payload_json"]),
-                        "corrections": [json.loads(item["payload_json"]) for item in corrections],
-                        "tombstones": [
-                            {"reason": item["reason"], "created_at": item["created_at"]}
-                            for item in tombstones
-                        ],
+                        "task": verified["task"],
+                        "regime": verified["regime"],
+                        "instrument_family": verified["instrument_family"],
+                        "permission_class": verified["permission_class"],
+                        "payload": verified["payload"],
+                        "corrections": visible_corrections,
+                        "tombstones": tombstones,
                     }
                 )
+        results.sort(key=lambda item: (item["decision_time"], item["episode_id"]))
         return tuple(results)
 
     def source_episode(self, episode_id: str) -> dict[str, Any]:
         identifier = _identifier(episode_id)
         with self._connect() as con:
-            row = con.execute("SELECT * FROM episodes WHERE episode_id=?", (identifier,)).fetchone()
+            row = con.execute(
+                "SELECT * FROM episodes WHERE episode_id=?",
+                (identifier,),
+            ).fetchone()
             if row is None:
                 raise KeyError(identifier)
+            verified = self._verified_episode(row)
             return {
                 "episode_id": row["episode_id"],
                 "episode_hash": row["episode_hash"],
-                "payload": json.loads(row["payload_json"]),
+                "payload": verified["payload"],
                 "information_cutoff": row["information_cutoff"],
             }

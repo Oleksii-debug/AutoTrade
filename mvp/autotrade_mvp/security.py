@@ -317,6 +317,8 @@ class SecurityBoundary:
             return {SecurityBoundary.redact(item) for item in value}
         if isinstance(value, frozenset):
             return frozenset(SecurityBoundary.redact(item) for item in value)
+        if isinstance(value, str) and _REDACT_RE.search(value):
+            return "[REDACTED]"
         return value
 
     @staticmethod

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from hashlib import sha256
@@ -53,6 +53,52 @@ def _normalize_mapping(values, *, name: str, parser) -> dict[str, Decimal]:
             raise ValueError(f"{name} keys must be unique after normalization")
         normalized[key] = parser(raw_value, key)
     return normalized
+
+
+def normalize_reservation_requirements(
+    values: Mapping[str, object],
+) -> tuple[tuple[str, Decimal], ...]:
+    """Canonical exact worst-case reservation delta bound to one risk decision."""
+
+    normalized = _normalize_mapping(
+        values,
+        name="reservation_requirements",
+        parser=lambda value, resource: _positive(
+            value,
+            name=f"reservation_requirements[{resource}]",
+        ),
+    )
+    if not normalized:
+        raise ValueError("reservation_requirements must not be empty")
+    return tuple(sorted(normalized.items()))
+
+
+def reservation_requirements_payload(
+    values: tuple[tuple[str, Decimal], ...] | Mapping[str, object],
+) -> dict[str, str]:
+    if isinstance(values, Mapping):
+        normalized = normalize_reservation_requirements(values)
+    else:
+        if (
+            not isinstance(values, tuple)
+            or not values
+            or any(
+                not isinstance(item, tuple) or len(item) != 2
+                for item in values
+            )
+        ):
+            raise TypeError(
+                "reservation requirements must be a canonical tuple or mapping"
+            )
+        normalized = normalize_reservation_requirements(dict(values))
+        if normalized != values:
+            raise ValueError(
+                "reservation requirements tuple is not canonical"
+            )
+    return {
+        resource: _canonical_decimal_text(amount)
+        for resource, amount in normalized
+    }
 
 
 def _normalize_text_mapping(values, *, name: str) -> dict[str, str]:
@@ -1043,6 +1089,15 @@ class RiskDecision:
     worst_stress_loss: Decimal
     input_fingerprint: str
     rules: tuple[RiskRuleResult, ...]
+    decision_id: str | None = None
+    intent_hash: str | None = None
+    state_version: int | None = None
+    policy_version: int | None = None
+    reservation_version: int | None = None
+    reservation_requirements: tuple[tuple[str, Decimal], ...] | None = None
+    capability_snapshot_id: str | None = None
+    evaluated_at: str | None = None
+    valid_until: str | None = None
 
 
 def _fingerprint_value(value):
@@ -1106,6 +1161,31 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
             for item in decision.rules
         ],
     }
+    binding_values = (
+        decision.intent_hash,
+        decision.state_version,
+        decision.policy_version,
+        decision.reservation_version,
+        decision.reservation_requirements,
+        decision.capability_snapshot_id,
+        decision.evaluated_at,
+        decision.valid_until,
+    )
+    if any(value is not None for value in binding_values):
+        if any(value is None for value in binding_values):
+            raise ValueError("risk decision binding must be complete")
+        payload["binding"] = {
+            "intent_hash": decision.intent_hash,
+            "state_version": decision.state_version,
+            "policy_version": decision.policy_version,
+            "reservation_version": decision.reservation_version,
+            "reservation_requirements": reservation_requirements_payload(
+                decision.reservation_requirements
+            ),
+            "capability_snapshot_id": decision.capability_snapshot_id,
+            "evaluated_at": decision.evaluated_at,
+            "valid_until": decision.valid_until,
+        }
     encoded = json.dumps(
         payload,
         ensure_ascii=True,
@@ -1113,6 +1193,138 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return sha256(encoded).hexdigest()
+
+
+def _risk_binding_instant(value: str, *, name: str) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} is required")
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{name} must be an ISO timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{name} must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _risk_binding_text(value: str, *, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} is required")
+    return value.strip()
+
+
+def bind_risk_decision(
+    decision: RiskDecision,
+    *,
+    intent_hash: str,
+    state_version: int,
+    policy_version: int,
+    reservation_version: int,
+    reservation_requirements: Mapping[str, object],
+    capability_snapshot_id: str,
+    evaluated_at: str,
+    valid_until: str,
+) -> RiskDecision:
+    """Bind a deterministic risk result to immutable admission evidence."""
+
+    if not isinstance(decision, RiskDecision):
+        raise TypeError("decision must be a RiskDecision")
+    ihash = _risk_binding_text(intent_hash, name="intent_hash")
+    capability = _risk_binding_text(
+        capability_snapshot_id, name="capability_snapshot_id"
+    )
+    if (
+        not isinstance(state_version, int)
+        or isinstance(state_version, bool)
+        or state_version < 0
+    ):
+        raise ValueError("state_version must be a non-negative integer")
+    if (
+        not isinstance(policy_version, int)
+        or isinstance(policy_version, bool)
+        or policy_version < 1
+    ):
+        raise ValueError("policy_version must be a positive integer")
+    if (
+        not isinstance(reservation_version, int)
+        or isinstance(reservation_version, bool)
+        or reservation_version < 0
+    ):
+        raise ValueError("reservation_version must be a non-negative integer")
+    requirements = normalize_reservation_requirements(
+        reservation_requirements
+    )
+    evaluated = _risk_binding_text(evaluated_at, name="evaluated_at")
+    valid = _risk_binding_text(valid_until, name="valid_until")
+    if _risk_binding_instant(evaluated, name="evaluated_at") >= _risk_binding_instant(
+        valid, name="valid_until"
+    ):
+        raise ValueError("evaluated_at must precede valid_until")
+
+    bound = replace(
+        decision,
+        decision_id=None,
+        intent_hash=ihash,
+        state_version=state_version,
+        policy_version=policy_version,
+        reservation_version=reservation_version,
+        reservation_requirements=requirements,
+        capability_snapshot_id=capability,
+        evaluated_at=evaluated,
+        valid_until=valid,
+    )
+    digest = risk_decision_fingerprint(bound)
+    return replace(bound, decision_id="risk:sha256:" + digest)
+
+
+def validate_bound_risk_decision(decision: RiskDecision, *, now: str) -> None:
+    if not isinstance(decision, RiskDecision):
+        raise TypeError("risk_decision must be a RiskDecision")
+    if decision.decision_id is None:
+        raise ValueError("risk_decision must be bound before admission")
+    expected = "risk:sha256:" + risk_decision_fingerprint(decision)
+    if decision.decision_id != expected:
+        raise ValueError("risk_decision_id does not match bound evidence")
+    current = _risk_binding_instant(now, name="now")
+    evaluated = _risk_binding_instant(decision.evaluated_at, name="evaluated_at")
+    valid = _risk_binding_instant(decision.valid_until, name="valid_until")
+    if current < evaluated:
+        raise ValueError("risk_decision is not yet valid")
+    if current >= valid:
+        raise ValueError("risk_decision is expired")
+
+
+def evaluate_bound_risk(
+    intent: RiskIntent,
+    context: RiskContext,
+    policy: RiskPolicy,
+    *,
+    intent_hash: str,
+    policy_version: int,
+    reservation_version: int,
+    reservation_requirements: Mapping[str, object],
+    capability_snapshot_id: str,
+    evaluated_at: str,
+    valid_until: str,
+    evidence_store: object | None = None,
+) -> RiskDecision:
+    decision = evaluate_risk(
+        intent,
+        context,
+        policy,
+        evidence_store=evidence_store,
+    )
+    return bind_risk_decision(
+        decision,
+        intent_hash=intent_hash,
+        state_version=context.state_version,
+        policy_version=policy_version,
+        reservation_version=reservation_version,
+        reservation_requirements=reservation_requirements,
+        capability_snapshot_id=capability_snapshot_id,
+        evaluated_at=evaluated_at,
+        valid_until=valid_until,
+    )
 
 
 def evaluate_risk(

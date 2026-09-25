@@ -66,6 +66,15 @@ def bound_book(state_value, *, current=None, registry=None):
 def corporate_event(**kwargs):
     kwargs.setdefault("instrument_id", INSTRUMENT_ID)
     kwargs.setdefault("instrument_version", 1)
+    if kwargs.get("kind", "").upper() == "SYMBOL_CHANGE" and "effective_at" not in kwargs:
+        effective_date = kwargs.get("effective_date")
+        if isinstance(effective_date, date):
+            kwargs["effective_at"] = datetime(
+                effective_date.year,
+                effective_date.month,
+                effective_date.day,
+                tzinfo=timezone.utc,
+            )
     return CorporateEvent.create(**kwargs)
 
 
@@ -741,6 +750,77 @@ class CorporateSettlementTests(unittest.TestCase):
                 self.assertEqual(book.state.symbol, "AAA")
                 self.assertEqual(book.instrument_version, first)
                 self.assertEqual(book.applied_event_ids, ())
+
+    def test_symbol_change_requires_exact_effective_instant_for_intraday_successor(self):
+        first = instrument()
+        successor_effective_at = datetime(
+            2026, 6, 1, 14, 0, tzinfo=timezone.utc
+        )
+        second = instrument(
+            version=2,
+            symbol="BBB",
+            effective_from=successor_effective_at,
+        )
+        registry = InstrumentRegistry(versions=(first, second))
+        book = bound_book(state(), current=first, registry=registry)
+        original_state = book.state
+
+        early = corporate_event(
+            event_id="symbol-change-too-early",
+            kind="SYMBOL_CHANGE",
+            effective_date=date(2026, 6, 1),
+            effective_at=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+            source_revision="provider:r1",
+            payload={"successor_instrument_version": 2},
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "effective_at does not match successor effective_from",
+        ):
+            book.apply(early)
+        self.assertEqual(book.state, original_state)
+        self.assertEqual(book.instrument_version, first)
+        self.assertEqual(book.applied_event_ids, ())
+
+        exact = corporate_event(
+            event_id="symbol-change-exact-instant",
+            kind="SYMBOL_CHANGE",
+            effective_date=date(2026, 6, 1),
+            effective_at=successor_effective_at,
+            source_revision="provider:r1",
+            payload={"successor_instrument_version": 2},
+        )
+        result = book.apply(exact)
+        self.assertEqual(result.economic_pnl, Decimal("0"))
+        self.assertEqual(result.after.symbol, "BBB")
+        self.assertEqual(book.instrument_version, second)
+
+    def test_symbol_change_without_effective_at_fails_closed(self):
+        first = instrument()
+        second = instrument(
+            version=2,
+            symbol="BBB",
+            effective_from=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        )
+        registry = InstrumentRegistry(versions=(first, second))
+        book = bound_book(state(), current=first, registry=registry)
+        event = CorporateEvent.create(
+            event_id="symbol-change-missing-effective-at",
+            instrument_id=INSTRUMENT_ID,
+            instrument_version=1,
+            kind="SYMBOL_CHANGE",
+            effective_date=date(2026, 6, 1),
+            source_revision="provider:r1",
+            payload={"successor_instrument_version": 2},
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires exact timezone-aware effective_at",
+        ):
+            book.apply(event)
+        self.assertEqual(book.state.symbol, "AAA")
+        self.assertEqual(book.instrument_version, first)
+        self.assertEqual(book.applied_event_ids, ())
 
     def test_symbol_change_rejects_economic_identity_drift_before_mutation(self):
         first = instrument()

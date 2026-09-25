@@ -222,6 +222,28 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 1,
             )
 
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "side must be BUY or SELL",
+            ):
+                book.ingest_execution_fill(
+                    event_key="lowercase-side",
+                    client_order_id="c1",
+                    committed_at=T2,
+                    execution_fill={**base_fill, "side": "buy"},
+                )
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "settlement_date must be an ISO calendar date",
+            ):
+                book.ingest_execution_fill(
+                    event_key="invalid-settlement-date",
+                    client_order_id="c1",
+                    committed_at=T2,
+                    execution_fill={**base_fill, "settlement_date": "2026-02-30"},
+                )
+            self.assertEqual(book.order("c1").filled_quantity, Decimal("0"))
+
     def test_canonical_execution_fill_correction_uses_existing_fill_lineage(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

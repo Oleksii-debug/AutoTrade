@@ -330,9 +330,21 @@ def verify_prepared_export(export: PreparedExport) -> bool:
     return export.sha256 == f"sha256:{sha256(export.data).hexdigest()}"
 
 
-def write_prepared_export(export: PreparedExport, directory: str | Path) -> Path:
-    """Atomically publish a verified export beneath one caller-owned directory."""
+def write_prepared_export(
+    export: PreparedExport,
+    directory: str | Path,
+    *,
+    rights: Mapping[str, object],
+) -> Path:
+    """Atomically publish a verified export beneath one caller-owned directory.
 
+    Publication rechecks current export permission and binds it to the exact
+    rights identity captured when the inert bytes were prepared.
+    """
+
+    current_rights_id = _rights(rights)
+    if current_rights_id != export.rights_id:
+        raise PermissionError("publication rights identity does not match prepared export")
     if not verify_prepared_export(export):
         raise ExportBoundaryError("prepared export failed integrity verification")
     root = Path(directory)

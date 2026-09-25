@@ -14,7 +14,10 @@ from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.risk import (
+    RiskContext,
     RiskDecision,
+    RiskIntent,
+    RiskPolicy,
     RiskRuleResult,
     bind_risk_decision,
 )
@@ -89,6 +92,72 @@ def bound_risk_decision(
         evaluated_at=evaluated_at,
         valid_until=valid_until,
     )
+
+
+PUBLIC_INTENT_HASH = "sha256:" + "a" * 64
+PUBLIC_CAPABILITY_SNAPSHOT_ID = "cap-snapshot-1"
+PUBLIC_RISK_VALID_UNTIL = "2026-09-24T18:30:00Z"
+
+
+def public_risk_intent(*, expected_state_version=7):
+    return RiskIntent.create(
+        symbol="ABC",
+        side="BUY",
+        quantity="1",
+        price="100",
+        expected_state_version=expected_state_version,
+    )
+
+
+def public_risk_context(*, state_version=7):
+    return RiskContext.create(
+        state_version=state_version,
+        equity="1000",
+        positions={},
+        marks={"ABC": "100"},
+        reserved_position_delta={},
+        daily_pnl="0",
+        drawdown_fraction="0",
+        market_data_age_seconds="1",
+        fx_age_seconds={"USD": "1"},
+        margin_headroom="1",
+        capability_allowed=True,
+        borrow_available=True,
+        stress_scenarios=({"ABC": "-0.10"},),
+    )
+
+
+def public_risk_policy(**overrides):
+    values = dict(
+        max_abs_position="10",
+        max_single_notional="1000",
+        max_gross_leverage="2",
+        max_net_leverage="2",
+        max_daily_loss="500",
+        max_drawdown_fraction="0.20",
+        max_data_age_seconds="5",
+        max_fx_age_seconds="60",
+        min_margin_headroom="0.20",
+        max_stress_loss="500",
+    )
+    values.update(overrides)
+    return RiskPolicy.create(**values)
+
+
+def public_financial_kwargs(**overrides):
+    values = dict(
+        intent_hash=PUBLIC_INTENT_HASH,
+        capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
+        risk_intent=public_risk_intent(),
+        risk_context=public_risk_context(),
+        risk_policy=public_risk_policy(),
+        risk_valid_until=PUBLIC_RISK_VALID_UNTIL,
+        reservation_requirements={"CASH:USD": "100"},
+        reservation_available={"CASH:USD": "1000"},
+        now="2026-09-24T18:01:00Z",
+    )
+    values.update(overrides)
+    return values
 
 class AuthorityTests(unittest.TestCase):
     def test_registration_rejects_unvalidated_policy_objects(self):
@@ -1144,38 +1213,27 @@ class AuthorityTests(unittest.TestCase):
                 environment="PAPER",
                 account_id="paper-1",
             )
-            decision = bound_risk_decision(
-                policy_version=item.version,
-                reservation_version=reservations.version,
-            )
-
             kwargs = dict(
                 command_id="cmd-public-admit",
                 idempotency_key="idem-public-admit",
                 admission_id="admission-public",
                 policy_id=item.policy_id,
                 intent_id="intent-public",
-                intent_hash=decision.intent_hash,
                 account_id="paper-1",
                 environment="PAPER",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
                 notional="100",
-                current_state_version=7,
-                capability_snapshot_id=decision.capability_snapshot_id,
-                risk_decision=decision,
                 reservation_id="reservation-public",
-                reservation_requirements={"CASH:USD": "100"},
-                reservation_available={"CASH:USD": "1000"},
-                now="2026-09-24T18:01:00Z",
+                **public_financial_kwargs(),
             )
             first = authority.admit(
                 reservation_book=reservations,
                 **kwargs,
             )
             self.assertEqual(first.outcome, "ADMITTED")
-            self.assertEqual(first.risk_decision_id, decision.decision_id)
+            self.assertTrue(first.risk_decision_id.startswith("risk:sha256:"))
             self.assertEqual(first.reservation_id, "reservation-public")
             self.assertEqual(
                 reservations.total_reserved("CASH:USD"),
@@ -1183,9 +1241,8 @@ class AuthorityTests(unittest.TestCase):
             )
             self.assertEqual(len(store.pending_outbox()), 1)
 
-            # A lost response followed by process restart must replay the exact
-            # prior admission even though the reservation aggregate advanced
-            # from version 0 to 1. It must not reserve or publish twice.
+            # Lost-response replay re-evaluates the typed risk inputs against
+            # immutable original evidence; it never reserves or publishes twice.
             restarted_authority = AuthorityService(store)
             restarted_reservations = DurableReservationBook(
                 store,
@@ -1204,7 +1261,7 @@ class AuthorityTests(unittest.TestCase):
             )
             self.assertEqual(len(store.pending_outbox()), 1)
             self.assertEqual(
-                len(store.load_events("risk_decision", decision.decision_id)),
+                len(store.load_events("risk_decision", first.risk_decision_id)),
                 1,
             )
             self.assertEqual(
@@ -1212,7 +1269,17 @@ class AuthorityTests(unittest.TestCase):
                 2,
             )
 
-    def test_public_financial_admission_rejects_under_reservation_without_mutation(self):
+    def test_public_admit_has_no_preapproved_risk_decision_escape_hatch(self):
+        import inspect
+
+        parameters = inspect.signature(AuthorityService.admit).parameters
+        self.assertIn("risk_intent", parameters)
+        self.assertIn("risk_context", parameters)
+        self.assertIn("risk_policy", parameters)
+        self.assertNotIn("risk_admitted", parameters)
+        self.assertNotIn("risk_decision", parameters)
+
+    def test_public_financial_admission_risk_rejection_does_not_reserve_or_publish(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = AuthorityService(store)
@@ -1223,53 +1290,66 @@ class AuthorityTests(unittest.TestCase):
                 environment="PAPER",
                 account_id="paper-1",
             )
-            decision = bound_risk_decision(
-                policy_version=item.version,
-                reservation_version=reservations.version,
-                reservation_requirements={"CASH:USD": "100"},
+            rejected = authority.admit(
+                command_id="cmd-risk-reject",
+                idempotency_key="idem-risk-reject",
+                admission_id="admission-risk-reject",
+                policy_id=item.policy_id,
+                intent_id="intent-risk-reject",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_book=reservations,
+                reservation_id="reservation-risk-reject",
+                **public_financial_kwargs(
+                    risk_policy=public_risk_policy(max_single_notional="50")
+                ),
             )
-            before_authority = len(
-                store.load_events("authority_state", "canonical")
-            )
-            with self.assertRaisesRegex(
-                AuthorityConflict,
-                "reservation requirements do not match risk decision",
-            ):
-                authority.admit(
-                    command_id="cmd-under-reserved",
-                    idempotency_key="idem-under-reserved",
-                    admission_id="admission-under-reserved",
-                    policy_id=item.policy_id,
-                    intent_id="intent-under-reserved",
-                    intent_hash=decision.intent_hash,
-                    account_id="paper-1",
-                    environment="PAPER",
-                    instrument_id=INSTRUMENT_ID,
-                    instrument_version=1,
-                    action="ORDER.SUBMIT",
-                    notional="100",
-                    current_state_version=7,
-                    capability_snapshot_id=decision.capability_snapshot_id,
-                    risk_decision=decision,
-                    reservation_book=reservations,
-                    reservation_id="reservation-under-reserved",
-                    reservation_requirements={"CASH:USD": "99"},
-                    reservation_available={"CASH:USD": "1000"},
-                    now="2026-09-24T18:01:00Z",
-                )
+            self.assertEqual(rejected.outcome, "REJECTED")
+            self.assertEqual(rejected.reason, "risk_rejected")
+            self.assertIsNone(rejected.reservation_id)
             self.assertEqual(reservations.version, 0)
+            self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("0"))
+            self.assertEqual(store.pending_outbox(), [])
             self.assertEqual(
-                reservations.total_reserved("CASH:USD"),
-                Decimal("0"),
+                len(store.load_events("risk_decision", rejected.risk_decision_id)),
+                1,
             )
-            self.assertEqual(
-                len(store.load_events("risk_decision", decision.decision_id)),
-                0,
+
+    def test_public_financial_admission_stale_state_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            item = policy(autonomous=True)
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store, environment="PAPER", account_id="paper-1"
             )
-            self.assertEqual(
-                len(store.load_events("authority_state", "canonical")),
-                before_authority,
+            rejected = authority.admit(
+                command_id="cmd-stale-state",
+                idempotency_key="idem-stale-state",
+                admission_id="admission-stale-state",
+                policy_id=item.policy_id,
+                intent_id="intent-stale-state",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_book=reservations,
+                reservation_id="reservation-stale-state",
+                **public_financial_kwargs(
+                    risk_intent=public_risk_intent(expected_state_version=6),
+                    risk_context=public_risk_context(state_version=7),
+                ),
             )
+            self.assertEqual(rejected.outcome, "REJECTED")
+            self.assertEqual(rejected.reason, "risk_rejected")
+            self.assertEqual(reservations.version, 0)
             self.assertEqual(store.pending_outbox(), [])
 
     def test_public_financial_admission_replay_rejects_changed_reservation_delta(self):
@@ -1283,31 +1363,20 @@ class AuthorityTests(unittest.TestCase):
                 environment="PAPER",
                 account_id="paper-1",
             )
-            decision = bound_risk_decision(
-                policy_version=item.version,
-                reservation_version=reservations.version,
-                reservation_requirements={"CASH:USD": "100"},
-            )
             kwargs = dict(
                 command_id="cmd-retry-delta",
                 idempotency_key="idem-retry-delta",
                 admission_id="admission-retry-delta",
                 policy_id=item.policy_id,
                 intent_id="intent-retry-delta",
-                intent_hash=decision.intent_hash,
                 account_id="paper-1",
                 environment="PAPER",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
                 notional="100",
-                current_state_version=7,
-                capability_snapshot_id=decision.capability_snapshot_id,
-                risk_decision=decision,
                 reservation_id="reservation-retry-delta",
-                reservation_requirements={"CASH:USD": "100"},
-                reservation_available={"CASH:USD": "1000"},
-                now="2026-09-24T18:01:00Z",
+                **public_financial_kwargs(),
             )
             first = authority.admit(
                 reservation_book=reservations,
@@ -1321,7 +1390,7 @@ class AuthorityTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 AuthorityConflict,
-                "reservation requirements do not match risk decision",
+                "another financial command",
             ):
                 restarted.admit(
                     reservation_book=restarted_book,
@@ -1337,10 +1406,9 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(restarted_book.version, 1)
             self.assertEqual(len(store.pending_outbox()), 1)
             self.assertEqual(
-                len(store.load_events("risk_decision", decision.decision_id)),
+                len(store.load_events("risk_decision", first.risk_decision_id)),
                 1,
             )
-            self.assertEqual(first.reservation_id, "reservation-retry-delta")
 
     def test_public_financial_admission_replay_rejects_changed_scope(self):
         with TemporaryDirectory() as directory:
@@ -1353,30 +1421,20 @@ class AuthorityTests(unittest.TestCase):
                 environment="PAPER",
                 account_id="paper-1",
             )
-            decision = bound_risk_decision(
-                policy_version=item.version,
-                reservation_version=reservations.version,
-            )
             kwargs = dict(
                 command_id="cmd-replay-scope",
                 idempotency_key="idem-replay-scope",
                 admission_id="admission-replay-scope",
                 policy_id=item.policy_id,
                 intent_id="intent-replay-scope",
-                intent_hash=decision.intent_hash,
                 account_id="paper-1",
                 environment="PAPER",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
                 notional="100",
-                current_state_version=7,
-                capability_snapshot_id=decision.capability_snapshot_id,
-                risk_decision=decision,
                 reservation_id="reservation-replay-scope",
-                reservation_requirements={"CASH:USD": "100"},
-                reservation_available={"CASH:USD": "1000"},
-                now="2026-09-24T18:01:00Z",
+                **public_financial_kwargs(),
             )
             authority.admit(reservation_book=reservations, **kwargs)
             restarted = AuthorityService(store)
@@ -1399,8 +1457,7 @@ class AuthorityTests(unittest.TestCase):
             )
             self.assertEqual(len(store.pending_outbox()), 1)
 
-
-    def test_public_financial_admission_rejects_stale_reservation_cut(self):
+    def test_internal_bound_risk_commit_rejects_stale_reservation_cut(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = AuthorityService(store)
@@ -1424,7 +1481,7 @@ class AuthorityTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 AuthorityConflict, "reservation_version is stale"
             ):
-                authority.admit(
+                authority._admit_bound_risk(
                     command_id="stale-command",
                     idempotency_key="stale-command",
                     admission_id="stale-admission",
@@ -1456,34 +1513,24 @@ class AuthorityTests(unittest.TestCase):
             reservations = DurableReservationBook(
                 store, environment="PAPER", account_id="paper-1"
             )
-            decision = bound_risk_decision(
-                policy_version=item.version,
-                reservation_version=reservations.version,
-            )
             admitted = authority.admit(
                 command_id="dispatch-command",
                 idempotency_key="dispatch-command",
                 admission_id="dispatch-admission",
                 policy_id=item.policy_id,
                 intent_id="dispatch-intent",
-                intent_hash=decision.intent_hash,
                 account_id="paper-1",
                 environment="PAPER",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
                 notional="100",
-                current_state_version=7,
-                capability_snapshot_id=decision.capability_snapshot_id,
-                risk_decision=decision,
                 reservation_book=reservations,
                 reservation_id="dispatch-reservation",
-                reservation_requirements={"CASH:USD": "100"},
-                reservation_available={"CASH:USD": "1000"},
-                now="2026-09-24T18:01:00Z",
+                **public_financial_kwargs(),
             )
             common = dict(
-                intent_hash=decision.intent_hash,
+                intent_hash=PUBLIC_INTENT_HASH,
                 account_id="paper-1",
                 environment="PAPER",
                 instrument_id=INSTRUMENT_ID,
@@ -1506,7 +1553,7 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(
                 authority.dispatch_allowed(
                     admitted.admission_id,
-                    capability_snapshot_id=decision.capability_snapshot_id,
+                    capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
                     **common,
                 ),
                 (True, "allowed"),
@@ -1519,7 +1566,7 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(
                 authority.dispatch_allowed(
                     admitted.admission_id,
-                    capability_snapshot_id=decision.capability_snapshot_id,
+                    capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
                     **common,
                 ),
                 (False, "reservation_not_dispatchable"),
@@ -1534,31 +1581,21 @@ class AuthorityTests(unittest.TestCase):
             reservations = DurableReservationBook(
                 store, environment="PAPER", account_id="paper-1"
             )
-            decision = bound_risk_decision(
-                policy_version=item.version,
-                reservation_version=reservations.version,
-            )
             admitted = authority.admit(
                 command_id="first-command",
                 idempotency_key="first-command",
                 admission_id="first-admission",
                 policy_id=item.policy_id,
                 intent_id="first-intent",
-                intent_hash=decision.intent_hash,
                 account_id="paper-1",
                 environment="PAPER",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
                 notional="100",
-                current_state_version=7,
-                capability_snapshot_id=decision.capability_snapshot_id,
-                risk_decision=decision,
                 reservation_book=reservations,
                 reservation_id="first-reservation",
-                reservation_requirements={"CASH:USD": "100"},
-                reservation_available={"CASH:USD": "1000"},
-                now="2026-09-24T18:01:00Z",
+                **public_financial_kwargs(),
             )
             reservations.reserve(
                 command_id="second-command",
@@ -1571,19 +1608,17 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(
                 authority.dispatch_allowed(
                     admitted.admission_id,
-                    intent_hash=decision.intent_hash,
+                    intent_hash=PUBLIC_INTENT_HASH,
                     account_id="paper-1",
                     environment="PAPER",
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
                     action="ORDER.SUBMIT",
                     now="2026-09-24T18:02:00Z",
-                    capability_snapshot_id=decision.capability_snapshot_id,
+                    capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
                 ),
                 (False, "reservation_state_changed"),
             )
-
-
 
 
 if __name__ == "__main__":

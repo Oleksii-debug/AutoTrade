@@ -2,8 +2,8 @@ from copy import deepcopy
 import unittest
 
 from control.tools.branch_lease_guard import evaluate_guard
-from control.tools.registry_state import RegistryCollisionError, RegistryProtocolError
-from test_registry_state import NOW, claim, empty_registry, release, renew, request
+from control.tools.registry_state import RegistryProtocolError, RegistryCollisionError
+from test_registry_state import claim, renew, release, empty_registry, request, NOW
 
 
 class RegistryRegressionTests(unittest.TestCase):
@@ -45,7 +45,12 @@ class RegistryRegressionTests(unittest.TestCase):
             now="2026-09-22T10:30:00Z",
             lease_ttl_seconds=3600,
         )
-        replay, result = claim(state, request(), expected_generation=0, now="2026-09-22T11:01:00Z")
+        replay, result = claim(
+            state,
+            request(),
+            expected_generation=0,
+            now="2026-09-22T11:01:00Z",
+        )
         self.assertEqual(replay, state)
         self.assertEqual(result["claim_id"], created["claim_id"])
         self.assertEqual(result["lease_until"], "2026-09-22T11:30:00Z")

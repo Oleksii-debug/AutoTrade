@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 from decimal import Decimal
+from hashlib import sha256
+import json
 import unittest
 
 from mvp.autotrade_mvp.capabilities import CapabilitySnapshot
@@ -22,6 +24,8 @@ def tier(upper="10000", rate="0.005", adjustment="0", convention="ADD"):
 
 
 SNAPSHOT_ID = "11111111-1111-4111-8111-111111111111"
+EVIDENCE_BUNDLE_ID = "22222222-2222-4222-8222-222222222222"
+TIER_TABLE_ID = "33333333-3333-4333-8333-333333333333"
 
 
 def capability(**overrides):
@@ -62,8 +66,8 @@ def evidence(**overrides):
         collateral_currency="USD",
         settlement_currency="USD",
         risk_tier_revision="tier-v7",
-        evidence_bundle_ref="artifact:margin-bundle:sha256:abc",
-        tier_table_evidence_ref="artifact:margin-tiers:sha256:def",
+        evidence_bundle_ref=EVIDENCE_BUNDLE_ID,
+        tier_table_evidence_ref=TIER_TABLE_ID,
         mark_price=Decimal("100"),
         index_price=Decimal("100"),
         collateral_fx_to_settlement=Decimal("1"),
@@ -75,6 +79,75 @@ def evidence(**overrides):
     )
     values.update(overrides)
     return PerpetualMarginEvidence(**values)
+
+
+class EvidenceArtifactStore:
+    """Minimal immutable-store contract used by margin unit tests."""
+
+    def __init__(self, value: PerpetualMarginEvidence):
+        common = {
+            "schema_version": 1,
+            "provider_id": value.provider_id,
+            "account_id": value.account_id,
+            "entity_id": value.entity_id,
+            "environment": value.environment,
+            "instrument_version": value.instrument_version,
+            "capability_snapshot_id": value.capability_snapshot_id,
+            "position_mode": value.position_mode,
+            "margin_mode": value.margin_mode,
+            "collateral_currency": value.collateral_currency,
+            "settlement_currency": value.settlement_currency,
+            "risk_tier_revision": value.risk_tier_revision,
+        }
+        self._records = {}
+        self._add(
+            value.tier_table_evidence_ref,
+            value.tier_table_payload(),
+            {
+                **common,
+                "artifact_kind": "PERPETUAL_MARGIN_TIER_TABLE",
+                "observed_at": value.margin_tiers_observed_at,
+            },
+        )
+        self._add(
+            value.evidence_bundle_ref,
+            value.evidence_bundle_payload(),
+            {
+                **common,
+                "artifact_kind": "PERPETUAL_MARGIN_EVIDENCE_BUNDLE",
+                "observed_at": value.mark_observed_at,
+            },
+        )
+
+    def _add(self, artifact_id, payload, metadata):
+        data = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        self._records[artifact_id] = (
+            {
+                "artifact_id": artifact_id,
+                "sha256": "sha256:" + sha256(data).hexdigest(),
+                "media_type": "application/json",
+                "metadata": metadata,
+            },
+            data,
+        )
+
+    def load_manifest(self, artifact_id):
+        try:
+            return dict(self._records[artifact_id][0])
+        except KeyError as error:
+            raise FileNotFoundError(artifact_id) from error
+
+    def read_bytes(self, artifact_id):
+        try:
+            return self._records[artifact_id][1]
+        except KeyError as error:
+            raise FileNotFoundError(artifact_id) from error
 
 
 def stress(**overrides):
@@ -109,6 +182,7 @@ def evaluate(**overrides):
         collateral_haircut_fraction=Decimal("0"),
     )
     values.update(overrides)
+    values.setdefault("artifact_store", EvidenceArtifactStore(values["evidence"]))
     return evaluate_perpetual_margin(**values)
 
 
@@ -291,6 +365,44 @@ class PerpetualMarginTests(unittest.TestCase):
         self.assertEqual(reopened.tier_identity, original.tier_identity)
         revised = evidence(risk_tier_revision="tier-v8")
         self.assertNotEqual(revised.tier_identity, original.tier_identity)
+
+    def test_same_tier_ref_cannot_authorize_altered_tier_economics(self):
+        trusted = evidence()
+        store = EvidenceArtifactStore(trusted)
+        altered = evidence(
+            margin_tiers=(
+                tier("10000", "0.001"),
+                tier("50000", "0.002", "0", "ADD"),
+            )
+        )
+        with self.assertRaisesRegex(
+            PerpetualMarginError,
+            "artifact content does not match supplied economics",
+        ):
+            evaluate(evidence=altered, artifact_store=store)
+
+    def test_same_bundle_ref_cannot_authorize_mixed_mark_index_fx_content(self):
+        trusted = evidence()
+        store = EvidenceArtifactStore(trusted)
+        mixed = evidence(
+            mark_price=Decimal("101"),
+            collateral_fx_to_settlement=Decimal("0.99"),
+        )
+        with self.assertRaisesRegex(
+            PerpetualMarginError,
+            "artifact content does not match supplied economics",
+        ):
+            evaluate(evidence=mixed, artifact_store=store)
+
+    def test_margin_evaluation_requires_resolvable_immutable_artifacts(self):
+        trusted = evidence()
+        missing = EvidenceArtifactStore(trusted)
+        missing._records.pop(trusted.tier_table_evidence_ref)
+        with self.assertRaisesRegex(
+            PerpetualMarginError,
+            "artifact is missing or corrupt",
+        ):
+            evaluate(evidence=trusted, artifact_store=missing)
 
     def test_float_money_and_rates_are_rejected(self):
         with self.assertRaises(TypeError):

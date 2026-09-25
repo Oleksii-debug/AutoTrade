@@ -1,3 +1,4 @@
+from hashlib import sha256
 from tempfile import TemporaryDirectory
 import json
 import sqlite3
@@ -324,7 +325,19 @@ class JournalStoreTests(unittest.TestCase):
             finally:
                 connection.close()
             self.assertIsNotNone(envelope_hash)
-            self.assertTrue(str(envelope_hash).startswith("sha256:"))
+            payload_json = connection = None
+            read_connection = sqlite3.connect(path)
+            try:
+                payload_json = read_connection.execute(
+                    "SELECT payload_json FROM outbox WHERE event_id = ?",
+                    ("evt-1",),
+                ).fetchone()[0]
+            finally:
+                read_connection.close()
+            self.assertEqual(
+                envelope_hash,
+                "sha256:" + sha256(payload_json.encode("utf-8")).hexdigest(),
+            )
 
             replayed, inserted, appended = store.commit_command(
                 actor="alice",
@@ -340,6 +353,20 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(replayed, result)
             self.assertEqual(appended, ())
             self.assertEqual(len(store.load_events("account", "paper-1")), 2)
+
+            tamper_connection = sqlite3.connect(path)
+            try:
+                tamper_connection.execute(
+                    "UPDATE outbox SET payload_json = ? WHERE event_id = ?",
+                    ('{"tampered":true}', "evt-1"),
+                )
+                tamper_connection.commit()
+            finally:
+                tamper_connection.close()
+            with self.assertRaisesRegex(
+                ValueError, "outbox envelope hash does not match stored payload"
+            ):
+                store.pending_outbox()
 
     def test_atomic_command_rolls_back_on_event_version_gap(self):
         with TemporaryDirectory() as directory:

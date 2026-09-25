@@ -37,6 +37,9 @@ def update(**overrides):
         current_parameters={"alpha": Decimal("0.40"), "beta": Decimal("0.10")},
         proposed_parameters={"alpha": Decimal("0.45"), "beta": Decimal("0.20")},
         label_version="labels-v1",
+        label_available_at=NOW - timedelta(minutes=1),
+        outcome_horizon_at=NOW - timedelta(minutes=2),
+        execution_reconciled_at=NOW - timedelta(seconds=90),
         observed_at=NOW,
         last_update_at=NOW - timedelta(minutes=5),
         updates_in_window=1,
@@ -150,6 +153,37 @@ class OnlineLearningEnvelopeTests(unittest.TestCase):
     def test_future_last_update_timestamp_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "last_update_at cannot be after observed_at"):
             update(last_update_at=NOW + timedelta(seconds=1))
+
+    def test_future_label_is_rejected_before_online_update(self):
+        with self.assertRaisesRegex(ValueError, "after observed_at"):
+            update(label_available_at=NOW + timedelta(seconds=1))
+
+    def test_label_cannot_mature_before_registered_outcome_horizon(self):
+        with self.assertRaisesRegex(ValueError, "outcome horizon"):
+            update(
+                label_available_at=NOW - timedelta(minutes=2),
+                outcome_horizon_at=NOW - timedelta(minutes=1),
+            )
+
+    def test_label_cannot_mature_before_execution_reconciliation(self):
+        with self.assertRaisesRegex(ValueError, "execution reconciliation"):
+            update(
+                label_available_at=NOW - timedelta(minutes=2),
+                outcome_horizon_at=NOW - timedelta(minutes=3),
+                execution_reconciled_at=NOW - timedelta(minutes=1),
+            )
+
+    def test_decision_identity_binds_label_maturity_evidence_times(self):
+        baseline = evaluate_online_update(envelope(), update())
+        later_reconciliation = evaluate_online_update(
+            envelope(),
+            update(
+                label_available_at=NOW - timedelta(seconds=30),
+                execution_reconciled_at=NOW - timedelta(seconds=45),
+            ),
+        )
+        self.assertEqual(baseline.status, later_reconciliation.status)
+        self.assertNotEqual(baseline.decision_id, later_reconciliation.decision_id)
 
 
 if __name__ == "__main__":

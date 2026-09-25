@@ -29,8 +29,10 @@ def prepared(client_order_id: str) -> WhiteBitPreparedRequest:
             "clientOrderId": client_order_id,
             "market": "BTC_USDT",
         },
+        account_id="paper-account",
+        environment="PAPER",
         capability_snapshot_id=str(uuid4()),
-        documentation_refs=(),
+        documentation_refs=("https://docs.whitebit.com/api-reference/overview",),
     )
 
 

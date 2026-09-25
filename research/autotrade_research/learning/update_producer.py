@@ -477,20 +477,21 @@ def _physical_observation_identity(
     artifact_store: ArtifactStore,
     raw: Mapping[str, Any],
     payload: Mapping[str, Any],
-) -> str:
-    """Derive physical identity only from registered immutable evidence.
+) -> tuple[str, datetime]:
+    """Derive physical identity and authoritative local availability.
 
-    Caller-owned decision/information timestamps are deliberately excluded.
-    Until the causal locus itself is independently authority-issued, allowing
-    those labels into identity would let one physical fact cross scientific
-    populations by timestamp relabelling.
+    Caller-owned decision/information/learning timestamps are deliberately
+    excluded from physical identity. Evidence availability is taken only from
+    an integrity-bound ArtifactStore manifest. A caller therefore cannot
+    backdate immutable evidence by writing an earlier label_available_at.
     """
 
     raw_refs = payload.get("evidence_refs")
     if not isinstance(raw_refs, (list, tuple)) or not raw_refs:
         raise ValueError("physical observation requires evidence references")
 
-    resolved_digests: list[str] = []
+    resolved_evidence: list[tuple[str, str]] = []
+    availability_points: list[datetime] = []
     seen_refs: set[str] = set()
     for raw_ref in raw_refs:
         reference, manifest, evidence_bytes = _artifact_ref(
@@ -503,6 +504,10 @@ def _physical_observation_identity(
                 "physical observation evidence references must be unique"
             )
         seen_refs.add(reference)
+        _sha256_identity(
+            manifest.get("manifest_hash"),
+            name="physical evidence manifest_hash",
+        )
         digest = _sha256_identity(
             manifest.get("sha256"),
             name="physical evidence digest",
@@ -511,17 +516,25 @@ def _physical_observation_identity(
             raise ValueError(
                 "physical observation evidence bytes changed after resolution"
             )
-        resolved_digests.append(digest)
+        available_at = _time(
+            manifest.get("created_at"),
+            name="physical evidence created_at",
+        )
+        availability_points.append(available_at)
+        resolved_evidence.append((digest, _iso(available_at)))
 
     material = {
-        "schema_version": "2.0.0",
+        "schema_version": "3.0.0",
         "instrument_family": _text(
             raw.get("instrument_family"),
             name="instrument_family",
         ),
-        "evidence_digests": tuple(sorted(resolved_digests)),
+        "evidence": tuple(sorted(resolved_evidence)),
     }
-    return _digest_bytes(_canonical_bytes(material))
+    return (
+        _digest_bytes(_canonical_bytes(material)),
+        max(availability_points),
+    )
 
 
 def _extract_learning_rows(
@@ -565,7 +578,10 @@ def _extract_learning_rows(
                 learning.get("observation_id"),
                 name="observation_id",
             )
-            base_physical_observation_id = _physical_observation_identity(
+            (
+                base_physical_observation_id,
+                physical_evidence_available_at,
+            ) = _physical_observation_identity(
                 artifact_store,
                 raw,
                 payload,
@@ -608,6 +624,11 @@ def _extract_learning_rows(
             or label_available < horizon
         ):
             exclusions.append((episode_id, "LABEL_NOT_CAUSALLY_MATURE"))
+            continue
+        if physical_evidence_available_at > label_available:
+            exclusions.append(
+                (episode_id, "PHYSICAL_EVIDENCE_NOT_CAUSALLY_AVAILABLE")
+            )
             continue
 
         intended = payload.get("intended_action")

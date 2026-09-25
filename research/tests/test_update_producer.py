@@ -1027,6 +1027,50 @@ class UpdateProducerTests(unittest.TestCase):
                 "0.5",
             )
 
+    def test_physical_evidence_availability_cannot_be_backdated_by_label(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            backdated = fixture.append_learning(
+                task="update",
+                feature="2",
+                target="1",
+                observation_id="backdated-evidence",
+                label_available_at=datetime(
+                    2026, 9, 1, tzinfo=timezone.utc
+                ),
+            )
+            exact_manifest = fixture.population_manifest(
+                checkpoint_ref=checkpoint,
+                task="update",
+                cutoff=UPDATE_CUTOFF,
+                extra_exclusions={
+                    backdated: "PHYSICAL_EVIDENCE_NOT_CAUSALLY_AVAILABLE",
+                },
+            )
+            self.assertFalse(exact_manifest.complete)
+
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref),
+                update_population_manifest=exact_manifest,
+            )
+
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIsNone(produced.proposed_parameters)
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIn(
+                "LEARNING.UPDATE_POPULATION_COVERAGE_INCOMPLETE",
+                artifact["reasons"],
+            )
+            self.assertIn(
+                [backdated, "PHYSICAL_EVIDENCE_NOT_CAUSALLY_AVAILABLE"],
+                artifact["population"]["update_exclusions"],
+            )
+
     def test_future_label_is_excluded_and_cannot_change_proposal(self):
         with TemporaryDirectory() as directory:
             fixture, checkpoint, test_ref, calibration, envelope = (

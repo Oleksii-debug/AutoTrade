@@ -5,7 +5,6 @@ import unittest
 from uuid import uuid4
 
 from mvp.autotrade_mvp.accounting import (
-    EconomicBook,
     book_equity_fill,
     book_external_cash_flow,
 )
@@ -13,6 +12,10 @@ from mvp.autotrade_mvp.authority import AuthorityPolicy, AuthorityService
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+from mvp.autotrade_mvp.provider_activity_accounting import (
+    DurableProviderEconomicBook,
+    commit_economic_batch_with_reservation_consumption,
+)
 from mvp.autotrade_mvp.reconciliation import (
     ProviderFillEvidence,
     ResourceAvailabilityEvidence,
@@ -96,7 +99,13 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 initial_cash="1000",
                 fee_rate="0.001",
             )
-            economic = EconomicBook()
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            economic = DurableProviderEconomicBook(
+                journal,
+                provider_id="SIMULATED",
+                account_id="sim-account",
+                environment="SIMULATION",
+            )
             economic.append(
                 book_external_cash_flow(
                     transaction_id="seed",
@@ -106,7 +115,6 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 )
             )
 
-            journal = JournalStore(f"{directory}/journal.sqlite3")
             authority = authority_service(journal)
             artifacts = ArtifactStore(Path(directory) / "artifacts")
             reservations = DurableReservationBook(
@@ -257,24 +265,27 @@ class WholeSimulatorFlowTests(unittest.TestCase):
 
             fill = provider.activity_fills()[0]
             fee = fill["fees"][0]
-            reservations.consume(
-                command_id="reservation-consume-1",
-                idempotency_key="reservation-consume-1",
+            commit_economic_batch_with_reservation_consumption(
+                economic,
+                reservations,
+                command_id="fill-financial-commit-1",
+                idempotency_key="fill-financial-commit-1",
                 reservation_id="reservation-1",
                 usage={"CASH:USD": "200.2"},
-            )
-            economic.append(
-                book_equity_fill(
-                    transaction_id="economic-fill-1",
-                    cause_event_id=fill["provider_execution_id"],
-                    instrument=fill["instrument_version"],
-                    settlement_currency="USD",
-                    side=fill["side"],
-                    quantity=fill["last_quantity"]["value"],
-                    price=fill["last_price"],
-                    fee=fee["amount"],
-                    fee_currency=fee["currency"],
-                )
+                transactions=(
+                    book_equity_fill(
+                        transaction_id="economic-fill-1",
+                        cause_event_id=fill["provider_execution_id"],
+                        instrument=fill["instrument_version"],
+                        settlement_currency="USD",
+                        side=fill["side"],
+                        quantity=fill["last_quantity"]["value"],
+                        price=fill["last_price"],
+                        fee=fee["amount"],
+                        fee_currency=fee["currency"],
+                    ),
+                ),
+                committed_at=LATER,
             )
             self.assertEqual(economic.cash("USD"), Decimal("799.8"))
             self.assertEqual(economic.position(INSTRUMENT), Decimal("2"))

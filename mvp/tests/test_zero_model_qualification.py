@@ -1,15 +1,23 @@
 from decimal import Decimal
 import unittest
 
-from qualification.zero_model.qualify import _require_source_sha, qualify
+from qualification.zero_model.qualify import (
+    _observed_source_sha,
+    _require_exact_checkout,
+    _require_source_sha,
+    qualify,
+)
 
 
 class ZeroModelQualificationTests(unittest.TestCase):
     def test_zero_model_slice_is_replayable_reconciled_and_cost_free(self):
-        evidence = qualify("a" * 40)
+        observed = _observed_source_sha()
+        evidence = qualify(observed)
 
         self.assertEqual(evidence["qualification"], "WP-62_ZERO_MODEL_FOUNDATION")
-        self.assertEqual(evidence["source_sha"], "a" * 40)
+        self.assertEqual(evidence["source_sha"], observed)
+        self.assertEqual(evidence["observed_source_sha"], observed)
+        self.assertRegex(evidence["qualifier_sha256"], r"^sha256:[0-9a-f]{64}$")
         route = evidence["model_route"]
         self.assertEqual(route["status"], "NO_MODEL")
         self.assertIsNone(route["model_id"])
@@ -73,6 +81,13 @@ class ZeroModelQualificationTests(unittest.TestCase):
         self.assertFalse(claims["live_trading_qualified"])
         self.assertFalse(claims["economic_edge_proven"])
         self.assertFalse(claims["all_wp62_workflows_qualified"])
+
+    def test_expected_source_identity_must_match_actual_checkout(self):
+        observed = _observed_source_sha()
+        different = ("0" if observed[0] != "0" else "1") + observed[1:]
+        with self.assertRaisesRegex(RuntimeError, "actual Git checkout"):
+            _require_exact_checkout(different)
+        self.assertEqual(_require_exact_checkout(observed), observed)
 
     def test_source_sha_accepts_canonical_sha1_or_sha256_only(self):
         self.assertEqual(_require_source_sha("a" * 40), "a" * 40)

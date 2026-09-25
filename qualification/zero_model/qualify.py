@@ -11,8 +11,10 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 
 from mvp.autotrade_mvp.economics import build_economic_report
@@ -55,6 +57,35 @@ def _require_source_sha(value: str) -> str:
             "source SHA must be a canonical lowercase 40- or 64-character Git object id"
         )
     return value
+
+
+def _observed_source_sha() -> str:
+    """Read source identity from the actual Git checkout, not caller metadata."""
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError("cannot resolve observed Git source identity") from error
+    return _require_source_sha(result.stdout.strip())
+
+
+def _require_exact_checkout(expected_source_sha: str) -> str:
+    expected = _require_source_sha(expected_source_sha)
+    observed = _observed_source_sha()
+    if observed != expected:
+        raise RuntimeError(
+            "qualification source identity does not match actual Git checkout"
+        )
+    return observed
+
+
+def _qualifier_sha256() -> str:
+    return "sha256:" + sha256(Path(__file__).read_bytes()).hexdigest()
 
 
 def _outage_routes() -> dict[str, object]:
@@ -121,7 +152,8 @@ def _outage_routes() -> dict[str, object]:
 
 
 def qualify(source_sha: str) -> dict[str, object]:
-    source_sha = _require_source_sha(source_sha)
+    source_sha = _require_exact_checkout(source_sha)
+    qualifier_sha256 = _qualifier_sha256()
 
     request = ModelRequest(
         request_id="zero-model-qualification",
@@ -231,6 +263,8 @@ def qualify(source_sha: str) -> dict[str, object]:
             "qualification": "WP-62_ZERO_MODEL_FOUNDATION",
             "qualification_schema_version": "1.0.0",
             "source_sha": source_sha,
+            "observed_source_sha": source_sha,
+            "qualifier_sha256": qualifier_sha256,
             "model_route": {
                 "status": route.status.value,
                 "model_id": route.model_id,

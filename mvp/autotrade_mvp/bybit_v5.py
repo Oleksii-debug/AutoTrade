@@ -262,8 +262,16 @@ def build_order_payload(
     if family in {"SPOT", "MARGIN"} and reduce_only:
         raise ProviderCoreError("spot/margin reduce_only is not qualified by this adapter")
 
+    derivative_family = family in {
+        "LINEAR_DERIVATIVES",
+        "INVERSE_DERIVATIVES",
+    }
+    if derivative_family and position_idx is None:
+        raise ProviderCoreError(
+            "Bybit derivative orders require explicit position_idx from evidenced account mode"
+        )
     if position_idx is not None:
-        if family not in {"LINEAR_DERIVATIVES", "INVERSE_DERIVATIVES"}:
+        if not derivative_family:
             raise ProviderCoreError("position_idx is only supported for derivative orders")
         if type(position_idx) is not int or position_idx not in {0, 1, 2}:
             raise ProviderCoreError("position_idx must be 0, 1 or 2")

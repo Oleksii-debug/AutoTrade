@@ -398,3 +398,274 @@ def reverse_transaction(
     )
     validate_transaction(transaction)
     return transaction
+
+
+@dataclass(frozen=True)
+class EquityLot:
+    """One open FIFO lot derived from canonical equity-fill postings."""
+
+    quantity: Decimal
+    unit_price: Decimal
+    transaction_id: str
+
+
+@dataclass(frozen=True)
+class EquityPositionProjection:
+    """Derived gross position economics; never an execution or accounting authority."""
+
+    instrument: str
+    settlement_currency: str
+    quantity: Decimal
+    open_cost_basis: Decimal
+    realized_pnl: Decimal
+    unrealized_pnl: Decimal | None
+    mark_price: Decimal | None
+    lots: tuple[EquityLot, ...]
+    policy_version: str = "FIFO_GROSS_V1"
+
+
+def _canonical_equity_fill_terms(
+    transaction: JournalTransaction,
+    *,
+    instrument: str,
+    settlement_currency: str,
+) -> tuple[Decimal, Decimal] | None:
+    """Extract quantity and unit price only from canonical book_equity_fill shape."""
+
+    symbol = _name(instrument, field="instrument")
+    settlement = _name(settlement_currency, field="settlement_currency")
+    if symbol == settlement:
+        raise ValueError("instrument and settlement_currency must be distinct")
+
+    normalized = _normalized_transaction(transaction)
+    position_postings = [
+        item
+        for item in normalized.postings
+        if item.ledger_account == f"POSITION:{symbol}"
+        and item.asset_or_currency == symbol
+    ]
+    if not position_postings:
+        return None
+    if len(position_postings) != 1:
+        raise AccountingConflict(
+            "Position projection requires exactly one canonical position posting"
+        )
+
+    quantity = position_postings[0].signed_amount
+    if quantity == 0:
+        raise AccountingConflict("Position projection cannot infer a zero-quantity fill")
+
+    instrument_clearing = [
+        item
+        for item in normalized.postings
+        if item.ledger_account == f"CLEARING:{symbol}"
+        and item.asset_or_currency == symbol
+    ]
+    settlement_clearing = [
+        item
+        for item in normalized.postings
+        if item.ledger_account == f"CLEARING:{settlement}"
+        and item.asset_or_currency == settlement
+    ]
+    if (
+        len(instrument_clearing) != 1
+        or instrument_clearing[0].signed_amount != -quantity
+        or len(settlement_clearing) != 1
+    ):
+        raise AccountingConflict(
+            "Position projection requires canonical equity-fill clearing postings"
+        )
+
+    trade_cash = -settlement_clearing[0].signed_amount
+    if trade_cash == 0 or (trade_cash > 0) == (quantity > 0):
+        raise AccountingConflict(
+            "Position projection requires cash direction opposite to quantity"
+        )
+    unit_price = abs(trade_cash / quantity)
+    if unit_price <= 0 or not unit_price.is_finite():
+        raise AccountingConflict("Position projection requires a finite positive price")
+
+    # Clearing legs alone are not evidence that this transaction came from the
+    # canonical equity-fill booking path. Reconstruct the only allowed posting
+    # shape from the inferred economic terms and compare the complete ordered
+    # postings, including trade cash and the optional single fee/rebate pair.
+    # This prevents an arbitrary balanced SUSPENSE/ADJUSTMENT leg from being
+    # interpreted as fill cash merely because it happened to carry matching
+    # clearing amounts.
+    fee_postings = [
+        item
+        for item in normalized.postings
+        if item.ledger_account.startswith("FEE_EXPENSE:")
+    ]
+    if len(fee_postings) > 1:
+        raise AccountingConflict(
+            "Position projection requires canonical equity-fill fee postings"
+        )
+    fee_amount = Decimal("0")
+    fee_currency: str | None = None
+    if fee_postings:
+        fee_posting = fee_postings[0]
+        fee_currency = fee_posting.asset_or_currency
+        if fee_posting.ledger_account != f"FEE_EXPENSE:{fee_currency}":
+            raise AccountingConflict(
+                "Position projection requires canonical equity-fill fee postings"
+            )
+        fee_amount = fee_posting.signed_amount
+
+    expected = book_equity_fill(
+        transaction_id=normalized.transaction_id,
+        cause_event_id=normalized.cause_event_id,
+        instrument=symbol,
+        settlement_currency=settlement,
+        side="BUY" if quantity > 0 else "SELL",
+        quantity=abs(quantity),
+        price=unit_price,
+        fee=fee_amount,
+        fee_currency=fee_currency,
+    )
+    if normalized.postings != expected.postings:
+        raise AccountingConflict(
+            "Position projection requires complete canonical equity-fill posting shape"
+        )
+    return quantity, unit_price
+
+
+def project_equity_position(
+    book: EconomicBook,
+    *,
+    instrument: str,
+    settlement_currency: str,
+    mark_price: Decimal | str | int | None = None,
+) -> EquityPositionProjection:
+    """Project FIFO gross basis/P&L from the canonical immutable journal.
+
+    Fees remain separately expensed by the accounting book.  Reversed position
+    histories deliberately fail closed because JournalTransaction currently does
+    not carry the economic effective-time metadata required to restate FIFO lots
+    safely after a retroactive correction.
+    """
+
+    if not isinstance(book, EconomicBook):
+        raise TypeError("book must be an EconomicBook")
+    symbol = _name(instrument, field="instrument")
+    settlement = _name(settlement_currency, field="settlement_currency")
+    mark = (
+        None
+        if mark_price is None
+        else _decimal(mark_price, name="mark_price")
+    )
+    if mark is not None and mark <= 0:
+        raise ValueError("mark_price must be positive")
+
+    reversed_ids = {
+        transaction.reverses_transaction_id
+        for transaction in book.transactions
+        if transaction.reverses_transaction_id is not None
+    }
+    reversal_ids = {
+        transaction.transaction_id
+        for transaction in book.transactions
+        if transaction.reverses_transaction_id is not None
+    }
+
+    for transaction in book.transactions:
+        if (
+            transaction.transaction_id in reversed_ids
+            or transaction.transaction_id in reversal_ids
+        ):
+            terms = _canonical_equity_fill_terms(
+                transaction,
+                instrument=symbol,
+                settlement_currency=settlement,
+            )
+            if terms is not None:
+                raise AccountingConflict(
+                    "Position projection cannot restate reversed fill history "
+                    "without economic effective-time metadata"
+                )
+
+    mutable_lots: list[list[Decimal | str]] = []
+    realized = Decimal("0")
+
+    for transaction in book.transactions:
+        terms = _canonical_equity_fill_terms(
+            transaction,
+            instrument=symbol,
+            settlement_currency=settlement,
+        )
+        if terms is None:
+            continue
+        quantity, unit_price = terms
+        remaining = quantity
+
+        while (
+            remaining != 0
+            and mutable_lots
+            and (mutable_lots[0][0] > 0) != (remaining > 0)
+        ):
+            lot_quantity = mutable_lots[0][0]
+            lot_price = mutable_lots[0][1]
+            assert isinstance(lot_quantity, Decimal)
+            assert isinstance(lot_price, Decimal)
+            close_quantity = min(abs(remaining), abs(lot_quantity))
+
+            if lot_quantity > 0:
+                realized += close_quantity * (unit_price - lot_price)
+                lot_quantity -= close_quantity
+                remaining += close_quantity
+            else:
+                realized += close_quantity * (lot_price - unit_price)
+                lot_quantity += close_quantity
+                remaining -= close_quantity
+
+            if lot_quantity == 0:
+                mutable_lots.pop(0)
+            else:
+                mutable_lots[0][0] = lot_quantity
+
+        if remaining != 0:
+            mutable_lots.append(
+                [remaining, unit_price, transaction.transaction_id]
+            )
+
+    lots = tuple(
+        EquityLot(
+            quantity=lot[0],
+            unit_price=lot[1],
+            transaction_id=lot[2],
+        )
+        for lot in mutable_lots
+    )
+    quantity = sum((lot.quantity for lot in lots), Decimal("0"))
+    open_cost_basis = sum(
+        (abs(lot.quantity) * lot.unit_price for lot in lots),
+        Decimal("0"),
+    )
+
+    unrealized: Decimal | None
+    if mark is None:
+        unrealized = None
+    else:
+        unrealized = sum(
+            (
+                abs(lot.quantity)
+                * (
+                    (mark - lot.unit_price)
+                    if lot.quantity > 0
+                    else (lot.unit_price - mark)
+                )
+                for lot in lots
+            ),
+            Decimal("0"),
+        )
+
+    return EquityPositionProjection(
+        instrument=symbol,
+        settlement_currency=settlement,
+        quantity=quantity,
+        open_cost_basis=open_cost_basis,
+        realized_pnl=realized,
+        unrealized_pnl=unrealized,
+        mark_price=mark,
+        lots=lots,
+    )

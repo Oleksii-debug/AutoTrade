@@ -187,14 +187,17 @@ def openapi_security_surface(
     manifest: dict,
     *,
     schema_base_uri: str,
-) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
-    """Return semantic global auth requirements and named security schemes.
+) -> tuple[
+    tuple[tuple[tuple[str, tuple[str, ...]], ...], ...],
+    dict[str, object],
+]:
+    """Return canonical semantic global auth requirements and security schemes.
 
-    OpenAPI's top-level security requirement applies to every operation unless
-    explicitly overridden.  Security-scheme definitions live outside paths, so
-    operation-only comparison would miss authentication weakening or header
-    identity changes.  This parser intentionally covers only those two semantic
-    surfaces and does not introduce a second YAML authority.
+    This deliberately remains a small OpenAPI/YAML subset parser rather than
+    introducing a second YAML dependency. Mapping order is semantically ignored,
+    sequence order is retained by the generic canonicalizer, and top-level
+    Security Requirement alternatives are explicitly unordered per OpenAPI.
+    Unsupported shapes fail closed instead of falling back to source-text order.
     """
 
     openapi = manifest.get("openapi")
@@ -205,86 +208,264 @@ def openapi_security_surface(
         raise ValueError("manifest openapi.path must be non-empty text")
     lines = (root / relative).read_text(encoding="utf-8").splitlines()
 
-    def normalize(line: str) -> str | None:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            return None
-        if stripped.startswith(("description:", "summary:")):
-            return None
+    def scalar(token: str) -> tuple[str, object]:
+        value = token.strip()
         if schema_base_uri:
-            stripped = stripped.replace(
+            value = value.replace(
                 schema_base_uri.rstrip("/") + "/",
                 "{SCHEMA_BASE}/",
             )
-        return stripped
+        if value == "[]":
+            return ("sequence", ())
+        if value == "{}":
+            return ("mapping", ())
+        if value.startswith("[") and value.endswith("]"):
+            body = value[1:-1].strip()
+            if not body:
+                return ("sequence", ())
+            items = tuple(
+                ("scalar", part.strip())
+                for part in body.split(",")
+                if part.strip()
+            )
+            return ("sequence", items)
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            try:
+                decoded = json.loads(value)
+            except json.JSONDecodeError as error:
+                raise ValueError("invalid quoted OpenAPI YAML scalar") from error
+            if not isinstance(decoded, str):
+                raise ValueError("quoted OpenAPI YAML scalar must decode to text")
+            value = decoded
+        elif len(value) >= 2 and value[0] == value[-1] == "'":
+            value = value[1:-1].replace("''", "'")
+        return ("scalar", value)
 
-    default_security: tuple[str, ...] = ()
+    def entries_for(raw_lines: list[str]) -> list[tuple[int, str]]:
+        entries: list[tuple[int, str]] = []
+        for raw in raw_lines:
+            if "\t" in raw[: len(raw) - len(raw.lstrip())]:
+                raise ValueError("OpenAPI YAML indentation must not use tabs")
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(raw) - len(raw.lstrip(" "))
+            entries.append((indent, stripped))
+        return entries
+
+    def parse_block(
+        entries: list[tuple[int, str]],
+        position: int,
+        indent: int,
+    ) -> tuple[tuple[str, object], int]:
+        if position >= len(entries) or entries[position][0] != indent:
+            raise ValueError("invalid OpenAPI YAML block indentation")
+        if entries[position][1].startswith("- "):
+            values: list[object] = []
+            while position < len(entries):
+                current_indent, text = entries[position]
+                if current_indent < indent:
+                    break
+                if current_indent != indent:
+                    raise ValueError("invalid OpenAPI YAML sequence indentation")
+                if not text.startswith("- "):
+                    break
+                item_text = text[2:].strip()
+                if not item_text:
+                    position += 1
+                    if position >= len(entries) or entries[position][0] <= indent:
+                        raise ValueError("empty OpenAPI YAML sequence item")
+                    child, position = parse_block(
+                        entries,
+                        position,
+                        entries[position][0],
+                    )
+                    values.append(child)
+                    continue
+
+                # A sequence item may itself be a mapping, as in OpenAPI
+                # Security Requirement Objects. Fold continuation mapping lines
+                # into one synthetic block and canonicalize its keys.
+                mapping_match = re.fullmatch(r"([^:]+):\s*(.*)", item_text)
+                if mapping_match is not None:
+                    item_entries: list[tuple[int, str]] = [
+                        (indent + 2, item_text)
+                    ]
+                    position += 1
+                    while position < len(entries):
+                        next_indent, next_text = entries[position]
+                        if next_indent < indent:
+                            break
+                        if next_indent == indent and next_text.startswith("- "):
+                            break
+                        if next_indent <= indent:
+                            break
+                        item_entries.append((next_indent, next_text))
+                        position += 1
+                    child, consumed = parse_block(item_entries, 0, indent + 2)
+                    if consumed != len(item_entries):
+                        raise ValueError(
+                            "unsupported OpenAPI YAML sequence mapping shape"
+                        )
+                    values.append(child)
+                    continue
+
+                values.append(scalar(item_text))
+                position += 1
+                if position < len(entries) and entries[position][0] > indent:
+                    raise ValueError(
+                        "scalar OpenAPI YAML sequence item cannot own a child block"
+                    )
+            return ("sequence", tuple(values)), position
+
+        items: list[tuple[str, object]] = []
+        seen: set[str] = set()
+        while position < len(entries):
+            current_indent, text = entries[position]
+            if current_indent < indent:
+                break
+            if current_indent != indent:
+                raise ValueError("invalid OpenAPI YAML mapping indentation")
+            if text.startswith("- "):
+                break
+            match = re.fullmatch(r"([^:]+):\s*(.*)", text)
+            if match is None:
+                raise ValueError("unsupported OpenAPI YAML mapping entry")
+            key = match.group(1).strip()
+            rest = match.group(2).strip()
+            if not key:
+                raise ValueError("OpenAPI YAML mapping key is empty")
+            if key in seen:
+                raise ValueError(f"duplicate OpenAPI YAML mapping key: {key}")
+            seen.add(key)
+            position += 1
+
+            if key in ANNOTATION_KEYS:
+                if not rest:
+                    while (
+                        position < len(entries)
+                        and entries[position][0] > current_indent
+                    ):
+                        position += 1
+                continue
+
+            if rest:
+                value = scalar(rest)
+            elif position < len(entries) and entries[position][0] > current_indent:
+                value, position = parse_block(
+                    entries,
+                    position,
+                    entries[position][0],
+                )
+            else:
+                value = ("scalar", "null")
+            items.append((key, value))
+        return ("mapping", tuple(sorted(items, key=lambda item: item[0]))), position
+
+    def parse_value(raw_lines: list[str], expected_indent: int) -> tuple[str, object]:
+        entries = entries_for(raw_lines)
+        if not entries:
+            return ("sequence", ())
+        if entries[0][0] != expected_indent:
+            raise ValueError("invalid OpenAPI YAML value indentation")
+        value, consumed = parse_block(entries, 0, expected_indent)
+        if consumed != len(entries):
+            raise ValueError("unsupported trailing OpenAPI YAML content")
+        return value
+
+    def normalized_scopes(value: tuple[str, object]) -> tuple[str, ...]:
+        kind, payload = value
+        if kind != "sequence" or not isinstance(payload, tuple):
+            raise ValueError(
+                "OpenAPI Security Requirement scopes must be a sequence"
+            )
+        scopes: list[str] = []
+        for item in payload:
+            if (
+                not isinstance(item, tuple)
+                or len(item) != 2
+                or item[0] != "scalar"
+                or not isinstance(item[1], str)
+            ):
+                raise ValueError(
+                    "OpenAPI Security Requirement scopes must contain strings"
+                )
+            scopes.append(item[1])
+        if len(scopes) != len(set(scopes)):
+            raise ValueError("OpenAPI Security Requirement scopes must be unique")
+        return tuple(sorted(scopes))
+
+    default_security_value: tuple[str, object] = ("sequence", ())
     for index, line in enumerate(lines):
         match = re.fullmatch(r"security:\s*(.*)", line)
         if match is None:
             continue
         inline = match.group(1).strip()
         if inline:
-            # Missing top-level security and explicit security: [] are both
-            # unauthenticated defaults under OpenAPI semantics.
-            default_security = () if inline == "[]" else ("security: " + inline,)
-            break
-        values: list[str] = []
-        for nested in lines[index + 1 :]:
-            if nested and not nested.startswith(" ") and not nested.lstrip().startswith("#"):
-                break
-            normalized = normalize(nested)
-            if normalized is not None:
-                values.append(normalized)
-        default_security = tuple(values)
+            default_security_value = scalar(inline)
+        else:
+            block: list[str] = []
+            for nested in lines[index + 1 :]:
+                if (
+                    nested
+                    and not nested.startswith(" ")
+                    and not nested.lstrip().startswith("#")
+                ):
+                    break
+                block.append(nested)
+            default_security_value = parse_value(block, 2)
         break
 
-    try:
-        components_index = next(
-            index for index, line in enumerate(lines) if line == "components:"
+    if (
+        default_security_value[0] != "sequence"
+        or not isinstance(default_security_value[1], tuple)
+    ):
+        raise ValueError("OpenAPI top-level security must be a sequence")
+    requirements: list[tuple[tuple[str, tuple[str, ...]], ...]] = []
+    for requirement in default_security_value[1]:
+        if (
+            not isinstance(requirement, tuple)
+            or len(requirement) != 2
+            or requirement[0] != "mapping"
+            or not isinstance(requirement[1], tuple)
+        ):
+            raise ValueError(
+                "OpenAPI security entries must be Security Requirement Objects"
+            )
+        normalized_requirement: list[tuple[str, tuple[str, ...]]] = []
+        for scheme_name, scope_value in requirement[1]:
+            if not isinstance(scheme_name, str):
+                raise ValueError("OpenAPI security scheme name must be text")
+            normalized_requirement.append(
+                (scheme_name, normalized_scopes(scope_value))
+            )
+        requirements.append(
+            tuple(sorted(normalized_requirement, key=lambda item: item[0]))
         )
-    except StopIteration:
-        return default_security, {}
+    default_security = tuple(sorted(requirements, key=repr))
 
     security_index: int | None = None
-    for index in range(components_index + 1, len(lines)):
-        line = lines[index]
-        if line and not line.startswith(" ") and not line.lstrip().startswith("#"):
-            break
+    for index, line in enumerate(lines):
         if re.fullmatch(r"  securitySchemes:\s*", line):
             security_index = index
             break
     if security_index is None:
         return default_security, {}
 
-    schemes: dict[str, list[str]] = {}
-    current_scheme: str | None = None
-    for line in lines[security_index + 1 :]:
-        if line.strip() == "" or line.lstrip().startswith("#"):
-            continue
-        indent = len(line) - len(line.lstrip(" "))
-        if indent <= 2:
+    scheme_block: list[str] = []
+    for nested in lines[security_index + 1 :]:
+        if nested.strip() and len(nested) - len(nested.lstrip(" ")) <= 2:
             break
-        scheme_match = re.fullmatch(r"    ([A-Za-z0-9_.-]+):\s*", line)
-        if scheme_match:
-            current_scheme = scheme_match.group(1)
-            if current_scheme in schemes:
-                raise ValueError(
-                    f"duplicate OpenAPI security scheme: {current_scheme}"
-                )
-            schemes[current_scheme] = []
-            continue
-        if current_scheme is None:
-            raise ValueError("OpenAPI security scheme content appeared before a scheme")
-        if indent < 6:
-            raise ValueError("invalid OpenAPI security scheme indentation")
-        normalized = normalize(line)
-        if normalized is not None:
-            schemes[current_scheme].append(normalized)
-
+        scheme_block.append(nested)
+    canonical_schemes = parse_value(scheme_block, 4)
+    if (
+        canonical_schemes[0] != "mapping"
+        or not isinstance(canonical_schemes[1], tuple)
+    ):
+        raise ValueError("OpenAPI securitySchemes must be a mapping")
     return default_security, {
-        name: tuple(values)
-        for name, values in schemes.items()
+        name: value
+        for name, value in canonical_schemes[1]
     }
 
 

@@ -1403,6 +1403,7 @@ class AuthorityService:
         instrument_version: int,
         action: str,
         now: str,
+        capability_snapshot_id: str | None = None,
     ) -> tuple[bool, str]:
         record = self._admissions.get(_text(admission_id, name="admission_id"))
         if record is None:
@@ -1433,8 +1434,53 @@ class AuthorityService:
             return False, reason
         if record.confirmation_id is not None:
             confirmation = self._confirmations[record.confirmation_id]
-            if _instant(now, name="now") >= _instant(confirmation.expires_at, name="confirmation.expires_at"):
+            if _instant(now, name="now") >= _instant(
+                confirmation.expires_at, name="confirmation.expires_at"
+            ):
                 return False, "confirmation_expired"
+
+        if record.risk_decision_id is not None:
+            if record.policy_version != policy.version:
+                return False, "policy_version_changed"
+            if capability_snapshot_id is None:
+                return False, "capability_snapshot_required"
+            try:
+                current_capability = _text(
+                    capability_snapshot_id, name="capability_snapshot_id"
+                )
+            except ValueError:
+                return False, "capability_snapshot_required"
+            if current_capability != record.capability_snapshot_id:
+                return False, "capability_snapshot_changed"
+            if _instant(now, name="now") >= _instant(
+                record.risk_valid_until, name="risk_valid_until"
+            ):
+                return False, "risk_decision_expired"
+            try:
+                self._validate_durable_financial_evidence(record, policy)
+                reservation_book = DurableReservationBook(
+                    self.store,
+                    environment=record.environment,
+                    account_id=record.account_id,
+                )
+                reservation = reservation_book.get(record.reservation_id)
+                risk_event = self.store.load_events(
+                    "risk_decision", record.risk_decision_id
+                )[0]
+                admission_reservation_version = (
+                    int(risk_event["payload"]["reservation_version"]) + 1
+                )
+            except Exception:
+                return False, "financial_evidence_invalid"
+            if reservation.intent_id != record.intent_id:
+                return False, "reservation_intent_changed"
+            if reservation.state != "WORKING":
+                return False, "reservation_not_dispatchable"
+            if reservation_book.version != admission_reservation_version:
+                return False, "reservation_state_changed"
+
+        # Final linearization barrier for durable authority. A revoke committed
+        # by another process after any of the reads above must fail the send.
         if not self._durable_authority_state_current():
             return False, "authority_state_stale"
         return True, "allowed"
@@ -1448,6 +1494,7 @@ class AuthorityService:
         instrument_id: str,
         instrument_version: int,
         action: str,
+        capability_snapshot_id: str | None = None,
     ) -> Callable[[str, str], tuple[bool, str]]:
         """Bind one admitted versioned scope to the dispatcher's final barrier."""
         aid = _text(admission_id, name="admission_id")
@@ -1455,6 +1502,11 @@ class AuthorityService:
         env = _text(environment, name="environment").upper()
         identity = InstrumentVersionIdentity(instrument_id, instrument_version)
         normalized_action = _text(action, name="action").upper()
+        capability = (
+            None
+            if capability_snapshot_id is None
+            else _text(capability_snapshot_id, name="capability_snapshot_id")
+        )
 
         def check(intent_hash: str, now: str) -> tuple[bool, str]:
             return self.dispatch_allowed(
@@ -1466,6 +1518,7 @@ class AuthorityService:
                 instrument_version=identity.version,
                 action=normalized_action,
                 now=now,
+                capability_snapshot_id=capability,
             )
 
         return check

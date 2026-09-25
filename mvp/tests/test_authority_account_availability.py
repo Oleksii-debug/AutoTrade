@@ -351,6 +351,14 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
             )
             first = _admit(authority, reservations, older)
             self.assertEqual(first.outcome, "ADMITTED")
+            risk_event = store.load_events(
+                "risk_decision",
+                first.risk_decision_id,
+            )[0]
+            journal_cut = risk_event["payload"]["journal_sequence_cut"]
+            self.assertIs(type(journal_cut), int)
+            self.assertGreaterEqual(journal_cut, 0)
+            self.assertGreater(risk_event["journal_sequence"], journal_cut)
             pending_before = len(store.pending_outbox())
 
             _checkpoint(
@@ -382,6 +390,67 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 restarted_reservations.total_reserved("CASH:USD"),
                 Decimal("100"),
             )
+
+    def test_transaction_a_rejects_reconciliation_race_after_latest_check(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            authority.register_policy(_policy())
+            selected = _checkpoint(
+                store,
+                available_cash="1000",
+                observed_at="2026-09-24T18:00:30Z",
+                reconciliation_id="race-reconciliation-a",
+                snapshot_id="availability-race-a",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            original_commit = store.commit_command
+            injected = False
+
+            def commit_with_newer_truth(**kwargs):
+                nonlocal injected
+                if not injected:
+                    injected = True
+                    _checkpoint(
+                        store,
+                        cash="50",
+                        available_cash="50",
+                        observed_at="2026-09-24T18:00:40Z",
+                        reconciliation_id="race-reconciliation-b",
+                        snapshot_id="availability-race-b",
+                    )
+                return original_commit(**kwargs)
+
+            store.commit_command = commit_with_newer_truth
+            with self.assertRaisesRegex(ValueError, "journal sequence changed"):
+                _admit(
+                    authority,
+                    reservations,
+                    selected,
+                    command_id="availability-command-race",
+                    idempotency_key="availability-command-race",
+                    admission_id="availability-admission-race",
+                    intent_id="availability-intent-race",
+                    intent_hash="sha256:" + "d" * 64,
+                    reservation_id="availability-reservation-race",
+                )
+
+            self.assertTrue(injected)
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+            self.assertFalse(
+                any(
+                    item["topic"] == "financial.admission.ready"
+                    for item in store.pending_outbox()
+                )
+            )
+
 
     def test_decimal_scale_is_canonical_across_admission_restart_replay(self):
         with TemporaryDirectory() as directory:

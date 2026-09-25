@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from hashlib import sha256
 import json
 from typing import Mapping, Sequence
@@ -174,6 +174,9 @@ class RiskPolicy:
     max_fx_age_seconds: Decimal
     min_margin_headroom: Decimal
     max_stress_loss: Decimal
+    max_expected_shortfall: Decimal | None = None
+    expected_shortfall_tail_fraction: Decimal | None = None
+    min_liquidation_headroom: Decimal | None = None
     max_asset_concentration_fraction: Decimal | None = None
     max_venue_concentration_fraction: Decimal | None = None
     max_order_participation_fraction: Decimal | None = None
@@ -200,6 +203,9 @@ class RiskPolicy:
         max_fx_age_seconds,
         min_margin_headroom,
         max_stress_loss,
+        max_expected_shortfall=None,
+        expected_shortfall_tail_fraction=None,
+        min_liquidation_headroom=None,
         max_asset_concentration_fraction=None,
         max_venue_concentration_fraction=None,
         max_order_participation_fraction=None,
@@ -226,6 +232,40 @@ class RiskPolicy:
         }
         if values["max_drawdown_fraction"] > 1:
             raise ValueError("max_drawdown_fraction cannot exceed 1")
+
+        expected_shortfall_limit = (
+            None
+            if max_expected_shortfall is None
+            else _positive(
+                max_expected_shortfall,
+                name="max_expected_shortfall",
+                allow_zero=True,
+            )
+        )
+        expected_shortfall_tail = (
+            None
+            if expected_shortfall_tail_fraction is None
+            else _positive(
+                expected_shortfall_tail_fraction,
+                name="expected_shortfall_tail_fraction",
+            )
+        )
+        if (expected_shortfall_limit is None) != (expected_shortfall_tail is None):
+            raise ValueError(
+                "max_expected_shortfall and expected_shortfall_tail_fraction "
+                "must be configured together"
+            )
+        if expected_shortfall_tail is not None and expected_shortfall_tail > 1:
+            raise ValueError("expected_shortfall_tail_fraction cannot exceed 1")
+        liquidation_headroom_limit = (
+            None
+            if min_liquidation_headroom is None
+            else _positive(
+                min_liquidation_headroom,
+                name="min_liquidation_headroom",
+                allow_zero=True,
+            )
+        )
 
         optional_limits: dict[str, Decimal | None] = {}
         for name, raw_value in (
@@ -281,6 +321,9 @@ class RiskPolicy:
         )
         return cls(
             **values,
+            max_expected_shortfall=expected_shortfall_limit,
+            expected_shortfall_tail_fraction=expected_shortfall_tail,
+            min_liquidation_headroom=liquidation_headroom_limit,
             **optional_limits,
             max_abs_factor_exposure=factor_limit,
             max_clock_age_seconds=clock_limit,
@@ -307,6 +350,8 @@ class RiskContext:
     capability_allowed: bool
     borrow_available: bool | None
     stress_scenarios: Sequence[Mapping[str, Decimal]]
+    tail_scenarios: Sequence[Mapping[str, Decimal]] = ()
+    liquidation_headroom: Decimal | None = None
     asset_buckets: Mapping[str, str] | None = None
     venues: Mapping[str, str] | None = None
     liquidity_capacity: Mapping[str, Decimal] | None = None
@@ -338,6 +383,8 @@ class RiskContext:
         capability_allowed: bool,
         borrow_available: bool | None,
         stress_scenarios: Sequence[Mapping[str, object]] = (),
+        tail_scenarios: Sequence[Mapping[str, object]] = (),
+        liquidation_headroom=None,
         asset_buckets: Mapping[str, str] | None = None,
         venues: Mapping[str, str] | None = None,
         liquidity_capacity: Mapping[str, object] | None = None,
@@ -470,6 +517,31 @@ class RiskContext:
             )
             for index, scenario in enumerate(stress_scenarios)
         )
+        if not isinstance(tail_scenarios, Sequence) or isinstance(
+            tail_scenarios,
+            (str, bytes),
+        ):
+            raise TypeError("tail_scenarios must be a sequence of mappings")
+        normalized_tail_scenarios = tuple(
+            _normalize_mapping(
+                scenario,
+                name=f"tail_scenarios[{index}]",
+                parser=lambda value, key: _decimal(
+                    value,
+                    name=f"tail return {key}",
+                ),
+            )
+            for index, scenario in enumerate(tail_scenarios)
+        )
+        normalized_liquidation_headroom = (
+            None
+            if liquidation_headroom is None
+            else _positive(
+                liquidation_headroom,
+                name="liquidation_headroom",
+                allow_zero=True,
+            )
+        )
         normalized_drawdown = _positive(
             drawdown_fraction,
             name="drawdown_fraction",
@@ -505,6 +577,8 @@ class RiskContext:
             capability_allowed=capability_allowed,
             borrow_available=borrow_available,
             stress_scenarios=scenarios,
+            tail_scenarios=normalized_tail_scenarios,
+            liquidation_headroom=normalized_liquidation_headroom,
             asset_buckets=normalized_asset_buckets,
             venues=normalized_venues,
             liquidity_capacity=normalized_liquidity,
@@ -601,6 +675,8 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         capability_allowed=context.capability_allowed,
         borrow_available=context.borrow_available,
         stress_scenarios=context.stress_scenarios,
+        tail_scenarios=context.tail_scenarios,
+        liquidation_headroom=context.liquidation_headroom,
         asset_buckets=context.asset_buckets,
         venues=context.venues,
         liquidity_capacity=context.liquidity_capacity,
@@ -625,6 +701,9 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         max_fx_age_seconds=policy.max_fx_age_seconds,
         min_margin_headroom=policy.min_margin_headroom,
         max_stress_loss=policy.max_stress_loss,
+        max_expected_shortfall=policy.max_expected_shortfall,
+        expected_shortfall_tail_fraction=policy.expected_shortfall_tail_fraction,
+        min_liquidation_headroom=policy.min_liquidation_headroom,
         max_asset_concentration_fraction=policy.max_asset_concentration_fraction,
         max_venue_concentration_fraction=policy.max_venue_concentration_fraction,
         max_order_participation_fraction=policy.max_order_participation_fraction,
@@ -788,9 +867,66 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
             base_worst_stress_loss = max(base_worst_stress_loss, -base_pnl)
             worst_stress_loss = max(worst_stress_loss, -pnl)
 
+    tail_coverage_complete = True
+    missing_tail_symbols: set[str] = set()
+    expected_shortfall: Decimal | None = None
+    base_expected_shortfall: Decimal | None = None
+    if policy.max_expected_shortfall is not None:
+        tail_coverage_complete = bool(context.tail_scenarios) or not stress_symbols
+        for scenario in context.tail_scenarios:
+            missing_tail_symbols.update(stress_symbols - set(scenario))
+        if missing_tail_symbols:
+            tail_coverage_complete = False
+        if tail_coverage_complete and stress_symbols:
+            projected_losses: list[Decimal] = []
+            base_losses: list[Decimal] = []
+            for scenario in context.tail_scenarios:
+                projected_pnl = sum(
+                    (notional * scenario[symbol] for symbol, notional in notionals.items()),
+                    Decimal("0"),
+                )
+                base_pnl = sum(
+                    (
+                        notional * scenario.get(symbol, Decimal("0"))
+                        for symbol, notional in base_notionals.items()
+                    ),
+                    Decimal("0"),
+                )
+                projected_losses.append(max(-projected_pnl, Decimal("0")))
+                base_losses.append(max(-base_pnl, Decimal("0")))
+            tail_fraction = policy.expected_shortfall_tail_fraction
+            assert tail_fraction is not None
+            tail_count = max(
+                1,
+                int(
+                    (Decimal(len(projected_losses)) * tail_fraction)
+                    .to_integral_value(rounding=ROUND_CEILING)
+                ),
+            )
+            projected_tail = sorted(projected_losses, reverse=True)[:tail_count]
+            base_tail = sorted(base_losses, reverse=True)[:tail_count]
+            expected_shortfall = sum(projected_tail, Decimal("0")) / Decimal(
+                len(projected_tail)
+            )
+            base_expected_shortfall = sum(base_tail, Decimal("0")) / Decimal(
+                len(base_tail)
+            )
+        elif tail_coverage_complete:
+            expected_shortfall = Decimal("0")
+            base_expected_shortfall = Decimal("0")
+
     reduces_absolute_exposure = (
         abs(resulting) < abs(base_position)
         and base_position * resulting >= 0
+    )
+    tail_nonworsening = (
+        policy.max_expected_shortfall is None
+        or (
+            tail_coverage_complete
+            and expected_shortfall is not None
+            and base_expected_shortfall is not None
+            and expected_shortfall <= base_expected_shortfall
+        )
     )
     protective_reduction = (
         intent.reduce_only
@@ -798,6 +934,7 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         and gross < base_gross
         and net <= base_net
         and worst_stress_loss <= base_worst_stress_loss
+        and tail_nonworsening
     )
 
     rules: list[RiskRuleResult] = []
@@ -1037,6 +1174,46 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         policy.max_stress_loss,
         "worst configured stress loss must stay within policy",
     )
+    if policy.max_expected_shortfall is not None:
+        add(
+            "tail_coverage",
+            tail_coverage_complete,
+            (
+                ",".join(sorted(missing_tail_symbols))
+                if missing_tail_symbols
+                else len(context.tail_scenarios)
+            ),
+            "complete non-empty tail scenarios for every non-zero projected position",
+            "expected-shortfall admission requires complete frozen tail evidence",
+        )
+        add(
+            "expected_shortfall",
+            tail_coverage_complete
+            and expected_shortfall is not None
+            and (
+                expected_shortfall <= policy.max_expected_shortfall
+                or protective_reduction
+            ),
+            expected_shortfall if expected_shortfall is not None else "UNKNOWN",
+            policy.max_expected_shortfall,
+            "equal-weight expected shortfall over the configured worst tail must stay within policy",
+        )
+    if policy.min_liquidation_headroom is not None:
+        add(
+            "liquidation_headroom",
+            context.liquidation_headroom is not None
+            and (
+                context.liquidation_headroom >= policy.min_liquidation_headroom
+                or protective_reduction
+            ),
+            (
+                context.liquidation_headroom
+                if context.liquidation_headroom is not None
+                else "UNKNOWN"
+            ),
+            policy.min_liquidation_headroom,
+            "evidenced liquidation headroom must meet policy or the action must strictly reduce risk",
+        )
 
     opens_short = resulting < 0 and resulting < base_position
     borrow_ok = not opens_short or context.borrow_available is True

@@ -5,6 +5,7 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+import zipfile
 
 from tools.check_nvda_qualification import (
     NvdaQualificationError,
@@ -19,6 +20,32 @@ REQUIREMENTS = json.loads(
         encoding="utf-8"
     )
 )
+
+
+def write_release_bundle(
+    path: Path,
+    *,
+    source_sha: str = "a" * 40,
+    mode: str = "release",
+    release_eligible: bool = True,
+):
+    manifest = {
+        "schema_version": "1.0.0",
+        "product": "AutoTrade",
+        "version": "test",
+        "source_sha": source_sha,
+        "mode": mode,
+        "release_eligible": release_eligible,
+        "trading_authority_granted_by_artifact": False,
+        "provenance_sha256": "sha256:" + "c" * 64,
+        "provenance_blockers": [],
+        "files": [],
+    }
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "bundle-manifest.json",
+            json.dumps(manifest, sort_keys=True),
+        )
 
 
 def complete_evidence():
@@ -214,7 +241,7 @@ class NvdaQualificationGateTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             release = root / "AutoTrade-release.zip"
-            release.write_bytes(b"exact-release-artifact")
+            write_release_bundle(release)
             evidence_value = complete_evidence()
             evidence_value["artifact_sha256"] = (
                 "sha256:" + sha256(release.read_bytes()).hexdigest()
@@ -292,6 +319,52 @@ class NvdaQualificationGateTests(unittest.TestCase):
             release.write_bytes(b"release-bytes")
             evidence = complete_evidence()
             with self.assertRaisesRegex(NvdaQualificationError, "does not match"):
+                validate_release_artifact_binding(evidence, release)
+
+
+    def test_release_bundle_source_sha_must_match_nvda_evidence(self):
+        with TemporaryDirectory() as directory:
+            release = Path(directory) / "AutoTrade-release.zip"
+            write_release_bundle(release, source_sha="d" * 40)
+            evidence = complete_evidence()
+            evidence["artifact_sha256"] = (
+                "sha256:" + sha256(release.read_bytes()).hexdigest()
+            )
+            with self.assertRaisesRegex(
+                NvdaQualificationError,
+                "source SHA does not match",
+            ):
+                validate_release_artifact_binding(evidence, release)
+
+    def test_diagnostics_or_ineligible_bundle_cannot_be_nvda_release_evidence(self):
+        for mode, eligible, message in (
+            ("diagnostics", False, "release-mode"),
+            ("release", False, "release-eligible"),
+        ):
+            with self.subTest(mode=mode, eligible=eligible):
+                with TemporaryDirectory() as directory:
+                    release = Path(directory) / "AutoTrade-release.zip"
+                    write_release_bundle(
+                        release,
+                        mode=mode,
+                        release_eligible=eligible,
+                    )
+                    evidence = complete_evidence()
+                    evidence["artifact_sha256"] = (
+                        "sha256:" + sha256(release.read_bytes()).hexdigest()
+                    )
+                    with self.assertRaisesRegex(NvdaQualificationError, message):
+                        validate_release_artifact_binding(evidence, release)
+
+    def test_non_bundle_file_cannot_qualify_even_with_matching_digest(self):
+        with TemporaryDirectory() as directory:
+            release = Path(directory) / "not-a-bundle.zip"
+            release.write_bytes(b"not a zip")
+            evidence = complete_evidence()
+            evidence["artifact_sha256"] = (
+                "sha256:" + sha256(release.read_bytes()).hexdigest()
+            )
+            with self.assertRaisesRegex(NvdaQualificationError, "release bundle"):
                 validate_release_artifact_binding(evidence, release)
 
 

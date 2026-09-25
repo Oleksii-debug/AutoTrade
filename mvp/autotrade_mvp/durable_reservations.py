@@ -463,13 +463,6 @@ class DurableReservationBook:
         )
         events = self._events()
         candidate, idempotency = self._replay(events)
-        if expected_cut is not None:
-            current_snapshot = candidate.get(request["reservation_id"])
-            current_cut = payload_digest(_snapshot_payload(current_snapshot))
-            if current_cut != expected_cut:
-                raise ReservationConflict(
-                    "reservation snapshot changed after provider fill plan derivation"
-                )
         existing = idempotency.get(key)
         if existing is not None:
             if existing[0] != payload_digest(request):
@@ -495,6 +488,14 @@ class DurableReservationBook:
                 ),
                 already_committed=True,
             )
+
+        if expected_cut is not None:
+            current_snapshot = candidate.get(request["reservation_id"])
+            current_cut = payload_digest(_snapshot_payload(current_snapshot))
+            if current_cut != expected_cut:
+                raise ReservationConflict(
+                    "reservation snapshot changed after provider fill plan derivation"
+                )
 
         snapshot = self._apply(candidate, "CONSUME", request)
         snapshot_value = _snapshot_payload(snapshot)

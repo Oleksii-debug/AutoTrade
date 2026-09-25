@@ -39,6 +39,21 @@ def _required_text(value: object, *, name: str) -> str:
     return value.strip()
 
 
+def _workflow_requirement_digest(workflow: dict[str, object]) -> str:
+    workflow_id = _required_text(workflow.get("id"), name="requirements.workflow.id")
+    description = _required_text(
+        workflow.get("description"),
+        name=f"requirements.workflow[{workflow_id}].description",
+    )
+    payload = json.dumps(
+        {"description": description, "id": workflow_id},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return "sha256:" + sha256(payload).hexdigest()
+
+
 def validate_evidence(
     evidence: dict[str, object],
     requirements: dict[str, object],
@@ -106,6 +121,14 @@ def validate_evidence(
             raise NvdaQualificationError(f"workflow did not pass: {workflow_id}")
         _required_text(item.get("keyboard_steps"), name=f"{workflow_id}.keyboard_steps")
         _required_text(item.get("nvda_observation"), name=f"{workflow_id}.nvda_observation")
+        requirement_sha = _required_text(
+            item.get("requirement_sha256"),
+            name=f"{workflow_id}.requirement_sha256",
+        )
+        if SHA256.fullmatch(requirement_sha) is None:
+            raise NvdaQualificationError(
+                f"{workflow_id}.requirement_sha256 must be an immutable sha256 digest"
+            )
         evidence_ref = _required_text(item.get("evidence_ref"), name=f"{workflow_id}.evidence_ref")
         if SHA256.fullmatch(evidence_ref) is None:
             raise NvdaQualificationError(
@@ -120,12 +143,13 @@ def validate_evidence(
     if not isinstance(required, list) or not required:
         raise NvdaQualificationError("requirements contain no workflows")
     required_id_list: list[str] = []
+    requirement_digests: dict[str, str] = {}
     for item in required:
         if not isinstance(item, dict):
             raise NvdaQualificationError("requirements.workflow must be an object")
-        required_id_list.append(
-            _required_text(item.get("id"), name="requirements.workflow.id")
-        )
+        workflow_id = _required_text(item.get("id"), name="requirements.workflow.id")
+        required_id_list.append(workflow_id)
+        requirement_digests[workflow_id] = _workflow_requirement_digest(item)
     if len(required_id_list) != len(set(required_id_list)):
         raise NvdaQualificationError("requirements.workflow ids must be unique")
     required_ids = set(required_id_list)
@@ -135,6 +159,11 @@ def validate_evidence(
         raise NvdaQualificationError(
             f"workflow evidence mismatch; missing={missing}; extra={extra}"
         )
+    for workflow_id in required_id_list:
+        if by_id[workflow_id].get("requirement_sha256") != requirement_digests[workflow_id]:
+            raise NvdaQualificationError(
+                f"workflow evidence is stale for requirement: {workflow_id}"
+            )
 
     reviewer = _required_text(evidence.get("reviewer"), name="reviewer")
     observed_at = _required_text(evidence.get("observed_at"), name="observed_at")

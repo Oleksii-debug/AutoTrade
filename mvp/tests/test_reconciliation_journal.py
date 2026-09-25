@@ -13,6 +13,7 @@ from mvp.autotrade_mvp.reconciliation import (
 )
 from mvp.autotrade_mvp.reconciliation_journal import (
     _reconciliation_aggregate_id,
+    load_account_resource_availability_evidence,
     load_latest_reconciliation_checkpoint,
     load_submission_resolution_evidence,
     load_reconciliation_checkpoint_for_readiness,
@@ -217,6 +218,64 @@ class ReconciliationJournalTests(unittest.TestCase):
                 owner_epoch="epoch-b",
             )
             self.assertEqual(exact_retry["event_id"], owner_b["event_id"])
+
+    def test_fresh_complete_checkpoint_is_exact_cash_availability_authority(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="acct-availability",
+                result=reconciliation(),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            reopened = JournalStore(path)
+            evidence = load_account_resource_availability_evidence(
+                reopened,
+                checkpoint_event_id=checkpoint["event_id"],
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                resources=("CASH:USD",),
+                now="2026-09-24T19:00:30Z",
+                max_age_seconds="60",
+            )
+            self.assertEqual(evidence["availability"], {"CASH:USD": "900"})
+            self.assertEqual(
+                evidence["checkpoint_event_id"],
+                checkpoint["event_id"],
+            )
+            self.assertEqual(evidence["snapshot_mode"], "ATOMIC")
+            self.assertEqual(evidence["age_seconds"], "30")
+
+            with self.assertRaisesRegex(ValueError, "stale"):
+                load_account_resource_availability_evidence(
+                    reopened,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:02:00Z",
+                    max_age_seconds="60",
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "not canonically supported",
+            ):
+                load_account_resource_availability_evidence(
+                    reopened,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("MARGIN:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                )
 
     def test_exact_checkpoint_event_is_submission_resolution_authority(self):
         with TemporaryDirectory() as directory:

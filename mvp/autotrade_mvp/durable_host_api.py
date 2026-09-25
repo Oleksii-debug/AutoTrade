@@ -29,7 +29,7 @@ class JournalBackedHostCommandStore:
     """Durable host API semantics over the canonical journal."""
 
     AGGREGATE_TYPE = "HOST_CONTROL"
-    AGGREGATE_ID = "host"
+    LEGACY_AGGREGATE_ID = "host"
     TERMINAL_PHASES = {"SUCCEEDED", "FAILED", "CANCELLED"}
     UPDATE_PHASES = {"RUNNING", "WAITING_EXTERNAL", "UNKNOWN", *TERMINAL_PHASES}
 
@@ -59,6 +59,21 @@ class JournalBackedHostCommandStore:
         self._journal = journal
         self.account_id = account_id
         self.environment = environment
+        self.aggregate_id = "host:" + payload_digest(
+            {
+                "account_id": self.account_id,
+                "environment": self.environment,
+            }
+        ).removeprefix("sha256:")
+        legacy = self._journal.load_events(
+            self.AGGREGATE_TYPE,
+            self.LEGACY_AGGREGATE_ID,
+        )
+        if legacy:
+            raise ValueError(
+                "legacy unscoped host journal requires explicit migration before "
+                "account-scoped host state can be opened"
+            )
         self._session_validator = session_validator
         self._request_origin_provider = request_origin_provider
         self._max_events = max_events
@@ -153,7 +168,7 @@ class JournalBackedHostCommandStore:
         return tuple(dict(item) for item in values)
 
     def _events(self) -> list[dict[str, object]]:
-        return self._journal.load_events(self.AGGREGATE_TYPE, self.AGGREGATE_ID)
+        return self._journal.load_events(self.AGGREGATE_TYPE, self.aggregate_id)
 
     @property
     def state_version(self) -> int:
@@ -177,7 +192,7 @@ class JournalBackedHostCommandStore:
             "event_id": event_id,
             "event_type": event_type,
             "aggregate_type": self.AGGREGATE_TYPE,
-            "aggregate_id": self.AGGREGATE_ID,
+            "aggregate_id": self.aggregate_id,
             "aggregate_version": str(aggregate_version),
             "payload": body,
             "payload_hash": payload_digest(body),

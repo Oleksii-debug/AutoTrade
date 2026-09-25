@@ -77,7 +77,13 @@ def _risk_policy():
     )
 
 
-def _checkpoint(store, *, cash="1000", available_cash=None):
+def _checkpoint(
+    store,
+    *,
+    cash="1000",
+    available_cash=None,
+    pagination_complete=True,
+):
     if available_cash is None:
         available_cash = cash
     result = reconcile_account(
@@ -100,7 +106,7 @@ def _checkpoint(store, *, cash="1000", available_cash=None):
         ),
         coverage_start="2026-09-24T18:00:00Z",
         coverage_end=NOW,
-        pagination_complete=True,
+        pagination_complete=pagination_complete,
         provider_activity_provider_id=PROVIDER_ID,
         provider_activity_account_id=ACCOUNT_ID,
         resource_availability=ResourceAvailabilityEvidence(
@@ -406,6 +412,142 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                     reservations.total_reserved("CASH:USD"),
                     Decimal("0"),
                 )
+
+    def test_new_admission_rejects_superseded_reconciliation_checkpoint(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            authority.register_policy(_policy())
+            historical = _checkpoint(store, available_cash="1000")
+            latest = _checkpoint(store, cash="900", available_cash="100")
+            self.assertNotEqual(historical["event_id"], latest["event_id"])
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "latest reconciliation checkpoint",
+            ):
+                _admit(
+                    authority,
+                    reservations,
+                    historical,
+                    command_id="availability-command-latest",
+                    idempotency_key="availability-command-latest",
+                    admission_id="availability-admission-latest",
+                    intent_id="availability-intent-latest",
+                    intent_hash="sha256:" + "b" * 64,
+                    reservation_id="availability-reservation-latest",
+                    reservation_available={"CASH:USD": "100"},
+                )
+
+            self.assertEqual(reservations.version, 0)
+            admitted = _admit(
+                authority,
+                reservations,
+                latest,
+                command_id="availability-command-latest",
+                idempotency_key="availability-command-latest",
+                admission_id="availability-admission-latest",
+                intent_id="availability-intent-latest",
+                intent_hash="sha256:" + "b" * 64,
+                reservation_id="availability-reservation-latest",
+                reservation_available={"CASH:USD": "100"},
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("100"),
+            )
+
+    def test_newer_incomplete_checkpoint_blocks_fallback_to_older_truth(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            authority.register_policy(_policy())
+            historical = _checkpoint(store, available_cash="1000")
+            latest = _checkpoint(
+                store,
+                cash="900",
+                available_cash="100",
+                pagination_complete=False,
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "latest reconciliation checkpoint",
+            ):
+                _admit(
+                    authority,
+                    reservations,
+                    historical,
+                    command_id="availability-command-blocked",
+                    idempotency_key="availability-command-blocked",
+                    admission_id="availability-admission-blocked",
+                    intent_id="availability-intent-blocked",
+                    intent_hash="sha256:" + "c" * 64,
+                    reservation_id="availability-reservation-blocked",
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "complete consistent reconciliation",
+            ):
+                _admit(
+                    authority,
+                    reservations,
+                    latest,
+                    command_id="availability-command-blocked",
+                    idempotency_key="availability-command-blocked",
+                    admission_id="availability-admission-blocked",
+                    intent_id="availability-intent-blocked",
+                    intent_hash="sha256:" + "c" * 64,
+                    reservation_id="availability-reservation-blocked",
+                    reservation_available={"CASH:USD": "100"},
+                )
+            self.assertEqual(reservations.version, 0)
+
+    def test_exact_retry_keeps_immutable_checkpoint_after_newer_truth(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            authority = AuthorityService(store)
+            authority.register_policy(_policy())
+            historical = _checkpoint(store, available_cash="1000")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            first = _admit(authority, reservations, historical)
+            self.assertEqual(first.outcome, "ADMITTED")
+
+            _checkpoint(store, cash="900", available_cash="100")
+
+            restarted_store = JournalStore(path)
+            restarted_authority = AuthorityService(restarted_store)
+            restarted_reservations = DurableReservationBook(
+                restarted_store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            replay = _admit(
+                restarted_authority,
+                restarted_reservations,
+                historical,
+            )
+            self.assertEqual(replay, first)
+            self.assertEqual(
+                restarted_reservations.total_reserved("CASH:USD"),
+                Decimal("100"),
+            )
 
     def test_stale_or_cross_account_checkpoint_fails_closed(self):
         with TemporaryDirectory() as directory:

@@ -8,10 +8,12 @@ from mvp.autotrade_mvp.science_qualification import (
 
 
 H = "sha256:" + "a" * 64
+P = "sha256:" + "c" * 64
 
 
 def gate(name, status="PASS", reasons=()):
-    return QualificationGate(name, status, (H,), H, H, H, tuple(reasons))
+    hashes = (H, P) if name == "retention" else (H,)
+    return QualificationGate(name, status, hashes, H, H, H, tuple(reasons))
 
 
 def complete_gates(**statuses):
@@ -19,8 +21,23 @@ def complete_gates(**statuses):
     return tuple(gate(name, statuses.get(name, "PASS"), (("X." + name.upper()),) if statuses.get(name) == "FAIL" else ()) for name in names)
 
 
-def evidence(gates=None, claim="NONE", holdout_used=False, future_used=False):
-    return ScientificQualificationInput(H, H, H, complete_gates() if gates is None else tuple(gates), claim, holdout_used, future_used)
+def evidence(
+    gates=None,
+    claim="NONE",
+    holdout_used=False,
+    future_used=False,
+    population_coverage_hash=P,
+):
+    return ScientificQualificationInput(
+        H,
+        H,
+        H,
+        complete_gates() if gates is None else tuple(gates),
+        claim,
+        holdout_used,
+        future_used,
+        population_coverage_hash,
+    )
 
 
 def _trusted_evidence_verifier(_gate):
@@ -75,6 +92,25 @@ class ScientificQualificationTests(unittest.TestCase):
         self.assertTrue(result.economic_claim_accepted)
         self.assertFalse(result.release_or_trading_authority)
         self.assertTrue(result.qualification_id.startswith("science-"))
+
+    def test_missing_population_coverage_is_inconclusive(self):
+        result = qualify(evidence(population_coverage_hash=None))
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertFalse(result.economic_claim_accepted)
+        self.assertIn("SCIENCE.POPULATION_COVERAGE_MISSING", result.reason_codes)
+
+    def test_population_coverage_must_be_bound_to_retention_gate(self):
+        gates = list(complete_gates())
+        gates[gates.index(next(g for g in gates if g.gate_id == "retention"))] = (
+            QualificationGate("retention", "PASS", (H,), H, H, H)
+        )
+        result = qualify(evidence(gates))
+        self.assertEqual(result.status, "FAIL")
+        self.assertFalse(result.economic_claim_accepted)
+        self.assertIn(
+            "SCIENCE.POPULATION_COVERAGE_NOT_BOUND_TO_RETENTION",
+            result.reason_codes,
+        )
 
     def test_leakage_sentinel_failure_is_hard_fail_even_if_other_gates_pass(self):
         result = qualify(evidence(complete_gates(leakage="FAIL")))

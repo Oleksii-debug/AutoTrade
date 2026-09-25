@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 from tempfile import TemporaryDirectory
 import unittest
@@ -11,6 +12,11 @@ from mvp.autotrade_mvp.securities_borrow import (
     BorrowRecallResolutionEvidence,
     DurableBorrowRecallProjection,
     borrow_resource_key,
+)
+from mvp.tests.securities_borrow_evidence_helpers import (
+    EvidencedBorrowRecallProjection,
+    artifact_store_for,
+    bind_provider_evidence,
 )
 
 
@@ -150,7 +156,7 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
             instrument_version=1,
         )
         values.update(overrides)
-        return DurableBorrowRecallProjection(store or self.store, **values)
+        return EvidencedBorrowRecallProjection(store or self.store, **values)
 
     def test_recall_survives_restart_and_projects_existing_equity_state(self):
         projection = self.projection()
@@ -260,6 +266,94 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(BorrowRecallConflict, "exceeds"):
             projection.project_equity_state(short)
+
+
+class SecuritiesBorrowArtifactBindingTests(unittest.TestCase):
+    def make_projection(self, directory):
+        store = JournalStore(f"{directory}/journal.sqlite3")
+        artifacts = artifact_store_for(store)
+        projection = DurableBorrowRecallProjection(
+            store,
+            provider_id=PROVIDER_ID,
+            account_id=ACCOUNT_ID,
+            environment=ENVIRONMENT,
+            instrument_id=INSTRUMENT_ID,
+            instrument_version=1,
+            evidence_artifact_store=artifacts,
+        )
+        return store, artifacts, projection
+
+    def test_unresolvable_recall_artifact_fails_before_journal_mutation(self):
+        with TemporaryDirectory() as directory:
+            store, _, projection = self.make_projection(directory)
+            forged = replace(
+                recall(),
+                evidence_ref=(
+                    "artifact:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa@sha256:"
+                    + "0" * 64
+                ),
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "verification failed",
+            ):
+                projection.record_recall(forged)
+            self.assertEqual(
+                store.load_events(
+                    "securities_borrow_recall",
+                    projection.aggregate_id,
+                ),
+                [],
+            )
+
+    def test_same_artifact_cannot_authorize_changed_recall_or_resolution(self):
+        with TemporaryDirectory() as directory:
+            _, artifacts, projection = self.make_projection(directory)
+            bound_recall = bind_provider_evidence(artifacts, recall())
+            forged_recall = replace(bound_recall, quantity=Decimal("4"))
+            with self.assertRaisesRegex(
+                ValueError,
+                "does not match supplied economics",
+            ):
+                projection.record_recall(forged_recall)
+
+            projection.record_recall(bound_recall)
+            bound_resolution = bind_provider_evidence(artifacts, resolution())
+            forged_resolution = replace(
+                bound_resolution,
+                resolved_quantity=Decimal("2"),
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "does not match supplied economics",
+            ):
+                projection.resolve_recall(forged_resolution)
+            self.assertEqual(projection.active_quantity, Decimal("3"))
+
+    def test_corrupt_recall_artifact_fails_closed_after_restart(self):
+        with TemporaryDirectory() as directory:
+            store, artifacts, projection = self.make_projection(directory)
+            bound = bind_provider_evidence(artifacts, recall())
+            projection.record_recall(bound)
+            artifact_id = bound.evidence_ref[len("artifact:"):].split(
+                "@sha256:",
+                1,
+            )[0]
+            manifest = artifacts.load_manifest(artifact_id)
+            digest = manifest["sha256"].removeprefix("sha256:")
+            (artifacts.objects / digest[:2] / digest).write_bytes(b"corrupt")
+
+            with self.assertRaisesRegex(ValueError, "verification failed"):
+                DurableBorrowRecallProjection(
+                    JournalStore(store.path),
+                    provider_id=PROVIDER_ID,
+                    account_id=ACCOUNT_ID,
+                    environment=ENVIRONMENT,
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    evidence_artifact_store=artifact_store_for(store),
+                )
+
 
 
 if __name__ == "__main__":

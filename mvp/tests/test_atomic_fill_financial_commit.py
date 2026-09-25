@@ -84,7 +84,11 @@ def settlement_obligation(store: JournalStore, transaction):
         effective_to=None,
         evidence_refs=("instrument:ABC", "rule:test-equity-cash:1"),
     )
-    receipt = settlement_rule_evidence_receipt(rule)
+    receipt = settlement_rule_evidence_receipt(
+        rule,
+        trade_date=date(2026, 9, 25),
+        expected_settlement_date=date(2026, 9, 26),
+    )
     artifact_id = str(
         uuid5(
             NAMESPACE_URL,
@@ -98,7 +102,11 @@ def settlement_obligation(store: JournalStore, transaction):
         media_type=SETTLEMENT_EVIDENCE_MEDIA_TYPE,
         rights={"storage": True, "export": False},
         source_refs=["provider-doc:test-settlement-rule"],
-        metadata=settlement_rule_evidence_metadata(rule),
+        metadata=settlement_rule_evidence_metadata(
+            rule,
+            trade_date=date(2026, 9, 25),
+            expected_settlement_date=date(2026, 9, 26),
+        ),
     )
     rule = replace(
         rule,

@@ -537,6 +537,11 @@ class ReconciliationResult:
     unexpected_working_provider_order_ids: tuple[str, ...]
     missing_local_working_client_order_ids: tuple[str, ...]
     snapshot_consistent: bool
+    provider_cash: Mapping[str, Decimal]
+    provider_positions: Mapping[str, Decimal]
+    snapshot_mode: str | None
+    snapshot_query_started_at: str | None
+    snapshot_query_completed_at: str | None
     cash_differences: Mapping[str, Decimal]
     position_differences: Mapping[str, Decimal]
     submission_resolutions: tuple[SubmissionResolution, ...]
@@ -1147,6 +1152,23 @@ def reconcile_account(
         unexpected_working_provider_order_ids=unexpected_working,
         missing_local_working_client_order_ids=missing_local_working,
         snapshot_consistent=snapshot_is_consistent,
+        provider_cash=MappingProxyType(provider_cash_map),
+        provider_positions=MappingProxyType(provider_position_map),
+        snapshot_mode=(
+            snapshot_consistency.mode
+            if snapshot_consistency is not None
+            else None
+        ),
+        snapshot_query_started_at=(
+            snapshot_consistency.query_started_at
+            if snapshot_consistency is not None
+            else None
+        ),
+        snapshot_query_completed_at=(
+            snapshot_consistency.query_completed_at
+            if snapshot_consistency is not None
+            else None
+        ),
         cash_differences=MappingProxyType(cash_differences),
         position_differences=MappingProxyType(position_differences),
         submission_resolutions=tuple(resolutions),

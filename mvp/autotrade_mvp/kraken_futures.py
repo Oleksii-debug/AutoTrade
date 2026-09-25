@@ -16,7 +16,7 @@ import re
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from .provider_core import ProviderCoreError
+from .provider_core import ProviderCoreError, ProviderResponseObservation, Surface
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
@@ -283,18 +283,26 @@ def parse_submission_response(
 
 
 def parse_position_executions(
-    response: Mapping[str, Any],
+    observation: ProviderResponseObservation,
     *,
-    account_id: str,
-    environment: str,
     instrument_versions: Mapping[str, str],
     execution_client_ids: Mapping[str, str] | None = None,
 ) -> tuple[ProviderFillEvidence, ...]:
-    """Extract trade-caused executions from authenticated position history."""
+    """Extract trade executions from one capability-bound exact-byte history read."""
 
+    if not isinstance(observation, ProviderResponseObservation):
+        raise TypeError("observation must be ProviderResponseObservation")
+    observation.require_scope(
+        provider_id="KRAKEN",
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint=KRAKEN_FUTURES_ENDPOINTS["POSITION_HISTORY"],
+    )
+    response = observation.payload
+    account_id = observation.account_id
+    environment = observation.environment
     envelope = _mapping(response, name="response")
     elements = envelope.get("elements")
-    if not isinstance(elements, list):
+    if not isinstance(elements, (list, tuple)):
         raise ProviderCoreError("Futures history elements must be an array")
     if not isinstance(instrument_versions, Mapping):
         raise ProviderCoreError("instrument_versions must be a mapping")

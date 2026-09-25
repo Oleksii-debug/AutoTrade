@@ -455,6 +455,29 @@ class InformationClaimTests(unittest.TestCase):
             claim.evidence_digest(),
         )
 
+    def test_direct_snapshot_rejects_syndicated_duplicate_identities(self):
+        first_store = ClaimStore()
+        first = first_store.build_claim(
+            doc("wire-a", "r1", "same syndicated passage"),
+            subject="X",
+            predicate="state",
+            value="up",
+        )
+        second = first_store.build_claim(
+            doc("wire-b", "r1", "same syndicated passage", available=1),
+            subject="X",
+            predicate="state",
+            value="up",
+        )
+        self.assertNotEqual(first.claim_id, second.claim_id)
+        self.assertEqual(first.syndication_key, second.syndication_key)
+
+        with self.assertRaisesRegex(ValueError, "syndicated duplicates"):
+            InformationSnapshot(
+                cutoff=BASE + timedelta(hours=1),
+                claims=(first, second),
+            )
+
     def test_direct_snapshot_rejects_future_duplicate_and_noncanonical_claims(self):
         store = ClaimStore()
         early = store.build_claim(

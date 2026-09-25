@@ -1,6 +1,8 @@
+from datetime import datetime, timezone
 from decimal import Decimal
 import unittest
 
+from mvp.autotrade_mvp.capabilities import CapabilitySnapshot
 from mvp.autotrade_mvp.perpetual_margin import (
     MarginTier,
     PerpetualMarginError,
@@ -19,9 +21,49 @@ def tier(upper="10000", rate="0.005", adjustment="0", convention="ADD"):
     )
 
 
+SNAPSHOT_ID = "11111111-1111-4111-8111-111111111111"
+
+
+def capability(**overrides):
+    values = dict(
+        snapshot_id=SNAPSHOT_ID,
+        provider_id="TEST_PROVIDER",
+        account_id="account-A",
+        entity_id="perpetual-account",
+        environment="PAPER",
+        instrument_version="BTC-PERP@v4",
+        observed_at=datetime(2026, 9, 24, tzinfo=timezone.utc),
+        expires_at=datetime(2026, 9, 26, tzinfo=timezone.utc),
+        supported_order_types=frozenset({"MARKET", "LIMIT"}),
+        time_in_force=frozenset({"GTC", "IOC"}),
+        permission_scopes=frozenset({"ORDER_WRITE"}),
+        position_mode="ONE_WAY",
+        native_protection=frozenset(),
+        rate_limit_policy_id="test-rate",
+        data_entitlements=frozenset({"MARK", "INDEX", "MARGIN"}),
+        evidence=(),
+        status="VERIFIED",
+        sources=frozenset({"DOCUMENTED"}),
+    )
+    values.update(overrides)
+    return CapabilitySnapshot(**values)
+
+
 def evidence(**overrides):
     values = dict(
+        provider_id="TEST_PROVIDER",
+        account_id="account-A",
+        entity_id="perpetual-account",
+        environment="PAPER",
         instrument_version="BTC-PERP@v4",
+        capability_snapshot_id=SNAPSHOT_ID,
+        position_mode="ONE_WAY",
+        margin_mode="CROSS",
+        collateral_currency="USD",
+        settlement_currency="USD",
+        risk_tier_revision="tier-v7",
+        evidence_bundle_ref="artifact:margin-bundle:sha256:abc",
+        tier_table_evidence_ref="artifact:margin-tiers:sha256:def",
         mark_price=Decimal("100"),
         index_price=Decimal("100"),
         collateral_fx_to_settlement=Decimal("1"),
@@ -30,7 +72,6 @@ def evidence(**overrides):
         collateral_fx_observed_at="2026-09-25T00:00:00Z",
         margin_tiers_observed_at="2026-09-25T00:00:00Z",
         margin_tiers=(tier(), tier("50000", "0.01", "10", "ADD")),
-        evidence_ref="artifact:margin:sha256:abc",
     )
     values.update(overrides)
     return PerpetualMarginEvidence(**values)
@@ -51,7 +92,12 @@ def stress(**overrides):
 
 def evaluate(**overrides):
     values = dict(
+        capability=capability(),
         instrument_version="BTC-PERP@v4",
+        margin_mode="CROSS",
+        collateral_currency="USD",
+        settlement_currency="USD",
+        risk_tier_revision="tier-v7",
         signed_notional_settlement=Decimal("5000"),
         collateral_amount=Decimal("1000"),
         unrealized_pnl_settlement=Decimal("0"),
@@ -158,6 +204,66 @@ class PerpetualMarginTests(unittest.TestCase):
             "instrument_version must match",
         ):
             evaluate(instrument_version="BTC-PERP@v5")
+
+    def test_account_scope_mismatch_fails_before_arithmetic(self):
+        with self.assertRaisesRegex(PerpetualMarginError, "capability scope mismatch"):
+            evaluate(capability=capability(account_id="account-B"))
+
+    def test_paper_evidence_cannot_be_reused_for_live_scope(self):
+        with self.assertRaisesRegex(PerpetualMarginError, "capability scope mismatch"):
+            evaluate(capability=capability(environment="LIVE"))
+
+    def test_position_and_margin_modes_are_not_portable(self):
+        with self.assertRaisesRegex(PerpetualMarginError, "position mode"):
+            evaluate(capability=capability(position_mode="HEDGE"))
+        with self.assertRaisesRegex(PerpetualMarginError, "margin mode"):
+            evaluate(margin_mode="ISOLATED")
+
+    def test_capability_snapshot_and_tier_revision_are_immutable_scope(self):
+        with self.assertRaisesRegex(PerpetualMarginError, "capability snapshot"):
+            evaluate(
+                capability=capability(
+                    snapshot_id="22222222-2222-4222-8222-222222222222"
+                )
+            )
+        with self.assertRaisesRegex(PerpetualMarginError, "risk tier revision"):
+            evaluate(risk_tier_revision="tier-v8")
+
+    def test_currency_semantics_are_explicit_scope(self):
+        with self.assertRaisesRegex(PerpetualMarginError, "collateral currency"):
+            evaluate(collateral_currency="USDT")
+        with self.assertRaisesRegex(PerpetualMarginError, "settlement currency"):
+            evaluate(settlement_currency="USDT")
+
+    def test_stale_capability_blocks_margin_evaluation(self):
+        with self.assertRaisesRegex(PerpetualMarginError, "capability snapshot is stale"):
+            evaluate(
+                capability=capability(
+                    expires_at=datetime(2026, 9, 25, 0, 0, 5, tzinfo=timezone.utc)
+                )
+            )
+
+    def test_tier_identity_survives_reconstruction_and_changes_with_revision(self):
+        original = evidence()
+        reopened = evidence(
+            provider_id=original.provider_id,
+            account_id=original.account_id,
+            entity_id=original.entity_id,
+            environment=original.environment,
+            instrument_version=original.instrument_version,
+            capability_snapshot_id=original.capability_snapshot_id,
+            position_mode=original.position_mode,
+            margin_mode=original.margin_mode,
+            collateral_currency=original.collateral_currency,
+            settlement_currency=original.settlement_currency,
+            risk_tier_revision=original.risk_tier_revision,
+            evidence_bundle_ref=original.evidence_bundle_ref,
+            tier_table_evidence_ref=original.tier_table_evidence_ref,
+        )
+        self.assertEqual(reopened.capability_identity, original.capability_identity)
+        self.assertEqual(reopened.tier_identity, original.tier_identity)
+        revised = evidence(risk_tier_revision="tier-v8")
+        self.assertNotEqual(revised.tier_identity, original.tier_identity)
 
     def test_float_money_and_rates_are_rejected(self):
         with self.assertRaises(TypeError):

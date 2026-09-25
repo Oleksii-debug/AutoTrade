@@ -31,6 +31,7 @@ from mvp.autotrade_mvp.reconciliation import (
     SubmissionResolution,
 )
 from mvp.autotrade_mvp.recovery import RecoveryController
+from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.autotrade_mvp.pipeline import run_vertical_slice
 
 
@@ -241,6 +242,31 @@ class BackupDurabilityTests(unittest.TestCase):
                 _fsync_file(missing)
 
 class BackupRestoreTests(unittest.TestCase):
+    def _record_durable_ready(
+        self,
+        controller: RecoveryController,
+        store: JournalStore,
+        *,
+        reconciliation_id: str,
+    ) -> None:
+        owner = controller.owner
+        self.assertIsNotNone(owner)
+        result = _reconciliation()
+        record_reconciliation_checkpoint(
+            store,
+            reconciliation_id=reconciliation_id,
+            result=result,
+            observed_at="2026-09-25T08:00:02Z",
+            host_id=owner.owner_id,
+            owner_epoch=str(owner.epoch),
+        )
+        controller.record_reconciliation_checkpoint(
+            reconciliation_id=reconciliation_id,
+            provider_id=result.provider_id,
+            account_id=result.account_id,
+            environment=result.environment,
+        )
+
     def _build_sources(self, root: Path) -> tuple[Path, Path]:
         state = root / "state"
         artifacts = root / "artifacts"
@@ -545,7 +571,9 @@ class BackupRestoreTests(unittest.TestCase):
         restored_store = JournalStore(restored / "state" / "journal.sqlite3")
         controller = RecoveryController(owner_store=restored_store)
         controller.start("restored-owner")
-        controller.record_reconciliation(consistent=True)
+        self._record_durable_ready(
+            controller, restored_store, reconciliation_id="restore-readiness"
+        )
         return restored, controller, marker
 
     def test_restore_completion_requires_reconciliation_and_immutable_fence(self):
@@ -618,7 +646,9 @@ class BackupRestoreTests(unittest.TestCase):
             other_store = JournalStore(root / "other" / "journal.sqlite3")
             other = RecoveryController(owner_store=other_store)
             other.start("other-owner")
-            other.record_reconciliation(consistent=True)
+            self._record_durable_ready(
+                other, other_store, reconciliation_id="other-readiness"
+            )
             fence = _publish_sender_fence_evidence(
                 restored,
                 backup_manifest_sha256=marker["backup_manifest_sha256"],
@@ -658,7 +688,11 @@ class BackupRestoreTests(unittest.TestCase):
                 old_sender_fenced=True,
                 reconciled=True,
             )
-            controller.record_reconciliation(consistent=True)
+            self._record_durable_ready(
+                controller,
+                JournalStore(restored / "state" / "journal.sqlite3"),
+                reconciliation_id="replacement-readiness",
+            )
             second = _publish_sender_fence_evidence(
                 restored,
                 backup_manifest_sha256=marker["backup_manifest_sha256"],

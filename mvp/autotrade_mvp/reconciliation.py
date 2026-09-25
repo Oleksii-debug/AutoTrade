@@ -46,6 +46,9 @@ def _instant(value: str, *, name: str) -> datetime:
 
 @dataclass(frozen=True)
 class CoverageSurfaceEvidence:
+    provider_id: str
+    account_id: str
+    environment: str
     surface: str
     coverage_start: str
     coverage_end: str
@@ -54,6 +57,15 @@ class CoverageSurfaceEvidence:
     provider_semantics_exclude_execution: bool
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "provider_id", _text(self.provider_id, name="provider_id").upper()
+        )
+        object.__setattr__(
+            self, "account_id", _text(self.account_id, name="account_id")
+        )
+        object.__setattr__(
+            self, "environment", _text(self.environment, name="environment").upper()
+        )
         object.__setattr__(
             self,
             "surface",
@@ -95,6 +107,9 @@ class CoverageSurfaceEvidence:
 class SnapshotConsistencyEvidence:
     """Evidence that a multi-surface provider snapshot has one coherent cut."""
 
+    provider_id: str
+    account_id: str
+    environment: str
     mode: str
     query_started_at: str
     query_completed_at: str
@@ -103,6 +118,15 @@ class SnapshotConsistencyEvidence:
     sequence_gap_detected: bool = False
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "provider_id", _text(self.provider_id, name="provider_id").upper()
+        )
+        object.__setattr__(
+            self, "account_id", _text(self.account_id, name="account_id")
+        )
+        object.__setattr__(
+            self, "environment", _text(self.environment, name="environment").upper()
+        )
         normalized = _text(self.mode, name="mode").upper()
         if normalized not in {"ATOMIC", "COMPOSED"}:
             raise ValueError("mode must be ATOMIC or COMPOSED")
@@ -421,7 +445,11 @@ class ProviderActivityEvidence:
 @dataclass(frozen=True)
 class UnknownSubmission:
     attempt_id: str
+    intent_id: str
     client_order_id: str
+    provider_id: str
+    account_id: str
+    environment: str
     started_at: str
 
     def __post_init__(self) -> None:
@@ -432,19 +460,45 @@ class UnknownSubmission:
         )
         object.__setattr__(
             self,
+            "intent_id",
+            _text(self.intent_id, name="intent_id"),
+        )
+        object.__setattr__(
+            self,
             "client_order_id",
             _text(self.client_order_id, name="client_order_id"),
+        )
+        object.__setattr__(
+            self, "provider_id", _text(self.provider_id, name="provider_id").upper()
+        )
+        object.__setattr__(
+            self, "account_id", _text(self.account_id, name="account_id")
+        )
+        object.__setattr__(
+            self, "environment", _text(self.environment, name="environment").upper()
         )
         _instant(self.started_at, name="started_at")
 
     @classmethod
     def create(
-        cls, *, attempt_id: str, client_order_id: str, started_at: str
+        cls,
+        *,
+        attempt_id: str,
+        intent_id: str,
+        client_order_id: str,
+        provider_id: str,
+        account_id: str,
+        environment: str,
+        started_at: str,
     ) -> "UnknownSubmission":
         _instant(started_at, name="started_at")
         return cls(
             attempt_id=_text(attempt_id, name="attempt_id"),
+            intent_id=_text(intent_id, name="intent_id"),
             client_order_id=_text(client_order_id, name="client_order_id"),
+            provider_id=_text(provider_id, name="provider_id").upper(),
+            account_id=_text(account_id, name="account_id"),
+            environment=_text(environment, name="environment").upper(),
             started_at=started_at,
         )
 
@@ -452,6 +506,7 @@ class UnknownSubmission:
 @dataclass(frozen=True)
 class SubmissionResolution:
     attempt_id: str
+    intent_id: str
     client_order_id: str
     outcome: str
     evidence_reason: str
@@ -460,6 +515,9 @@ class SubmissionResolution:
 
 @dataclass(frozen=True)
 class ReconciliationResult:
+    provider_id: str
+    account_id: str
+    environment: str
     complete: bool
     matched_execution_ids: tuple[str, ...]
     unexpected_execution_ids: tuple[str, ...]

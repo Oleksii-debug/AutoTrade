@@ -859,7 +859,10 @@ class AuthorityService:
             "confirmation_id": record.confirmation_id,
             "risk_reducing": record.risk_reducing,
         }
-        if payload_digest(request) != record.request_fingerprint:
+        expected_request_fingerprint = sha256(
+            json.dumps(request, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if expected_request_fingerprint != record.request_fingerprint:
             raise AuthorityConflict(
                 "durable financial admission request fingerprint is inconsistent"
             )
@@ -1455,7 +1458,9 @@ class AuthorityService:
             "confirmation_id": candidate.confirmation_id,
             "risk_reducing": risk_reducing,
         }
-        request_fingerprint = payload_digest(request)
+        request_fingerprint = sha256(
+            json.dumps(request, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
         record = replace(
             candidate,
             request_fingerprint=request_fingerprint,

@@ -73,6 +73,7 @@ def bound_risk_decision(
         gross_leverage=Decimal("0.10"),
         net_leverage=Decimal("0.10"),
         worst_stress_loss=Decimal("10"),
+        input_fingerprint=sha256(b"authority-bound-risk-fixture").hexdigest(),
         rules=(
             RiskRuleResult(
                 rule="test-boundary",
@@ -830,7 +831,12 @@ class AuthorityTests(unittest.TestCase):
                 instrument_version=1,
                 action="ORDER.SUBMIT",
             )
-            dispatcher = GuardedDispatcher(store, owner_token="owner")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+                owner_token="owner",
+            )
             outbound = 0
 
             def transport(client_id, request, final_guard):

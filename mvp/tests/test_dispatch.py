@@ -12,6 +12,8 @@ from mvp.autotrade_mvp.dispatch import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.recovery import RecoveryController
+from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
+from mvp.tests.test_reconciliation_journal import reconciliation
 
 
 class SimulatedProcessDeath(BaseException):
@@ -19,6 +21,29 @@ class SimulatedProcessDeath(BaseException):
 
 
 class DispatchTests(unittest.TestCase):
+    def _record_ready(self, recovery, store, *, account_id="acct"):
+        owner = recovery.owner
+        if owner is None:
+            raise AssertionError("recovery owner must exist")
+        result = reconciliation(
+            account_id=account_id,
+            provider_activity_account_id=account_id,
+        )
+        record_reconciliation_checkpoint(
+            store,
+            reconciliation_id="dispatch-ready",
+            result=result,
+            observed_at="2026-09-24T19:00:00Z",
+            host_id=owner.owner_id,
+            owner_epoch=str(owner.epoch),
+        )
+        recovery.record_reconciliation_checkpoint(
+            reconciliation_id="dispatch-ready",
+            provider_id=result.provider_id,
+            account_id=result.account_id,
+            environment=result.environment,
+        )
+
     def store(self, directory):
         return JournalStore(f"{directory}/journal.sqlite3")
 
@@ -1077,7 +1102,7 @@ class DispatchTests(unittest.TestCase):
                 owner_scope="PAPER:acct",
             )
             owner = recovery.start("host-a")
-            recovery.record_reconciliation(consistent=True)
+            self._record_ready(recovery, store, account_id="acct")
             dispatcher = GuardedDispatcher(
                 store,
                 environment="PAPER",
@@ -1121,7 +1146,7 @@ class DispatchTests(unittest.TestCase):
                 owner_scope="PAPER:acct",
             )
             owner = recovery.start("host-a")
-            recovery.record_reconciliation(consistent=True)
+            self._record_ready(recovery, store, account_id="acct")
             dispatcher = GuardedDispatcher(
                 store,
                 environment="PAPER",

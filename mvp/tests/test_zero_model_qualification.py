@@ -17,6 +17,16 @@ class ZeroModelQualificationTests(unittest.TestCase):
         self.assertEqual(route["reserved_cost"], "0")
         self.assertFalse(route["model_inventory_touched"])
 
+        outages = evidence["outage_routes"]
+        self.assertEqual(set(outages), {"remote_outage", "local_resource_exhaustion"})
+        for outage in outages.values():
+            self.assertEqual(outage["status"], "NO_MODEL")
+            self.assertIsNone(outage["model_id"])
+            self.assertIsNone(outage["provider_id"])
+            self.assertEqual(outage["reserved_cost"], "0")
+            self.assertEqual(outage["reason"], "no_admissible_model")
+        self.assertEqual(evidence["model_cost_total"], "0")
+
         financial = evidence["deterministic_financial_slice"]
         self.assertTrue(financial["resumed"])
         self.assertTrue(financial["same_order_identity"])
@@ -29,6 +39,24 @@ class ZeroModelQualificationTests(unittest.TestCase):
         self.assertEqual(economics["evidence_count"], 1)
         self.assertEqual(economics["trade_count"], 1)
         self.assertGreaterEqual(Decimal(economics["total_fees"]), Decimal("0"))
+
+        campaign = evidence["multi_episode_economics"]
+        self.assertEqual(campaign["episode_statuses"], ["filled", "filled"])
+        self.assertEqual(campaign["replay_statuses"], ["filled", "filled"])
+        self.assertTrue(campaign["restart_resumed"])
+        self.assertTrue(campaign["same_order_identities"])
+        self.assertTrue(campaign["same_fill_identities"])
+        self.assertTrue(campaign["reconciled"])
+        campaign_economics = campaign["economics"]
+        self.assertEqual(campaign_economics["trade_count"], 2)
+        self.assertEqual(campaign_economics["evidence_count"], 2)
+        self.assertEqual(campaign_economics["ending_position"], "0")
+        self.assertEqual(
+            campaign_economics["economic_edge_claim"],
+            "UNPROVEN_SIMULATION_ONLY",
+        )
+        self.assertGreater(Decimal(campaign_economics["total_fees"]), Decimal("0"))
+        self.assertLess(Decimal(campaign_economics["net_pnl"]), Decimal("0"))
 
         small = evidence["small_capital"]
         self.assertEqual(small["status"], "risk_rejected")

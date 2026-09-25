@@ -136,6 +136,23 @@ class ResearchJobHostServiceTests(unittest.TestCase):
             None,
         )
 
+    def test_researcher_cannot_select_global_durable_job_identity(self):
+        created, _ = self.enqueue()
+        with self.assertRaisesRegex(ValueError, "server-assigned"):
+            self.host.enqueue(
+                session=self.researcher_two.token,
+                actor="researcher-two",
+                kind="research.replay",
+                dedupe_key="foreign-id-probe",
+                input_hashes=[digest("dataset")],
+                resource_budget={"wall_seconds": 60},
+                job_id=created["job_id"],
+            )
+        self.assertEqual(
+            self.jobs.get(created["job_id"])["dedupe_key"],
+            created["dedupe_key"],
+        )
+
     def test_authenticated_actor_must_match_session_subject(self):
         with self.assertRaisesRegex(PermissionError, "subject"):
             self.host.enqueue(

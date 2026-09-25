@@ -21,6 +21,24 @@ class ResearchBoundaryError(ValueError):
     pass
 
 
+_MAX_UNTRUSTED_NODES = 10_000
+_MAX_UNTRUSTED_TEXT_CHARS = 1_000_000
+
+
+class _FreezeBudget:
+    __slots__ = ("nodes",)
+
+    def __init__(self) -> None:
+        self.nodes = 0
+
+    def consume(self, *, label: str) -> None:
+        self.nodes += 1
+        if self.nodes > _MAX_UNTRUSTED_NODES:
+            raise ResearchBoundaryError(
+                f"{label} exceeds maximum structural node budget"
+            )
+
+
 class _FrozenDict(MappingABC[str, object]):
     """Read-only mapping with no mutable dict base class."""
 
@@ -62,7 +80,11 @@ def _freeze_proposal(
     *,
     depth: int = 0,
     label: str = "model proposal",
+    budget: _FreezeBudget | None = None,
 ) -> object:
+    if budget is None:
+        budget = _FreezeBudget()
+    budget.consume(label=label)
     if depth > 32:
         raise ResearchBoundaryError(f"{label} exceeds maximum nesting depth")
     if isinstance(value, Mapping):
@@ -70,18 +92,34 @@ def _freeze_proposal(
         for key, nested in value.items():
             if not isinstance(key, str):
                 raise ResearchBoundaryError(f"{label} object keys must be strings")
+            if len(key) > _MAX_UNTRUSTED_TEXT_CHARS:
+                raise ResearchBoundaryError(
+                    f"{label} object key exceeds maximum text size"
+                )
             frozen[key] = _freeze_proposal(
                 nested,
                 depth=depth + 1,
                 label=label,
+                budget=budget,
             )
         return _FrozenDict(frozen)
     if isinstance(value, (list, tuple)):
         return tuple(
-            _freeze_proposal(item, depth=depth + 1, label=label)
+            _freeze_proposal(
+                item,
+                depth=depth + 1,
+                label=label,
+                budget=budget,
+            )
             for item in value
         )
-    if value is None or isinstance(value, (str, bool, int)):
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, str):
+        if len(value) > _MAX_UNTRUSTED_TEXT_CHARS:
+            raise ResearchBoundaryError(
+                f"{label} text value exceeds maximum text size"
+            )
         return value
     if isinstance(value, float):
         if not isfinite(value):

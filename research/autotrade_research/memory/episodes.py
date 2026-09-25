@@ -691,3 +691,144 @@ class ExperienceMemory:
                 "permission_class": verified["permission_class"],
                 "tombstones": tombstones,
             }
+
+
+    def coverage_population(
+        self,
+        *,
+        causal_cutoff: datetime,
+        granted_permissions: set[str],
+        task: str | None = None,
+        instrument_family: str | None = None,
+    ) -> tuple[dict[str, Any], ...]:
+        """Return verified, reproducible episode facts available at a causal cutoff.
+
+        This projection is intentionally qualification-facing.  Unlike normal
+        retrieval, it keeps tombstoned episodes visible as population facts so a
+        scientific manifest must account for them explicitly instead of silently
+        shrinking the eligible population.  Corrections and tombstones that first
+        become available after the cutoff cannot rewrite the historical snapshot.
+        """
+
+        cutoff = _time(causal_cutoff, name="causal_cutoff")
+        if not isinstance(granted_permissions, set):
+            raise TypeError("granted_permissions must be a set")
+        normalized_permissions: set[str] = set()
+        for permission in granted_permissions:
+            normalized = _text(permission, name="granted_permission")
+            if normalized != permission:
+                raise ValueError("granted_permissions must contain canonical text")
+            normalized_permissions.add(normalized)
+        if not normalized_permissions:
+            raise ValueError("granted_permissions must not be empty")
+        normalized_task = None if task is None else _text(task, name="task")
+        normalized_family = (
+            None
+            if instrument_family is None
+            else _text(instrument_family, name="instrument_family")
+        )
+
+        population: list[dict[str, Any]] = []
+        with self._connect() as con:
+            rows = con.execute("SELECT * FROM episodes ORDER BY episode_id").fetchall()
+            for row in rows:
+                verified = self._verified_episode(row)
+                created = _stored_time(row["created_at"], name="episode created_at")
+                if (
+                    verified["cutoff"] > cutoff
+                    or verified["decision"] > cutoff
+                    or created > cutoff
+                ):
+                    continue
+                if normalized_task is not None and verified["task"] != normalized_task:
+                    continue
+                if (
+                    normalized_family is not None
+                    and verified["instrument_family"] != normalized_family
+                ):
+                    continue
+                if not self._permission_allowed(
+                    verified["permission_class"],
+                    normalized_permissions,
+                ):
+                    continue
+
+                effective_payload = json.loads(_canonical(verified["payload"]))
+                correction_lineage: list[dict[str, Any]] = []
+                correction_rows = con.execute(
+                    """
+                    SELECT * FROM corrections
+                    WHERE episode_id=?
+                    ORDER BY COALESCE(available_at, created_at), created_at, correction_id
+                    """,
+                    (row["episode_id"],),
+                ).fetchall()
+                for correction_row in correction_rows:
+                    correction, available = self._verified_correction(
+                        correction_row,
+                        episode_id=row["episode_id"],
+                    )
+                    if available > cutoff:
+                        continue
+                    supersedes = correction["supersedes_fields"]
+                    for field in supersedes:
+                        effective_payload[field] = correction[field]
+                    correction_lineage.append(
+                        {
+                            "correction_id": correction_row["correction_id"],
+                            "correction_hash": correction_row["correction_hash"],
+                            "available_at": available.isoformat(),
+                            "evidence_ref": correction["evidence_ref"],
+                            "supersedes_fields": tuple(supersedes),
+                        }
+                    )
+
+                tombstone_lineage: list[dict[str, Any]] = []
+                tombstone_rows = con.execute(
+                    """
+                    SELECT * FROM tombstones
+                    WHERE episode_id=?
+                    ORDER BY created_at,tombstone_id
+                    """,
+                    (row["episode_id"],),
+                ).fetchall()
+                for tombstone_row in tombstone_rows:
+                    tombstone = self._verified_tombstone(
+                        tombstone_row,
+                        episode_id=row["episode_id"],
+                    )
+                    tombstone_time = _stored_time(
+                        tombstone_row["created_at"],
+                        name="tombstone created_at",
+                    )
+                    if tombstone_time > cutoff:
+                        continue
+                    tombstone_lineage.append(
+                        {
+                            "tombstone_id": tombstone_row["tombstone_id"],
+                            "tombstone_hash": tombstone_row["tombstone_hash"],
+                            "reason": tombstone["reason"],
+                            "created_at": tombstone_time.isoformat(),
+                        }
+                    )
+
+                population.append(
+                    {
+                        "episode_id": row["episode_id"],
+                        "episode_hash": row["episode_hash"],
+                        "decision_time": row["decision_time"],
+                        "information_cutoff": row["information_cutoff"],
+                        "created_at": row["created_at"],
+                        "task": verified["task"],
+                        "regime": verified["regime"],
+                        "instrument_family": verified["instrument_family"],
+                        "permission_class": verified["permission_class"],
+                        "effective_payload": effective_payload,
+                        "correction_lineage": tuple(correction_lineage),
+                        "tombstone_lineage": tuple(tombstone_lineage),
+                    }
+                )
+        population.sort(
+            key=lambda item: (item["decision_time"], item["episode_id"])
+        )
+        return tuple(population)

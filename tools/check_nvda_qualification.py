@@ -13,10 +13,30 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from mvp.autotrade_mvp.qualification_attestation import (
+    QualificationTrustError,
+    QualificationTrustPolicy,
+    SignedQualificationAttestation,
+    parse_qualification_trust_policy,
+    parse_signed_qualification_attestation,
+    verify_qualification_attestation,
+)
+from research.autotrade_research.artifacts.store import ArtifactStore
+
 DEFAULT_REQUIREMENTS = ROOT / "qualification" / "nvda" / "requirements.json"
 DEFAULT_STATUS = ROOT / "qualification" / "nvda" / "status.json"
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+NVDA_DOMAIN = "ACCESSIBILITY"
+NVDA_GATE = "NVDA_RELEASE"
+NVDA_PACKAGE_ID = "WP-53"
+NVDA_PROTOCOL_ID = "real-nvda-keyboard-v1"
+NVDA_PROTOCOL_VERSION = "1.0.0"
+NVDA_EVIDENCE_KIND = "NVDA_REAL_RUN"
+SIGNED_ATTESTATION_REQUIRED = "SIGNED_QUALIFICATION_ATTESTATION_REQUIRED"
 
 
 class NvdaQualificationError(ValueError):
@@ -176,7 +196,9 @@ def validate_evidence(
     observed_at = observed_instant.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     return {
         "schema_version": "1.0.0",
-        "qualified": True,
+        "evidence_complete": True,
+        "qualified": False,
+        "reason": SIGNED_ATTESTATION_REQUIRED,
         "source_sha": source_sha,
         "artifact_sha256": artifact_sha,
         "windows_version": environment["windows_version"],
@@ -286,6 +308,155 @@ def validate_release_artifact_binding(
     return actual
 
 
+def validate_trusted_nvda_qualification(
+    evidence: dict[str, object],
+    requirements: dict[str, object],
+    *,
+    evidence_sha256: str,
+    release_artifact_sha256: str,
+    receipt: SignedQualificationAttestation,
+    policy: QualificationTrustPolicy,
+    evidence_store: ArtifactStore,
+    expected_policy_id: str,
+    expected_policy_version: str,
+) -> dict[str, object]:
+    result = validate_evidence(evidence, requirements)
+    if SHA256.fullmatch(evidence_sha256) is None:
+        raise NvdaQualificationError("evidence_sha256 must be canonical")
+    if SHA256.fullmatch(release_artifact_sha256) is None:
+        raise NvdaQualificationError("release artifact digest must be canonical")
+    required = requirements.get("workflows")
+    if not isinstance(required, list) or not required:
+        raise NvdaQualificationError("requirements contain no workflows")
+    if any(not isinstance(item, dict) for item in required):
+        raise NvdaQualificationError("requirements.workflow must be an object")
+    requirement_ids = tuple(
+        sorted(
+            _required_text(item.get("id"), name="requirements.workflow.id")
+            for item in required
+        )
+    )
+    if tuple(receipt.attestation.requirement_ids) != requirement_ids:
+        raise NvdaQualificationError(
+            "signed NVDA attestation requirements do not match the canonical workflow set"
+        )
+    release_artifact_id = receipt.attestation.release_artifact_id
+    if release_artifact_id is None:
+        raise NvdaQualificationError(
+            "signed NVDA attestation must bind the delivered release artifact"
+        )
+    if receipt.attestation.release_artifact_sha256 != release_artifact_sha256:
+        raise NvdaQualificationError(
+            "signed NVDA attestation release digest does not match the delivered artifact"
+        )
+    exact_refs = [
+        ref
+        for ref in receipt.attestation.evidence_refs
+        if (
+            ref.sha256 == evidence_sha256
+            and ref.evidence_kind == NVDA_EVIDENCE_KIND
+            and ref.source_sha == result["source_sha"]
+        )
+    ]
+    if len(exact_refs) != 1:
+        raise NvdaQualificationError(
+            "signed NVDA attestation must resolve the exact raw NVDA evidence payload"
+        )
+
+    accepted = None
+    for requirement_id in requirement_ids:
+        try:
+            current = verify_qualification_attestation(
+                receipt,
+                policy=policy,
+                evidence_store=evidence_store,
+                expected_policy_id=expected_policy_id,
+                expected_policy_version=expected_policy_version,
+                expected_source_sha=result["source_sha"],
+                expected_domain=NVDA_DOMAIN,
+                expected_gate=NVDA_GATE,
+                expected_package_id=NVDA_PACKAGE_ID,
+                expected_protocol_id=NVDA_PROTOCOL_ID,
+                expected_protocol_version=NVDA_PROTOCOL_VERSION,
+                expected_requirement_id=requirement_id,
+                expected_release_artifact_id=release_artifact_id,
+                expected_release_artifact_sha256=release_artifact_sha256,
+            )
+        except (QualificationTrustError, TypeError, ValueError) as error:
+            raise NvdaQualificationError(
+                "signed NVDA qualification verification failed"
+            ) from error
+        if current.result != "PASS":
+            raise NvdaQualificationError(
+                f"signed NVDA qualification is not PASS for {requirement_id}"
+            )
+        if accepted is None:
+            accepted = current
+        elif (
+            current.attestation_id != accepted.attestation_id
+            or current.attestation_digest != accepted.attestation_digest
+            or current.policy_id != accepted.policy_id
+            or current.trust_root_id != accepted.trust_root_id
+        ):
+            raise NvdaQualificationError(
+                "NVDA workflow requirements resolved to inconsistent trust receipts"
+            )
+    if accepted is None:
+        raise NvdaQualificationError("signed NVDA qualification has no requirements")
+    return {
+        **result,
+        "qualified": True,
+        "reason": "QUALIFIED_SIGNED_REAL_NVDA_RELEASE",
+        "attestation_id": accepted.attestation_id,
+        "attestation_digest": accepted.attestation_digest,
+        "policy_id": accepted.policy_id,
+        "trust_root_id": accepted.trust_root_id,
+        "release_artifact_id": release_artifact_id,
+        "artifact_sha256": release_artifact_sha256,
+        "evidence_sha256": evidence_sha256,
+    }
+
+
+def _load_trust_inputs(args):
+    values = (
+        args.attestation,
+        args.qualification_policy,
+        args.evidence_store,
+        args.expected_policy_id,
+        args.expected_policy_version,
+    )
+    if any(value is not None for value in values) and not all(
+        value is not None for value in values
+    ):
+        raise NvdaQualificationError(
+            "signed NVDA trust inputs must be supplied together"
+        )
+    if not all(value is not None for value in values):
+        return None
+    if not args.evidence_store.is_dir():
+        raise NvdaQualificationError(
+            "NVDA evidence store must be an existing directory"
+        )
+    try:
+        receipt = parse_signed_qualification_attestation(
+            _load(args.attestation, name="signed NVDA attestation")
+        )
+        policy = parse_qualification_trust_policy(
+            _load(args.qualification_policy, name="qualification trust policy")
+        )
+    except (QualificationTrustError, TypeError, ValueError) as error:
+        raise NvdaQualificationError(
+            "signed NVDA trust inputs are invalid"
+        ) from error
+    return (
+        receipt,
+        policy,
+        ArtifactStore(args.evidence_store),
+        args.expected_policy_id,
+        args.expected_policy_version,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--requirements", type=Path, default=DEFAULT_REQUIREMENTS)
@@ -293,9 +464,15 @@ def main() -> int:
     parser.add_argument("--release-artifact", type=Path)
     parser.add_argument("--status", type=Path, default=DEFAULT_STATUS)
     parser.add_argument("--check-status", action="store_true")
+    parser.add_argument("--attestation", type=Path)
+    parser.add_argument("--qualification-policy", type=Path)
+    parser.add_argument("--evidence-store", type=Path)
+    parser.add_argument("--expected-policy-id")
+    parser.add_argument("--expected-policy-version")
     args = parser.parse_args()
     try:
         requirements = _load(args.requirements, name="requirements")
+        trust = _load_trust_inputs(args)
         if args.check_status:
             status = _load(args.status, name="status")
             if status.get("qualified") is True:
@@ -318,25 +495,42 @@ def main() -> int:
                     ) from error
                 if args.release_artifact is None:
                     raise NvdaQualificationError(
-                        "qualified status requires --release-artifact or a future "
-                        "independently trusted artifact-binding attestation"
+                        "qualified status requires --release-artifact"
+                    )
+                if trust is None:
+                    raise NvdaQualificationError(
+                        "qualified status requires signed qualification trust inputs"
                     )
                 evidence = _load(evidence_path, name="evidence")
-                result = validate_evidence(evidence, requirements)
                 actual_artifact_sha = validate_release_artifact_binding(
                     evidence,
                     args.release_artifact,
                 )
-                if result["source_sha"] != status.get("source_sha"):
-                    raise NvdaQualificationError("status source SHA does not match evidence")
-                if result["artifact_sha256"] != status.get("artifact_sha256"):
-                    raise NvdaQualificationError("status artifact SHA does not match evidence")
-                if actual_artifact_sha != status.get("artifact_sha256"):
-                    raise NvdaQualificationError(
-                        "status artifact SHA does not match observed release artifact"
-                    )
-                if status.get("evidence_sha256") != evidence_digest(evidence_path):
-                    raise NvdaQualificationError("status evidence digest is stale")
+                receipt, policy, evidence_store, policy_id, policy_version = trust
+                result = validate_trusted_nvda_qualification(
+                    evidence,
+                    requirements,
+                    evidence_sha256=evidence_digest(evidence_path),
+                    release_artifact_sha256=actual_artifact_sha,
+                    receipt=receipt,
+                    policy=policy,
+                    evidence_store=evidence_store,
+                    expected_policy_id=policy_id,
+                    expected_policy_version=policy_version,
+                )
+                for field in (
+                    "source_sha",
+                    "artifact_sha256",
+                    "evidence_sha256",
+                    "attestation_id",
+                    "attestation_digest",
+                    "policy_id",
+                    "trust_root_id",
+                ):
+                    if result.get(field) != status.get(field):
+                        raise NvdaQualificationError(
+                            f"status {field} does not match independently verified NVDA evidence"
+                        )
             else:
                 if status.get("reason") != "NO_REAL_NVDA_RELEASE_EVIDENCE":
                     raise NvdaQualificationError(
@@ -353,11 +547,29 @@ def main() -> int:
             )
         evidence = _load(args.evidence, name="evidence")
         result = validate_evidence(evidence, requirements)
-        result["artifact_sha256"] = validate_release_artifact_binding(
+        actual_artifact_sha = validate_release_artifact_binding(
             evidence,
             args.release_artifact,
         )
-        result["evidence_sha256"] = evidence_digest(args.evidence)
+        raw_evidence_sha = evidence_digest(args.evidence)
+        result["artifact_sha256"] = actual_artifact_sha
+        result["evidence_sha256"] = raw_evidence_sha
+        if trust is None:
+            print(json.dumps(result, sort_keys=True))
+            return 3
+
+        receipt, policy, evidence_store, policy_id, policy_version = trust
+        result = validate_trusted_nvda_qualification(
+            evidence,
+            requirements,
+            evidence_sha256=raw_evidence_sha,
+            release_artifact_sha256=actual_artifact_sha,
+            receipt=receipt,
+            policy=policy,
+            evidence_store=evidence_store,
+            expected_policy_id=policy_id,
+            expected_policy_version=policy_version,
+        )
         print(json.dumps(result, sort_keys=True))
         return 0
     except NvdaQualificationError as error:

@@ -964,13 +964,22 @@ class IndependentRiskTests(unittest.TestCase):
                 stress_scenarios=(),
                 stress_scenario_labels=(),
             ),
-            policy(required_stress_scenario_labels=("price_gap", "correlation_one")),
+            policy(
+                required_stress_scenario_labels=("price_gap", "correlation_one"),
+                max_expected_shortfall="0",
+                expected_shortfall_tail_fraction="1",
+            ),
         )
         regime = next(
             x for x in decision.rules if x.rule == "stress_regime_coverage"
         )
+        expected_shortfall = next(
+            x for x in decision.rules if x.rule == "expected_shortfall"
+        )
         self.assertTrue(regime.passed)
         self.assertEqual(regime.observed, "NO_PROJECTED_RISK")
+        self.assertTrue(expected_shortfall.passed)
+        self.assertEqual(expected_shortfall.observed, "0")
         self.assertTrue(decision.admitted)
 
     def test_stress_scenario_labels_are_unique_and_align_with_scenarios(self):

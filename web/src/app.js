@@ -50,6 +50,7 @@
     "operations-region",
     "risk-region",
     "jobs-region",
+    "event-history-region",
     "host-action",
     "submit-command",
     "refresh-state",
@@ -540,6 +541,35 @@
     return operation;
   }
 
+  function renderHostEvent(event, cursor, stateVersion) {
+    const body = byId("event-history-body");
+    if (!body) return;
+    const kind = requiredText(
+      event.kind ?? event.event_type,
+      "event.kind");
+    const payload = event.payload === undefined ? {} : event.payload;
+
+    if (body.children.length === 1 &&
+        body.firstElementChild.dataset.hostEventCursor === undefined) {
+      body.replaceChildren();
+    }
+
+    const row = document.createElement("tr");
+    row.dataset.hostEventCursor = cursor.toString();
+    for (let index = 0; index < 4; index += 1) {
+      row.appendChild(document.createElement("td"));
+    }
+    row.children[0].textContent = cursor.toString();
+    row.children[1].textContent = stateVersion.toString();
+    row.children[2].textContent = kind;
+    row.children[3].textContent = projectionText(payload);
+    body.prepend(row);
+
+    while (body.children.length > 100) {
+      body.lastElementChild.remove();
+    }
+  }
+
   function renderSnapshot(snapshot, {announceRefresh = false} = {}) {
     const parsed = parseCanonicalSnapshot(snapshot);
     if (parsed.version < state.version || parsed.cursor < state.cursor) {
@@ -670,6 +700,7 @@
         if (MATERIAL_EVENTS.has(kind)) {
           announce(eventMessage(event), URGENT_EVENTS.has(kind));
         }
+        renderHostEvent(event, cursor, version);
         // Commit the local event position only after every required side effect
         // for this event succeeded. If processing throws, the next poll retries
         // the same cursor instead of silently acknowledging an unprocessed event.

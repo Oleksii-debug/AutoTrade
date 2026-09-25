@@ -23,6 +23,7 @@ from .securities_borrow import (
 )
 from .risk import (
     RiskContext,
+    _canonical_decimal_text,
     RiskDecision,
     RiskIntent,
     RiskPolicy,
@@ -433,7 +434,7 @@ class AuthorityService:
             "environments": sorted(policy.environments),
             "instruments": [cls._instrument_payload(item) for item in sorted(policy.instruments)],
             "actions": sorted(policy.actions),
-            "max_notional": str(policy.max_notional),
+            "max_notional": _canonical_decimal_text(policy.max_notional),
             "expires_at": policy.expires_at,
             "autonomous": policy.autonomous,
             "valid_from": policy.valid_from,
@@ -451,7 +452,7 @@ class AuthorityService:
             "environment": confirmation.environment,
             "instrument": cls._instrument_payload(confirmation.instrument_version),
             "action": confirmation.action,
-            "notional": str(confirmation.notional),
+            "notional": _canonical_decimal_text(confirmation.notional),
             "expires_at": confirmation.expires_at,
         }
 
@@ -465,7 +466,7 @@ class AuthorityService:
             "environment": record.environment,
             "instrument": cls._instrument_payload(record.instrument_version),
             "action": record.action,
-            "notional": str(record.notional),
+            "notional": _canonical_decimal_text(record.notional),
             "risk_reducing": record.risk_reducing,
             "state_version": record.state_version,
             "authority_epoch": record.authority_epoch,
@@ -683,7 +684,7 @@ class AuthorityService:
                             "instrument_id": record.instrument_version.instrument_id,
                             "instrument_version": record.instrument_version.version,
                             "action": record.action,
-                            "notional": str(record.notional),
+                            "notional": _canonical_decimal_text(record.notional),
                             "state_version": record.state_version,
                             "risk_admitted": True,
                             "confirmation_id": record.confirmation_id,
@@ -882,7 +883,7 @@ class AuthorityService:
             ) from error
         expected_availability_evidence = {
             **regenerated_availability,
-            "max_age_seconds": str(
+            "max_age_seconds": _canonical_decimal_text(
                 _decimal(
                     availability_evidence.get("max_age_seconds"),
                     name="reservation_max_age_seconds",
@@ -968,12 +969,12 @@ class AuthorityService:
                     raise AuthorityConflict(
                         "durable borrow capacity adjustment is inconsistent"
                     )
-                adjusted_available[resource] = str(reservable_capacity)
+                adjusted_available[resource] = _canonical_decimal_text(reservable_capacity)
                 canonical_adjustments[resource] = {
-                    "total_capacity": str(total_capacity),
-                    "current_borrowed_quantity": str(current_borrowed),
-                    "reservable_capacity": str(reservable_capacity),
-                    "required_increment": str(required_increment),
+                    "total_capacity": _canonical_decimal_text(total_capacity),
+                    "current_borrowed_quantity": _canonical_decimal_text(current_borrowed),
+                    "reservable_capacity": _canonical_decimal_text(reservable_capacity),
+                    "required_increment": _canonical_decimal_text(required_increment),
                 }
             expected_availability_evidence["availability"] = adjusted_available
             expected_availability_evidence[
@@ -1017,7 +1018,7 @@ class AuthorityService:
             "instrument_id": record.instrument_version.instrument_id,
             "instrument_version": record.instrument_version.version,
             "action": record.action,
-            "notional": str(record.notional),
+            "notional": _canonical_decimal_text(record.notional),
             "current_state_version": record.state_version,
             "capability_snapshot_id": record.capability_snapshot_id,
             "risk_decision_id": record.risk_decision_id,
@@ -1184,7 +1185,7 @@ class AuthorityService:
             "instrument_id": identity.instrument_id,
             "instrument_version": identity.version,
             "action": normalized_action,
-            "notional": str(amount),
+            "notional": _canonical_decimal_text(amount),
             "state_version": state_version,
             "risk_admitted": risk_admitted,
             "confirmation_id": confirmation_id,
@@ -1472,7 +1473,7 @@ class AuthorityService:
                 raise ValueError(
                     "reservation_max_age_seconds must be non-negative"
                 )
-            normalized_max_age = str(max_age)
+            normalized_max_age = _canonical_decimal_text(max_age)
 
             if existing is not None:
                 durable_risk_events = self.store.load_events(
@@ -1587,12 +1588,12 @@ class AuthorityService:
                     **availability_evidence,
                     "borrow_capacity_adjustments": {
                         required_borrow_resource: {
-                            "total_capacity": str(total_capacity),
-                            "current_borrowed_quantity": str(
+                            "total_capacity": _canonical_decimal_text(total_capacity),
+                            "current_borrowed_quantity": _canonical_decimal_text(
                                 current_borrowed_quantity
                             ),
-                            "reservable_capacity": str(reservable_capacity),
-                            "required_increment": str(
+                            "reservable_capacity": _canonical_decimal_text(reservable_capacity),
+                            "required_increment": _canonical_decimal_text(
                                 required_borrow_quantity
                             ),
                         }
@@ -1841,7 +1842,7 @@ class AuthorityService:
             "instrument_id": candidate.instrument_version.instrument_id,
             "instrument_version": candidate.instrument_version.version,
             "action": candidate.action,
-            "notional": str(candidate.notional),
+            "notional": _canonical_decimal_text(candidate.notional),
             "current_state_version": current_state_version,
             "capability_snapshot_id": capability,
             "risk_decision_id": risk_decision.decision_id,
@@ -1884,10 +1885,10 @@ class AuthorityService:
             "evaluated_at": risk_decision.evaluated_at,
             "valid_until": risk_decision.valid_until,
             "verdict": "ALLOW" if risk_decision.admitted else "REJECT",
-            "resulting_position": str(risk_decision.resulting_position),
-            "gross_leverage": str(risk_decision.gross_leverage),
-            "net_leverage": str(risk_decision.net_leverage),
-            "worst_stress_loss": str(risk_decision.worst_stress_loss),
+            "resulting_position": _canonical_decimal_text(risk_decision.resulting_position),
+            "gross_leverage": _canonical_decimal_text(risk_decision.gross_leverage),
+            "net_leverage": _canonical_decimal_text(risk_decision.net_leverage),
+            "worst_stress_loss": _canonical_decimal_text(risk_decision.worst_stress_loss),
             "checks": [
                 {
                     "rule_id": item.rule,
@@ -2198,7 +2199,7 @@ class AuthorityService:
                         instrument(item) for item in sorted(policy.instruments)
                     ],
                     "actions": sorted(policy.actions),
-                    "max_notional": str(policy.max_notional),
+                    "max_notional": _canonical_decimal_text(policy.max_notional),
                     "expires_at": policy.expires_at,
                     "autonomous": policy.autonomous,
                     "valid_from": policy.valid_from,
@@ -2219,7 +2220,7 @@ class AuthorityService:
                     "environment": confirmation.environment,
                     "instrument": instrument(confirmation.instrument_version),
                     "action": confirmation.action,
-                    "notional": str(confirmation.notional),
+                    "notional": _canonical_decimal_text(confirmation.notional),
                     "expires_at": confirmation.expires_at,
                 }
             )
@@ -2236,7 +2237,7 @@ class AuthorityService:
                     "environment": record.environment,
                     "instrument": instrument(record.instrument_version),
                     "action": record.action,
-                    "notional": str(record.notional),
+                    "notional": _canonical_decimal_text(record.notional),
                     "risk_reducing": record.risk_reducing,
                     "state_version": record.state_version,
                     "authority_epoch": record.authority_epoch,

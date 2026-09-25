@@ -438,6 +438,47 @@ class SecurityBoundaryTests(unittest.TestCase):
         }
         self.assertEqual(store.submit(owner_command).status, "ACCEPTED")
 
+    def test_unknown_host_action_fails_closed_before_mutation(self):
+        for role in ("OWNER", "OPERATOR"):
+            with self.subTest(role=role):
+                session = (
+                    self.owner
+                    if role == "OWNER"
+                    else self.boundary.create_session(
+                        subject="operator-unknown",
+                        role="OPERATOR",
+                        origin=self.owner.origin,
+                    )
+                )
+                store = HostCommandStore(
+                    account_id="paper-account-1",
+                    environment="PAPER",
+                    session_validator=self.boundary.validate_host_session,
+                    request_origin_provider=lambda: self.owner.origin,
+                )
+                command = {
+                    "command_id": (
+                        "dddddddd-dddd-dddd-dddd-dddddddddddd"
+                        if role == "OWNER"
+                        else "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+                    ),
+                    "expected_state_version": "0",
+                    "idempotency_key": f"unknown-action-{role.lower()}",
+                    "actor": session.subject,
+                    "session": session.token,
+                    "account_id": "paper-account-1",
+                    "environment": "PAPER",
+                    "action": "FUTURE_PRIVILEGED_ACTION",
+                    "payload": {},
+                }
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "unsupported or non-canonical host action",
+                ):
+                    store.submit(command)
+                self.assertEqual(store.state_version, 0)
+                self.assertEqual(store.events_after(0), ())
+
     def test_host_mutation_is_bound_to_current_request_origin(self):
         current_origin = ["https://evil.invalid"]
         store = HostCommandStore(

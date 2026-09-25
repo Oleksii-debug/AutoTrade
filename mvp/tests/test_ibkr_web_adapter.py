@@ -400,7 +400,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertFalse(outcome.proves_fill)
         self.assertFalse(outcome.retry_same_economic_action)
 
-    def test_reply_message_requires_separate_explicit_guarded_authorization(self):
+    def test_unrecorded_reply_message_cannot_prepare_second_request(self):
         outcome = parse_order_submission_response(
             [
                 {
@@ -413,14 +413,14 @@ class IbkrWebAdapterTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "REPLY_REQUIRED")
         self.assertFalse(outcome.proves_fill)
-        with self.assertRaisesRegex(IbkrWebAdapterError, "explicit authorization"):
-            prepare_reply_confirmation(outcome, explicit_authorization=False)
-        request = prepare_reply_confirmation(outcome, explicit_authorization=True)
-        self.assertEqual(
-            request.endpoint,
-            "/iserver/reply/07a13a5a-4a48-44a5-bb25-5ab37b79186c",
-        )
-        self.assertEqual(dict(request.body), {"confirmed": True})
+        with self.assertRaisesRegex(TypeError, "recorded"):
+            prepare_reply_confirmation(
+                outcome,
+                expected_attempt_id="attempt-1",
+                expected_account_id="U1234567",
+                expected_client_order_id="coid-1",
+                explicit_authorization=True,
+            )
 
     def test_ambiguous_ack_and_reply_shape_fails_closed(self):
         with self.assertRaisesRegex(IbkrWebAdapterError, "ambiguous"):
@@ -549,6 +549,47 @@ class IbkrWebAdapterTests(unittest.TestCase):
             "07a13a5a-4a48-44a5-bb25-5ab37b79186c",
         )
         self.assertFalse(recorded.retry_same_economic_action)
+
+        with self.assertRaisesRegex(IbkrWebAdapterError, "explicit authorization"):
+            prepare_reply_confirmation(
+                recorded,
+                expected_attempt_id="attempt-ibkr-reply",
+                expected_account_id="U1234567",
+                expected_client_order_id="at-ibkr-reply",
+                explicit_authorization=False,
+            )
+
+        request = prepare_reply_confirmation(
+            recorded,
+            expected_attempt_id="attempt-ibkr-reply",
+            expected_account_id="U1234567",
+            expected_client_order_id="at-ibkr-reply",
+            explicit_authorization=True,
+        )
+        self.assertEqual(
+            request.endpoint,
+            "/iserver/reply/07a13a5a-4a48-44a5-bb25-5ab37b79186c",
+        )
+        self.assertEqual(dict(request.body), {"confirmed": True})
+        self.assertEqual(request.attempt_id, "attempt-ibkr-reply")
+        self.assertEqual(request.account_id, "U1234567")
+        self.assertEqual(request.client_order_id, "at-ibkr-reply")
+        self.assertEqual(request.response_sha256, recorded.response_sha256)
+
+        for field, value in (
+            ("expected_attempt_id", "other-attempt"),
+            ("expected_account_id", "OTHER"),
+            ("expected_client_order_id", "other-coid"),
+        ):
+            kwargs = {
+                "expected_attempt_id": "attempt-ibkr-reply",
+                "expected_account_id": "U1234567",
+                "expected_client_order_id": "at-ibkr-reply",
+                "explicit_authorization": True,
+            }
+            kwargs[field] = value
+            with self.subTest(field=field), self.assertRaises(IbkrWebAdapterError):
+                prepare_reply_confirmation(recorded, **kwargs)
 
     def test_recorded_submission_rejects_cross_account_binding(self):
         intent = IbkrWebOrderIntent.create(

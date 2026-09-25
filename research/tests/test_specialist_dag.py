@@ -39,10 +39,6 @@ def run(role, score, *, confidence="1", cost="1", late=False, critique=()):
     )
 
 
-def full_plan(specs, *, inputs=(), budget="100"):
-    return plan_specialists(specs, available_inputs=inputs, total_budget=budget)
-
-
 class SpecialistDagTests(unittest.TestCase):
     def test_plan_runs_only_positive_value_roles_inside_budget(self):
         plan = plan_specialists(
@@ -88,10 +84,11 @@ class SpecialistDagTests(unittest.TestCase):
             spec("clone2", "same-source"),
             spec("independent", "independent-source"),
         ]
+        plan = plan_specialists(specs, available_inputs=(), total_budget="3")
         result = aggregate_specialists(
             specs,
             [run("clone1", "1"), run("clone2", "1"), run("independent", "-1")],
-            plan=full_plan(specs),
+            plan=plan,
             decision_deadline=NOW,
         )
         self.assertEqual(result.score, Decimal("0"))
@@ -100,6 +97,7 @@ class SpecialistDagTests(unittest.TestCase):
 
     def test_late_and_over_budget_results_are_rejected(self):
         specs = [spec("late", "a"), spec("costly", "b", cost="1"), spec("ok", "c")]
+        plan = plan_specialists(specs, available_inputs=(), total_budget="3")
         result = aggregate_specialists(
             specs,
             [
@@ -107,7 +105,7 @@ class SpecialistDagTests(unittest.TestCase):
                 run("costly", "1", cost="2"),
                 run("ok", "-0.5"),
             ],
-            plan=full_plan(specs),
+            plan=plan,
             decision_deadline=NOW,
         )
         self.assertEqual(result.direction, "SHORT")
@@ -116,78 +114,77 @@ class SpecialistDagTests(unittest.TestCase):
 
     def test_blocking_critique_removes_affected_output(self):
         specs = [spec("a", "a"), spec("b", "b")]
+        plan = plan_specialists(specs, available_inputs=(), total_budget="2")
         result = aggregate_specialists(
             specs,
             [
                 run("a", "1", critique=("Future leakage detected",)),
                 run("b", "-0.4"),
             ],
-            plan=full_plan(specs),
+            plan=plan,
             decision_deadline=NOW,
             blocking_critique_terms=("future leakage",),
         )
         self.assertEqual(result.direction, "SHORT")
         self.assertIn(("a", "blocking_critique"), result.rejected_roles)
 
-    def test_unscheduled_known_role_cannot_influence_aggregation(self):
+    def test_aggregation_rejects_result_from_role_not_scheduled_by_plan(self):
         specs = [
-            spec("admitted", "independent", cost="1", value="1"),
-            spec("rejected", "other", cost="1", value="-1"),
+            spec("a", "g1", cost="2", value="2"),
+            spec("b", "g2", cost="2", value="2"),
         ]
-        plan = full_plan(specs)
-        self.assertEqual(plan.scheduled_roles, ("admitted",))
+        plan = plan_specialists(specs, available_inputs=(), total_budget="2")
+        self.assertEqual(plan.scheduled_roles, ("a",))
         result = aggregate_specialists(
             specs,
-            [run("admitted", "-0.2"), run("rejected", "1")],
+            [run("a", "0.5", cost="1"), run("b", "-1", cost="1")],
             plan=plan,
             decision_deadline=NOW,
         )
-        self.assertEqual(result.direction, "SHORT")
-        self.assertEqual(result.accepted_roles, ("admitted",))
-        self.assertIn(("rejected", "not_scheduled"), result.rejected_roles)
+        self.assertEqual(result.accepted_roles, ("a",))
+        self.assertEqual(result.direction, "LONG")
+        self.assertIn(("b", "not_scheduled"), result.rejected_roles)
+        self.assertEqual(result.total_cost, Decimal("1"))
 
-    def test_missing_planned_result_is_explicit_evidence(self):
-        specs = [spec("a", "g1"), spec("b", "g2")]
-        result = aggregate_specialists(
-            specs,
-            [run("a", "0.4")],
-            plan=full_plan(specs),
-            decision_deadline=NOW,
+    def test_aggregation_rejects_forged_plan_reservation(self):
+        specs = [spec("a", "g1", cost="2", value="2")]
+        forged = plan_specialists(specs, available_inputs=(), total_budget="2")
+        forged = forged.__class__(
+            scheduled_roles=forged.scheduled_roles,
+            skipped_roles=forged.skipped_roles,
+            reserved_cost=Decimal("0"),
+            available_inputs=forged.available_inputs,
+            total_budget=forged.total_budget,
         )
-        self.assertIn(("b", "missing_result"), result.rejected_roles)
-
-    def test_tampered_plan_cost_is_rejected(self):
-        specs = [spec("a", "g1", cost="2")]
-        plan = full_plan(specs)
-        tampered = type(plan)(plan.scheduled_roles, plan.skipped_roles, Decimal("0"))
-        with self.assertRaisesRegex(SpecialistDagError, "reserved cost"):
+        with self.assertRaisesRegex(SpecialistDagError, "canonical planner output"):
             aggregate_specialists(
                 specs,
-                [run("a", "1")],
-                plan=tampered,
+                [run("a", "1", cost="1")],
+                plan=forged,
                 decision_deadline=NOW,
             )
 
-    def test_direction_must_match_score_sign(self):
-        with self.assertRaisesRegex(SpecialistDagError, "direction must match score sign"):
-            SpecialistRun(
-                role_id="x",
-                direction="SHORT",
-                score=Decimal("0.4"),
-                confidence=Decimal("1"),
-                evidence_refs=("evidence:x",),
-                cost=Decimal("0"),
-                completed_at=NOW,
-            )
-        with self.assertRaisesRegex(SpecialistDagError, "direction must match score sign"):
-            SpecialistRun(
-                role_id="flat",
-                direction="LONG",
-                score=Decimal("0"),
-                confidence=Decimal("1"),
-                evidence_refs=("evidence:flat",),
-                cost=Decimal("0"),
-                completed_at=NOW,
+    def test_aggregation_rejects_forged_schedule_with_missing_required_input(self):
+        specs = [spec("research", "g1", cost="1", value="2", inputs=("news",))]
+        planned = plan_specialists(
+            specs,
+            available_inputs=(),
+            total_budget="1",
+        )
+        self.assertEqual(planned.scheduled_roles, ())
+        forged = planned.__class__(
+            scheduled_roles=("research",),
+            skipped_roles=(),
+            reserved_cost=Decimal("1"),
+            available_inputs=planned.available_inputs,
+            total_budget=planned.total_budget,
+        )
+        with self.assertRaisesRegex(SpecialistDagError, "canonical planner output"):
+            aggregate_specialists(
+                specs,
+                [run("research", "1", cost="1")],
+                plan=forged,
+                decision_deadline=NOW,
             )
 
     def test_output_requires_evidence_and_rejects_binary_floats(self):
@@ -215,6 +212,38 @@ class SpecialistDagTests(unittest.TestCase):
             Decimal("2"),
         )
 
+
+    def test_missing_planned_result_is_explicit_evidence(self):
+        specs = [spec("a", "g1"), spec("b", "g2")]
+        result = aggregate_specialists(
+            specs,
+            [run("a", "0.4")],
+            plan=full_plan(specs),
+            decision_deadline=NOW,
+        )
+        self.assertIn(("b", "missing_result"), result.rejected_roles)
+
+    def test_direction_must_match_score_sign(self):
+        with self.assertRaisesRegex(SpecialistDagError, "direction must match score sign"):
+            SpecialistRun(
+                role_id="x",
+                direction="SHORT",
+                score=Decimal("0.4"),
+                confidence=Decimal("1"),
+                evidence_refs=("evidence:x",),
+                cost=Decimal("0"),
+                completed_at=NOW,
+            )
+        with self.assertRaisesRegex(SpecialistDagError, "direction must match score sign"):
+            SpecialistRun(
+                role_id="flat",
+                direction="LONG",
+                score=Decimal("0"),
+                confidence=Decimal("1"),
+                evidence_refs=("evidence:flat",),
+                cost=Decimal("0"),
+                completed_at=NOW,
+            )
 
 if __name__ == "__main__":
     unittest.main()

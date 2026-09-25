@@ -627,6 +627,30 @@ def prepare_order_submission(
     )
 
 
+def guarded_order_projection(
+    prepared_request: BybitPreparedSubmission,
+) -> Mapping[str, object]:
+    """Project canonical Bybit preparation into the shared guarded transport seam."""
+
+    if not isinstance(prepared_request, BybitPreparedSubmission):
+        raise TypeError("prepared_request must be BybitPreparedSubmission")
+    return MappingProxyType(
+        {
+            "endpoint": prepared_request.endpoint,
+            "body": dict(prepared_request.body),
+            "account_id": prepared_request.account_id,
+            "environment": prepared_request.environment,
+            "provider_environment": prepared_request.provider_environment,
+            "capability_snapshot_id": prepared_request.capability_snapshot_id,
+            "capability_snapshot_ids": list(
+                prepared_request.capability_snapshot_ids
+            ),
+            "instrument_versions": list(prepared_request.instrument_versions),
+            "body_sha256": prepared_request.body_sha256,
+        }
+    )
+
+
 def _submission_evidence(
     observation: ProviderSubmissionObservation,
     *,

@@ -521,6 +521,7 @@ class SubmissionResolution:
     outcome: str
     evidence_reason: str
     provider_order_ids: tuple[str, ...] = ()
+    provider_execution_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -686,6 +687,7 @@ def reconcile_account(
     provider_by_id: dict[str, ProviderFillEvidence] = {}
     provider_client_ids: set[str] = set()
     provider_client_fill_times: dict[str, list[datetime]] = {}
+    provider_client_fills: dict[str, list[ProviderFillEvidence]] = {}
     for fill in provider_fills:
         if not isinstance(fill, ProviderFillEvidence):
             raise TypeError("provider_fills must contain ProviderFillEvidence")
@@ -705,6 +707,7 @@ def reconcile_account(
             provider_client_fill_times.setdefault(fill.client_order_id, []).append(
                 _instant(fill.trade_time, name="provider_fill.trade_time")
             )
+            provider_client_fills.setdefault(fill.client_order_id, []).append(fill)
 
     provider_ids = set(provider_by_id)
     local_id_set = set(local_ids)
@@ -956,13 +959,25 @@ def reconcile_account(
             submission.client_order_id
         )
         provider_order_ids: tuple[str, ...] = ()
+        provider_execution_ids: tuple[str, ...] = ()
         matching_fill_times = provider_client_fill_times.get(
             submission.client_order_id, ()
         )
-        causal_execution_observed = any(
-            submission_time <= trade_time <= end
-            for trade_time in matching_fill_times
+        matching_fills = provider_client_fills.get(
+            submission.client_order_id, ()
         )
+        provider_execution_ids = tuple(
+            sorted(
+                {
+                    fill.provider_execution_id
+                    for fill in matching_fills
+                    if submission_time
+                    <= _instant(fill.trade_time, name="provider_fill.trade_time")
+                    <= end
+                }
+            )
+        )
+        causal_execution_observed = bool(provider_execution_ids)
         working_snapshot_is_causal = bool(
             provider_working is not None
             and snapshot_is_consistent
@@ -1018,6 +1033,7 @@ def reconcile_account(
                 outcome=outcome,
                 evidence_reason=reason,
                 provider_order_ids=provider_order_ids,
+                provider_execution_ids=provider_execution_ids,
             )
         )
 

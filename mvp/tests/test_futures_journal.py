@@ -263,17 +263,34 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
         )
 
         with TemporaryDirectory() as directory:
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            first = self._bind_provider_evidence(artifacts, first)
+            conflicting = self._bind_provider_evidence(artifacts, conflicting)
             store = JournalStore(f"{directory}/journal.sqlite3")
-            commit_linear_variation_margin(store, opening, first)
+            commit_linear_variation_margin(
+                store,
+                opening,
+                first,
+                evidence_artifact_store=artifacts,
+            )
             aggregate_id = variation_margin_aggregate_id(opening)
             with self.assertRaisesRegex(FuturesError, "conflicts"):
-                commit_linear_variation_margin(store, opening, conflicting)
+                commit_linear_variation_margin(
+                    store,
+                    opening,
+                    conflicting,
+                    evidence_artifact_store=artifacts,
+                )
             self.assertEqual(
                 len(store.load_events("FUTURES_VARIATION_MARGIN", aggregate_id)),
                 1,
             )
             self.assertEqual(
-                restore_linear_variation_margin(store, opening).last_settlement_price,
+                restore_linear_variation_margin(
+                    store,
+                    opening,
+                    evidence_artifact_store=artifacts,
+                ).last_settlement_price,
                 Decimal("105"),
             )
 
@@ -289,12 +306,15 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
 
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            first = self._bind_provider_evidence(artifacts, first)
             store = JournalStore(path)
             state, exact, settled_cash, transaction, inserted = (
                 commit_inverse_variation_margin(
                     store,
                     opening,
                     first,
+                    evidence_artifact_store=artifacts,
                     settlement_quantum=Decimal("0.00000001"),
                 )
             )
@@ -303,7 +323,11 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             self.assertEqual(settled_cash, Decimal("0.00090909"))
             self.assertIsNotNone(transaction)
             self.assertEqual(
-                restore_inverse_variation_margin(JournalStore(path), opening),
+                restore_inverse_variation_margin(
+                    JournalStore(path),
+                    opening,
+                    evidence_artifact_store=artifacts,
+                ),
                 state,
             )
 
@@ -312,6 +336,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     JournalStore(path),
                     opening,
                     first,
+                    evidence_artifact_store=artifacts,
                     settlement_quantum=Decimal("0.00000001"),
                 )
             )
@@ -321,18 +346,22 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             self.assertEqual(retry_cash, Decimal("0"))
             self.assertIsNone(retry_tx)
 
-            correction = self._settlement(
-                contract,
-                "inverse-period",
-                "12000",
-                sequence=1,
-                revision=1,
+            correction = self._bind_provider_evidence(
+                artifacts,
+                self._settlement(
+                    contract,
+                    "inverse-period",
+                    "12000",
+                    sequence=1,
+                    revision=1,
+                ),
             )
             corrected, correction_exact, _, correction_tx, correction_inserted = (
                 commit_inverse_variation_margin(
                     JournalStore(path),
                     opening,
                     correction,
+                    evidence_artifact_store=artifacts,
                     settlement_quantum=Decimal("0.00000001"),
                 )
             )
@@ -358,10 +387,18 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             )
             final_store = JournalStore(path)
             self.assertEqual(
-                restore_inverse_variation_margin(final_store, opening),
+                restore_inverse_variation_margin(
+                    final_store,
+                    opening,
+                    evidence_artifact_store=artifacts,
+                ),
                 corrected,
             )
-            rebuilt_book = rebuild_variation_margin_book(final_store, opening)
+            rebuilt_book = rebuild_variation_margin_book(
+                final_store,
+                opening,
+                evidence_artifact_store=artifacts,
+            )
             self.assertEqual(
                 rebuilt_book.cash("BTC"),
                 sum(
@@ -376,6 +413,48 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 ),
             )
 
+    def test_altered_provider_economics_under_same_artifact_is_rejected_before_commit(self):
+        contract = self._contract()
+        opening = VariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("100"),
+            settlement_scope=self._scope(),
+        )
+        with TemporaryDirectory() as directory:
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            original = self._bind_provider_evidence(
+                artifacts,
+                self._settlement(contract, "provenance-period", "105"),
+            )
+            altered = replace(original, settlement_price=Decimal("106"))
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            aggregate_id = variation_margin_aggregate_id(opening)
+
+            with self.assertRaisesRegex(
+                FuturesError,
+                "evidence (manifest metadata|does not match supplied economics)",
+            ):
+                commit_linear_variation_margin(
+                    store,
+                    opening,
+                    altered,
+                    evidence_artifact_store=artifacts,
+                )
+
+            self.assertEqual(
+                store.load_events("FUTURES_VARIATION_MARGIN", aggregate_id),
+                [],
+            )
+            with sqlite3.connect(store.path) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM command_dedupe WHERE actor = ?",
+                        ("autotrade-futures-settlement",),
+                    ).fetchone()[0],
+                    0,
+                )
+
     def test_sqlite_failure_rolls_back_command_and_settlement_event_together(self):
         contract = self._contract()
         opening = VariationMarginState(
@@ -387,6 +466,8 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
         settlement = self._settlement(contract, "rollback-period", "105")
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            settlement = self._bind_provider_evidence(artifacts, settlement)
             store = JournalStore(path)
             connection = sqlite3.connect(path)
             try:
@@ -405,7 +486,12 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 connection.close()
 
             with self.assertRaisesRegex(Exception, "injected futures commit failure"):
-                commit_linear_variation_margin(store, opening, settlement)
+                commit_linear_variation_margin(
+                    store,
+                    opening,
+                    settlement,
+                    evidence_artifact_store=artifacts,
+                )
 
             aggregate_id = variation_margin_aggregate_id(opening)
             self.assertEqual(

@@ -900,6 +900,129 @@ class IndependentRiskTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             policy(min_futures_delivery_headroom_seconds=3600.0)
 
+    def test_expected_shortfall_uses_complete_projected_tail_distribution(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        tail = (
+            {"ABC": "-0.10"},
+            {"ABC": "-0.20"},
+            {"ABC": "0.05"},
+            {"ABC": "-0.40"},
+        )
+        boundary = evaluate_risk(
+            intent,
+            context(tail_scenarios=tail),
+            policy(
+                max_expected_shortfall="90",
+                expected_shortfall_tail_fraction="0.50",
+            ),
+        )
+        rule = next(x for x in boundary.rules if x.rule == "expected_shortfall")
+        self.assertTrue(rule.passed)
+        self.assertEqual(rule.observed, "90")
+
+        blocked = evaluate_risk(
+            intent,
+            context(tail_scenarios=tail),
+            policy(
+                max_expected_shortfall="89.99",
+                expected_shortfall_tail_fraction="0.50",
+            ),
+        )
+        self.assertFalse(blocked.admitted)
+        blocked_rule = next(x for x in blocked.rules if x.rule == "expected_shortfall")
+        self.assertFalse(blocked_rule.passed)
+        self.assertEqual(blocked_rule.observed, "90")
+
+    def test_expected_shortfall_fails_closed_without_complete_tail_evidence(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        configured = policy(
+            max_expected_shortfall="500",
+            expected_shortfall_tail_fraction="0.25",
+        )
+        missing = evaluate_risk(
+            intent,
+            context(tail_scenarios=()),
+            configured,
+        )
+        self.assertFalse(missing.admitted)
+        self.assertFalse(next(x for x in missing.rules if x.rule == "tail_coverage").passed)
+        self.assertEqual(
+            next(x for x in missing.rules if x.rule == "expected_shortfall").observed,
+            "UNKNOWN",
+        )
+
+        incomplete = evaluate_risk(
+            intent,
+            context(
+                positions={"ABC": "2", "XYZ": "1"},
+                tail_scenarios=({"ABC": "-0.10"},),
+                stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.10"},),
+            ),
+            configured,
+        )
+        coverage = next(x for x in incomplete.rules if x.rule == "tail_coverage")
+        self.assertFalse(coverage.passed)
+        self.assertEqual(coverage.observed, "XYZ")
+
+    def test_expected_shortfall_policy_requires_explicit_tail_fraction(self):
+        with self.assertRaisesRegex(ValueError, "configured together"):
+            policy(max_expected_shortfall="100")
+        with self.assertRaisesRegex(ValueError, "configured together"):
+            policy(expected_shortfall_tail_fraction="0.05")
+        with self.assertRaises(ValueError):
+            policy(
+                max_expected_shortfall="100",
+                expected_shortfall_tail_fraction="1.01",
+            )
+
+    def test_liquidation_headroom_is_fail_closed_and_exact_at_boundary(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        configured = policy(min_liquidation_headroom="0.25")
+        missing = evaluate_risk(
+            intent,
+            context(liquidation_headroom=None),
+            configured,
+        )
+        missing_rule = next(
+            x for x in missing.rules if x.rule == "liquidation_headroom"
+        )
+        self.assertFalse(missing_rule.passed)
+        self.assertEqual(missing_rule.observed, "UNKNOWN")
+
+        exact = evaluate_risk(
+            intent,
+            context(liquidation_headroom="0.25"),
+            configured,
+        )
+        self.assertTrue(
+            next(x for x in exact.rules if x.rule == "liquidation_headroom").passed
+        )
+
+    def test_tail_and_liquidation_inputs_reject_binary_float(self):
+        with self.assertRaises(TypeError):
+            context(tail_scenarios=({"ABC": -0.10},))
+        with self.assertRaises(TypeError):
+            context(liquidation_headroom=0.25)
+        with self.assertRaises(TypeError):
+            policy(
+                max_expected_shortfall=100.0,
+                expected_shortfall_tail_fraction="0.05",
+            )
+        with self.assertRaises(TypeError):
+            policy(
+                max_expected_shortfall="100",
+                expected_shortfall_tail_fraction=0.05,
+            )
+
     def test_evaluate_risk_revalidates_direct_dataclass_construction(self):
         good_context = context()
         good_policy = policy()

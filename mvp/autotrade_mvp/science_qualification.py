@@ -128,12 +128,14 @@ def qualify_scientific_learning(
     checks: list[tuple[str, str]] = []
     reasons: list[str] = []
     effective_status: dict[str, str] = {}
+    verification_state: dict[str, str] = {}
 
     for gate_id in _REQUIRED_GATES:
         gate = by_id.get(gate_id)
         if gate is None:
             checks.append((gate_id, "INCONCLUSIVE"))
             effective_status[gate_id] = "INCONCLUSIVE"
+            verification_state[gate_id] = "MISSING"
             reasons.append("SCIENCE.MISSING_GATE:" + gate_id)
             continue
         binding_ok = (
@@ -144,6 +146,7 @@ def qualify_scientific_learning(
         if not binding_ok:
             checks.append((gate_id, "FAIL"))
             effective_status[gate_id] = "FAIL"
+            verification_state[gate_id] = "BINDING_FAIL"
             reasons.append("SCIENCE.EVIDENCE_BINDING_MISMATCH:" + gate_id)
             continue
 
@@ -159,9 +162,11 @@ def qualify_scientific_learning(
         if not verified:
             checks.append((gate_id, "INCONCLUSIVE"))
             effective_status[gate_id] = "INCONCLUSIVE"
+            verification_state[gate_id] = "UNVERIFIED"
             reasons.append("SCIENCE.EVIDENCE_UNVERIFIED:" + gate_id)
             continue
 
+        verification_state[gate_id] = "VERIFIED"
         checks.append((gate_id, gate.status))
         effective_status[gate_id] = gate.status
         if gate.status == "FAIL":
@@ -195,19 +200,36 @@ def qualify_scientific_learning(
         checks.append(("routing_causality", "PASS"))
 
     claim_ok = True
+    claim_status = "PASS"
     if (
         evidence.economic_claim == "ECONOMIC_EDGE_QUALIFIED"
         and effective_status.get("forward_evidence") != "PASS"
     ):
         claim_ok = False
         reasons.append("SCIENCE.CLAIM_EXCEEDS_EVIDENCE")
-    if evidence.economic_claim == "RESEARCH_CANDIDATE" and (
-        effective_status.get("protocol") != "PASS"
-        or effective_status.get("leakage") != "PASS"
-    ):
-        claim_ok = False
-        reasons.append("SCIENCE.CLAIM_EXCEEDS_EVIDENCE")
-    checks.append(("economic_claim", "PASS" if claim_ok else "FAIL"))
+        claim_status = (
+            "INCONCLUSIVE"
+            if verification_state.get("forward_evidence") in {"MISSING", "UNVERIFIED"}
+            else "FAIL"
+        )
+    if evidence.economic_claim == "RESEARCH_CANDIDATE":
+        blockers = tuple(
+            gate_id
+            for gate_id in ("protocol", "leakage")
+            if effective_status.get(gate_id) != "PASS"
+        )
+        if blockers:
+            claim_ok = False
+            reasons.append("SCIENCE.CLAIM_EXCEEDS_EVIDENCE")
+            claim_status = (
+                "INCONCLUSIVE"
+                if all(
+                    verification_state.get(gate_id) in {"MISSING", "UNVERIFIED"}
+                    for gate_id in blockers
+                )
+                else "FAIL"
+            )
+    checks.append(("economic_claim", claim_status))
 
     has_fail = any(status == "FAIL" for _, status in checks)
     has_inconclusive = any(status == "INCONCLUSIVE" for _, status in checks)

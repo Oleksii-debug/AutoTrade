@@ -746,6 +746,8 @@ class ReconciliationResult:
     activity_coverage_complete: bool = True
     resource_availability: ResourceAvailabilityEvidence | None = None
     borrow_differences: Mapping[str, Decimal] | None = None
+    settlement_differences: Mapping[str, Decimal] | None = None
+    settlement_activity_complete: bool = True
 
     @property
     def blocks_new_risk(self) -> bool:
@@ -845,6 +847,13 @@ def reconcile_account(
     local_borrowed_resources: Mapping[str, object] | None = None,
     provider_borrowed_resources: Mapping[str, object] | None = None,
     active_borrow_recall_resources: Sequence[str] = (),
+    local_settled_cash: Mapping[str, object] | None = None,
+    provider_settled_cash: Mapping[str, object] | None = None,
+    local_unsettled_receivable: Mapping[str, object] | None = None,
+    provider_unsettled_receivable: Mapping[str, object] | None = None,
+    local_unsettled_payable: Mapping[str, object] | None = None,
+    provider_unsettled_payable: Mapping[str, object] | None = None,
+    settlement_activity_complete: bool | None = None,
 ) -> ReconciliationResult:
     """Compare local and provider truth without inventing absence evidence.
 
@@ -1088,6 +1097,58 @@ def reconcile_account(
         ) - local_borrowed.get(resource, Decimal("0"))
         if difference != 0:
             borrow_differences[resource] = difference
+
+    settlement_inputs = (
+        local_settled_cash,
+        provider_settled_cash,
+        local_unsettled_receivable,
+        provider_unsettled_receivable,
+        local_unsettled_payable,
+        provider_unsettled_payable,
+    )
+    settlement_requested = any(value is not None for value in settlement_inputs)
+    if settlement_requested and any(value is None for value in settlement_inputs):
+        raise ValueError(
+            "settlement reconciliation requires all local/provider settlement surfaces"
+        )
+    if settlement_requested and settlement_activity_complete is None:
+        raise ValueError(
+            "settlement reconciliation requires explicit activity completeness"
+        )
+    if settlement_activity_complete is not None and not isinstance(
+        settlement_activity_complete, bool
+    ):
+        raise TypeError("settlement_activity_complete must be boolean or None")
+
+    local_settled = _amount_map(local_settled_cash or {}, name="local_settled_cash")
+    provider_settled = _amount_map(provider_settled_cash or {}, name="provider_settled_cash")
+    local_receivable = _amount_map(local_unsettled_receivable or {}, name="local_unsettled_receivable")
+    provider_receivable = _amount_map(provider_unsettled_receivable or {}, name="provider_unsettled_receivable")
+    local_payable = _amount_map(local_unsettled_payable or {}, name="local_unsettled_payable")
+    provider_payable = _amount_map(provider_unsettled_payable or {}, name="provider_unsettled_payable")
+    if any(
+        value < 0
+        for mapping in (
+            local_receivable,
+            provider_receivable,
+            local_payable,
+            provider_payable,
+        )
+        for value in mapping.values()
+    ):
+        raise ValueError("unsettled settlement surfaces must be non-negative")
+
+    settlement_differences: dict[str, Decimal] = {}
+    if settlement_requested and settlement_activity_complete:
+        for prefix, local_map, provider_map in (
+            ("SETTLED", local_settled, provider_settled),
+            ("RECEIVABLE", local_receivable, provider_receivable),
+            ("PAYABLE", local_payable, provider_payable),
+        ):
+            for currency in sorted(set(local_map) | set(provider_map)):
+                difference = provider_map.get(currency, Decimal("0")) - local_map.get(currency, Decimal("0"))
+                if difference != 0:
+                    settlement_differences[f"{prefix}:{currency}"] = difference
 
     cash_differences: dict[str, Decimal] = {}
     for currency in sorted(set(local_cash_map) | set(provider_cash_map)):
@@ -1407,6 +1468,14 @@ def reconcile_account(
         reasons.append(
             "local provider activity identities are absent from provider activity evidence"
         )
+    if settlement_requested and not settlement_activity_complete:
+        blocking.add("ACCOUNT")
+        reasons.append("provider settlement/activity coverage is incomplete")
+    if settlement_differences:
+        for settlement_resource in settlement_differences:
+            _, currency = settlement_resource.split(":", 1)
+            blocking.add(f"CASH:{currency}")
+        reasons.append("provider/local settled or pending cash differs")
     for currency in cash_differences:
         blocking.add(f"CASH:{currency}")
     if cash_differences:
@@ -1435,6 +1504,13 @@ def reconcile_account(
         and not missing_local_activities
         and not cash_differences
         and not position_differences
+        and (
+            not settlement_requested
+            or (
+                settlement_activity_complete is True
+                and not settlement_differences
+            )
+        )
         and all(item.outcome != "UNKNOWN" for item in resolutions)
     )
     return ReconciliationResult(
@@ -1478,4 +1554,8 @@ def reconcile_account(
         activity_coverage_complete=activity_coverage_complete,
         resource_availability=resource_availability,
         borrow_differences=MappingProxyType(borrow_differences),
+        settlement_differences=MappingProxyType(settlement_differences),
+        settlement_activity_complete=(
+            True if not settlement_requested else bool(settlement_activity_complete)
+        ),
     )

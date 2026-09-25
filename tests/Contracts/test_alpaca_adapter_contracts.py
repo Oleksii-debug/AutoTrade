@@ -46,6 +46,22 @@ class AlpacaAdapterContractTests(unittest.TestCase):
             format_checker=FormatChecker(),
         ).validate(value)
 
+        unknown = parse_submission_response(
+            attempt_id=str(uuid4()),
+            client_order_id="contract-unknown",
+            response=None,
+            observed_at="2026-09-24T20:00:00Z",
+            environment="PAPER",
+            transport_ambiguous=True,
+        )
+        self.assertNotIn("provider_received_at", unknown)
+        self.assertNotIn("observed_at", unknown)
+        Draft202012Validator(
+            {"$ref": f"{schema['$id']}#/$defs/SubmissionResult"},
+            registry=self.registry,
+            format_checker=FormatChecker(),
+        ).validate(unknown)
+
 
 if __name__ == "__main__":
     unittest.main()

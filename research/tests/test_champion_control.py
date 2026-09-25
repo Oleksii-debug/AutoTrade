@@ -1414,5 +1414,160 @@ class ChampionRegistryTests(unittest.TestCase):
                     **common,
                 )
 
+
+    def test_online_update_cannot_use_naked_unverifiable_evidence(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            state = registry.promote(
+                approval(science),
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            missing = OnlineEvidenceRef(
+                artifact_id=str(uuid5(NAMESPACE_URL, "missing-online-evidence")),
+                sha256=digest("missing-online-evidence"),
+            )
+            with self.assertRaisesRegex(ValueError, "immutable artifact verifier"):
+                registry.record_online_update(
+                    envelope=online_envelope(),
+                    update_id="missing-verifier",
+                    expected_generation=state.generation,
+                    updates={"threshold": "0.4"},
+                    label_refs=("label:reconciled-outcome",),
+                    evidence_refs=(missing,),
+                    actual_update_cost="1",
+                    now=BASE + timedelta(minutes=1),
+                    drift_gate_evidence=missing,
+                    stop_condition_evidence=missing,
+                    label_evidence_refs={
+                        "label:reconciled-outcome": missing,
+                    },
+                )
+
+    def test_online_update_rejects_future_or_pending_label_evidence(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            state = registry.promote(
+                approval(science),
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            envelope = online_envelope()
+            applied = BASE + timedelta(minutes=2)
+            with self.assertRaisesRegex(ValueError, "future online evidence"):
+                online_update(
+                    registry,
+                    envelope=envelope,
+                    update_id="future-label",
+                    expected_generation=state.generation,
+                    updates={"threshold": "0.4"},
+                    label_refs=("label:reconciled-outcome",),
+                    evidence_refs=("episode:future-label",),
+                    actual_update_cost="1",
+                    now=applied,
+                    label_available_at=applied + timedelta(seconds=1),
+                )
+            with self.assertRaisesRegex(ValueError, "not reconciled"):
+                online_update(
+                    registry,
+                    envelope=envelope,
+                    update_id="pending-label",
+                    expected_generation=state.generation,
+                    updates={"threshold": "0.4"},
+                    label_refs=("label:reconciled-outcome",),
+                    evidence_refs=("episode:pending-label",),
+                    actual_update_cost="1",
+                    now=applied,
+                    label_outcome_state="PENDING",
+                )
+
+    def test_online_update_evidence_is_bound_to_exact_generation(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            state = registry.promote(
+                approval(science),
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            with self.assertRaisesRegex(ValueError, "different routing generation"):
+                online_update(
+                    registry,
+                    envelope=online_envelope(),
+                    update_id="wrong-evidence-generation",
+                    expected_generation=state.generation,
+                    bound_generation=state.generation + 1,
+                    updates={"threshold": "0.4"},
+                    label_refs=("label:reconciled-outcome",),
+                    evidence_refs=("episode:generation",),
+                    actual_update_cost="1",
+                    now=BASE + timedelta(minutes=1),
+                )
+
+    def test_online_update_retry_with_changed_evidence_identity_conflicts(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            state = registry.promote(
+                approval(science),
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            common = dict(
+                envelope=online_envelope(),
+                update_id="evidence-retry",
+                expected_generation=state.generation,
+                updates={"threshold": "0.4"},
+                label_refs=("label:reconciled-outcome",),
+                evidence_refs=("episode:evidence-retry",),
+                actual_update_cost="1",
+            )
+            first = online_update(
+                registry,
+                now=BASE + timedelta(minutes=1),
+                evidence_available_at=BASE,
+                **common,
+            )
+            retry = online_update(
+                registry,
+                now=BASE + timedelta(minutes=5),
+                evidence_available_at=BASE,
+                **common,
+            )
+            self.assertEqual(
+                first["request_fingerprint"],
+                retry["request_fingerprint"],
+            )
+            with self.assertRaises(PromotionConflict):
+                online_update(
+                    registry,
+                    now=BASE + timedelta(minutes=5),
+                    evidence_available_at=BASE + timedelta(seconds=1),
+                    **common,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

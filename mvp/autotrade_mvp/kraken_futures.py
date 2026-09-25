@@ -256,7 +256,6 @@ def parse_submission_response(
             "attempt_id": aid,
             "outcome": "REJECTED",
             "client_order_id": cid,
-            "provider_received_at": when,
             "reason_code": "KRAKEN_FUTURES_" + str(error),
             "evidence": evidence,
             "retry_disposition": "NEVER",
@@ -278,7 +277,6 @@ def parse_submission_response(
         "outcome": "ACKNOWLEDGED",
         "provider_order_id": provider_order_id,
         "client_order_id": cid,
-        "provider_received_at": when,
         "evidence": evidence,
         "retry_disposition": "NEVER",
     }

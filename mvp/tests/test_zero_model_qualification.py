@@ -1,7 +1,7 @@
 from decimal import Decimal
 import unittest
 
-from qualification.zero_model.qualify import qualify
+from qualification.zero_model.qualify import _require_source_sha, qualify
 
 
 class ZeroModelQualificationTests(unittest.TestCase):
@@ -74,11 +74,25 @@ class ZeroModelQualificationTests(unittest.TestCase):
         self.assertFalse(claims["economic_edge_proven"])
         self.assertFalse(claims["all_wp62_workflows_qualified"])
 
-    def test_source_sha_is_exact_not_a_label_or_prefix(self):
-        for invalid in ("abc", "g" * 40, "a" * 39, "a" * 41, "A" * 40, " " + "a" * 40, "a" * 40 + " "):
+    def test_source_sha_accepts_canonical_sha1_or_sha256_only(self):
+        self.assertEqual(_require_source_sha("a" * 40), "a" * 40)
+        self.assertEqual(_require_source_sha("b" * 64), "b" * 64)
+
+        for invalid in (
+            "abc",
+            "g" * 40,
+            "a" * 39,
+            "a" * 41,
+            "a" * 63,
+            "a" * 65,
+            "A" * 40,
+            "B" * 64,
+            " " + "a" * 40,
+            "a" * 64 + " ",
+        ):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(ValueError):
-                    qualify(invalid)
+                    _require_source_sha(invalid)
 
 
 if __name__ == "__main__":

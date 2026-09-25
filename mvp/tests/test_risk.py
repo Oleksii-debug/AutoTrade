@@ -150,6 +150,29 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertFalse(decision.admitted)
         self.assertIn("reduce_only", {r.rule for r in decision.rules if not r.passed})
 
+    def test_reduce_only_cannot_use_pending_reservation_to_increase_current_position(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="4",
+                price="100",
+                expected_state_version=7,
+                reduce_only=True,
+            ),
+            context(
+                positions={"ABC": "10"},
+                reserved_position_delta={"ABC": "-15"},
+                stress_scenarios=({"ABC": "-0.10"},),
+            ),
+            policy(),
+        )
+        self.assertEqual(decision.resulting_position, Decimal("-1"))
+        reduce_rule = next(item for item in decision.rules if item.rule == "reduce_only")
+        self.assertFalse(reduce_rule.passed)
+        self.assertIn("current=14", reduce_rule.observed)
+        self.assertFalse(decision.admitted)
+
     def test_genuine_reduce_only_can_decrease_risk_while_account_is_over_limits(self):
         decision = evaluate_risk(
             RiskIntent.create(

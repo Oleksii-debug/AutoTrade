@@ -91,6 +91,26 @@ def _optional_text(value: str | None, *, name: str) -> str | None:
     return None if value is None else _text(value, name=name)
 
 
+def _canonical_quantity_value(value: object, *, name: str) -> str:
+    """Validate canonical Quantity shape and return its exact decimal value."""
+    if not isinstance(value, Mapping):
+        raise OrderProjectionConflict(f"{name} must be a canonical Quantity object")
+    unknown = set(value) - {"value", "unit"}
+    missing = {"value", "unit"} - set(value)
+    if unknown or missing:
+        raise OrderProjectionConflict(
+            f"{name} must contain exactly value and unit"
+        )
+    raw_value = value.get("value")
+    if not isinstance(raw_value, str):
+        raise OrderProjectionConflict(f"{name}.value must be a decimal string")
+    canonical_value = _decimal_text(raw_value, name=f"{name}.value")
+    if canonical_value != raw_value:
+        raise OrderProjectionConflict(f"{name}.value must be canonical decimal text")
+    _text(value.get("unit"), name=f"{name}.unit")
+    return raw_value
+
+
 def _canonical_evidence_refs(
     value: Sequence[Mapping[str, object]] | None,
 ) -> tuple[dict[str, str], ...]:
@@ -1016,9 +1036,41 @@ class DurableOrderBookProjection:
                 "canonical ExecutionFill cannot be committed before receipt_time"
             )
 
+        quantity_value = _canonical_quantity_value(
+            execution_fill.get("last_quantity"),
+            name="last_quantity",
+        )
+        last_price = execution_fill.get("last_price")
+        if not isinstance(last_price, str):
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill last_price must be a decimal string"
+            )
+        if _decimal_text(last_price, name="last_price") != last_price:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill last_price must be canonical decimal text"
+            )
+
         fees = execution_fill.get("fees")
         if isinstance(fees, (str, bytes)) or not isinstance(fees, Sequence):
             raise OrderProjectionConflict("canonical ExecutionFill fees must be an array")
+        for index, fee in enumerate(fees):
+            if not isinstance(fee, Mapping) or set(fee) != {"amount", "currency"}:
+                raise OrderProjectionConflict(
+                    f"canonical ExecutionFill fees[{index}] must be Money"
+                )
+            amount = fee.get("amount")
+            if not isinstance(amount, str) or _decimal_text(
+                amount, name=f"fees[{index}].amount"
+            ) != amount:
+                raise OrderProjectionConflict(
+                    f"canonical ExecutionFill fees[{index}].amount must be canonical decimal text"
+                )
+            _text(fee.get("currency"), name=f"fees[{index}].currency")
+
+        liquidity_flag = execution_fill.get("liquidity_flag")
+        if liquidity_flag is not None:
+            _text(liquidity_flag, name="liquidity_flag")
+
         evidence = execution_fill.get("evidence")
         if isinstance(evidence, (str, bytes)) or not isinstance(evidence, Sequence):
             raise OrderProjectionConflict(
@@ -1079,8 +1131,8 @@ class DurableOrderBookProjection:
                     execution_fill.get("fill_id"),
                     name="fill_id",
                 ),
-                quantity=execution_fill.get("last_quantity"),
-                price=execution_fill.get("last_price"),
+                quantity=quantity_value,
+                price=last_price,
                 provider_revision=_text(
                     provider_revision,
                     name="provider_revision",
@@ -1097,8 +1149,8 @@ class DurableOrderBookProjection:
                 execution_fill.get("provider_execution_id"),
                 name="provider_execution_id",
             ),
-            quantity=execution_fill.get("last_quantity"),
-            price=execution_fill.get("last_price"),
+            quantity=quantity_value,
+            price=last_price,
             provider_revision=_optional_text(
                 execution_fill.get("provider_revision"),
                 name="provider_revision",

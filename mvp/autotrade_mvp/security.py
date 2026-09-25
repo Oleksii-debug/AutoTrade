@@ -13,7 +13,7 @@ import math
 import re
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 
@@ -68,6 +68,7 @@ class Session:
     role: str
     origin: str
     expires_at: float
+    idle_expires_at: float
 
 
 class SecurityBoundary:
@@ -84,6 +85,7 @@ class SecurityBoundary:
         credential_vault: ProtectedCredentialVault,
         session_authorizer: Callable[[str, str, str], bool] | None = None,
         now: Callable[[], float] | None = None,
+        session_idle_timeout_seconds: int = 300,
     ) -> None:
         if not allowed_origins:
             raise ValueError("At least one authenticated origin is required")
@@ -94,6 +96,16 @@ class SecurityBoundary:
         if session_authorizer is not None and not callable(session_authorizer):
             raise TypeError("session_authorizer must be callable or None")
         self._session_authorizer = session_authorizer
+        if (
+            isinstance(session_idle_timeout_seconds, bool)
+            or not isinstance(session_idle_timeout_seconds, int)
+            or session_idle_timeout_seconds <= 0
+            or session_idle_timeout_seconds > 3600
+        ):
+            raise ValueError(
+                "Session idle timeout must be an integer between 1 and 3600 seconds"
+            )
+        self._session_idle_timeout_seconds = session_idle_timeout_seconds
         self._now = now or time.time
         self._sessions: dict[str, Session] = {}
 
@@ -141,12 +153,18 @@ class SecurityBoundary:
             raise PermissionError(
                 "Session identity and role are not authenticated"
             )
+        issued_at = self._now_value()
+        expires_at = issued_at + ttl_seconds
         session = Session(
             token=secrets.token_urlsafe(32),
             subject=normalized_subject,
             role=normalized_role,
             origin=normalized_origin,
-            expires_at=self._now_value() + ttl_seconds,
+            expires_at=expires_at,
+            idle_expires_at=min(
+                expires_at,
+                issued_at + self._session_idle_timeout_seconds,
+            ),
         )
         self._sessions[session.token] = session
         return session
@@ -165,9 +183,13 @@ class SecurityBoundary:
         if session.origin not in self._paired_origins:
             self._sessions.pop(normalized_token, None)
             raise PermissionError("Session origin is no longer paired")
-        if self._now_value() >= session.expires_at:
+        now = self._now_value()
+        if now >= session.expires_at:
             self._sessions.pop(normalized_token, None)
             raise PermissionError("Session expired")
+        if now >= session.idle_expires_at:
+            self._sessions.pop(normalized_token, None)
+            raise PermissionError("Session idle timeout expired")
         if origin is not None and _authenticated_origin(origin) != session.origin:
             raise PermissionError("Session origin mismatch")
         if required_roles is not None:
@@ -178,6 +200,16 @@ class SecurityBoundary:
                 raise PermissionError("Unknown required role")
             if session.role not in normalized_roles:
                 raise PermissionError("Role is not authorized")
+        refreshed_idle_expires_at = min(
+            session.expires_at,
+            now + self._session_idle_timeout_seconds,
+        )
+        if refreshed_idle_expires_at != session.idle_expires_at:
+            session = replace(
+                session,
+                idle_expires_at=refreshed_idle_expires_at,
+            )
+            self._sessions[normalized_token] = session
         return session
 
     def validate_host_session(

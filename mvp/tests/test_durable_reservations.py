@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
-from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+from mvp.autotrade_mvp.persistence import (\n    JournalStore,\n    _event_envelope_digest,\n    canonical_json,\n    payload_digest,\n)
 from research.autotrade_research.artifacts.store import ArtifactStore
 from mvp.autotrade_mvp.reservations import (
     InsufficientAvailable,
@@ -425,23 +425,28 @@ class DurableReservationBookTests(unittest.TestCase):
         self.reserve(book)
         with closing(sqlite3.connect(self.path)) as connection:
             row = connection.execute(
-                "SELECT event_id, payload_json FROM events "
+                "SELECT event_id, payload_json, envelope_json FROM events "
                 "WHERE aggregate_type='reservation_book'"
             ).fetchone()
             import json
-            from mvp.autotrade_mvp.persistence import payload_digest
 
             payload = json.loads(row[1])
             payload["snapshot"]["remaining"]["CASH:USD"] = "69"
-            replacement = json.dumps(
-                payload,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-            )
+            replacement = canonical_json(payload)
+            envelope = json.loads(row[2])
+            envelope["payload"] = payload
+            envelope["payload_hash"] = payload_digest(payload)
+            envelope_json = canonical_json(envelope)
             connection.execute(
-                "UPDATE events SET payload_json=?, payload_hash=? WHERE event_id=?",
-                (replacement, payload_digest(payload), row[0]),
+                "UPDATE events SET payload_json=?, payload_hash=?, "
+                "envelope_json=?, envelope_hash=? WHERE event_id=?",
+                (
+                    replacement,
+                    payload_digest(payload),
+                    envelope_json,
+                    _event_envelope_digest(envelope_json),
+                    row[0],
+                ),
             )
             connection.commit()
 

@@ -17,6 +17,11 @@ from mvp.autotrade_mvp.borrow import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.risk import RiskContext, RiskIntent
+from mvp.tests.borrow_evidence_helpers import (
+    EvidencedBorrowJournal,
+    artifact_store_for,
+    bind_provider_evidence,
+)
 
 
 INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
@@ -145,7 +150,7 @@ class BorrowResourceTests(unittest.TestCase):
     def test_provider_loan_truth_must_match_current_filled_short(self):
         scope = resource()
         with TemporaryDirectory() as directory:
-            journal = BorrowLifecycleJournal(
+            journal = EvidencedBorrowJournal(
                 JournalStore(f"{directory}/journal.sqlite3"),
                 scope,
             )
@@ -171,7 +176,7 @@ class BorrowResourceTests(unittest.TestCase):
     def test_existing_short_requires_fresh_provider_loan_truth(self):
         scope = resource()
         with TemporaryDirectory() as directory:
-            journal = BorrowLifecycleJournal(
+            journal = EvidencedBorrowJournal(
                 JournalStore(f"{directory}/journal.sqlite3"),
                 scope,
             )
@@ -219,7 +224,7 @@ class BorrowLifecycleJournalTests(unittest.TestCase):
             path = f"{directory}/journal.sqlite3"
             store = JournalStore(path)
             scope = resource()
-            journal = BorrowLifecycleJournal(store, scope)
+            journal = EvidencedBorrowJournal(store, scope)
             journal.record_locate(locate(scope))
             journal.record_loan(loan(scope, borrowed_quantity="25"))
             journal.record_recall(
@@ -237,7 +242,7 @@ class BorrowLifecycleJournalTests(unittest.TestCase):
             self.assertTrue(journal.state().blocks_new_short)
             self.assertEqual(journal.state().active_recall_quantity, Decimal("25"))
 
-            reopened = BorrowLifecycleJournal(JournalStore(path), scope)
+            reopened = EvidencedBorrowJournal(JournalStore(path), scope)
             state = reopened.state()
             self.assertTrue(state.blocks_new_short)
             self.assertEqual(state.active_recall_quantity, Decimal("25"))
@@ -248,7 +253,7 @@ class BorrowLifecycleJournalTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             scope = resource()
-            journal = BorrowLifecycleJournal(store, scope)
+            journal = EvidencedBorrowJournal(store, scope)
             journal.record_locate(locate(scope, available_quantity="50"))
             journal.record_loan(loan(scope, borrowed_quantity="10"))
             self.assertEqual(
@@ -284,7 +289,7 @@ class BorrowLifecycleJournalTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             scope = resource()
-            journal = BorrowLifecycleJournal(store, scope)
+            journal = EvidencedBorrowJournal(store, scope)
             journal.record_locate(locate(scope, available_quantity="20"))
             journal.record_loan(loan(scope, borrowed_quantity="5"))
 
@@ -331,7 +336,7 @@ class BorrowLifecycleJournalTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             scope = resource()
-            journal = BorrowLifecycleJournal(store, scope)
+            journal = EvidencedBorrowJournal(store, scope)
             journal.record_locate(locate(scope, available_quantity="20"))
             bound = journal.authority_snapshot(
                 context(),
@@ -350,7 +355,7 @@ class BorrowLifecycleJournalTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             scope = resource()
-            journal = BorrowLifecycleJournal(store, scope)
+            journal = EvidencedBorrowJournal(store, scope)
             journal.record_recall(
                 BorrowRecallEvidence(
                     resource=scope,
@@ -389,7 +394,7 @@ class BorrowLifecycleJournalTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             scope = resource()
-            journal = BorrowLifecycleJournal(store, scope)
+            journal = EvidencedBorrowJournal(store, scope)
             journal.record_recall(
                 BorrowRecallEvidence(
                     resource=scope,
@@ -417,7 +422,7 @@ class BorrowLifecycleJournalTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             scope = resource()
-            journal = BorrowLifecycleJournal(store, scope)
+            journal = EvidencedBorrowJournal(store, scope)
             first = journal.record_locate(locate(scope))
             replay = journal.record_locate(locate(scope))
             self.assertEqual(first["event_id"], replay["event_id"])

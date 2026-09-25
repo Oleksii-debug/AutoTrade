@@ -1826,34 +1826,47 @@ def commit_economic_correction_with_settlement_replacement(
             "fresh provider correction binding is missing durable event"
         )
 
-    request = {
-        "schema_version": "1.1.0",
-        "provider_id": economic_book.provider_id,
-        "account_id": economic_book.account_id,
-        "environment": economic_book.environment,
-        "economic_correction": economic_plan.request,
-        "replacement_settlement": settlement_plan.request,
-        "reservation_consumption": (
-            None if reservation_plan is None else reservation_plan.request
-        ),
-        "provider_fill_correction_binding": (
-            None
-            if provider_fill_correction_binding is None
-            else provider_fill_correction_binding.request
-        ),
-    }
-    result = {
-        "economic_correction": economic_plan.result,
-        "replacement_settlement": settlement_plan.result,
-        "reservation_consumption": (
-            None if reservation_plan is None else reservation_plan.snapshot_payload
-        ),
-        "provider_fill_correction_binding": (
-            None
-            if provider_fill_correction_binding is None
-            else provider_fill_correction_binding.result
-        ),
-    }
+    if provider_fill_correction_binding is None:
+        # Preserve the exact legacy durable command contract for upgrade-safe
+        # retry of economics+settlement corrections created before reservation
+        # correction binding existed.
+        request = {
+            "schema_version": "1.0.0",
+            "provider_id": economic_book.provider_id,
+            "account_id": economic_book.account_id,
+            "environment": economic_book.environment,
+            "economic_correction": economic_plan.request,
+            "replacement_settlement": settlement_plan.request,
+        }
+        result = {
+            "economic_correction": economic_plan.result,
+            "replacement_settlement": settlement_plan.result,
+        }
+    else:
+        request = {
+            "schema_version": "1.1.0",
+            "provider_id": economic_book.provider_id,
+            "account_id": economic_book.account_id,
+            "environment": economic_book.environment,
+            "economic_correction": economic_plan.request,
+            "replacement_settlement": settlement_plan.request,
+            "reservation_consumption": (
+                None if reservation_plan is None else reservation_plan.request
+            ),
+            "provider_fill_correction_binding": (
+                provider_fill_correction_binding.request
+            ),
+        }
+        result = {
+            "economic_correction": economic_plan.result,
+            "replacement_settlement": settlement_plan.result,
+            "reservation_consumption": (
+                None if reservation_plan is None else reservation_plan.snapshot_payload
+            ),
+            "provider_fill_correction_binding": (
+                provider_fill_correction_binding.result
+            ),
+        }
     command_identity = str(
         uuid5(
             NAMESPACE_URL,

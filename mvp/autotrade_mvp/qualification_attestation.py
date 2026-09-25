@@ -822,9 +822,12 @@ def verify_qualification_attestation(
     *,
     policy: QualificationTrustPolicy,
     evidence_store: ArtifactStore,
+    expected_policy_id: str,
+    expected_policy_version: str,
     expected_source_sha: str,
     expected_domain: str,
     expected_gate: str,
+    expected_package_id: str,
     expected_protocol_id: str,
     expected_protocol_version: str,
     expected_requirement_id: str,
@@ -842,6 +845,22 @@ def verify_qualification_attestation(
     if not isinstance(evidence_store, ArtifactStore):
         raise TypeError("evidence_store must be ArtifactStore")
 
+    expected_policy_id = _digest(
+        expected_policy_id, name="expected_policy_id"
+    )
+    expected_policy_version = _token(
+        expected_policy_version,
+        name="expected_policy_version",
+    )
+    if policy.policy_id != expected_policy_id:
+        raise QualificationTrustError(
+            "qualification trust policy identity is not the pinned policy"
+        )
+    if policy.policy_version != expected_policy_version:
+        raise QualificationTrustError(
+            "qualification trust policy version is stale or mismatched"
+        )
+
     expected_source_sha = _git_sha(
         expected_source_sha, name="expected_source_sha"
     )
@@ -850,6 +869,9 @@ def verify_qualification_attestation(
     )
     expected_gate = _token(
         expected_gate, name="expected_gate", upper=True
+    )
+    expected_package_id = _token(
+        expected_package_id, name="expected_package_id", upper=True
     )
     expected_protocol_id = _token(
         expected_protocol_id, name="expected_protocol_id"
@@ -889,6 +911,10 @@ def verify_qualification_attestation(
     ):
         raise QualificationTrustError(
             "attestation is not authorized for the requested domain/gate"
+        )
+    if attestation.package_id != expected_package_id:
+        raise QualificationTrustError(
+            "attestation package does not match requested package"
         )
     if (
         attestation.protocol_id != expected_protocol_id
@@ -932,6 +958,11 @@ def verify_qualification_attestation(
         )
 
     signed_at = _instant_value(attestation.signed_at)
+    if root.revoked_at is not None:
+        raise QualificationTrustError(
+            "revoked trust root cannot authorize terminal qualification "
+            "without independently authenticated chronology evidence"
+        )
     if signed_at < _instant_value(root.valid_from):
         raise QualificationTrustError(
             "attestation predates trust root validity"
@@ -943,14 +974,6 @@ def verify_qualification_attestation(
         raise QualificationTrustError(
             "attestation is outside trust root validity"
         )
-    if (
-        root.revoked_at is not None
-        and signed_at >= _instant_value(root.revoked_at)
-    ):
-        raise QualificationTrustError(
-            "attestation was signed after trust root revocation"
-        )
-
     signature = base64.b64decode(
         receipt.signature_b64, validate=True
     )

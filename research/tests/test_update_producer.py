@@ -24,11 +24,12 @@ from research.autotrade_research.learning.update_producer import (
     publish_online_update_result,
 )
 from research.autotrade_research.memory.episodes import ExperienceMemory
+from research.autotrade_research.science.registry import ScientificRegistry
 
 
 SOURCE_SHA = "a" * 40
 FEATURE_SCHEMA = "sha256:" + "f" * 64
-FROZEN_PROTOCOL = "sha256:" + "e" * 64
+PROTOCOL_ID = "00000000-0000-0000-0000-000000000901"
 CALIBRATION_CUTOFF = datetime(2026, 10, 5, tzinfo=timezone.utc)
 UPDATE_CUTOFF = datetime(2026, 10, 10, tzinfo=timezone.utc)
 DECISION = datetime(2026, 10, 1, tzinfo=timezone.utc)
@@ -54,6 +55,8 @@ class ProducerFixture:
         )
         self.artifacts = ArtifactStore(self.root / "artifacts")
         self.jobs = ResearchJobStore(self.root / "jobs.sqlite3")
+        self.science = ScientificRegistry(self.root / "science.sqlite3")
+        self.protocol_registration = None
         self._episode_counter = 0
         self._physical_evidence_refs = {}
 
@@ -178,7 +181,63 @@ class ProducerFixture:
             ),
         )
 
-    def publish_checkpoint(self):
+
+    def register_protocol(self):
+        snapshot = self.memory.coverage_population_snapshot(
+            causal_cutoff=CALIBRATION_CUTOFF,
+            granted_permissions={"research"},
+            task="calibration",
+            instrument_family="equity",
+        )
+        payload = {
+            "hypothesis": "bounded update preregistered before candidate publication",
+            "strategy": "bounded-linear-gradient-v1",
+            "features": ["x"],
+            "search_space": {"learning_rate": ["1"]},
+            "train_period": {"start": "2024-01-01", "end": "2024-12-31"},
+            "validation_period": {"start": "2025-01-01", "end": "2025-06-30"},
+            "test_period": {"start": "2025-07-01", "end": "2025-12-31"},
+            "forward_period": {"start": "2026-01-01", "end": "2026-06-30"},
+            "labels": ["label-v1"],
+            "horizons": ["1d"],
+            "purge_embargo": {"purge": "1d", "embargo": "1d"},
+            "universe": ["equity"],
+            "cost_fill_model": "test-cost-v1",
+            "baselines": ["zero-update"],
+            "primary_metrics": ["bounded-loss"],
+            "secondary_metrics": ["drift"],
+            "trial_budget": 3,
+            "stopping_rules": "fail closed on evidence gaps",
+            "statistical_estimator": "deterministic",
+            "multiplicity_treatment": "registered",
+            "minimum_practical_effect": "0.001",
+            "risk_constraints": {"max_update": "bounded"},
+            "retention_tolerances": {"prior_regime_loss": "0"},
+            "promotion_rule": "independent downstream gates",
+            "online_update_registration": {
+                "schema_version": "1.0.0",
+                "calibration_population_root_hash": snapshot.root_hash,
+                "calibration_cutoff": CALIBRATION_CUTOFF.isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "update_task": "update",
+                "calibration_task": "calibration",
+                "instrument_family": "equity",
+                "permission_classes": ["research"],
+                "feature_schema_hash": FEATURE_SCHEMA,
+                "label_version": "label-v1",
+                "source_sha": SOURCE_SHA,
+            },
+        }
+        self.protocol_registration = self.science.register_protocol(
+            payload,
+            protocol_id=PROTOCOL_ID,
+        )
+        return self.protocol_registration
+
+    def publish_checkpoint(self, *, preregister=True):
+        if preregister and self.protocol_registration is None:
+            self.register_protocol()
         payload = {
             "schema_version": "1.0.0",
             "artifact_kind": "BOUNDED_LINEAR_CHECKPOINT",
@@ -279,6 +338,7 @@ class ProducerFixture:
             calibration_task="calibration",
             test_evidence_refs=(test_ref,),
             instrument_family="equity",
+            protocol_id=PROTOCOL_ID,
         )
 
     @staticmethod
@@ -312,8 +372,12 @@ class ProducerFixture:
         task,
         cutoff,
         extra_exclusions=None,
-        frozen_protocol_hash=FROZEN_PROTOCOL,
+        frozen_protocol_hash=None,
     ):
+        if frozen_protocol_hash is None:
+            if self.protocol_registration is None:
+                raise RuntimeError("protocol must be registered before population manifest")
+            frozen_protocol_hash = self.protocol_registration.protocol_hash
         snapshot = self.memory.coverage_population_snapshot(
             causal_cutoff=cutoff,
             granted_permissions={"research"},
@@ -393,6 +457,7 @@ class ProducerFixture:
             granted_permissions=permissions,
             update_population_manifest=update_population_manifest,
             calibration_population_manifest=calibration_population_manifest,
+            scientific_registry=self.science,
         )
 
 
@@ -596,7 +661,7 @@ class UpdateProducerTests(unittest.TestCase):
                 checkpoint_ref=checkpoint,
                 task="update",
                 cutoff=UPDATE_CUTOFF,
-                frozen_protocol_hash=FROZEN_PROTOCOL,
+                frozen_protocol_hash=fixture.protocol_registration.protocol_hash,
             )
             calibration_manifest = fixture.population_manifest(
                 checkpoint_ref=checkpoint,

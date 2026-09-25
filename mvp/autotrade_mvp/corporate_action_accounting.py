@@ -304,7 +304,6 @@ def _correction_transactions(
     transition: Transition,
     *,
     exact_retry: bool,
-    transaction_observed_at: str | None = None,
 ) -> tuple[JournalTransaction, ...]:
     target_id = accepted.corrects_external_event_id
     if target_id is None:
@@ -411,6 +410,7 @@ def _economic_transactions(
     transition: Transition,
     *,
     exact_retry: bool,
+    transaction_observed_at: str | None = None,
 ) -> tuple[JournalTransaction, ...]:
     if accepted.event.kind not in _SUPPORTED_DURABLE_KINDS:
         raise AccountingConflict(

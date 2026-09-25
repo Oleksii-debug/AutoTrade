@@ -13,6 +13,75 @@ public sealed record EmergencyHostStatus(
     DateTimeOffset ObservedAtUtc,
     string Message)
 {
+    public EmergencyHostStatus Validated()
+    {
+        if (string.IsNullOrWhiteSpace(Message))
+        {
+            throw new InvalidOperationException("Host status message is required.");
+        }
+
+        if (ObservedAtUtc == default || ObservedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new InvalidOperationException(
+                "Host status evidence time must be a non-default UTC instant.");
+        }
+
+        if (Connected)
+        {
+            ValidateConnectedIdentity(HostId, nameof(HostId));
+            ValidateConnectedIdentity(AccountId, nameof(AccountId));
+            ValidateConnectedIdentity(Environment, nameof(Environment));
+            ValidateConnectedIdentity(StateVersion, nameof(StateVersion));
+            ValidateEnvironment(Environment);
+            ValidateStateVersion(StateVersion);
+        }
+
+        return this;
+    }
+
+    private static void ValidateConnectedIdentity(string value, string name)
+    {
+        if (string.IsNullOrWhiteSpace(value)
+            || !string.Equals(value, value.Trim(), StringComparison.Ordinal)
+            || string.Equals(value, "Unavailable", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Connected host status requires canonical {name} evidence.");
+        }
+    }
+
+    private static void ValidateEnvironment(string value)
+    {
+        if (value is not ("REPLAY" or "SIMULATION" or "PAPER" or "LIVE"))
+        {
+            throw new InvalidOperationException(
+                "Connected host status environment must be REPLAY, SIMULATION, PAPER, or LIVE.");
+        }
+    }
+
+    private static void ValidateStateVersion(string value)
+    {
+        bool canonical = value == "0";
+        if (!canonical && value.Length > 0 && value[0] is >= '1' and <= '9')
+        {
+            canonical = true;
+            foreach (char character in value)
+            {
+                if (character is < '0' or > '9')
+                {
+                    canonical = false;
+                    break;
+                }
+            }
+        }
+
+        if (!canonical)
+        {
+            throw new InvalidOperationException(
+                "Connected host state version must be a canonical non-negative integer sequence string.");
+        }
+    }
+
     public static EmergencyHostStatus Disconnected(string message) =>
         new(
             false,
@@ -21,7 +90,9 @@ public sealed record EmergencyHostStatus(
             "Unavailable",
             "Unavailable",
             DateTimeOffset.UtcNow,
-            message);
+            string.IsNullOrWhiteSpace(message)
+                ? throw new ArgumentException("Disconnected status message is required.", nameof(message))
+                : message.Trim());
 }
 
 /// <summary>

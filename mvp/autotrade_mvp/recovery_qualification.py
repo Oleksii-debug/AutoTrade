@@ -7,7 +7,7 @@ evidence produced by the canonical recovery/runtime components.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from hashlib import sha256
 import json
@@ -34,6 +34,8 @@ _GIT_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _RELEASE_ARTIFACT_MEDIA_TYPE = "application/vnd.autotrade.release-artifact"
 _RECOVERY_EVIDENCE_MEDIA_TYPE = "application/vnd.autotrade.recovery-evidence"
+_RECOVERY_EVIDENCE_KIND = "RECOVERY_SCENARIO_EVIDENCE"
+_RECOVERY_QUALIFICATION_DECISION_TOKEN = object()
 _QUALIFICATION_DOMAIN = "RECOVERY"
 _QUALIFICATION_GATE = "RELEASE"
 _QUALIFICATION_PACKAGE = "WP-59"
@@ -302,7 +304,7 @@ def recovery_evidence_receipt_metadata(
     if not isinstance(item, RecoveryScenarioEvidence):
         raise TypeError("item must be RecoveryScenarioEvidence")
     return {
-        "evidence_kind": "RECOVERY_SCENARIO_EVIDENCE",
+        "evidence_kind": _RECOVERY_EVIDENCE_KIND,
         "scenario": item.scenario.value,
         "status": item.status.value,
         "source_sha": item.source_sha,
@@ -332,6 +334,30 @@ def recovery_evidence_receipt_metadata(
     }
 
 
+def recovery_evidence_receipt_payload(
+    item: RecoveryScenarioEvidence,
+) -> dict[str, object]:
+    """Canonical bytes whose digest binds every recovery qualification fact."""
+
+    payload = dict(recovery_evidence_receipt_metadata(item))
+    # The content digest cannot include itself; every other decision-relevant fact
+    # remains inside the immutable receipt bytes.
+    payload.pop("evidence_artifact_sha256")
+    return payload
+
+
+def recovery_evidence_receipt_bytes(
+    item: RecoveryScenarioEvidence,
+) -> bytes:
+    return json.dumps(
+        recovery_evidence_receipt_payload(item),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
 def _store_artifact_matches(
     store: ArtifactStore,
     *,
@@ -340,6 +366,7 @@ def _store_artifact_matches(
     media_type: str,
     source_sha: str,
     metadata: dict[str, object],
+    expected_bytes: bytes | None = None,
 ) -> bool:
     """Verify stored bytes and declared bindings, not independent producer trust."""
     try:
@@ -354,7 +381,12 @@ def _store_artifact_matches(
             return False
         if manifest.get("metadata") != metadata:
             return False
-        store.read_bytes(artifact_id)
+        data = store.read_bytes(artifact_id)
+        if expected_bytes is not None:
+            if data != expected_bytes:
+                return False
+            if "sha256:" + sha256(data).hexdigest() != artifact_sha256:
+                return False
     except (
         ArtifactIntegrityError,
         FileNotFoundError,
@@ -382,6 +414,33 @@ def _recovery_evidence_set_sha256(
     return "sha256:" + sha256(encoded).hexdigest()
 
 
+def _qualification_covers_exact_recovery_evidence(
+    receipt: SignedQualificationAttestation,
+    evidence: Sequence[RecoveryScenarioEvidence],
+) -> bool:
+    expected = {
+        (
+            item.evidence_artifact_id,
+            item.evidence_artifact_sha256,
+            item.source_sha,
+            _RECOVERY_EVIDENCE_MEDIA_TYPE,
+            _RECOVERY_EVIDENCE_KIND,
+        )
+        for item in evidence
+    }
+    observed = {
+        (
+            ref.artifact_id,
+            ref.sha256,
+            ref.source_sha,
+            ref.media_type,
+            ref.evidence_kind,
+        )
+        for ref in receipt.attestation.evidence_refs
+    }
+    return observed == expected
+
+
 @dataclass(frozen=True, slots=True)
 class RecoveryQualificationDecision:
     status: RecoveryEvidenceStatus
@@ -397,6 +456,7 @@ class RecoveryQualificationDecision:
     qualification_attestation_digest: str | None = None
     qualification_policy_id: str | None = None
     qualification_trust_root_id: str | None = None
+    _verification_token: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -449,12 +509,61 @@ class RecoveryQualificationDecision:
                 name=f"measured_downtime_ms[{scenario.value}]",
             )
 
+        qualification_values = (
+            self.qualification_attestation_id,
+            self.qualification_attestation_digest,
+            self.qualification_policy_id,
+            self.qualification_trust_root_id,
+        )
+        if any(value is not None for value in qualification_values):
+            if not all(value is not None for value in qualification_values):
+                raise ValueError(
+                    "qualification trust identity must be complete when present"
+                )
+            object.__setattr__(
+                self,
+                "qualification_attestation_id",
+                _artifact_id(
+                    self.qualification_attestation_id,
+                    name="qualification_attestation_id",
+                ),
+            )
+            object.__setattr__(
+                self,
+                "qualification_attestation_digest",
+                _sha256(
+                    self.qualification_attestation_digest,
+                    name="qualification_attestation_digest",
+                ),
+            )
+            object.__setattr__(
+                self,
+                "qualification_policy_id",
+                _sha256(self.qualification_policy_id, name="qualification_policy_id"),
+            )
+            object.__setattr__(
+                self,
+                "qualification_trust_root_id",
+                _sha256(
+                    self.qualification_trust_root_id,
+                    name="qualification_trust_root_id",
+                ),
+            )
+
         if self.status is RecoveryEvidenceStatus.PASS:
             if blockers:
                 raise ValueError("PASS recovery decision cannot contain blockers")
             if set(measured) != _REQUIRED_SCENARIOS:
                 raise ValueError(
                     "PASS recovery decision must measure every required scenario"
+                )
+            if not all(value is not None for value in qualification_values):
+                raise ValueError(
+                    "PASS recovery decision requires accepted qualification trust"
+                )
+            if self._verification_token is not _RECOVERY_QUALIFICATION_DECISION_TOKEN:
+                raise ValueError(
+                    "PASS recovery decision must come from canonical qualification"
                 )
         elif not blockers:
             raise ValueError("non-PASS recovery decision requires blockers")
@@ -514,11 +623,15 @@ def qualify_recovery_release(
     hard_failure = False
     inconclusive = False
 
+    evidence_artifact_ids: set[str] = set()
     for item in evidence:
         if not isinstance(item, RecoveryScenarioEvidence):
             raise TypeError("evidence must contain RecoveryScenarioEvidence")
         if item.scenario in by_scenario:
             raise ValueError(f"duplicate evidence for {item.scenario.value}")
+        if item.evidence_artifact_id in evidence_artifact_ids:
+            raise ValueError("duplicate recovery evidence artifact identity")
+        evidence_artifact_ids.add(item.evidence_artifact_id)
         by_scenario[item.scenario] = item
 
     missing = sorted(
@@ -560,6 +673,12 @@ def qualify_recovery_release(
         blockers.append("independent_evidence_trust_incomplete")
         inconclusive = True
     else:
+        if not _qualification_covers_exact_recovery_evidence(
+            qualification_receipt,
+            tuple(by_scenario.values()),
+        ):
+            blockers.append("independent_evidence_set_mismatch")
+            hard_failure = True
         try:
             accepted = verify_qualification_attestation(
                 qualification_receipt,
@@ -581,23 +700,12 @@ def qualify_recovery_release(
             blockers.append("independent_evidence_trust_invalid")
             inconclusive = True
         else:
-            signed_refs = {
-                (item.artifact_id, item.sha256)
-                for item in qualification_receipt.attestation.evidence_refs
-            }
-            expected_refs = {
-                (item.evidence_artifact_id, item.evidence_artifact_sha256)
-                for item in by_scenario.values()
-            }
             if accepted.result == "FAIL":
                 blockers.append("independent_evidence_attestation_failed")
                 hard_failure = True
             elif accepted.result != "PASS":
                 blockers.append("independent_evidence_attestation_inconclusive")
                 inconclusive = True
-            elif signed_refs != expected_refs:
-                blockers.append("independent_evidence_set_mismatch")
-                hard_failure = True
 
     for scenario in sorted(by_scenario, key=lambda item: item.value):
         item = by_scenario[scenario]
@@ -612,6 +720,7 @@ def qualify_recovery_release(
                 media_type=_RECOVERY_EVIDENCE_MEDIA_TYPE,
                 source_sha=item.source_sha,
                 metadata=recovery_evidence_receipt_metadata(item),
+                expected_bytes=recovery_evidence_receipt_bytes(item),
             )
         if not integrity_verified:
             blockers.append(f"{prefix}:evidence_integrity_unverified")
@@ -729,5 +838,10 @@ def qualify_recovery_release(
         ),
         qualification_trust_root_id=(
             None if accepted is None else accepted.trust_root_id
+        ),
+        _verification_token=(
+            _RECOVERY_QUALIFICATION_DECISION_TOKEN
+            if status is RecoveryEvidenceStatus.PASS and accepted is not None
+            else None
         ),
     )

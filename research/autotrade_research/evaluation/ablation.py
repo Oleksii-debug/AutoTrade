@@ -446,7 +446,7 @@ def evaluate_incremental_value(
         raise ValueError("uncertainty_multiplier must be non-negative")
 
     target = target_component.strip() if isinstance(target_component, str) else target_component
-    selected = _validate_pairs(target, selected_input)
+    selected = _validate_pairs(target, pairs)
     if any(not pair.full.input_evidence for pair in selected):
         return AblationEvaluation(
             target_component=target,
@@ -1067,7 +1067,7 @@ def evaluate_qualified_incremental_value(
     if multiplier < 0:
         raise ValueError("uncertainty_multiplier must be non-negative")
     target = target_component.strip() if isinstance(target_component, str) else target_component
-    selected = _validate_pairs(target, pairs)
+    selected = _validate_pairs(target, selected_input)
 
     def inconclusive(reason: str) -> AblationEvaluation:
         return _qualified_inconclusive(

@@ -1,3 +1,4 @@
+from functools import partial
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import unittest
@@ -65,6 +66,11 @@ def ready_session(**overrides):
     values.update(overrides)
     return IbkrBrokerageSessionStatus(**values)
 
+
+
+# Bind only test fixtures; production APIs require explicit account/environment scope.
+parse_web_api_trades = partial(parse_web_api_trades, environment="PAPER")
+execution_to_reconciliation_fill = partial(execution_to_reconciliation_fill, environment="PAPER")
 
 class IbkrWebAdapterTests(unittest.TestCase):
     def test_trade_session_requires_all_ready_flags_and_no_competitor(self):

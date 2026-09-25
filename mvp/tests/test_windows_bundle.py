@@ -338,6 +338,32 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
                 provenance_path=self.provenance(eligible=False),
             )
 
+    def test_windows_reserved_and_trailing_dot_paths_are_rejected(self):
+        reserved = self.staging / "CON.txt"
+        reserved.write_bytes(b"reserved")
+        with self.assertRaisesRegex(BundleError, "reserved device name"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "reserved.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+        reserved.unlink()
+
+        trailing = self.staging / "report."
+        trailing.write_bytes(b"ambiguous")
+        with self.assertRaisesRegex(BundleError, "trailing space/dot"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "trailing-dot.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
     def test_source_sha_and_empty_staging_are_rejected(self):
         with self.assertRaisesRegex(BundleError, "source_sha"):
             build_bundle(

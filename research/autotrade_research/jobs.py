@@ -138,6 +138,37 @@ def _verify_job_output_artifact(
     )
 
 
+def _verify_job_checkpoint_artifact(
+    *,
+    artifact_store: ArtifactStore,
+    checkpoint_ref: str,
+    job_id: str,
+    generation: int,
+    input_hashes: list[str],
+) -> bool:
+    """Prove a checkpoint is immutable and belongs to this exact job generation."""
+
+    if not _verify_artifact_ref(artifact_store, checkpoint_ref):
+        return False
+    reference = _require_immutable_artifact_ref(
+        checkpoint_ref,
+        "checkpoint_ref",
+    )
+    artifact_id = reference[len("artifact:"):].split("@sha256:", 1)[0]
+    try:
+        manifest = artifact_store.load_manifest(artifact_id)
+    except (FileNotFoundError, UnicodeError, ValueError, TypeError):
+        return False
+    metadata = manifest.get("metadata")
+    return (
+        isinstance(metadata, dict)
+        and metadata.get("artifact_kind") == "RESEARCH_JOB_CHECKPOINT"
+        and metadata.get("job_id") == job_id
+        and metadata.get("job_generation") == generation
+        and manifest.get("source_refs") == input_hashes
+    )
+
+
 def _verify_external_resolution_artifact(
     *,
     artifact_store: ArtifactStore,
@@ -726,6 +757,7 @@ class ResearchJobStore:
         generation: int,
         checkpoint_ref: str,
         resource_usage: dict[str, int | float],
+        artifact_store: ArtifactStore,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         identifier = str(UUID(_require_text(job_id, "job_id")))
@@ -741,6 +773,18 @@ class ResearchJobStore:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (identifier,)).fetchone()
             self._require_live_lease(row, worker, generation, current)
+            input_hashes = json.loads(row["input_hashes_json"])
+            if not _verify_job_checkpoint_artifact(
+                artifact_store=artifact_store,
+                checkpoint_ref=checkpoint,
+                job_id=identifier,
+                generation=generation,
+                input_hashes=input_hashes,
+            ):
+                connection.rollback()
+                raise JobConflictError(
+                    "checkpoint requires verified job-bound immutable artifact"
+                )
             budget = json.loads(row["resource_budget_json"])
             previous_usage = json.loads(row["resource_usage_json"])
             merged_usage = dict(previous_usage)
@@ -763,6 +807,74 @@ class ResearchJobStore:
             updated = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (identifier,)).fetchone()
             connection.commit()
         return self._row_record(updated)
+
+    def publish_checkpoint_bytes(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        generation: int,
+        artifact_store: ArtifactStore,
+        data: bytes,
+        media_type: str,
+        rights: dict[str, Any],
+        resource_usage: dict[str, int | float],
+        slot: str = "primary",
+        now: datetime | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Publish and durably bind one deterministic checkpoint artifact."""
+
+        identifier = str(UUID(_require_text(job_id, "job_id")))
+        worker = _require_text(worker_id, "worker_id")
+        checkpoint_slot = _require_text(slot, "slot")
+        if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+            raise ValueError("generation must be a positive integer")
+        if not isinstance(data, bytes):
+            raise TypeError("data must be bytes")
+        current = _utc(now or datetime.now(timezone.utc))
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id = ?",
+                (identifier,),
+            ).fetchone()
+            self._require_live_lease(row, worker, generation, current)
+            source_refs = json.loads(row["input_hashes_json"])
+            kind = row["kind"]
+            connection.commit()
+
+        artifact_id = str(
+            uuid5(
+                UUID(identifier),
+                f"checkpoint:generation:{generation}:slot:{checkpoint_slot}",
+            )
+        )
+        manifest = artifact_store.publish_bytes(
+            artifact_id=artifact_id,
+            data=data,
+            media_type=media_type,
+            rights=rights,
+            source_refs=source_refs,
+            metadata={
+                "artifact_kind": "RESEARCH_JOB_CHECKPOINT",
+                "job_id": identifier,
+                "job_generation": generation,
+                "job_kind": kind,
+                "slot": checkpoint_slot,
+            },
+        )
+        checkpoint_ref = f"artifact:{artifact_id}@{manifest['sha256']}"
+        record = self.checkpoint(
+            identifier,
+            worker_id=worker,
+            generation=generation,
+            checkpoint_ref=checkpoint_ref,
+            resource_usage=resource_usage,
+            artifact_store=artifact_store,
+            now=now,
+        )
+        return manifest, record
 
     def cancel(self, job_id: str, *, now: datetime | None = None) -> bool:
         identifier = str(UUID(_require_text(job_id, "job_id")))

@@ -14,3 +14,6 @@ It adds:
 The implementation intentionally does not infer required option level from strategy intent. The caller must bind a provider-qualified required level to the exact intended operation. This avoids silently treating all single-leg option actions as economically or legally equivalent.
 
 This is non-live software evidence only. It does not prove paper/live equivalence, option assignment timing guarantees, economic edge, or real-account qualification.
+
+
+Hardening: option entitlement admission is bound to the exact target account ID and PAPER/LIVE environment. Evidence from another account or from paper trading cannot qualify a live option intent.

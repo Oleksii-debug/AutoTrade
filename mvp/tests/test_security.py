@@ -51,6 +51,7 @@ class SecurityBoundaryTests(unittest.TestCase):
             owner_identity="windows-user-1",
             account_id="paper-1",
             provider="SIMULATED",
+            environment="PAPER",
             purpose="TRADE",
             secret_value="top-secret",
         )
@@ -66,6 +67,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 "owner_identity": "windows-user-1",
                 "account_id": "paper-1",
                 "provider": "SIMULATED",
+                "environment": "PAPER",
                 "purpose": "TRADE",
             }
             values.update(overrides)
@@ -92,6 +94,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 execution_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             )
 
@@ -105,6 +108,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 execution_identity="windows-user-2",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             )
         with self.assertRaises(PermissionError):
@@ -115,6 +119,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 execution_identity="windows-user-1",
                 account_id="other",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             )
 
@@ -129,6 +134,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 execution_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             )
 
@@ -142,6 +148,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 execution_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             )
 
@@ -163,6 +170,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 execution_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             )
         resolved = self.boundary.resolve_for_execution(
@@ -172,6 +180,7 @@ class SecurityBoundaryTests(unittest.TestCase):
             execution_identity="windows-user-1",
             account_id="paper-1",
             provider="SIMULATED",
+            environment="PAPER",
             purpose="TRADE",
         )
         self.assertEqual(resolved, "rotated-secret")
@@ -184,6 +193,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 owner_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="WITHDRAWAL",
                 secret_value="should-never-exist",
             )
@@ -260,6 +270,54 @@ class SecurityBoundaryTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             store.submit(forged)
         self.assertEqual(store.state_version, 1)
+
+    def test_host_validator_allows_operator_but_rejects_read_only_roles(self):
+        store = HostCommandStore(
+            account_id="paper-account-1",
+            environment="PAPER",
+            session_validator=self.boundary.validate_host_session,
+        )
+        operator = self.boundary.create_session(
+            subject="operator",
+            role="OPERATOR",
+            origin=self.owner.origin,
+        )
+        accepted = {
+            "command_id": "33333333-3333-3333-3333-333333333333",
+            "expected_state_version": "0",
+            "idempotency_key": "security-operator",
+            "actor": "operator",
+            "session": operator.token,
+            "account_id": "paper-account-1",
+            "environment": "PAPER",
+            "action": "BLOCK_NEW_EXPOSURE",
+            "payload": {},
+        }
+        self.assertEqual(store.submit(accepted).status, "ACCEPTED")
+
+        for index, role in enumerate(("RESEARCHER", "OBSERVER"), start=4):
+            session = self.boundary.create_session(
+                subject=role.lower(),
+                role=role,
+                origin=self.owner.origin,
+            )
+            command = {
+                "command_id": (
+                    f"{index}{index}{index}{index}{index}{index}{index}{index}"
+                    "-4444-4444-4444-444444444444"
+                ),
+                "expected_state_version": "1",
+                "idempotency_key": f"security-{role.lower()}",
+                "actor": role.lower(),
+                "session": session.token,
+                "account_id": "paper-account-1",
+                "environment": "PAPER",
+                "action": "BLOCK_NEW_EXPOSURE",
+                "payload": {},
+            }
+            with self.subTest(role=role), self.assertRaises(PermissionError):
+                store.submit(command)
+            self.assertEqual(store.state_version, 1)
 
     def test_revoked_session_cannot_be_reused(self):
         token = self.owner.token
@@ -432,6 +490,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 owner_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="ARBITRARY_TOOL",
                 secret_value="must-not-exist",
             )
@@ -494,6 +553,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 execution_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             ),
             "top-secret",

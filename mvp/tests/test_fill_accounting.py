@@ -328,6 +328,7 @@ class FillAccountingTests(unittest.TestCase):
             corrected_provider_fill=corrected_provider,
             expected_instrument="ABC",
             settlement_currency="USD",
+            correction_observed_at="2026-01-01T00:00:02Z",
         )
         self.assertTrue(book_provider_fill_correction(**args))
         self.assertEqual(book.position("ABC"), Decimal("2"))
@@ -449,9 +450,98 @@ class FillAccountingTests(unittest.TestCase):
                         corrected_provider_fill=provider_evidence,
                         expected_instrument="ABC",
                         settlement_currency="USD",
+                        correction_observed_at="2026-01-01T00:00:02Z",
                     )
                 self.assertEqual(book.audit_digest(), before)
                 self.assertEqual(len(book.transactions), 1)
+
+    def test_second_provider_correction_reverses_latest_active_replacement(self):
+        original_projected, original_provider = matched_fill()
+        first_projected = ProjectedFillEvidence.create(
+            fill_id="fill-1-r2",
+            provider_execution_id="exec-1",
+            intent_id="intent-1",
+            client_order_id="client-1",
+            side="BUY",
+            quantity="2",
+            price="101",
+            provider_revision="r2",
+            correction_of="fill-1",
+        )
+        first_provider = ProviderFillEvidence.create(
+            provider_execution_id="exec-1",
+            client_order_id="client-1",
+            instrument="ABC",
+            quantity="2",
+            price="101",
+            fee_amount="1",
+            fee_currency="USD",
+            trade_time="2026-01-01T00:00:00Z",
+        )
+        second_projected = ProjectedFillEvidence.create(
+            fill_id="fill-1-r3",
+            provider_execution_id="exec-1",
+            intent_id="intent-1",
+            client_order_id="client-1",
+            side="BUY",
+            quantity="2",
+            price="102",
+            provider_revision="r3",
+            correction_of="fill-1-r2",
+        )
+        second_provider = ProviderFillEvidence.create(
+            provider_execution_id="exec-1",
+            client_order_id="client-1",
+            instrument="ABC",
+            quantity="2",
+            price="102",
+            fee_amount="1",
+            fee_currency="USD",
+            trade_time="2026-01-01T00:00:00Z",
+        )
+        book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
+        self.assertTrue(book_provider_fill(
+            book=book,
+            provider_id="provider-a",
+            projected_fill=original_projected,
+            provider_fill=original_provider,
+            expected_instrument="ABC",
+            settlement_currency="USD",
+        ))
+        self.assertTrue(book_provider_fill_correction(
+            book=book,
+            provider_id="provider-a",
+            original_projected_fill=original_projected,
+            original_provider_fill=original_provider,
+            corrected_projected_fill=first_projected,
+            corrected_provider_fill=first_provider,
+            expected_instrument="ABC",
+            settlement_currency="USD",
+            correction_observed_at="2026-01-01T00:00:02Z",
+        ))
+        first_replacement = book.transactions[-1]
+        self.assertTrue(book_provider_fill_correction(
+            book=book,
+            provider_id="provider-a",
+            original_projected_fill=first_projected,
+            original_provider_fill=first_provider,
+            corrected_projected_fill=second_projected,
+            corrected_provider_fill=second_provider,
+            expected_instrument="ABC",
+            settlement_currency="USD",
+            correction_observed_at="2026-01-01T00:00:03Z",
+        ))
+        self.assertEqual(book.transactions[-1].corrects_transaction_id, first_replacement.transaction_id)
+        self.assertEqual(book.position("ABC"), Decimal("2"))
+        self.assertEqual(book.cash("USD"), Decimal("-205"))
+        self.assertEqual(book.fee_expense("USD"), Decimal("1"))
+
+        restarted = ScopedEconomicBook(
+            environment="PAPER",
+            account_id="acct-1",
+            transactions=book.transactions,
+        )
+        self.assertEqual(restarted.audit_digest(), book.audit_digest())
 
     def test_replacement_conflict_cannot_publish_candidate_reversal(self):
         original_projected, original_provider = matched_fill()
@@ -494,6 +584,7 @@ class FillAccountingTests(unittest.TestCase):
             corrected_provider_fill=corrected_provider,
             expected_instrument="ABC",
             settlement_currency="USD",
+            correction_observed_at="2026-01-01T00:00:02Z",
         )
         conflict = book_equity_fill(
             transaction_id=replacement.transaction_id,

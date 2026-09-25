@@ -7,6 +7,7 @@ transactions and projections, but does not authorize or send orders.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Iterable
 
@@ -35,6 +36,17 @@ def _name(value: str, *, field: str) -> str:
     return value.strip()
 
 
+def _instant(value: str, *, field: str) -> str:
+    text = _name(value, field=field)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{field} must be an ISO timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field} must include timezone")
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def _canonical_decimal(value: Decimal) -> str:
     amount = _decimal(value, name="signed_amount")
     if amount == 0:
@@ -58,6 +70,10 @@ class JournalTransaction:
     cause_event_id: str
     postings: tuple[Posting, ...]
     reverses_transaction_id: str | None = None
+    economic_effective_at: str | None = None
+    observed_at: str | None = None
+    economic_sequence_id: str | None = None
+    corrects_transaction_id: str | None = None
 
 
 def _normalized_transaction(transaction: JournalTransaction) -> JournalTransaction:
@@ -82,6 +98,26 @@ def _normalized_transaction(transaction: JournalTransaction) -> JournalTransacti
             if transaction.reverses_transaction_id is not None
             else None
         ),
+        economic_effective_at=(
+            _instant(transaction.economic_effective_at, field="economic_effective_at")
+            if transaction.economic_effective_at is not None
+            else None
+        ),
+        observed_at=(
+            _instant(transaction.observed_at, field="observed_at")
+            if transaction.observed_at is not None
+            else None
+        ),
+        economic_sequence_id=(
+            _name(transaction.economic_sequence_id, field="economic_sequence_id")
+            if transaction.economic_sequence_id is not None
+            else None
+        ),
+        corrects_transaction_id=(
+            _name(transaction.corrects_transaction_id, field="corrects_transaction_id")
+            if transaction.corrects_transaction_id is not None
+            else None
+        ),
     )
 
 
@@ -96,7 +132,7 @@ def posting(ledger_account: str, asset_or_currency: str, signed_amount: Decimal 
 def canonical_transaction(transaction: JournalTransaction) -> dict[str, object]:
     normalized = _normalized_transaction(transaction)
     validate_transaction(normalized)
-    return {
+    payload: dict[str, object] = {
         "schema_version": "1.0.0",
         "transaction_id": normalized.transaction_id,
         "cause_event_id": normalized.cause_event_id,
@@ -110,6 +146,20 @@ def canonical_transaction(transaction: JournalTransaction) -> dict[str, object]:
             for item in normalized.postings
         ],
     }
+    optional_identity = {
+        "economic_effective_at": normalized.economic_effective_at,
+        "observed_at": normalized.observed_at,
+        "economic_sequence_id": normalized.economic_sequence_id,
+        "corrects_transaction_id": normalized.corrects_transaction_id,
+    }
+    payload.update(
+        {
+            key: value
+            for key, value in optional_identity.items()
+            if value is not None
+        }
+    )
+    return payload
 
 
 def transaction_digest(transaction: JournalTransaction) -> str:
@@ -117,8 +167,54 @@ def transaction_digest(transaction: JournalTransaction) -> str:
 
 
 def validate_transaction(transaction: JournalTransaction) -> None:
-    _name(transaction.transaction_id, field="transaction_id")
+    transaction_id = _name(transaction.transaction_id, field="transaction_id")
     _name(transaction.cause_event_id, field="cause_event_id")
+    has_effective_time = transaction.economic_effective_at is not None
+    has_sequence = transaction.economic_sequence_id is not None
+    if has_effective_time != has_sequence:
+        raise ValueError(
+            "economic_effective_at and economic_sequence_id must be supplied together"
+        )
+    if transaction.economic_effective_at is not None:
+        _instant(transaction.economic_effective_at, field="economic_effective_at")
+    if transaction.observed_at is not None:
+        _instant(transaction.observed_at, field="observed_at")
+    if transaction.economic_sequence_id is not None:
+        _name(transaction.economic_sequence_id, field="economic_sequence_id")
+    if transaction.corrects_transaction_id is not None:
+        corrected_id = _name(
+            transaction.corrects_transaction_id,
+            field="corrects_transaction_id",
+        )
+        if corrected_id == transaction_id:
+            raise ValueError("transaction cannot correct itself")
+        if transaction.reverses_transaction_id is not None:
+            raise ValueError(
+                "transaction cannot both reverse and replace corrected economics"
+            )
+        if not has_effective_time or transaction.observed_at is None:
+            raise ValueError(
+                "correcting transaction requires effective-time and observation metadata"
+            )
+    if (
+        transaction.economic_effective_at is not None
+        and transaction.observed_at is not None
+    ):
+        effective = datetime.fromisoformat(
+            _instant(
+                transaction.economic_effective_at,
+                field="economic_effective_at",
+            ).replace("Z", "+00:00")
+        )
+        observed = datetime.fromisoformat(
+            _instant(transaction.observed_at, field="observed_at").replace(
+                "Z", "+00:00"
+            )
+        )
+        if observed < effective:
+            raise ValueError(
+                "observed_at cannot precede economic_effective_at"
+            )
     if len(transaction.postings) < 2:
         raise ValueError("A journal transaction requires at least two postings")
     totals: dict[str, Decimal] = {}
@@ -140,6 +236,7 @@ class EconomicBook:
         self._by_id: dict[str, JournalTransaction] = {}
         self._by_cause_event_id: dict[str, JournalTransaction] = {}
         self._reversed_transaction_ids: set[str] = set()
+        self._replacement_by_corrected_id: dict[str, str] = {}
         for transaction in transactions:
             self.append(transaction)
 
@@ -179,11 +276,62 @@ class EconomicBook:
             )
             if normalized.postings != expected:
                 raise AccountingConflict("A reversal must exactly negate the original postings")
+
+        if normalized.corrects_transaction_id is not None:
+            if normalized.reverses_transaction_id is not None:
+                raise AccountingConflict(
+                    "A transaction cannot be both a reversal and a correction replacement"
+                )
+            corrected_id = normalized.corrects_transaction_id
+            corrected = self._by_id.get(corrected_id)
+            if corrected is None:
+                raise AccountingConflict("Cannot correct an unknown transaction")
+            if corrected_id not in self._reversed_transaction_ids:
+                raise AccountingConflict(
+                    "Correction replacement requires the corrected transaction to be reversed first"
+                )
+            existing_replacement = self._replacement_by_corrected_id.get(corrected_id)
+            if (
+                existing_replacement is not None
+                and existing_replacement != transaction_id
+            ):
+                raise AccountingConflict(
+                    "Corrected transaction already has a replacement"
+                )
+            if (
+                corrected.economic_sequence_id is None
+                or normalized.economic_sequence_id
+                != corrected.economic_sequence_id
+            ):
+                raise AccountingConflict(
+                    "Correction replacement must preserve immutable economic sequence identity"
+                )
+            reversal = next(
+                (
+                    item
+                    for item in self._transactions
+                    if item.reverses_transaction_id == corrected_id
+                ),
+                None,
+            )
+            if reversal is None:
+                raise AccountingConflict(
+                    "Correction replacement requires an explicit reversal transaction"
+                )
+            if reversal.observed_at != normalized.observed_at:
+                raise AccountingConflict(
+                    "Correction reversal and replacement must share observation time"
+                )
+
         self._by_id[transaction_id] = normalized
         self._by_cause_event_id[cause_event_id] = normalized
         self._transactions.append(normalized)
         if normalized.reverses_transaction_id is not None:
             self._reversed_transaction_ids.add(normalized.reverses_transaction_id)
+        if normalized.corrects_transaction_id is not None:
+            self._replacement_by_corrected_id[
+                normalized.corrects_transaction_id
+            ] = transaction_id
         return True
 
     def append_batch(self, transactions: Iterable[JournalTransaction]) -> bool:
@@ -211,6 +359,9 @@ class EconomicBook:
         self._by_id = candidate._by_id.copy()
         self._by_cause_event_id = candidate._by_cause_event_id.copy()
         self._reversed_transaction_ids = candidate._reversed_transaction_ids.copy()
+        self._replacement_by_corrected_id = (
+            candidate._replacement_by_corrected_id.copy()
+        )
         return True
 
     def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
@@ -342,6 +493,10 @@ def book_equity_fill(
     price: Decimal | str | int,
     fee: Decimal | str | int = Decimal("0"),
     fee_currency: str | None = None,
+    economic_effective_at: str | None = None,
+    observed_at: str | None = None,
+    economic_sequence_id: str | None = None,
+    corrects_transaction_id: str | None = None,
 ) -> JournalTransaction:
     symbol = _name(instrument, field="instrument")
     settlement = _name(settlement_currency, field="settlement_currency")
@@ -374,6 +529,10 @@ def book_equity_fill(
         transaction_id=_name(transaction_id, field="transaction_id"),
         cause_event_id=_name(cause_event_id, field="cause_event_id"),
         postings=tuple(items),
+        economic_effective_at=economic_effective_at,
+        observed_at=observed_at,
+        economic_sequence_id=economic_sequence_id,
+        corrects_transaction_id=corrects_transaction_id,
     )
     validate_transaction(transaction)
     return transaction
@@ -415,6 +574,7 @@ def reverse_transaction(
     *,
     transaction_id: str,
     cause_event_id: str,
+    observed_at: str | None = None,
 ) -> JournalTransaction:
     validate_transaction(original)
     transaction = JournalTransaction(
@@ -425,6 +585,7 @@ def reverse_transaction(
             for item in original.postings
         ),
         reverses_transaction_id=original.transaction_id,
+        observed_at=observed_at,
     )
     validate_transaction(transaction)
     return transaction
@@ -567,12 +728,12 @@ def project_equity_position(
     settlement_currency: str,
     mark_price: Decimal | str | int | None = None,
 ) -> EquityPositionProjection:
-    """Project FIFO gross basis/P&L from the canonical immutable journal.
+    """Project FIFO gross basis/P&L from effective immutable economic history.
 
-    Fees remain separately expensed by the accounting book.  Reversed position
-    histories deliberately fail closed because JournalTransaction currently does
-    not carry the economic effective-time metadata required to restate FIFO lots
-    safely after a retroactive correction.
+    Legacy unreversed journals without effective-time metadata retain append-order
+    projection. Once effective metadata or a correction lineage exists, every
+    relevant active fill must carry a canonical economic timestamp and immutable
+    sequence identity. Reversal rows remain auditable but never act as new fills.
     """
 
     if not isinstance(book, EconomicBook):
@@ -587,45 +748,137 @@ def project_equity_position(
     if mark is not None and mark <= 0:
         raise ValueError("mark_price must be positive")
 
+    transactions = book.transactions
+    by_id = {item.transaction_id: item for item in transactions}
     reversed_ids = {
-        transaction.reverses_transaction_id
-        for transaction in book.transactions
-        if transaction.reverses_transaction_id is not None
+        item.reverses_transaction_id
+        for item in transactions
+        if item.reverses_transaction_id is not None
     }
     reversal_ids = {
-        transaction.transaction_id
-        for transaction in book.transactions
-        if transaction.reverses_transaction_id is not None
+        item.transaction_id
+        for item in transactions
+        if item.reverses_transaction_id is not None
     }
 
-    for transaction in book.transactions:
-        if (
-            transaction.transaction_id in reversed_ids
-            or transaction.transaction_id in reversal_ids
-        ):
-            terms = _canonical_equity_fill_terms(
-                transaction,
-                instrument=symbol,
-                settlement_currency=settlement,
-            )
-            if terms is not None:
-                raise AccountingConflict(
-                    "Position projection cannot restate reversed fill history "
-                    "without economic effective-time metadata"
-                )
-
-    mutable_lots: list[list[Decimal | str]] = []
-    realized = Decimal("0")
-
-    for transaction in book.transactions:
+    fill_terms: dict[str, tuple[Decimal, Decimal]] = {}
+    for transaction in transactions:
         terms = _canonical_equity_fill_terms(
             transaction,
             instrument=symbol,
             settlement_currency=settlement,
         )
+        if terms is not None:
+            fill_terms[transaction.transaction_id] = terms
+
+    relevant_reversed = {
+        transaction_id
+        for transaction_id in reversed_ids
+        if transaction_id in fill_terms
+    }
+    for corrected_id in relevant_reversed:
+        corrected = by_id.get(corrected_id)
+        if corrected is None:
+            raise AccountingConflict(
+                "Reversed fill references missing economic history"
+            )
+        replacements = [
+            item
+            for item in transactions
+            if item.corrects_transaction_id == corrected_id
+        ]
+        if len(replacements) != 1:
+            raise AccountingConflict(
+                "Reversed fill requires exactly one explicit correction replacement"
+            )
+        replacement = replacements[0]
+        if (
+            corrected.economic_effective_at is None
+            or corrected.economic_sequence_id is None
+            or replacement.economic_effective_at is None
+            or replacement.economic_sequence_id is None
+        ):
+            raise AccountingConflict(
+                "Position projection cannot restate corrected fill history "
+                "without economic effective-time metadata"
+            )
+        if corrected.economic_sequence_id != replacement.economic_sequence_id:
+            raise AccountingConflict(
+                "Correction lineage changed immutable economic sequence identity"
+            )
+
+    active_fills: list[
+        tuple[JournalTransaction, Decimal, Decimal]
+    ] = []
+    for transaction in transactions:
+        if (
+            transaction.transaction_id in reversal_ids
+            or transaction.transaction_id in reversed_ids
+        ):
+            continue
+        terms = fill_terms.get(transaction.transaction_id)
         if terms is None:
             continue
-        quantity, unit_price = terms
+        active_fills.append((transaction, terms[0], terms[1]))
+
+    metadata_flags = [
+        (
+            transaction.economic_effective_at is not None
+            or transaction.economic_sequence_id is not None
+        )
+        for transaction, _quantity, _price in active_fills
+    ]
+    use_effective_order = bool(relevant_reversed) or any(metadata_flags)
+    if use_effective_order:
+        if not all(
+            transaction.economic_effective_at is not None
+            and transaction.economic_sequence_id is not None
+            for transaction, _quantity, _price in active_fills
+        ):
+            raise AccountingConflict(
+                "Effective FIFO history cannot mix ordered and unordered fills"
+            )
+        ordered: list[
+            tuple[datetime, str, JournalTransaction, Decimal, Decimal]
+        ] = []
+        seen_order_keys: set[tuple[datetime, str]] = set()
+        for transaction, quantity, unit_price in active_fills:
+            assert transaction.economic_effective_at is not None
+            assert transaction.economic_sequence_id is not None
+            effective_text = _instant(
+                transaction.economic_effective_at,
+                field="economic_effective_at",
+            )
+            effective = datetime.fromisoformat(
+                effective_text.replace("Z", "+00:00")
+            )
+            sequence_id = _name(
+                transaction.economic_sequence_id,
+                field="economic_sequence_id",
+            )
+            order_key = (effective, sequence_id)
+            if order_key in seen_order_keys:
+                raise AccountingConflict(
+                    "Effective FIFO ordering key is not unique"
+                )
+            seen_order_keys.add(order_key)
+            ordered.append(
+                (effective, sequence_id, transaction, quantity, unit_price)
+            )
+        ordered.sort(key=lambda item: (item[0], item[1]))
+        projected_fills = [
+            (transaction, quantity, unit_price)
+            for _effective, _sequence, transaction, quantity, unit_price in ordered
+        ]
+        policy_version = "FIFO_GROSS_EFFECTIVE_V2"
+    else:
+        projected_fills = active_fills
+        policy_version = "FIFO_GROSS_V1"
+
+    mutable_lots: list[list[Decimal | str]] = []
+    realized = Decimal("0")
+
+    for transaction, quantity, unit_price in projected_fills:
         remaining = quantity
 
         while (
@@ -698,4 +951,5 @@ def project_equity_position(
         unrealized_pnl=unrealized,
         mark_price=mark,
         lots=lots,
+        policy_version=policy_version,
     )

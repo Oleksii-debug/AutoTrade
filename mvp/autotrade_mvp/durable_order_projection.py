@@ -1046,13 +1046,35 @@ class DurableOrderBookProjection:
                 raise OrderProjectionConflict(
                     "corrected ExecutionFill requires provider_revision"
                 )
+            correction_target = _text(
+                correction_reference,
+                name="correction_reference",
+            )
+            incoming_execution_id = _text(
+                execution_fill.get("provider_execution_id"),
+                name="provider_execution_id",
+            )
+            target_observation = next(
+                (
+                    item
+                    for item in reversed(order.fill_history)
+                    if item.fill_id == correction_target
+                    or item.correction_of == correction_target
+                ),
+                None,
+            )
+            if target_observation is None:
+                raise OrderProjectionConflict(
+                    "corrected ExecutionFill references an unknown fill"
+                )
+            if target_observation.provider_execution_id != incoming_execution_id:
+                raise OrderProjectionConflict(
+                    "corrected ExecutionFill provider_execution_id differs from target fill"
+                )
             return self.correct_fill(
                 event_key=event_key,
                 client_order_id=client_id,
-                fill_id=_text(
-                    correction_reference,
-                    name="correction_reference",
-                ),
+                fill_id=correction_target,
                 correction_fill_id=_text(
                     execution_fill.get("fill_id"),
                     name="fill_id",

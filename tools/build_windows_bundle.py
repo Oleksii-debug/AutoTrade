@@ -38,7 +38,7 @@ FORBIDDEN_PREFIXES = (
 PRIVATE_KEY_MARKERS = (
     b"-----BEGIN PRIVATE KEY-----",
     b"-----BEGIN ENCRYPTED PRIVATE KEY-----",
-    b"-----BEGIN RSA PRIVATE KEY-----"
+    b"-----BEGIN RSA PRIVATE KEY-----",
     b"-----BEGIN EC PRIVATE KEY-----",
     b"-----BEGIN OPENSSH PRIVATE KEY-----",
 )

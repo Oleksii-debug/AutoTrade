@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 from hashlib import sha256
 import json
@@ -19,6 +19,7 @@ from mvp.autotrade_mvp.provider_core import (
     ProviderSubmissionObservation,
     QualificationEvidence,
     QuotaBucket,
+    WriteOutcome,
     classify_write_outcome,
     observe_submission_json_response,
     provider_definition,
@@ -28,6 +29,14 @@ from mvp.autotrade_mvp.provider_core import (
 NOW = datetime(2026, 9, 24, 18, tzinfo=timezone.utc)
 CODE_SHA = "a" * 40
 OTHER_SHA = "b" * 40
+
+
+class _NoOffsetTZ(tzinfo):
+    def utcoffset(self, dt):
+        return None
+
+    def dst(self, dt):
+        return None
 
 
 class ProviderCoreTests(unittest.TestCase):
@@ -260,6 +269,67 @@ class ProviderCoreTests(unittest.TestCase):
         self.assertEqual(unknown.status, "UNKNOWN")
         self.assertFalse(unknown.retry_same_economic_action)
         self.assertTrue(unknown.reconciliation_required)
+
+    def test_direct_write_outcome_cannot_bypass_send_state_invariants(self):
+        invalid_cases = (
+            ("UNKNOWN", True, True),
+            ("UNKNOWN", False, False),
+            ("NOT_SENT", False, False),
+            ("ACKNOWLEDGED", True, False),
+            ("REJECTED", False, True),
+        )
+        for status, retry, reconcile in invalid_cases:
+            with self.subTest(status=status), self.assertRaisesRegex(
+                ProviderCoreError,
+                "send-state invariant",
+            ):
+                WriteOutcome(status, retry, reconcile)
+
+        with self.assertRaisesRegex(ProviderCoreError, "boolean"):
+            WriteOutcome("UNKNOWN", 0, True)
+
+    def test_adapter_code_identity_rejects_noncanonical_whitespace(self):
+        with self.assertRaisesRegex(ProviderCoreError, "canonical"):
+            QualificationEvidence(
+                provider_id="BYBIT",
+                product_family="SPOT",
+                environment="TEST",
+                adapter_code_sha=" " + CODE_SHA,
+                documentation_ref="docs",
+                observed_at=NOW,
+                expires_at=NOW + timedelta(days=1),
+                passed_cases=REQUIRED_QUALIFICATION_CASES,
+            )
+
+        evidence = QualificationEvidence(
+            provider_id="BYBIT",
+            product_family="SPOT",
+            environment="TEST",
+            adapter_code_sha=CODE_SHA,
+            documentation_ref="docs",
+            observed_at=NOW,
+            expires_at=NOW + timedelta(days=1),
+            passed_cases=REQUIRED_QUALIFICATION_CASES,
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "canonical"):
+            evidence.status(
+                now=NOW + timedelta(hours=1),
+                exact_code_sha=CODE_SHA + " ",
+            )
+
+    def test_timezone_object_without_utc_offset_fails_closed(self):
+        invalid = datetime(2026, 9, 24, 18, tzinfo=_NoOffsetTZ())
+        with self.assertRaisesRegex(ProviderCoreError, "timezone-aware"):
+            QualificationEvidence(
+                provider_id="BYBIT",
+                product_family="SPOT",
+                environment="TEST",
+                adapter_code_sha=CODE_SHA,
+                documentation_ref="docs",
+                observed_at=invalid,
+                expires_at=NOW + timedelta(days=1),
+                passed_cases=REQUIRED_QUALIFICATION_CASES,
+            )
 
     def test_only_never_sent_write_is_retryable_as_same_action(self):
         outcome = classify_write_outcome(

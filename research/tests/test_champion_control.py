@@ -1,13 +1,18 @@
 from datetime import datetime, timedelta, timezone, tzinfo
 from hashlib import sha256
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from uuid import NAMESPACE_URL, uuid5
+
+from autotrade_research.artifacts.store import ArtifactStore
 
 from research.autotrade_research.learning.champion import (
     CandidateApproval,
     ChampionRegistry,
     OnlineEnvelope,
+    OnlineEvidenceRef,
     ParameterBound,
     PromotionConflict,
 )
@@ -143,6 +148,90 @@ def online_envelope(candidate="candidate-a", *, interval=60, max_cost="2"):
         minimum_update_interval_seconds=interval,
         maximum_update_cost=max_cost,
         eligible_label_refs=("label:reconciled-outcome",),
+    )
+
+
+def _publish_online_evidence(registry, payload):
+    if registry.artifact_store is None:
+        registry.artifact_store = ArtifactStore(registry.path.parent / "artifacts")
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    artifact_id = str(uuid5(NAMESPACE_URL, canonical))
+    manifest = registry.artifact_store.publish_bytes(
+        artifact_id=artifact_id,
+        data=canonical.encode("utf-8"),
+        media_type="application/json",
+        rights={"storage": True, "export": False},
+        metadata={"kind": "online-update-test-evidence"},
+    )
+    return OnlineEvidenceRef(
+        artifact_id=artifact_id,
+        sha256=manifest["sha256"],
+    )
+
+
+def online_update(
+    registry,
+    *,
+    envelope,
+    expected_generation,
+    label_refs,
+    evidence_refs,
+    now,
+    drift_gate_passed=True,
+    stop_condition_triggered=False,
+    label_outcome_state="RECONCILED",
+    evidence_available_at=BASE,
+    label_available_at=None,
+    bound_generation=None,
+    **kwargs,
+):
+    generation = expected_generation if bound_generation is None else bound_generation
+    label_time = evidence_available_at if label_available_at is None else label_available_at
+
+    def common(kind, available_at):
+        return {
+            "kind": kind,
+            "champion_artifact_hash": envelope.champion_artifact_hash,
+            "routing_generation": generation,
+            "authority_scope_id": envelope.authority_scope_id,
+            "envelope_hash": envelope.envelope_hash,
+            "available_at": available_at.astimezone(timezone.utc).isoformat(),
+        }
+
+    drift = common("DRIFT_GATE", evidence_available_at)
+    drift["status"] = "PASS" if drift_gate_passed else "FAIL"
+    stop = common("STOP_CONDITION", evidence_available_at)
+    stop["triggered"] = stop_condition_triggered
+
+    labels = {}
+    for label in set(label_refs):
+        payload = common("ONLINE_LABEL", label_time)
+        payload["label_ref"] = label
+        payload["outcome_state"] = label_outcome_state
+        labels[label] = _publish_online_evidence(registry, payload)
+
+    supporting = []
+    for purpose in evidence_refs:
+        payload = common("ONLINE_SUPPORT", evidence_available_at)
+        payload["purpose"] = purpose
+        supporting.append(_publish_online_evidence(registry, payload))
+
+    return online_update(registry,
+        envelope=envelope,
+        expected_generation=expected_generation,
+        label_refs=label_refs,
+        evidence_refs=tuple(supporting),
+        now=now,
+        drift_gate_evidence=_publish_online_evidence(registry, drift),
+        stop_condition_evidence=_publish_online_evidence(registry, stop),
+        label_evidence_refs=labels,
+        **kwargs,
     )
 
 
@@ -901,7 +990,7 @@ class ChampionRegistryTests(unittest.TestCase):
                 open_position_count=0,
                 existing_position_policy=None,
             )
-            row = registry.record_online_update(
+            row = online_update(registry,
                 envelope=online_envelope(),
                 update_id="update-1",
                 expected_generation=state.generation,
@@ -931,7 +1020,7 @@ class ChampionRegistryTests(unittest.TestCase):
                 existing_position_policy=None,
             )
             with self.assertRaisesRegex(ValueError, "outside the approved online range"):
-                registry.record_online_update(
+                online_update(registry,
                     envelope=online_envelope(),
                     update_id="outside-range",
                     expected_generation=state.generation,
@@ -974,7 +1063,7 @@ class ChampionRegistryTests(unittest.TestCase):
                 envelope_hash="sha256:" + "0" * 64,
             )
             with self.assertRaisesRegex(ValueError, "minimum cannot exceed maximum"):
-                registry.record_online_update(
+                online_update(registry,
                     envelope=forged,
                     update_id="forged-update",
                     expected_generation=state.generation,
@@ -1008,7 +1097,7 @@ class ChampionRegistryTests(unittest.TestCase):
                     "envelope_hash": "sha256:" + "0" * 64,
                 }
             )
-            row = registry.record_online_update(
+            row = online_update(registry,
                 envelope=forged,
                 update_id="canonicalized-envelope-hash",
                 expected_generation=state.generation,
@@ -1048,7 +1137,7 @@ class ChampionRegistryTests(unittest.TestCase):
                 existing_position_policy=None,
             )
             with self.assertRaisesRegex(ValueError, "labels outside"):
-                registry.record_online_update(
+                online_update(registry,
                     envelope=online_envelope(),
                     update_id="bad-label",
                     expected_generation=state.generation,
@@ -1061,7 +1150,7 @@ class ChampionRegistryTests(unittest.TestCase):
                     stop_condition_triggered=False,
                 )
             with self.assertRaisesRegex(ValueError, "resource budget"):
-                registry.record_online_update(
+                online_update(registry,
                     envelope=online_envelope(max_cost="1"),
                     update_id="too-expensive",
                     expected_generation=state.generation,
@@ -1098,14 +1187,14 @@ class ChampionRegistryTests(unittest.TestCase):
                 now=BASE + timedelta(minutes=1),
             )
             with self.assertRaisesRegex(ValueError, "drift gate"):
-                registry.record_online_update(
+                online_update(registry,
                     update_id="drift-failed",
                     drift_gate_passed=False,
                     stop_condition_triggered=False,
                     **common,
                 )
             with self.assertRaisesRegex(ValueError, "stop condition"):
-                registry.record_online_update(
+                online_update(registry,
                     update_id="stop-triggered",
                     drift_gate_passed=True,
                     stop_condition_triggered=True,
@@ -1128,7 +1217,7 @@ class ChampionRegistryTests(unittest.TestCase):
             )
             envelope = online_envelope(interval=60)
             def apply(update_id, when):
-                return registry.record_online_update(
+                return online_update(registry,
                     envelope=envelope,
                     update_id=update_id,
                     expected_generation=state.generation,
@@ -1170,17 +1259,17 @@ class ChampionRegistryTests(unittest.TestCase):
                 drift_gate_passed=True,
                 stop_condition_triggered=False,
             )
-            first = registry.record_online_update(
+            first = online_update(registry,
                 now=BASE + timedelta(minutes=1),
                 **kwargs,
             )
-            retry = registry.record_online_update(
+            retry = online_update(registry,
                 now=BASE + timedelta(minutes=5),
                 **kwargs,
             )
             self.assertEqual(retry["request_fingerprint"], first["request_fingerprint"])
             with self.assertRaises(PromotionConflict):
-                registry.record_online_update(
+                online_update(registry,
                     envelope=kwargs["envelope"],
                     update_id="retry-update",
                     expected_generation=state.generation,
@@ -1215,7 +1304,7 @@ class ChampionRegistryTests(unittest.TestCase):
                 existing_position_policy=None,
             )
             with self.assertRaises(PromotionConflict):
-                registry.record_online_update(
+                online_update(registry,
                     envelope=online_envelope("candidate-a"),
                     update_id="stale-envelope",
                     expected_generation=first.generation,
@@ -1243,7 +1332,7 @@ class ChampionRegistryTests(unittest.TestCase):
                 open_position_count=0,
                 existing_position_policy=None,
             )
-            registry.record_online_update(
+            online_update(registry,
                 envelope=online_envelope(interval=0),
                 update_id="envelope-first",
                 expected_generation=state.generation,
@@ -1271,7 +1360,7 @@ class ChampionRegistryTests(unittest.TestCase):
                 eligible_label_refs=("label:reconciled-outcome",),
             )
             with self.assertRaisesRegex(ValueError, "immutable content"):
-                registry.record_online_update(
+                online_update(registry,
                     envelope=changed,
                     update_id="envelope-changed",
                     expected_generation=state.generation,
@@ -1308,7 +1397,7 @@ class ChampionRegistryTests(unittest.TestCase):
                 stop_condition_triggered=False,
             )
             with self.assertRaisesRegex(ValueError, "label references must be unique"):
-                registry.record_online_update(
+                online_update(registry,
                     update_id="duplicate-label",
                     label_refs=(
                         "label:reconciled-outcome",
@@ -1318,7 +1407,7 @@ class ChampionRegistryTests(unittest.TestCase):
                     **common,
                 )
             with self.assertRaisesRegex(ValueError, "evidence references must be unique"):
-                registry.record_online_update(
+                online_update(registry,
                     update_id="duplicate-evidence",
                     label_refs=("label:reconciled-outcome",),
                     evidence_refs=("episode:dup", "episode:dup"),

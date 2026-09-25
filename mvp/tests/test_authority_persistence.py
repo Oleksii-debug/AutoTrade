@@ -48,7 +48,7 @@ class AuthorityPersistenceTests(unittest.TestCase):
             notional=Decimal("10"),
             expires_at="2026-09-25T02:00:00Z",
         )
-        admitted = service.admit(
+        admitted = service._admit_unverified(
             admission_id="admit-1",
             policy_id="policy-1",
             intent_hash="intent-hash",
@@ -189,7 +189,7 @@ class AuthorityPersistenceTests(unittest.TestCase):
             restored = restore_authority_snapshot(
                 store, authority_id="runtime-authority"
             )
-            second = restored.admit(
+            second = restored._admit_unverified(
                 admission_id="admit-2",
                 policy_id="policy-1",
                 intent_hash="intent-hash",

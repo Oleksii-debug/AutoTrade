@@ -268,6 +268,7 @@ class InformationClaimTests(unittest.TestCase):
                 passage="passage",
                 published_at=BASE,
                 available_at=BASE,
+                ingested_at=BASE,
                 rights_basis="quotation-and-hash-only",
                 locator="p1",
             )
@@ -280,6 +281,7 @@ class InformationClaimTests(unittest.TestCase):
                 passage="passage",
                 published_at=datetime(2026, 1, 1),
                 available_at=BASE,
+                ingested_at=BASE,
                 rights_basis="quotation-and-hash-only",
                 locator="p1",
             )
@@ -292,6 +294,21 @@ class InformationClaimTests(unittest.TestCase):
                 passage="passage",
                 published_at=BASE,
                 available_at=BASE - timedelta(seconds=1),
+                ingested_at=BASE,
+                rights_basis="quotation-and-hash-only",
+                locator="p1",
+            )
+
+        with self.assertRaisesRegex(ValueError, "ingested_at cannot precede"):
+            SourceDocument(
+                source_id="source",
+                source_revision="r1",
+                source_kind="NEWS",
+                title="title",
+                passage="passage",
+                published_at=BASE,
+                available_at=BASE + timedelta(hours=1),
+                ingested_at=BASE,
                 rights_basis="quotation-and-hash-only",
                 locator="p1",
             )

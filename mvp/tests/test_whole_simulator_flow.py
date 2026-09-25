@@ -123,6 +123,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 intent_hash=intent_hash,
                 policy_version=1,
                 reservation_version=reservations.version,
+                reservation_requirements={"CASH:USD": "200.2"},
                 capability_snapshot_id=CAPABILITY_SNAPSHOT_ID,
                 evaluated_at=NOW,
                 valid_until="2026-09-24T18:05:00Z",

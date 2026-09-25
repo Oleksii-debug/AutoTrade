@@ -541,13 +541,15 @@ def parse_submission_response(
             raise AlpacaAdapterError(
                 "ambiguous transport must not fabricate a provider response"
             )
+        # SubmissionResult is the canonical provider result contract, not the
+        # durable transport-attempt journal. With no authoritative provider
+        # response there is no provider_received_at and no provider evidence.
+        # The caller must persist the already-validated local observation time
+        # and target environment with the durable send attempt itself.
         return {
             "attempt_id": aid,
             "outcome": "UNKNOWN",
             "client_order_id": cid,
-            "provider_received_at": None,
-            "observed_at": when,
-            "provider_environment": env,
             "reason_code": "ALPACA_TRANSPORT_AMBIGUOUS",
             "evidence": [],
             "retry_disposition": "RECONCILE_FIRST",

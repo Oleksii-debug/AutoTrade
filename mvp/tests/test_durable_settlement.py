@@ -9,6 +9,7 @@ from uuid import NAMESPACE_URL, uuid5
 from mvp.autotrade_mvp.accounting import (
     book_equity_fill,
     book_external_cash_flow,
+    reverse_transaction,
 )
 from mvp.autotrade_mvp.durable_settlement import (
     DurableSettlementBook,
@@ -19,7 +20,10 @@ from mvp.autotrade_mvp.durable_settlement import (
     settlement_rule_evidence_receipt,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
-from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
+from mvp.autotrade_mvp.provider_activity_accounting import (
+    DurableProviderEconomicBook,
+    commit_economic_correction_with_settlement_replacement,
+)
 from mvp.autotrade_mvp.settlement import (
     SettlementAccountScope,
     SettlementConflict,
@@ -139,12 +143,55 @@ def economics(store: JournalStore) -> DurableProviderEconomicBook:
     )
 
 
-def raw_evidence(ref="provider-read:sha256:" + "b" * 64, *, minute=0) -> SettlementEvidence:
+def raw_evidence(
+    ref="provider-read:sha256:" + "b" * 64,
+    *,
+    minute=0,
+    obligation_id="settlement-sell-1",
+) -> SettlementEvidence:
     return SettlementEvidence(
-        obligation_id="settlement-sell-1",
+        obligation_id=obligation_id,
         evidence_ref=ref,
         observed_at=datetime(2026, 9, 26, 15, minute, tzinfo=timezone.utc),
     )
+
+
+def correction_pair(
+    store: JournalStore,
+    original,
+    *,
+    price="110",
+    suffix="r2",
+):
+    observed_at = "2026-09-25T10:00:00Z"
+    reversal = reverse_transaction(
+        original,
+        transaction_id=f"sell-1-reversal-{suffix}",
+        cause_event_id=f"provider-execution-sell-1-reversal-{suffix}",
+        observed_at=observed_at,
+    )
+    replacement = book_equity_fill(
+        transaction_id=f"sell-1-corrected-{suffix}",
+        cause_event_id=f"provider-execution-sell-1-{suffix}",
+        instrument="ABC",
+        settlement_currency="USD",
+        side="SELL",
+        quantity="1",
+        price=price,
+        economic_effective_at=original.economic_effective_at,
+        economic_order_key=original.economic_order_key,
+        observed_at=observed_at,
+        corrects_transaction_id=original.transaction_id,
+    )
+    replacement_obligation = equity_cash_obligation_from_transaction(
+        replacement,
+        obligation_id=f"settlement-sell-1-{suffix}",
+        instrument="ABC",
+        settlement_currency="USD",
+        settlement_date=date(2026, 9, 26),
+        rule_binding=bind_rule(store),
+    )
+    return reversal, replacement, replacement_obligation
 
 
 def bind_evidence(
@@ -451,6 +498,261 @@ class DurableSettlementBookTests(unittest.TestCase):
                 store.commit_command = original_commit
 
             self.assertEqual(durable(JournalStore(path)).obligations, ())
+
+
+    def test_correction_before_settlement_atomically_replaces_pending_cash(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            economic = economics(store)
+            economic.append(
+                book_external_cash_flow(
+                    transaction_id="deposit-correction-before",
+                    cause_event_id="deposit-event-correction-before",
+                    currency="USD",
+                    amount="1000",
+                )
+            )
+            original = sell_transaction()
+            economic.append(original)
+            settlements = durable(store)
+            original_obligation = obligation(store, original)
+            settlements.register_obligations(
+                (original_obligation,),
+                command_id="register-original-before",
+                idempotency_key="register-original-before",
+                committed_at="2026-09-25T09:00:02Z",
+            )
+
+            reversal, replacement, replacement_obligation = correction_pair(
+                store,
+                original,
+            )
+            self.assertTrue(
+                commit_economic_correction_with_settlement_replacement(
+                    economic,
+                    settlements,
+                    command_id="correct-before",
+                    idempotency_key="correct-before",
+                    reversal=reversal,
+                    replacement=replacement,
+                    settlement_obligations=(replacement_obligation,),
+                    committed_at="2026-09-25T10:00:01Z",
+                )
+            )
+
+            projected = settlements.project(economic)
+            self.assertEqual(economic.cash("USD"), Decimal("1110"))
+            self.assertEqual(projected.snapshot("USD").settled_cash, Decimal("1000"))
+            self.assertEqual(
+                projected.snapshot("USD").unsettled_receivable,
+                Decimal("110"),
+            )
+            self.assertEqual(projected.available_to_spend("USD"), Decimal("1000"))
+
+            self.assertFalse(
+                commit_economic_correction_with_settlement_replacement(
+                    economic,
+                    settlements,
+                    command_id="correct-before-retry",
+                    idempotency_key="correct-before-retry",
+                    reversal=reversal,
+                    replacement=replacement,
+                    settlement_obligations=(replacement_obligation,),
+                    committed_at="2026-09-25T10:00:02Z",
+                )
+            )
+
+            reopened_store = JournalStore(path)
+            reopened_economic = economics(reopened_store)
+            reopened_settlements = durable(reopened_store)
+            restarted = reopened_settlements.project(reopened_economic)
+            self.assertEqual(restarted.snapshot("USD").settled_cash, Decimal("1000"))
+            self.assertEqual(
+                restarted.snapshot("USD").unsettled_receivable,
+                Decimal("110"),
+            )
+            self.assertEqual(restarted.available_to_spend("USD"), Decimal("1000"))
+
+    def test_correction_after_settlement_relocks_replacement_until_new_evidence(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            economic = economics(store)
+            economic.append(
+                book_external_cash_flow(
+                    transaction_id="deposit-correction-after",
+                    cause_event_id="deposit-event-correction-after",
+                    currency="USD",
+                    amount="1000",
+                )
+            )
+            original = sell_transaction()
+            economic.append(original)
+            settlements = durable(store)
+            original_obligation = obligation(store, original)
+            settlements.register_obligations(
+                (original_obligation,),
+                command_id="register-original-after",
+                idempotency_key="register-original-after",
+                committed_at="2026-09-25T09:00:02Z",
+            )
+            settlements.apply_settlement(
+                bind_evidence(store, original_obligation),
+                as_of=date(2026, 9, 26),
+                command_id="settle-original-before-correction",
+                idempotency_key="settle-original-before-correction",
+                committed_at="2026-09-26T15:00:01Z",
+            )
+            self.assertEqual(
+                settlements.project(economic).available_to_spend("USD"),
+                Decimal("1100"),
+            )
+
+            reversal, replacement, replacement_obligation = correction_pair(
+                store,
+                original,
+            )
+            self.assertTrue(
+                commit_economic_correction_with_settlement_replacement(
+                    economic,
+                    settlements,
+                    command_id="correct-after",
+                    idempotency_key="correct-after",
+                    reversal=reversal,
+                    replacement=replacement,
+                    settlement_obligations=(replacement_obligation,),
+                    committed_at="2026-09-26T15:01:00Z",
+                )
+            )
+            relocked = settlements.project(economic)
+            self.assertEqual(relocked.snapshot("USD").settled_cash, Decimal("1000"))
+            self.assertEqual(
+                relocked.snapshot("USD").unsettled_receivable,
+                Decimal("110"),
+            )
+            self.assertEqual(relocked.available_to_spend("USD"), Decimal("1000"))
+
+            replacement_evidence = bind_evidence(
+                store,
+                replacement_obligation,
+                raw_evidence(
+                    minute=2,
+                    obligation_id=replacement_obligation.obligation_id,
+                ),
+            )
+            self.assertTrue(
+                settlements.apply_settlement(
+                    replacement_evidence,
+                    as_of=date(2026, 9, 26),
+                    command_id="settle-replacement-after-correction",
+                    idempotency_key="settle-replacement-after-correction",
+                    committed_at="2026-09-26T15:02:01Z",
+                )
+            )
+            self.assertEqual(
+                settlements.project(economic).available_to_spend("USD"),
+                Decimal("1110"),
+            )
+
+            reopened_store = JournalStore(path)
+            restarted = durable(reopened_store).project(economics(reopened_store))
+            self.assertEqual(restarted.available_to_spend("USD"), Decimal("1110"))
+            self.assertEqual(
+                restarted.snapshot("USD").unsettled_receivable,
+                Decimal("0"),
+            )
+
+    def test_unbound_active_correction_replacement_fails_closed_in_projection(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            economic = economics(store)
+            original = sell_transaction()
+            economic.append(original)
+            settlements = durable(store)
+            settlements.register_obligations(
+                (obligation(store, original),),
+                command_id="register-partial-original",
+                idempotency_key="register-partial-original",
+                committed_at="2026-09-25T09:00:02Z",
+            )
+            reversal, replacement, replacement_obligation = correction_pair(
+                store,
+                original,
+            )
+
+            # Simulate legacy/foreign code committing only the economic half.
+            economic.append_batch((reversal, replacement))
+            with self.assertRaisesRegex(
+                SettlementConflict,
+                "replacement cash leg lacks settlement obligation",
+            ):
+                settlements.project(economic)
+
+            with self.assertRaisesRegex(
+                Exception,
+                "partially committed",
+            ):
+                commit_economic_correction_with_settlement_replacement(
+                    economic,
+                    settlements,
+                    command_id="repair-partial",
+                    idempotency_key="repair-partial",
+                    reversal=reversal,
+                    replacement=replacement,
+                    settlement_obligations=(replacement_obligation,),
+                    committed_at="2026-09-25T10:00:02Z",
+                )
+
+    def test_failed_atomic_correction_commit_mutates_neither_projection(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            economic = economics(store)
+            original = sell_transaction()
+            economic.append(original)
+            settlements = durable(store)
+            original_obligation = obligation(store, original)
+            settlements.register_obligations(
+                (original_obligation,),
+                command_id="register-failure-original",
+                idempotency_key="register-failure-original",
+                committed_at="2026-09-25T09:00:02Z",
+            )
+            reversal, replacement, replacement_obligation = correction_pair(
+                store,
+                original,
+            )
+            before_economic = economic.audit_digest()
+            before_obligations = settlements.obligations
+            original_commit = store.commit_command
+
+            def fail(**kwargs):
+                raise RuntimeError("injected correction commit failure")
+
+            store.commit_command = fail
+            try:
+                with self.assertRaisesRegex(RuntimeError, "commit failure"):
+                    commit_economic_correction_with_settlement_replacement(
+                        economic,
+                        settlements,
+                        command_id="correct-failure",
+                        idempotency_key="correct-failure",
+                        reversal=reversal,
+                        replacement=replacement,
+                        settlement_obligations=(replacement_obligation,),
+                        committed_at="2026-09-25T10:00:02Z",
+                    )
+            finally:
+                store.commit_command = original_commit
+
+            self.assertEqual(economic.audit_digest(), before_economic)
+            self.assertEqual(settlements.obligations, before_obligations)
+            reopened_store = JournalStore(path)
+            reopened_economic = economics(reopened_store)
+            reopened_settlements = durable(reopened_store)
+            self.assertEqual(reopened_economic.audit_digest(), before_economic)
+            self.assertEqual(reopened_settlements.obligations, before_obligations)
 
 
 if __name__ == "__main__":

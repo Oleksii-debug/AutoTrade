@@ -329,7 +329,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             WindowsUpdateError,
-            "exactly one WINDOWS_PACKAGE",
+            "frozen release evidence no longer qualifies",
         ):
             build_windows_update_plan(
                 current_release=forged,
@@ -370,6 +370,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
         with self.assertRaisesRegex(WindowsUpdateError, "positive integer"):
             BackupEvidence(
                 manifest_sha256="sha256:" + "c" * 64,
+                source_sha=CURRENT_SOURCE,
                 journal_schema_version=0,
                 verification_status="PASS",
                 reconciliation_required_after_restore=True,
@@ -935,7 +936,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             ),
             (
                 lambda body: body["migration_evidence"].__setitem__(
-                    "from_schema_version", 2
+                    "from_schema_version", 3
                 ),
                 "migration source schema mismatch",
             ),

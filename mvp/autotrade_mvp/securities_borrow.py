@@ -70,6 +70,43 @@ def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
     return result
 
 
+def _signed_decimal(value, *, name: str) -> Decimal:
+    if isinstance(value, bool) or isinstance(value, float):
+        raise TypeError(f"{name} must use Decimal, string or integer input")
+    try:
+        result = value if isinstance(value, Decimal) else Decimal(value)
+    except (InvalidOperation, TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be a finite decimal") from error
+    if not result.is_finite():
+        raise ValueError(f"{name} must be a finite decimal")
+    return result
+
+
+def incremental_short_borrow_quantity(
+    *,
+    side: str,
+    quantity,
+    current_position,
+    reserved_position_delta=0,
+) -> Decimal:
+    """Exact incremental short exposure requiring new borrow reservation."""
+    normalized_side = _text(side, name="side").upper()
+    if normalized_side not in {"BUY", "SELL"}:
+        raise ValueError("side must be BUY or SELL")
+    qty = _decimal(quantity, name="quantity", positive=True)
+    current = _signed_decimal(current_position, name="current_position")
+    reserved = _signed_decimal(
+        reserved_position_delta,
+        name="reserved_position_delta",
+    )
+    base = current + reserved
+    signed = qty if normalized_side == "BUY" else -qty
+    resulting = base + signed
+    base_short = max(Decimal("0"), -base)
+    resulting_short = max(Decimal("0"), -resulting)
+    return max(Decimal("0"), resulting_short - base_short)
+
+
 def _decimal_text(value: Decimal) -> str:
     if value == 0:
         return "0"

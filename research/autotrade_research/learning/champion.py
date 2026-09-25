@@ -17,7 +17,11 @@ from autotrade_research.science.registry import ScientificRegistry
 
 
 def _time(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
         raise ValueError(f"{name} must be timezone-aware")
     return value.astimezone(timezone.utc)
 

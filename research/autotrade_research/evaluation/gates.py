@@ -296,6 +296,7 @@ class EvaluationEvidence:
     trials_attempted: int | None
     regime_coverage: frozenset[str] | None
     untouched_holdout_passed: bool | None = None
+    valid_sequential_evaluation_passed: bool | None = None
     walk_forward_passed: bool | None = None
     evidence_refs: Mapping[str, GateEvidenceRef] | None = None
 
@@ -330,6 +331,7 @@ class EvaluationEvidence:
             "trial_log_complete",
             "retention_passed",
             "untouched_holdout_passed",
+            "valid_sequential_evaluation_passed",
             "walk_forward_passed",
         ):
             value = getattr(self, name)
@@ -424,7 +426,8 @@ class EvaluationEvidence:
         for name in (
             "profile_unchanged_after_results", "reproducible", "causal_audit_passed",
             "financial_invariants_passed", "trial_log_complete", "retention_passed",
-            "untouched_holdout_passed", "walk_forward_passed",
+            "untouched_holdout_passed", "valid_sequential_evaluation_passed",
+            "walk_forward_passed",
         ):
             value = converted.get(name)
             if value is not None and not isinstance(value, bool):
@@ -587,6 +590,7 @@ def gate_report_payload(
         value = {
             "profile_id": profile_id,
             "untouched_holdout_passed": evidence.untouched_holdout_passed,
+            "valid_sequential_evaluation_passed": evidence.valid_sequential_evaluation_passed,
             "walk_forward_passed": evidence.walk_forward_passed,
         }
     elif kind == "metrics":
@@ -736,11 +740,26 @@ def evaluate_gates(
             "walk-forward evaluation evidence is missing",
         )
     if profile.require_untouched_holdout:
+        locked_evaluation_passed = (
+            True
+            if (
+                evidence.untouched_holdout_passed is True
+                or evidence.valid_sequential_evaluation_passed is True
+            )
+            else (
+                False
+                if (
+                    evidence.untouched_holdout_passed is False
+                    and evidence.valid_sequential_evaluation_passed is False
+                )
+                else None
+            )
+        )
         check(
-            "untouched_holdout",
-            evidence.untouched_holdout_passed,
-            "locked holdout was contaminated or failed",
-            "untouched locked-holdout evidence is missing",
+            "locked_evaluation",
+            locked_evaluation_passed,
+            "neither untouched holdout nor valid sequential evaluation passed",
+            "locked evaluation requires untouched holdout or valid sequential evidence",
         )
 
     if evidence.selection_correction_applied is None:

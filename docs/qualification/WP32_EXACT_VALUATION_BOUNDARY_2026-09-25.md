@@ -3,7 +3,7 @@
 ## Scope
 
 This evidence note records the convergence work for issue #639 on exact base
-`main@4de3a4c5fdf1642a53676009f94d5b1fd61133e7`.
+`main@90e0a64891682c3f35295b2c463b8f429f1ae340` after semantic zero-overlap reconvergence from the original `4de3a4c5fdf1642a53676009f94d5b1fd61133e7` development base.
 
 The change extends the existing WP-32 proposal allocator; it does not create a
 second portfolio, risk, accounting, provider, execution or reconciliation

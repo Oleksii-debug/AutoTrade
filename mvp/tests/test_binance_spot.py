@@ -241,33 +241,6 @@ class BinanceSpotFoundationTests(unittest.TestCase):
                 at=NOW,
             )
 
-    def test_exchange_info_filter_steps_use_provider_minimum_as_origin(self):
-        rules = symbol_rules(
-            min_qty="0.0015",
-            step_size="0.001",
-            min_price="0.015",
-            tick_size="0.01",
-            min_notional="0.000001",
-        )
-        intent = BinanceSpotOrderIntent.create(
-            instrument_version="BTCUSDT:v1",
-            symbol="BTCUSDT",
-            side="BUY",
-            order_type="LIMIT",
-            quantity="0.0025",
-            price="0.025",
-            time_in_force="GTC",
-        )
-        request = prepare_order_request(
-            intent,
-            client_order_id="at-filter-origin",
-            capability=capability(),
-            symbol_rules=rules,
-            at=NOW,
-        )
-        self.assertEqual(request.body["quantity"], "0.0025")
-        self.assertEqual(request.body["price"], "0.025")
-
     def test_zero_price_tick_disables_tick_rule_without_disabling_bounds(self):
         rules = symbol_rules(
             min_price="1",

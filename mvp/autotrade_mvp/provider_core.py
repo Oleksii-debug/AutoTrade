@@ -13,10 +13,23 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Iterable, Literal, Mapping
+import re
 
 
 class ProviderCoreError(ValueError):
     pass
+
+
+_GIT_OBJECT_ID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
+
+def _code_sha(value: str, name: str = "adapter_code_sha") -> str:
+    sha = _text(value, name)
+    if _GIT_OBJECT_ID.fullmatch(sha) is None:
+        raise ProviderCoreError(
+            f"{name} must be a canonical 40- or 64-character lowercase Git object id"
+        )
+    return sha
 
 
 def _text(value: str, name: str) -> str:
@@ -160,8 +173,12 @@ class QualificationEvidence:
         if family not in PROVIDERS[provider].product_families:
             raise ProviderCoreError("product family is not declared for provider")
         object.__setattr__(self, "product_family", family)
-        object.__setattr__(self, "environment", _text(self.environment, "environment"))
-        object.__setattr__(self, "adapter_code_sha", _text(self.adapter_code_sha, "adapter_code_sha"))
+        object.__setattr__(
+            self,
+            "environment",
+            _text(self.environment, "environment").upper(),
+        )
+        object.__setattr__(self, "adapter_code_sha", _code_sha(self.adapter_code_sha))
         object.__setattr__(self, "documentation_ref", _text(self.documentation_ref, "documentation_ref"))
         observed = _utc(self.observed_at, "observed_at")
         expires = _utc(self.expires_at, "expires_at")
@@ -179,7 +196,7 @@ class QualificationEvidence:
 
     def status(self, *, now: datetime, exact_code_sha: str) -> str:
         point = _utc(now, "now")
-        if _text(exact_code_sha, "exact_code_sha") != self.adapter_code_sha:
+        if _code_sha(exact_code_sha, "exact_code_sha") != self.adapter_code_sha:
             return "CODE_MISMATCH"
         if point < self.observed_at:
             return "FUTURE_EVIDENCE"
@@ -188,6 +205,8 @@ class QualificationEvidence:
         missing = REQUIRED_QUALIFICATION_CASES - self.passed_cases
         if missing:
             return "INCOMPLETE"
+        if self.environment == "LIVE":
+            return "LIVE_REQUIRES_BOUNDED_REAL"
         return "QUALIFIED_FOR_NONLIVE"
 
 
@@ -213,16 +232,22 @@ class QuotaBucket:
 
     def acquire(self, cost, *, purpose: Literal["RECOVERY", "TRADING", "RESEARCH"]) -> None:
         amount = _decimal(cost, "quota cost", non_negative=True)
-        if amount == 0:
-            return
         if purpose not in {"RECOVERY", "TRADING", "RESEARCH"}:
             raise ProviderCoreError("unknown quota purpose")
+        if amount == 0:
+            return
         remaining = self.available()
         if amount > remaining:
             raise ProviderCoreError("provider quota exhausted")
         if purpose != "RECOVERY" and remaining - amount < self.recovery_reserve:
             raise ProviderCoreError("recovery quota reserve is protected")
         self.used += amount
+
+    def release(self, cost) -> None:
+        amount = _decimal(cost, "quota cost", non_negative=True)
+        if amount > self.used:
+            raise ProviderCoreError("cannot release more quota than was acquired")
+        self.used -= amount
 
     def reset(self) -> None:
         self.used = Decimal("0")

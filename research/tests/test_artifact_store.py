@@ -232,7 +232,6 @@ class ArtifactStoreTests(unittest.TestCase):
                 sync.assert_any_call(target)
                 self.assertEqual(target.read_bytes(), b"durable")
 
-
     def test_recovery_reports_malformed_or_misplaced_objects_without_crashing(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
@@ -279,7 +278,6 @@ class ArtifactStoreTests(unittest.TestCase):
                 "object:" + misplaced.relative_to(store.root).as_posix(),
                 after.corrupt_objects,
             )
-
 
 if __name__ == "__main__":
     unittest.main()

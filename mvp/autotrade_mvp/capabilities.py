@@ -131,7 +131,15 @@ class CapabilityClaim:
             "rate_limit_policy_id",
             _text(self.rate_limit_policy_id, "rate_limit_policy_id"),
         )
-        object.__setattr__(self, "evidence_ref", _freeze_evidence(self.evidence_ref))
+        evidence = _freeze_evidence(self.evidence_ref)
+        evidence_observed = datetime.fromisoformat(
+            str(evidence["observed_at"])[:-1] + "+00:00"
+        ).astimezone(timezone.utc)
+        if evidence_observed != observed:
+            raise CapabilityError(
+                "evidence observed_at must match claim observed_at"
+            )
+        object.__setattr__(self, "evidence_ref", evidence)
 
 
 @dataclass(frozen=True)
@@ -303,8 +311,40 @@ class CapabilitySnapshot:
             UUID(self.snapshot_id)
         except (ValueError, TypeError, AttributeError) as error:
             raise CapabilityError("snapshot_id must be a UUID") from error
-        if self.status not in STATUSES:
+        for field in ("provider_id", "account_id", "entity_id", "instrument_version"):
+            object.__setattr__(self, field, _text(getattr(self, field), field))
+        environment = _text(self.environment, "environment").upper()
+        if environment not in ENVIRONMENTS:
+            raise CapabilityError("environment is unsupported")
+        object.__setattr__(self, "environment", environment)
+        observed = _instant(self.observed_at, "observed_at")
+        expires = _instant(self.expires_at, "expires_at")
+        if expires < observed:
+            raise CapabilityError("expires_at cannot be before observed_at")
+        object.__setattr__(self, "observed_at", observed)
+        object.__setattr__(self, "expires_at", expires)
+        for field in (
+            "supported_order_types",
+            "time_in_force",
+            "permission_scopes",
+            "native_protection",
+            "data_entitlements",
+        ):
+            object.__setattr__(self, field, _set(getattr(self, field), field))
+        object.__setattr__(self, "position_mode", _text(self.position_mode, "position_mode"))
+        object.__setattr__(
+            self,
+            "rate_limit_policy_id",
+            _text(self.rate_limit_policy_id, "rate_limit_policy_id"),
+        )
+        status = _text(self.status, "status").upper()
+        if status not in STATUSES:
             raise CapabilityError("status is unsupported")
+        object.__setattr__(self, "status", status)
+        sources = frozenset(_text(source, "source").upper() for source in self.sources)
+        if not sources.issubset(SOURCES):
+            raise CapabilityError("snapshot sources contain unsupported source")
+        object.__setattr__(self, "sources", sources)
         object.__setattr__(self, "evidence", tuple(_freeze_evidence(item) for item in self.evidence))
 
     @property

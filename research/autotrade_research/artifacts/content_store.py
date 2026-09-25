@@ -1,3 +1,10 @@
+"""Legacy content-hash artifact-store compatibility surface.
+
+This module predates the canonical rights-bound WP-06 store in store.py.
+It is retained only to characterize or migrate the earlier on-disk format.
+New production code must import ArtifactStore from autotrade_research.artifacts
+and must not establish this module as a second artifact authority.
+"""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass

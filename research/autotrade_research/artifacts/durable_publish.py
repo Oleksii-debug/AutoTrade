@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import threading
+import stat
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -17,6 +18,49 @@ else:
 _PATH_LOCKS_GUARD = threading.Lock()
 _PATH_LOCKS: dict[str, threading.RLock] = {}
 _PATH_LOCK_LOCAL = threading.local()
+
+
+class DurablePublishLockError(RuntimeError):
+    """Raised when the publication lock path is unsafe or changes identity."""
+
+
+def _validate_existing_lock_path(lock_path: Path) -> None:
+    try:
+        path_stat = os.stat(lock_path, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise DurablePublishLockError("cannot inspect publication lock path") from exc
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise DurablePublishLockError(
+            "publication lock path must be a regular non-symlink file"
+        )
+    if path_stat.st_nlink != 1:
+        raise DurablePublishLockError(
+            "publication lock path must not have hard-link aliases"
+        )
+
+
+def _validate_lock_handle_identity(lock_path: Path, handle) -> None:
+    try:
+        opened = os.fstat(handle.fileno())
+        path_stat = os.stat(lock_path, follow_symlinks=False)
+    except OSError as exc:
+        raise DurablePublishLockError(
+            "publication lock path changed during acquisition"
+        ) from exc
+    if not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(path_stat.st_mode):
+        raise DurablePublishLockError(
+            "publication lock path must be a regular non-symlink file"
+        )
+    if opened.st_nlink != 1 or path_stat.st_nlink != 1:
+        raise DurablePublishLockError(
+            "publication lock path must not have hard-link aliases"
+        )
+    if not os.path.samestat(opened, path_stat):
+        raise DurablePublishLockError(
+            "publication lock path changed during acquisition"
+        )
 
 
 def _resolved_key(path: Path) -> str:
@@ -80,9 +124,17 @@ def durable_path_lock(path: str | Path) -> Iterator[None]:
             return
 
         lock_path = destination.with_name(f".{destination.name}.lock")
-        handle = lock_path.open("a+b")
+        _validate_existing_lock_path(lock_path)
         try:
+            handle = lock_path.open("a+b")
+        except OSError as exc:
+            raise DurablePublishLockError(
+                "cannot open publication lock path"
+            ) from exc
+        try:
+            _validate_lock_handle_identity(lock_path, handle)
             _lock_handle(handle)
+            _validate_lock_handle_identity(lock_path, handle)
             held[key] = [1, handle]
             try:
                 yield
@@ -119,6 +171,11 @@ def sync_parent_directory(path: str | Path) -> None:
         os.fsync(directory_fd)
     finally:
         os.close(directory_fd)
+
+
+def _sync_parent_directory(path: Path) -> None:
+    """Compatibility fault-injection seam for atomic_write_json."""
+    sync_parent_directory(path)
 
 
 def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
@@ -159,7 +216,7 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
         with durable_path_lock(destination):
             os.replace(temporary, destination)
             temporary = None
-            sync_parent_directory(destination)
+            _sync_parent_directory(destination)
     finally:
         if temporary is not None:
             try:

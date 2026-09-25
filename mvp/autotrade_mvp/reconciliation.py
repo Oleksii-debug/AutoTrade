@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
@@ -409,6 +409,7 @@ class ProviderFillEvidence:
     fee_amount: Decimal
     fee_currency: str
     trade_time: str
+    evidence_refs: tuple[str, ...] = field(default=(), compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -453,6 +454,15 @@ class ProviderFillEvidence:
             "fee_currency",
             _text(self.fee_currency, name="fee_currency").upper(),
         )
+        if not isinstance(self.evidence_refs, tuple):
+            raise TypeError("evidence_refs must be a tuple of strings")
+        refs: list[str] = []
+        for reference in self.evidence_refs:
+            ref = _text(reference, name="evidence_ref")
+            if ref in refs:
+                raise ValueError("evidence_refs must be unique")
+            refs.append(ref)
+        object.__setattr__(self, "evidence_refs", tuple(refs))
 
     @classmethod
     def create(
@@ -469,6 +479,7 @@ class ProviderFillEvidence:
         fee_amount=0,
         fee_currency: str,
         trade_time: str,
+        evidence_refs: tuple[str, ...] = (),
     ) -> "ProviderFillEvidence":
         qty = _decimal(quantity, name="quantity")
         px = _decimal(price, name="price")
@@ -494,6 +505,7 @@ class ProviderFillEvidence:
             fee_amount=fee,
             fee_currency=_text(fee_currency, name="fee_currency").upper(),
             trade_time=trade_time,
+            evidence_refs=evidence_refs,
         )
 
 

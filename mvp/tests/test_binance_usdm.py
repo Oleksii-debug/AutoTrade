@@ -359,7 +359,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
         self.assertEqual(fill.provider_execution_id, "BINANCE-USDM:BTCUSDT:698759")
         self.assertEqual(fill.account_id, "paper-1")
         self.assertEqual(fill.environment, "PAPER")
-        self.assertTrue(observation.evidence_ref.startswith("provider-read:sha256:"))
+        self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
         self.assertEqual(fill.client_order_id, "at-usdm-fill")
         self.assertEqual(fill.quantity, Decimal("0.002"))
         self.assertEqual(fill.price, Decimal("7819.01"))

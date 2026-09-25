@@ -440,6 +440,7 @@ def parse_account_trades(
                 raw.get("commissionAsset"), name="commissionAsset"
             ),
             trade_time=_millis(raw.get("time"), name="trade.time"),
+            evidence_refs=(observation.evidence_ref,),
         )
         previous = by_id.get(execution_id)
         if previous is not None and previous != fill:

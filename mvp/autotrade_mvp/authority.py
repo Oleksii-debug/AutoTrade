@@ -410,6 +410,7 @@ class AllocationAuthoritySnapshot:
     account_id: str
     instrument_versions: Mapping[str, str]
     capability_snapshot_ids: Mapping[str, str]
+    policy_version: str
     account_snapshot_id: str
     reconciliation_run_id: str
     account_state_version: int
@@ -487,6 +488,14 @@ class AllocationAuthoritySnapshot:
             normalized_scope(
                 self.capability_snapshot_ids,
                 name="allocation capability_snapshot_ids",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "policy_version",
+            _text(
+                self.policy_version,
+                name="allocation policy_version",
             ),
         )
         object.__setattr__(
@@ -1427,7 +1436,12 @@ class AuthorityService:
         reservation_provider_id: str,
         account_id: str,
         environment: str,
+        instrument_id: str,
+        instrument_version: int,
+        action: str,
+        notional,
         capability_snapshot_id: str,
+        reservation_availability_evidence: Mapping[str, Any] | None,
         now: str,
     ) -> dict[str, Any]:
         """Re-resolve and bind one allocation immediately before Transaction A."""
@@ -1514,6 +1528,60 @@ class AuthorityService:
             raise AuthorityConflict(
                 "allocation account does not match admission account"
             )
+        if current.account_state_version != risk_context.state_version:
+            raise AuthorityConflict(
+                "allocation account state differs from final risk state"
+            )
+        if _text(action, name="action").upper() != "ORDER.SUBMIT":
+            raise AuthorityConflict(
+                "allocation decision authorizes only ORDER.SUBMIT"
+            )
+
+        admitted_identity = InstrumentVersionIdentity(
+            instrument_id,
+            instrument_version,
+        )
+        admitted_instrument_ref = (
+            f"{admitted_identity.instrument_id}@{admitted_identity.version}"
+        )
+        current_instrument_ref = dict(current.instrument_versions).get(
+            risk_intent.symbol
+        )
+        if current_instrument_ref != admitted_instrument_ref:
+            raise AuthorityConflict(
+                "allocation instrument version differs from admitted instrument"
+            )
+
+        admitted_notional = _decimal(notional, name="notional")
+        intent_notional = risk_intent.quantity * risk_intent.price
+        if admitted_notional != intent_notional:
+            raise AuthorityConflict(
+                "admission notional differs from final risk intent notional"
+            )
+
+        if reservation_availability_evidence is not None:
+            if not isinstance(reservation_availability_evidence, Mapping):
+                raise AuthorityConflict(
+                    "allocation admission availability evidence is malformed"
+                )
+            if (
+                current.account_snapshot_id
+                != reservation_availability_evidence.get(
+                    "resource_snapshot_id"
+                )
+            ):
+                raise AuthorityConflict(
+                    "allocation account snapshot differs from reservation truth"
+                )
+            if (
+                current.reconciliation_run_id
+                != reservation_availability_evidence.get(
+                    "checkpoint_event_id"
+                )
+            ):
+                raise AuthorityConflict(
+                    "allocation reconciliation differs from reservation truth"
+                )
 
         try:
             revalidate_evidence_bound_allocation(
@@ -1521,7 +1589,7 @@ class AuthorityService:
                 resolved_evidence=current.resolved_evidence,
                 environment=env,
                 as_of=now,
-                current_policy_version=str(policy.version),
+                current_policy_version=current.policy_version,
                 current_provider_id=current.provider_id,
                 current_instrument_versions=current.instrument_versions,
                 current_capability_snapshot_ids=current.capability_snapshot_ids,
@@ -1958,7 +2026,12 @@ class AuthorityService:
                 reservation_provider_id=reservation_provider_id,
                 account_id=account_id,
                 environment=environment,
+                instrument_id=instrument_id,
+                instrument_version=instrument_version,
+                action=action,
+                notional=notional,
                 capability_snapshot_id=capability,
+                reservation_availability_evidence=availability_evidence,
                 now=now,
             )
 

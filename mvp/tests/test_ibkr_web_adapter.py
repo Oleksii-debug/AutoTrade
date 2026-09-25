@@ -1,6 +1,7 @@
 from functools import partial
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import json
 import unittest
 from uuid import uuid4
 
@@ -8,6 +9,11 @@ from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
     EvidenceVerification,
     derive_capability_snapshot,
+)
+from mvp.autotrade_mvp.provider_core import (
+    Surface,
+    observe_authenticated_json_response,
+    prepare_authenticated_read_query,
 )
 from mvp.autotrade_mvp.ibkr_web import (
     IbkrAbsenceEvidence,
@@ -44,7 +50,7 @@ def capability(*, account_id="U1234567", order_types=("MARKET", "LIMIT", "STOP",
             expires_at=NOW + timedelta(hours=1),
             supported_order_types=frozenset(order_types),
             time_in_force=frozenset({"DAY", "GTC", "IOC"}),
-            permission_scopes=frozenset({"ORDER_WRITE"}),
+            permission_scopes=frozenset({"ORDER_WRITE", "ORDER.READ"}),
             position_mode="NET",
             native_protection=frozenset(),
             rate_limit_policy_id="ibkr-web-paper",
@@ -78,8 +84,27 @@ def ready_session(**overrides):
     return IbkrBrokerageSessionStatus(**values)
 
 
-# Bind only test fixtures; production APIs require explicit account/environment scope.
-parse_web_api_trades = partial(parse_web_api_trades, environment="PAPER")
+def ibkr_trade_observation(payload, *, account_id="U1234567"):
+    binding = prepare_authenticated_read_query(
+        capability=capability(account_id=account_id),
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint="/iserver/account/trades",
+        query={},
+        at=NOW,
+    )
+    return observe_authenticated_json_response(
+        query_binding=binding,
+        response_bytes=json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8"),
+        observed_at=NOW,
+    )
+
+
+# Bind only the non-provider-read fixture helper.
 execution_to_reconciliation_fill = partial(
     execution_to_reconciliation_fill,
     environment="PAPER",
@@ -728,8 +753,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
             }
         ]
         fills = parse_web_api_trades(
-            [rows[0], dict(rows[0])],
-            expected_account_id="U1234567",
+            ibkr_trade_observation([rows[0], dict(rows[0])]),
             instrument_versions_by_conid={265598: "AAPL-CONID-265598:v1"},
             fee_currency_by_execution_id={"0001.123.01": "USD"},
         )
@@ -755,22 +779,19 @@ class IbkrWebAdapterTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(IbkrWebAdapterError, "account"):
             parse_web_api_trades(
-                [row],
-                expected_account_id="OTHER",
+                ibkr_trade_observation([row], account_id="OTHER"),
                 instrument_versions_by_conid={265598: "AAPL:v1"},
                 fee_currency_by_execution_id={"exec-1": "USD"},
             )
         with self.assertRaisesRegex(IbkrWebAdapterError, "unmapped IBKR conid"):
             parse_web_api_trades(
-                [row],
-                expected_account_id="U1234567",
+                ibkr_trade_observation([row]),
                 instrument_versions_by_conid={},
                 fee_currency_by_execution_id={"exec-1": "USD"},
             )
         with self.assertRaisesRegex(IbkrWebAdapterError, "fee currency"):
             parse_web_api_trades(
-                [row],
-                expected_account_id="U1234567",
+                ibkr_trade_observation([row]),
                 instrument_versions_by_conid={265598: "AAPL:v1"},
                 fee_currency_by_execution_id={},
             )
@@ -788,15 +809,13 @@ class IbkrWebAdapterTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(IbkrWebAdapterError, "exact decimal"):
             parse_web_api_trades(
-                [dict(base, size=1.0)],
-                expected_account_id="U1234567",
+                ibkr_trade_observation([dict(base, size=1.0)]),
                 instrument_versions_by_conid={265598: "AAPL:v1"},
                 fee_currency_by_execution_id={"exec-1": "USD"},
             )
         with self.assertRaisesRegex(IbkrWebAdapterError, "conflicting"):
             parse_web_api_trades(
-                [base, dict(base, size="2")],
-                expected_account_id="U1234567",
+                ibkr_trade_observation([base, dict(base, size="2")]),
                 instrument_versions_by_conid={265598: "AAPL:v1"},
                 fee_currency_by_execution_id={"exec-1": "USD"},
             )

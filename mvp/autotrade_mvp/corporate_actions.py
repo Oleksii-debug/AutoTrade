@@ -474,6 +474,29 @@ class CorporateActionBook:
                 "symbol change successor must carry a different provider symbol"
             )
 
+        # SYMBOL_CHANGE is a zero-P&L identity transition, not a generic
+        # InstrumentVersion migration. If any field that changes the economic
+        # meaning of the held quantity changes, a different corporate-action
+        # treatment is required instead of silently preserving quantity/basis.
+        economic_identity_fields = (
+            "asset_class",
+            "base_currency",
+            "quote_currency",
+            "settlement_currency",
+            "quantity_unit",
+            "contract_multiplier",
+        )
+        changed_economic_fields = tuple(
+            field
+            for field in economic_identity_fields
+            if getattr(successor, field) != getattr(current, field)
+        )
+        if changed_economic_fields:
+            raise ValueError(
+                "symbol change successor changes economic identity: "
+                + ", ".join(changed_economic_fields)
+            )
+
         before = self.state
         after = replace(before, symbol=successor.provider_symbol)
         return (

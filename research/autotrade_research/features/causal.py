@@ -127,21 +127,76 @@ class LabelPoint:
     label_available_at: datetime
     value: Decimal
     source_revision: str
+    source_observation_id: str
+    source_event_time: datetime
+    information_cutoff: datetime
+    source_population_fingerprint: str
+    provenance_hash: str
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "symbol", _text(self.symbol, name="symbol"))
+        symbol = _text(self.symbol, name="symbol")
         anchor = _time(self.anchor_time, name="anchor_time")
         available = _time(self.label_available_at, name="label_available_at")
+        event = _time(self.source_event_time, name="source_event_time")
+        cutoff = _time(self.information_cutoff, name="information_cutoff")
         if available <= anchor:
             raise ValueError("label_available_at must be after anchor_time")
+        if event <= anchor:
+            raise ValueError("source_event_time must be after anchor_time")
+        if available < event:
+            raise ValueError("label availability cannot precede source event")
+        if available > cutoff:
+            raise ValueError("label source is not available by information_cutoff")
+        value = _decimal(self.value, name="value")
+        revision = _text(self.source_revision, name="source_revision")
+        observation_id = _text(
+            self.source_observation_id,
+            name="source_observation_id",
+        )
+        population = _text(
+            self.source_population_fingerprint,
+            name="source_population_fingerprint",
+        )
+        if not population.startswith("sha256:") or len(population) != 71:
+            raise ValueError("source_population_fingerprint must be sha256:<64 hex>")
+        try:
+            int(population[7:], 16)
+        except ValueError as error:
+            raise ValueError(
+                "source_population_fingerprint must be sha256:<64 hex>"
+            ) from error
+        material = {
+            "schema_version": "2.0.0",
+            "symbol": symbol,
+            "anchor_time": anchor.isoformat(),
+            "source_observation_id": observation_id,
+            "source_event_time": event.isoformat(),
+            "source_available_at": available.isoformat(),
+            "source_revision": revision,
+            "information_cutoff": cutoff.isoformat(),
+            "source_population_fingerprint": population,
+            "label_value": str(value),
+        }
+        expected = "sha256:" + sha256(
+            json.dumps(
+                material,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        provenance = _text(self.provenance_hash, name="provenance_hash")
+        if provenance != expected:
+            raise ValueError("label provenance_hash does not match immutable inputs")
+        object.__setattr__(self, "symbol", symbol)
         object.__setattr__(self, "anchor_time", anchor)
         object.__setattr__(self, "label_available_at", available)
-        object.__setattr__(self, "value", _decimal(self.value, name="value"))
-        object.__setattr__(
-            self,
-            "source_revision",
-            _text(self.source_revision, name="source_revision"),
-        )
+        object.__setattr__(self, "source_event_time", event)
+        object.__setattr__(self, "information_cutoff", cutoff)
+        object.__setattr__(self, "value", value)
+        object.__setattr__(self, "source_revision", revision)
+        object.__setattr__(self, "source_observation_id", observation_id)
+        object.__setattr__(self, "source_population_fingerprint", population)
+        object.__setattr__(self, "provenance_hash", provenance)
 
 
 @dataclass(frozen=True)
@@ -300,23 +355,130 @@ def make_forward_label(
     symbol: str,
     anchor_time: datetime,
     anchor_value,
-    future: SourceValue,
+    observations: Iterable[SourceValue],
+    future_event_time: datetime,
+    information_cutoff: datetime,
+    future: SourceValue | None = None,
 ) -> LabelPoint:
+    """Derive a forward label from latest truth known at a frozen cutoff.
+
+    The optional future argument is only a caller assertion. It never selects
+    the label vintage; a stale assertion fails closed when a later correction
+    was already causally visible at the information cutoff.
+    """
+
     name = _text(symbol, name="symbol")
     anchor = _time(anchor_time, name="anchor_time")
-    if future.symbol != name:
-        raise ValueError("label source symbol does not match anchor symbol")
-    if future.event_time <= anchor:
+    event = _time(future_event_time, name="future_event_time")
+    cutoff = _time(information_cutoff, name="information_cutoff")
+    if event <= anchor:
         raise ValueError("label source must occur after the anchor")
+    population = tuple(observations)
+    if not population:
+        raise ValueError("label source observation population must be non-empty")
+    if any(not isinstance(item, SourceValue) for item in population):
+        raise TypeError("label source population must contain SourceValue values")
+    selected = tuple(
+        item
+        for item in _latest_known_vintages(
+            population,
+            symbol=name,
+            cutoff=cutoff,
+        )
+        if item.event_time == event
+    )
+    if len(selected) != 1:
+        raise ValueError(
+            "target future event is not uniquely causally available by information_cutoff"
+        )
+    chosen = selected[0]
+    if future is not None:
+        if not isinstance(future, SourceValue):
+            raise TypeError("future assertion must be SourceValue")
+        asserted = (
+            future.observation_id,
+            future.symbol,
+            future.event_time,
+            future.available_at,
+            future.value,
+            future.source_revision,
+        )
+        canonical = (
+            chosen.observation_id,
+            chosen.symbol,
+            chosen.event_time,
+            chosen.available_at,
+            chosen.value,
+            chosen.source_revision,
+        )
+        if asserted != canonical:
+            raise ValueError(
+                "caller-selected future is not the latest causally known revision"
+            )
     base = _decimal(anchor_value, name="anchor_value")
     if base == 0:
         raise ValueError("anchor_value cannot be zero")
+    visible_target_vintages = tuple(
+        sorted(
+            (
+                item.observation_id,
+                item.available_at.isoformat(),
+                item.source_revision,
+                str(item.value),
+            )
+            for item in population
+            if (
+                item.symbol == name
+                and item.event_time == event
+                and item.available_at <= cutoff
+            )
+        )
+    )
+    population_material = {
+        "schema_version": "1.0.0",
+        "symbol": name,
+        "future_event_time": event.isoformat(),
+        "information_cutoff": cutoff.isoformat(),
+        "visible_vintages": visible_target_vintages,
+    }
+    population_fingerprint = "sha256:" + sha256(
+        json.dumps(
+            population_material,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    label_value = (chosen.value / base) - Decimal("1")
+    provenance_material = {
+        "schema_version": "2.0.0",
+        "symbol": name,
+        "anchor_time": anchor.isoformat(),
+        "source_observation_id": chosen.observation_id,
+        "source_event_time": chosen.event_time.isoformat(),
+        "source_available_at": chosen.available_at.isoformat(),
+        "source_revision": chosen.source_revision,
+        "information_cutoff": cutoff.isoformat(),
+        "source_population_fingerprint": population_fingerprint,
+        "label_value": str(label_value),
+    }
+    provenance_hash = "sha256:" + sha256(
+        json.dumps(
+            provenance_material,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     return LabelPoint(
         symbol=name,
         anchor_time=anchor,
-        label_available_at=future.available_at,
-        value=(future.value / base) - Decimal("1"),
-        source_revision=future.source_revision,
+        label_available_at=chosen.available_at,
+        value=label_value,
+        source_revision=chosen.source_revision,
+        source_observation_id=chosen.observation_id,
+        source_event_time=chosen.event_time,
+        information_cutoff=cutoff,
+        source_population_fingerprint=population_fingerprint,
+        provenance_hash=provenance_hash,
     )
 
 
@@ -333,6 +495,10 @@ def training_row(
         raise ValueError("feature decision_time must equal label anchor_time")
     if feature.decision_time > cutoff:
         raise ValueError("feature is not available by training cutoff")
+    if label.information_cutoff != cutoff:
+        raise ValueError(
+            "label must be derived at the exact training information cutoff"
+        )
     if label.label_available_at > cutoff:
         raise ValueError("label is delayed beyond training cutoff")
     return feature.value, label.value
@@ -575,6 +741,8 @@ def training_rows_for_fold(
         if label.anchor_time != feature.decision_time:
             raise ValueError("label anchor_time must equal feature decision_time")
         if not (fold.train_start <= feature.decision_time <= cutoff):
+            continue
+        if label.information_cutoff != cutoff:
             continue
         if label.label_available_at > cutoff:
             continue

@@ -8,6 +8,7 @@ from mvp.autotrade_mvp.kraken_spot import (
     KrakenSpotAbsenceEvidence,
     KrakenSpotAdapterError,
     KrakenSpotOrderIntent,
+    KrakenSpotPreparedRequest,
     coverage_evidence,
     derivatives_supported_by_this_module,
     parse_trade_history,

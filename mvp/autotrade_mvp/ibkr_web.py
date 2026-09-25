@@ -86,6 +86,8 @@ def validate_coid(value: str) -> str:
 
 @dataclass(frozen=True)
 class IbkrBrokerageSessionStatus:
+    account_id: str
+    environment: str
     connected: bool
     authenticated: bool
     established: bool
@@ -93,9 +95,17 @@ class IbkrBrokerageSessionStatus:
     observed_at: datetime
 
     def __post_init__(self) -> None:
+        account = _text(self.account_id, name="account_id")
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"PAPER", "LIVE"}:
+            raise IbkrWebAdapterError(
+                "brokerage session environment must be PAPER or LIVE"
+            )
         for field in ("connected", "authenticated", "established", "competing"):
             if type(getattr(self, field)) is not bool:
                 raise TypeError(f"{field} must be boolean")
+        object.__setattr__(self, "account_id", account)
+        object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "observed_at", _instant(self.observed_at, name="observed_at"))
 
     @property
@@ -324,11 +334,19 @@ def prepare_normalized_order(
     if point - session.observed_at > timedelta(seconds=maximum_session_age_seconds):
         raise IbkrWebAdapterError("brokerage session evidence is stale")
     session.require_trade_ready()
+    if session.account_id != intent.account_id:
+        raise IbkrWebAdapterError(
+            "brokerage session account does not match intent account"
+        )
     coid = validate_coid(client_order_id)
     if capability.provider_id.upper() != "IBKR":
         raise IbkrWebAdapterError("capability belongs to another provider")
     if capability.account_id != intent.account_id:
         raise IbkrWebAdapterError("capability account does not match intent account")
+    if capability.environment.upper() != session.environment:
+        raise IbkrWebAdapterError(
+            "capability environment does not match brokerage session environment"
+        )
     if capability.instrument_version != intent.instrument_version:
         raise IbkrWebAdapterError("capability instrument version does not match intent")
     if not capability.admits(

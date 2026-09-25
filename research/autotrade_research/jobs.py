@@ -20,6 +20,11 @@ from .artifacts.store import ArtifactStore
 
 
 FINAL_STATES = {"SUCCEEDED", "FAILED", "CANCELLED"}
+
+# Automatic lease retry is code-reviewed capability, never caller authority.
+# Callers may disable retry for a safe kind, but cannot promote an arbitrary
+# research/external job into the retry-safe class.
+_REQUEUEABLE_JOB_KINDS = frozenset({"research.replay"})
 ALLOWED_STATES = {"QUEUED", "RUNNING", "WAITING_EXTERNAL", *FINAL_STATES}
 
 
@@ -325,6 +330,10 @@ class ResearchJobStore:
         budget = _validate_budget(resource_budget)
         if not isinstance(lease_requeueable, bool):
             raise ValueError("lease_requeueable must be boolean")
+        if lease_requeueable and job_kind not in _REQUEUEABLE_JOB_KINDS:
+            raise ValueError(
+                "job kind is not qualified for automatic lease requeue"
+            )
         current = _utc(now or datetime.now(timezone.utc))
         identifier = str(uuid4()) if job_id is None else str(UUID(_require_text(job_id, "job_id")))
 

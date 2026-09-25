@@ -38,6 +38,29 @@ class RegimeMetric:
     observations: int
     label_complete: bool
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.regime, str) or not self.regime.strip():
+            raise ValueError("regime is required")
+        if (
+            not isinstance(self.observations, int)
+            or isinstance(self.observations, bool)
+            or self.observations < 0
+        ):
+            raise ValueError("observations must be a non-negative integer")
+        if not isinstance(self.label_complete, bool):
+            raise TypeError("label_complete must be boolean")
+        object.__setattr__(self, "regime", self.regime.strip())
+        object.__setattr__(
+            self,
+            "champion_net_score",
+            _decimal(self.champion_net_score, name="champion_net_score"),
+        )
+        object.__setattr__(
+            self,
+            "candidate_net_score",
+            _decimal(self.candidate_net_score, name="candidate_net_score"),
+        )
+
     @classmethod
     def create(
         cls,
@@ -75,6 +98,63 @@ class RetentionPolicy:
     independent_science_gate_passed: bool
     risk_gate_passed: bool
 
+    def __post_init__(self) -> None:
+        if isinstance(self.protected_regimes, (str, bytes)) or isinstance(
+            self.recent_regimes, (str, bytes)
+        ):
+            raise TypeError("regime lists must be collections of text")
+        protected_raw = tuple(self.protected_regimes)
+        recent_raw = tuple(self.recent_regimes)
+        if any(not isinstance(value, str) for value in protected_raw + recent_raw):
+            raise TypeError("regime lists must contain text values")
+        protected = tuple(value.strip() for value in protected_raw)
+        recent = tuple(value.strip() for value in recent_raw)
+        if any(not value for value in protected + recent):
+            raise ValueError("regime identities must be non-empty")
+        if len(protected) != len(set(protected)) or len(recent) != len(set(recent)):
+            raise ValueError("regime lists must not contain duplicates")
+        if not recent:
+            raise ValueError("at least one recent regime is required")
+        if (
+            not isinstance(self.min_observations_per_regime, int)
+            or isinstance(self.min_observations_per_regime, bool)
+            or self.min_observations_per_regime < 1
+        ):
+            raise ValueError("min_observations_per_regime must be positive")
+        for name in (
+            "require_complete_labels",
+            "independent_science_gate_passed",
+            "risk_gate_passed",
+        ):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} must be boolean")
+        object.__setattr__(self, "protected_regimes", protected)
+        object.__setattr__(self, "recent_regimes", recent)
+        object.__setattr__(
+            self,
+            "max_protected_degradation",
+            _non_negative(
+                self.max_protected_degradation,
+                name="max_protected_degradation",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "max_recent_degradation",
+            _non_negative(
+                self.max_recent_degradation,
+                name="max_recent_degradation",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "min_recent_improvement",
+            _non_negative(
+                self.min_recent_improvement,
+                name="min_recent_improvement",
+            ),
+        )
+
     @classmethod
     def create(
         cls,
@@ -89,8 +169,18 @@ class RetentionPolicy:
         independent_science_gate_passed: bool,
         risk_gate_passed: bool,
     ) -> "RetentionPolicy":
-        protected = tuple(str(x).strip() for x in protected_regimes if str(x).strip())
-        recent = tuple(str(x).strip() for x in recent_regimes if str(x).strip())
+        if isinstance(protected_regimes, (str, bytes)) or isinstance(
+            recent_regimes, (str, bytes)
+        ):
+            raise TypeError("regime lists must be collections of text")
+        protected_raw = tuple(protected_regimes)
+        recent_raw = tuple(recent_regimes)
+        if any(not isinstance(value, str) for value in protected_raw + recent_raw):
+            raise TypeError("regime lists must contain text values")
+        protected = tuple(value.strip() for value in protected_raw)
+        recent = tuple(value.strip() for value in recent_raw)
+        if any(not value for value in protected + recent):
+            raise ValueError("regime identities must be non-empty")
         if len(protected) != len(set(protected)) or len(recent) != len(set(recent)):
             raise ValueError("regime lists must not contain duplicates")
         if not recent:

@@ -799,5 +799,42 @@ class ExperienceMemoryTests(unittest.TestCase):
             self.assertEqual(second.source_episode(episode)["episode_id"], episode)
 
 
+    def test_binary_float_economics_are_rejected_before_immutable_memory_write(self):
+        with TemporaryDirectory() as directory:
+            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            bad_episode = payload("candidate")
+            bad_episode["costs"] = {"fees": 0.1}
+            with self.assertRaisesRegex(TypeError, "binary float"):
+                store.append_episode(
+                    decision_time=BASE,
+                    information_cutoff=BASE,
+                    task="research",
+                    regime="calm",
+                    instrument_family="equity",
+                    permission_class="research",
+                    payload=bad_episode,
+                )
+
+            clean_episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("pending"),
+            )
+            with self.assertRaisesRegex(TypeError, "binary float"):
+                store.append_correction(
+                    clean_episode,
+                    available_at=BASE,
+                    payload={
+                        "supersedes_fields": ["costs"],
+                        "costs": {"fees": 0.1},
+                        "evidence_ref": "artifact:float-cost",
+                    },
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

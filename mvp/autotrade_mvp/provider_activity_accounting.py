@@ -99,31 +99,121 @@ def _scoped_identity(kind: str, *parts: str) -> str:
     return f"{normalized_kind}:{digest}"
 
 
+def _economic_provider_environment(
+    *,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> str:
+    """Normalize exact provider environment without collapsing distinct endpoints."""
+
+    provider = _text(provider_id, name="provider_id").upper()
+    runtime_environment = _environment(environment)
+    if provider == "BYBIT" and provider_environment is None:
+        raise AccountingConflict(
+            "BYBIT economic scope requires explicit provider_environment"
+        )
+    exact = (
+        runtime_environment
+        if provider_environment is None
+        else _text(provider_environment, name="provider_environment").upper()
+    )
+    if provider == "BYBIT" and exact not in {"MAINNET", "TESTNET", "DEMO"}:
+        raise AccountingConflict(
+            "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+        )
+    return exact
+
+
+def _economic_scope_parts(
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> tuple[str, str, str, str]:
+    provider = _text(provider_id, name="provider_id").upper()
+    account = _text(account_id, name="account_id")
+    runtime_environment = _environment(environment)
+    exact_provider_environment = _economic_provider_environment(
+        provider_id=provider,
+        environment=runtime_environment,
+        provider_environment=provider_environment,
+    )
+    return provider, account, runtime_environment, exact_provider_environment
+
+
+def _scoped_environment_identity_parts(
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> tuple[str, ...]:
+    provider, account, runtime_environment, exact_provider_environment = (
+        _economic_scope_parts(
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+            provider_environment=provider_environment,
+        )
+    )
+    parts = [provider, account, runtime_environment]
+    if exact_provider_environment != runtime_environment:
+        parts.append(exact_provider_environment)
+    return tuple(parts)
+
+
+def _legacy_book_id(
+    *, provider_id: str, account_id: str, environment: str
+) -> str:
+    """Return the pre-provider-environment economic-book identity."""
+
+    provider = _text(provider_id, name="provider_id").upper()
+    account = _text(account_id, name="account_id")
+    runtime_environment = _environment(environment)
+    return _scoped_identity(
+        "economic-book", provider, account, runtime_environment
+    )
+
+
 def _activity_identity(
     *,
     provider_id: str,
     account_id: str,
     environment: str,
     activity_id: str,
+    provider_environment: str | None = None,
 ) -> str:
-    provider = _text(provider_id, name="provider_id").upper()
-    account = _text(account_id, name="account_id")
-    scope = _environment(environment)
     activity = _text(activity_id, name="activity_id")
     return _scoped_identity(
         "provider-activity",
-        provider,
-        account,
-        scope,
+        *_scoped_environment_identity_parts(
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+            provider_environment=provider_environment,
+        ),
         activity,
     )
 
 
-def _book_id(*, provider_id: str, account_id: str, environment: str) -> str:
-    provider = _text(provider_id, name="provider_id").upper()
-    account = _text(account_id, name="account_id")
-    scope = _environment(environment)
-    return _scoped_identity("economic-book", provider, account, scope)
+def _book_id(
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    provider_environment: str | None = None,
+) -> str:
+    return _scoped_identity(
+        "economic-book",
+        *_scoped_environment_identity_parts(
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+            provider_environment=provider_environment,
+        ),
+    )
 
 
 def _transaction_payload(transaction: JournalTransaction) -> dict[str, Any]:
@@ -209,14 +299,25 @@ def _economic_batch_digest(
     account_id: str,
     environment: str,
     transactions: Iterable[JournalTransaction],
+    provider_environment: str | None = None,
 ) -> str:
+    provider, account, runtime_environment, exact_provider_environment = (
+        _economic_scope_parts(
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+            provider_environment=provider_environment,
+        )
+    )
     material = {
         "schema_version": "1.0.0",
-        "provider_id": _text(provider_id, name="provider_id").upper(),
-        "account_id": _text(account_id, name="account_id"),
-        "environment": _environment(environment),
+        "provider_id": provider,
+        "account_id": account,
+        "environment": runtime_environment,
         "transactions": [_transaction_payload(item) for item in transactions],
     }
+    if exact_provider_environment != runtime_environment:
+        material["provider_environment"] = exact_provider_environment
     return payload_digest(material)
 
 
@@ -563,17 +664,37 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         provider_id: str,
         account_id: str,
         environment: str,
+        provider_environment: str | None = None,
     ):
         if not isinstance(store, JournalStore):
             raise TypeError("store must be JournalStore")
         self.store = store
         self.provider_id = _text(provider_id, name="provider_id").upper()
         super().__init__(environment=environment, account_id=account_id)
+        self.provider_environment = _economic_provider_environment(
+            provider_id=self.provider_id,
+            environment=self.environment,
+            provider_environment=provider_environment,
+        )
         self.book_id = _book_id(
             provider_id=self.provider_id,
             account_id=self.account_id,
             environment=self.environment,
+            provider_environment=self.provider_environment,
         )
+        legacy_book_id = _legacy_book_id(
+            provider_id=self.provider_id,
+            account_id=self.account_id,
+            environment=self.environment,
+        )
+        if (
+            legacy_book_id != self.book_id
+            and self.store.load_events("economic_book", legacy_book_id)
+        ):
+            raise AccountingConflict(
+                "legacy ambiguous provider economic-book state requires "
+                "explicit migration/reconciliation before provider-environment scoped use"
+            )
         self._reload()
 
     def _events(self) -> list[dict[str, Any]]:
@@ -602,10 +723,17 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 raise AccountingConflict(
                     "economic durable event payload must be an object"
                 )
+            expected_provider_environment = (
+                self.provider_environment
+                if self.provider_environment != self.environment
+                else None
+            )
             if (
                 payload.get("provider_id") != self.provider_id
                 or payload.get("account_id") != self.account_id
                 or payload.get("environment") != self.environment
+                or payload.get("provider_environment")
+                != expected_provider_environment
             ):
                 raise AccountingConflict(
                     "economic durable event scope does not match provider book"
@@ -629,6 +757,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 provider_id=self.provider_id,
                 account_id=self.account_id,
                 environment=self.environment,
+                provider_environment=self.provider_environment,
                 transactions=transactions,
             )
             if payload.get("batch_digest") != batch_digest:
@@ -682,6 +811,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             provider_id=self.provider_id,
             account_id=self.account_id,
             environment=self.environment,
+            provider_environment=self.provider_environment,
             transactions=batch,
         )
         request = {
@@ -692,6 +822,8 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             "batch_digest": batch_digest,
             "transactions": transaction_payloads,
         }
+        if self.provider_environment != self.environment:
+            request["provider_environment"] = self.provider_environment
 
         if not inserted_locally:
             matching_batches = [
@@ -747,9 +879,12 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 "https://events.autotrade.local/economic-batch/"
                 + _scoped_identity(
                     "economic-batch",
-                    self.provider_id,
-                    self.account_id,
-                    self.environment,
+                    *_scoped_environment_identity_parts(
+                        provider_id=self.provider_id,
+                        account_id=self.account_id,
+                        environment=self.environment,
+                        provider_environment=self.provider_environment,
+                    ),
                     batch_digest,
                 ),
             )
@@ -764,6 +899,8 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             "resulting_book_digest": resulting_digest,
             "transactions": transaction_payloads,
         }
+        if self.provider_environment != self.environment:
+            payload["provider_environment"] = self.provider_environment
         envelope = {
             "event_id": event_identity,
             "event_type": self._BATCH_EVENT,
@@ -810,9 +947,12 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 "https://commands.autotrade.local/economic-batch/"
                 + _scoped_identity(
                     "economic-batch-command",
-                    self.provider_id,
-                    self.account_id,
-                    self.environment,
+                    *_scoped_environment_identity_parts(
+                        provider_id=self.provider_id,
+                        account_id=self.account_id,
+                        environment=self.environment,
+                        provider_environment=self.provider_environment,
+                    ),
                     plan.batch_digest,
                 ),
             )
@@ -930,17 +1070,23 @@ def commit_economic_batch_with_reservation_consumption(
     )
     reservation_component_key = _scoped_identity(
         "atomic-fill-reservation",
-        economic_book.provider_id,
-        economic_book.account_id,
-        economic_book.environment,
+        *_scoped_environment_identity_parts(
+            provider_id=economic_book.provider_id,
+            account_id=economic_book.account_id,
+            environment=economic_book.environment,
+            provider_environment=economic_book.provider_environment,
+        ),
         idem,
     )
     reservation_plan = reservation_book.prepare_consume_mutation(
         event_key=_scoped_identity(
             "atomic-fill-reservation-event",
-            economic_book.provider_id,
-            economic_book.account_id,
-            economic_book.environment,
+            *_scoped_environment_identity_parts(
+                provider_id=economic_book.provider_id,
+                account_id=economic_book.account_id,
+                environment=economic_book.environment,
+                provider_environment=economic_book.provider_environment,
+            ),
             cid,
         ),
         idempotency_key=reservation_component_key,
@@ -1068,6 +1214,8 @@ def commit_economic_batch_with_reservation_consumption(
             else provider_fill_binding.request
         ),
     }
+    if economic_book.provider_environment != economic_book.environment:
+        request["provider_environment"] = economic_book.provider_environment
     result = {
         "reservation": reservation_plan.snapshot_payload,
         "economic_batch": economic_plan.result,
@@ -1086,18 +1234,24 @@ def commit_economic_batch_with_reservation_consumption(
             "https://commands.autotrade.local/atomic-fill/"
             + _scoped_identity(
                 "atomic-fill-command",
-                economic_book.provider_id,
-                economic_book.account_id,
-                economic_book.environment,
+                *_scoped_environment_identity_parts(
+                    provider_id=economic_book.provider_id,
+                    account_id=economic_book.account_id,
+                    environment=economic_book.environment,
+                    provider_environment=economic_book.provider_environment,
+                ),
                 cid,
             ),
         )
     )
     journal_idempotency_key = "atomic-fill:" + _scoped_identity(
         "atomic-fill-idempotency",
-        economic_book.provider_id,
-        economic_book.account_id,
-        economic_book.environment,
+        *_scoped_environment_identity_parts(
+            provider_id=economic_book.provider_id,
+            account_id=economic_book.account_id,
+            environment=economic_book.environment,
+            provider_environment=economic_book.provider_environment,
+        ),
         idem,
     )
     try:
@@ -1571,12 +1725,14 @@ def book_external_provider_cash_activity(
         provider_id=provider,
         account_id=account,
         environment=scope,
+        provider_environment=activity.provider_environment,
         activity_id=activity.activity_id,
     )
     book_id = _book_id(
         provider_id=provider,
         account_id=account,
         environment=scope,
+        provider_environment=activity.provider_environment,
     )
     cause_event_id = f"provider-activity:{identity}"
     transaction_id = str(

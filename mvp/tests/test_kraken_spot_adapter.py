@@ -8,6 +8,7 @@ from mvp.autotrade_mvp.kraken_spot import (
     KrakenSpotAbsenceEvidence,
     KrakenSpotAdapterError,
     KrakenSpotOrderIntent,
+    KrakenSpotPreparedRequest,
     coverage_evidence,
     derivatives_supported_by_this_module,
     parse_trade_history,
@@ -20,7 +21,13 @@ from mvp.autotrade_mvp.kraken_spot import (
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
-def capability(*, order_types=("MARKET", "LIMIT"), tif=("GTC", "IOC")):
+def capability(
+    *,
+    order_types=("MARKET", "LIMIT"),
+    tif=("GTC", "IOC"),
+    account_id="spot-account",
+    environment="PAPER",
+):
     evidence = {
         "artifact_id": str(uuid4()),
         "sha256": "sha256:" + "b" * 64,
@@ -30,9 +37,9 @@ def capability(*, order_types=("MARKET", "LIMIT"), tif=("GTC", "IOC")):
     return CapabilitySnapshot(
         snapshot_id=str(uuid4()),
         provider_id="KRAKEN",
-        account_id="spot-account",
+        account_id=account_id,
         entity_id="kraken-spot",
-        environment="PAPER",
+        environment=environment,
         instrument_version="XBTUSD:v1",
         observed_at=NOW - timedelta(hours=1),
         expires_at=NOW + timedelta(hours=1),
@@ -50,39 +57,28 @@ def capability(*, order_types=("MARKET", "LIMIT"), tif=("GTC", "IOC")):
 
 
 class KrakenSpotAdapterTests(unittest.TestCase):
-    def test_direct_prepared_request_fails_closed_on_scope_and_provenance(self):
+    def test_direct_prepared_request_requires_canonical_factory(self):
         base = {
             "endpoint": "/0/private/AddOrder",
             "body": {
                 "pair": "XBTUSD",
+                "type": "buy",
+                "ordertype": "market",
+                "volume": "0.01",
                 "cl_ord_id": "at-direct",
+                "timeinforce": "gtc",
             },
             "account_id": "spot-account",
             "environment": "PAPER",
             "capability_snapshot_id": "cap-1",
             "documentation_refs": ("https://docs.kraken.com/order",),
+            "instrument_version": "XBTUSD:v1",
         }
-        request = KrakenSpotPreparedRequest(**base)
-        self.assertEqual(request.environment, "PAPER")
-        with self.assertRaisesRegex(KrakenSpotAdapterError, "endpoint"):
-            KrakenSpotPreparedRequest(**{**base, "endpoint": "/0/private/Withdraw"})
-        with self.assertRaisesRegex(KrakenSpotAdapterError, "environment"):
-            KrakenSpotPreparedRequest(**{**base, "environment": "STAGING"})
-        with self.assertRaisesRegex(KrakenSpotAdapterError, "capability_snapshot_id"):
-            KrakenSpotPreparedRequest(**{**base, "capability_snapshot_id": " "})
-        with self.assertRaisesRegex(KrakenSpotAdapterError, "documentation_refs"):
-            KrakenSpotPreparedRequest(**{**base, "documentation_refs": ()})
-        with self.assertRaisesRegex(KrakenSpotAdapterError, "client_order_id"):
-            KrakenSpotPreparedRequest(
-                **{**base, "body": {"pair": "XBTUSD", "cl_ord_id": ""}}
-            )
-        for field, value in (("cl_ord_id", None), ("cl_ord_id", 123), ("pair", True)):
-            with self.subTest(field=field, value=value), self.assertRaises(
-                KrakenSpotAdapterError
-            ):
-                KrakenSpotPreparedRequest(
-                    **{**base, "body": {**base["body"], field: value}}
-                )
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "canonical preparation factory",
+        ):
+            KrakenSpotPreparedRequest(**base)
 
     def test_limit_request_preserves_exact_decimal_and_has_no_nonce(self):
         intent = KrakenSpotOrderIntent.create(
@@ -107,6 +103,8 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         self.assertEqual(request.body["volume"], "0.0100")
         self.assertEqual(request.body["price"], "60000.25")
         self.assertEqual(request.body["cl_ord_id"], "at-0123456789abcd")
+        self.assertEqual(request.instrument_version, "XBTUSD:v1")
+        self.assertRegex(request.body_sha256, r"^sha256:[0-9a-f]{64}$")
         self.assertNotIn("nonce", request.body)
         self.assertNotIn("deadline", request.body)
 
@@ -190,11 +188,36 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 at=NOW,
             )
 
+    def _prepared_submission_request(
+        self,
+        *,
+        account_id="spot-account",
+        environment="LIVE",
+        client_order_id="at-order-1",
+    ):
+        intent = KrakenSpotOrderIntent.create(
+            instrument_version="XBTUSD:v1",
+            pair="XBTUSD",
+            side="BUY",
+            order_type="MARKET",
+            volume="0.01",
+        )
+        return prepare_spot_order_request(
+            intent,
+            client_order_id=client_order_id,
+            account_id=account_id,
+            environment=environment,
+            capability=capability(
+                account_id=account_id,
+                environment=environment,
+            ),
+            at=NOW,
+        )
+
     def _parse_submission(self, payload, **overrides):
         values = {
             "attempt_id": str(uuid4()),
-            "client_order_id": "at-order-1",
-            "environment": "LIVE",
+            "prepared_request": self._prepared_submission_request(),
             "observed_at": "2026-09-24T20:00:00Z",
             "source_uri": "https://api.kraken.com/0/private/AddOrder",
             "payload": payload,
@@ -213,14 +236,15 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             }
         )
         self.assertEqual(result["outcome"], "ACKNOWLEDGED")
-        self.assertEqual(result["provider_order_ids"], ("OABC-D123-E456",))
+        self.assertEqual(result["provider_order_id"], "OABC-D123-E456")
         self.assertEqual(result["retry_disposition"], "NEVER")
         self.assertNotIn("fill", repr(result).lower())
         self.assertEqual(
             result["evidence"][0]["source_uri"],
             "https://api.kraken.com/0/private/AddOrder",
         )
-        self.assertEqual(result["evidence"][0]["provider_environment"], "LIVE")
+        self.assertNotIn("provider_environment", result["evidence"][0])
+        self.assertNotIn("provider_environment", result)
 
     def test_provider_error_is_canonical_rejection_not_exception_or_success(self):
         result = self._parse_submission(
@@ -237,8 +261,9 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "UNKNOWN")
         self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
         self.assertEqual(result["evidence"], [])
-        self.assertIsNone(result["provider_received_at"])
-        self.assertEqual(result["observed_at"], "2026-09-24T20:00:00Z")
+        self.assertNotIn("provider_received_at", result)
+        self.assertNotIn("observed_at", result)
+        self.assertNotIn("provider_environment", result)
 
         with self.assertRaisesRegex(KrakenSpotAdapterError, "must not fabricate"):
             self._parse_submission(
@@ -261,7 +286,40 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 source_uri="https://example.invalid/0/private/AddOrder",
             )
         with self.assertRaisesRegex(KrakenSpotAdapterError, "qualified only for LIVE"):
-            self._parse_submission(payload, environment="PAPER")
+            self._parse_submission(
+                payload,
+                prepared_request=self._prepared_submission_request(
+                    environment="PAPER"
+                ),
+            )
+
+    def test_submission_evidence_binds_exact_prepared_account_and_capability(self):
+        payload = {"error": [], "result": {"txid": ["OABC-D123-E456"]}}
+        first = self._parse_submission(
+            payload,
+            prepared_request=self._prepared_submission_request(
+                account_id="spot-account-a",
+            ),
+        )
+        second = self._parse_submission(
+            payload,
+            prepared_request=self._prepared_submission_request(
+                account_id="spot-account-b",
+            ),
+        )
+        self.assertNotEqual(
+            first["evidence"][0]["sha256"],
+            second["evidence"][0]["sha256"],
+        )
+
+    def test_multiple_txids_fail_closed_for_single_add_order(self):
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "exactly one"):
+            self._parse_submission(
+                {
+                    "error": [],
+                    "result": {"txid": ["OABC-D123-E456", "OXYZ-D123-E456"]},
+                }
+            )
 
     def test_empty_txid_fails_closed(self):
         with self.assertRaisesRegex(KrakenSpotAdapterError, "transaction ids"):
@@ -338,6 +396,36 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         self.assertEqual(fill.fee_amount, Decimal("0.20"))
         self.assertEqual(fill.fee_currency, "USD")
         self.assertEqual(fill.trade_time, "2026-09-24T20:00:01.123456Z")
+
+    def test_trade_history_never_invents_missing_fee_as_zero(self):
+        base_trade = {
+            "ordertxid": "OABC-D123-E456",
+            "pair": "XXBTZUSD",
+            "time": "1790280001.123456",
+            "price": "60000.25",
+            "vol": "0.0100",
+        }
+        response = {
+            "error": [],
+            "result": {"trades": {"T-EXEC-1": dict(base_trade)}},
+        }
+        kwargs = {
+            "instrument_versions": {"XXBTZUSD": "XBTUSD:v1"},
+            "client_ids_by_provider_order": {
+                "OABC-D123-E456": "at-order-1"
+            },
+            "fee_currency_by_pair": {"XXBTZUSD": "USD"},
+        }
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "fee amount"):
+            parse_trade_history(response, **kwargs)
+
+        response["result"]["trades"]["T-EXEC-1"]["fee"] = "0"
+        fills = parse_trade_history(response, **kwargs)
+        self.assertEqual(fills[0].fee_amount, Decimal("0"))
+
+        response["result"]["trades"]["T-EXEC-1"]["fee"] = "0.25"
+        fills = parse_trade_history(response, **kwargs)
+        self.assertEqual(fills[0].fee_amount, Decimal("0.25"))
 
     def test_trade_history_refuses_to_guess_instrument_or_fee_currency(self):
         response = {

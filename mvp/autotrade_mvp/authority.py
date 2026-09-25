@@ -897,7 +897,11 @@ class AuthorityService:
             self._journal_version = event_version
 
     def _validate_durable_financial_evidence(
-        self, record: AdmissionRecord, policy: AuthorityPolicy
+        self,
+        record: AdmissionRecord,
+        policy: AuthorityPolicy,
+        *,
+        require_transaction_cut: bool = False,
     ) -> None:
         if self.store is None:
             raise AuthorityConflict(
@@ -928,9 +932,29 @@ class AuthorityService:
             raise AuthorityConflict(
                 "durable admission references missing risk decision evidence"
             )
-        risk_payload = risk_events[0]["payload"]
+        risk_event = risk_events[0]
+        risk_payload = risk_event["payload"]
         if not isinstance(risk_payload, dict):
             raise AuthorityConflict("durable risk decision payload is malformed")
+        journal_sequence_cut = risk_payload.get("journal_sequence_cut")
+        if journal_sequence_cut is None:
+            if require_transaction_cut:
+                raise AuthorityConflict(
+                    "durable financial admission lacks transaction journal cut"
+                )
+        else:
+            if type(journal_sequence_cut) is not int or journal_sequence_cut < 0:
+                raise AuthorityConflict(
+                    "durable financial admission journal cut is invalid"
+                )
+            risk_journal_sequence = risk_event.get("journal_sequence")
+            if (
+                type(risk_journal_sequence) is not int
+                or risk_journal_sequence <= journal_sequence_cut
+            ):
+                raise AuthorityConflict(
+                    "durable risk decision is not after its transaction journal cut"
+                )
         risk_digest = record.risk_decision_id.removeprefix("risk:sha256:")
         if (
             risk_payload.get("decision_id") != record.risk_decision_id
@@ -1246,6 +1270,8 @@ class AuthorityService:
             "confirmation_id": record.confirmation_id,
             "risk_reducing": record.risk_reducing,
         }
+        if journal_sequence_cut is not None:
+            request["journal_sequence_cut"] = journal_sequence_cut
         if "allocation_evidence" in risk_payload:
             allocation_evidence = risk_payload.get("allocation_evidence")
             if not isinstance(allocation_evidence, Mapping):
@@ -1798,6 +1824,7 @@ class AuthorityService:
 
         existing = self._admissions.get(aid)
         if existing is None:
+            journal_sequence_cut = self.store.current_journal_sequence()
             reservation_version = reservation_book.version
             evaluated_at = _text(now, name="now")
             valid_until = _text(risk_valid_until, name="risk_valid_until")
@@ -1818,6 +1845,17 @@ class AuthorityService:
                     "existing admission risk evidence is missing or ambiguous"
                 )
             payload = risk_events[0]["payload"]
+            journal_sequence_cut = payload.get("journal_sequence_cut")
+            if (
+                journal_sequence_cut is not None
+                and (
+                    type(journal_sequence_cut) is not int
+                    or journal_sequence_cut < 0
+                )
+            ):
+                raise AuthorityConflict(
+                    "existing admission journal cut is invalid"
+                )
             reservation_version = payload.get("reservation_version")
             if (
                 not isinstance(reservation_version, int)
@@ -2188,6 +2226,7 @@ class AuthorityService:
             now=now,
             reservation_availability_evidence=availability_evidence,
             allocation_binding=allocation_binding,
+            journal_sequence_cut=journal_sequence_cut,
             confirmation_id=confirmation_id,
             risk_reducing=risk_reducing,
         )
@@ -2217,6 +2256,7 @@ class AuthorityService:
         now: str,
         reservation_availability_evidence: Mapping[str, Any] | None = None,
         allocation_binding: Mapping[str, Any] | None = None,
+        journal_sequence_cut: int | None = None,
         confirmation_id: str | None = None,
         risk_reducing: bool = False,
     ) -> AdmissionRecord:
@@ -2290,6 +2330,16 @@ class AuthorityService:
         policy = self._policies.get(pid)
         if policy is None:
             raise KeyError(pid)
+        if (
+            journal_sequence_cut is not None
+            and (
+                type(journal_sequence_cut) is not int
+                or journal_sequence_cut < 0
+            )
+        ):
+            raise ValueError(
+                "journal_sequence_cut must be a non-negative integer"
+            )
 
         # Exact retries must be replayable after the first transaction advances
         # the reservation aggregate.  Otherwise the risk decision that was
@@ -2298,6 +2348,10 @@ class AuthorityService:
         # immutable admission identity is replayed; any changed scope fails
         # closed before a new reservation or send can occur.
         existing = self._admissions.get(aid)
+        if existing is None and journal_sequence_cut is None:
+            raise AuthorityConflict(
+                "new financial admission requires a transaction journal cut"
+            )
         if existing is not None:
             expected_instrument = InstrumentVersionIdentity(
                 instrument_id, instrument_version
@@ -2434,6 +2488,8 @@ class AuthorityService:
             "confirmation_id": candidate.confirmation_id,
             "risk_reducing": risk_reducing,
         }
+        if journal_sequence_cut is not None:
+            request["journal_sequence_cut"] = journal_sequence_cut
         if allocation_binding is not None:
             request["allocation_evidence"] = dict(allocation_binding)
         request_fingerprint = sha256(
@@ -2462,6 +2518,7 @@ class AuthorityService:
                 risk_decision.reservation_requirements
             ),
             "reservation_availability_evidence": reservation_availability_evidence,
+            "journal_sequence_cut": journal_sequence_cut,
             "capability_snapshot_id": risk_decision.capability_snapshot_id,
             "evaluated_at": risk_decision.evaluated_at,
             "valid_until": risk_decision.valid_until,
@@ -2546,6 +2603,7 @@ class AuthorityService:
                 result=result_payload,
                 state_version=current_state_version,
                 events=events,
+                expected_journal_sequence=journal_sequence_cut,
             )
         except Exception:
             reservation_book.refresh()
@@ -2631,7 +2689,11 @@ class AuthorityService:
             ):
                 return False, "risk_decision_expired"
             try:
-                self._validate_durable_financial_evidence(record, policy)
+                self._validate_durable_financial_evidence(
+                    record,
+                    policy,
+                    require_transaction_cut=True,
+                )
                 reservation_book = DurableReservationBook(
                     self.store,
                     environment=record.environment,

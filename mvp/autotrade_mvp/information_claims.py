@@ -561,6 +561,112 @@ class ClaimStore:
         )
 
 
+def build_information_event(
+    document: SourceDocument,
+    claims: Iterable[InformationClaim],
+    *,
+    information_id: str,
+    revision: str,
+    language: str,
+    extraction_version: str,
+    artifact_id: str,
+    artifact_sha256: str,
+    observed_at: datetime,
+    source_uri: str | None = None,
+    confidence_by_claim: dict[str, float],
+    trust_features: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build a canonical InformationEvent v1.0.0 without granting authority."""
+
+    if not isinstance(document, SourceDocument):
+        raise ValueError("document must be a SourceDocument")
+    canonical_information_id = _canonical_uuid(information_id, name="information_id")
+    canonical_revision = _text(revision, name="revision")
+    if re.fullmatch(r"0|[1-9][0-9]*", canonical_revision) is None:
+        raise ValueError("revision must be a canonical Sequence")
+    canonical_language = _text(language, name="language")
+    if len(canonical_language) < 2:
+        raise ValueError("language must contain at least two characters")
+    canonical_extraction_version = _text(
+        extraction_version,
+        name="extraction_version",
+    )
+
+    claim_values = tuple(claims)
+    if len({claim.claim_id for claim in claim_values if isinstance(claim, InformationClaim)}) != len(claim_values):
+        raise ValueError("claims must have unique identities")
+
+    expected_passage_hash = _digest(document.passage)
+    projected_claims: list[dict[str, object]] = []
+    for claim in claim_values:
+        if not isinstance(claim, InformationClaim):
+            raise ValueError("claims must contain only InformationClaim values")
+        if (
+            claim.source_id != document.source_id
+            or claim.source_revision != document.source_revision
+            or claim.source_kind != document.source_kind
+            or claim.published_at != document.published_at
+            or claim.available_at != document.available_at
+            or claim.ingested_at != document.ingested_at
+            or claim.passage_hash != expected_passage_hash
+            or claim.rights_basis != document.rights_basis
+        ):
+            raise ValueError("claim provenance does not match source document")
+        if claim.claim_id not in confidence_by_claim:
+            raise ValueError("every claim requires explicit confidence")
+        confidence = confidence_by_claim[claim.claim_id]
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            raise ValueError("claim confidence must be numeric")
+        if confidence < 0 or confidence > 1:
+            raise ValueError("claim confidence must be between 0 and 1")
+        projected_claims.append(
+            {
+                "claim_id": claim.claim_id,
+                "kind": claim.predicate,
+                "text": claim.value,
+                "confidence": float(confidence),
+            }
+        )
+
+    expected_confidence_ids = {claim.claim_id for claim in claim_values}
+    if set(confidence_by_claim) != expected_confidence_ids:
+        raise ValueError("confidence map must match exact claim population")
+
+    reserved_trust_keys = {"source_kind", "source_revision", "extraction_version"}
+    features = dict(trust_features or {})
+    if reserved_trust_keys.intersection(features):
+        raise ValueError("trust_features cannot override canonical provenance")
+    features.update(
+        {
+            "source_kind": document.source_kind,
+            "source_revision": document.source_revision,
+            "extraction_version": canonical_extraction_version,
+        }
+    )
+
+    evidence = document.to_evidence_ref(
+        artifact_id=artifact_id,
+        sha256=artifact_sha256,
+        observed_at=observed_at,
+        source_uri=source_uri,
+    )
+    return {
+        "information_id": canonical_information_id,
+        "source_id": document.source_id,
+        "published_at": _utc_text(document.published_at, name="published_at"),
+        "available_at": _utc_text(document.available_at, name="available_at"),
+        "ingested_at": _utc_text(document.ingested_at, name="ingested_at"),
+        "revision": canonical_revision,
+        "entities": sorted({claim.subject for claim in claim_values}),
+        "claims": projected_claims,
+        "content_hash": evidence["sha256"],
+        "rights_id": document.rights_basis,
+        "trust_features": features,
+        "language": canonical_language,
+        "evidence": [evidence],
+    }
+
+
 def ingest_claims(
     documents: Iterable[SourceDocument],
     *,

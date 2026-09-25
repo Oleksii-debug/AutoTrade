@@ -103,23 +103,27 @@ def persist_authority_snapshot(
     authority_id = authority_id.strip()
     event_id = event_id.strip()
     state = service.export_state()
-    existing_events = store.load_events(AUTHORITY_AGGREGATE_TYPE, authority_id)
-    if existing_events:
-        previous_payload = existing_events[-1].get("payload")
-        previous_state = (
-            previous_payload.get("state")
-            if isinstance(previous_payload, dict)
-            else None
-        )
-        if not isinstance(previous_state, dict):
-            raise ValueError("latest authority journal payload state is invalid")
-        _assert_monotonic_authority_state(previous_state, state)
+    existing = store.get_event(event_id)
+    # An immutable event-id replay is a lost-reply retry, not a new authority
+    # publication. Let JournalStore compare the reconstructed envelope exactly;
+    # only a genuinely new event must extend the latest durable snapshot.
+    if existing is None:
+        existing_events = store.load_events(AUTHORITY_AGGREGATE_TYPE, authority_id)
+        if existing_events:
+            previous_payload = existing_events[-1].get("payload")
+            previous_state = (
+                previous_payload.get("state")
+                if isinstance(previous_payload, dict)
+                else None
+            )
+            if not isinstance(previous_state, dict):
+                raise ValueError("latest authority journal payload state is invalid")
+            _assert_monotonic_authority_state(previous_state, state)
 
     payload = {
         "authority_id": authority_id,
         "state": state,
     }
-    existing = store.get_event(event_id)
     aggregate_version = (
         existing["aggregate_version"]
         if existing is not None

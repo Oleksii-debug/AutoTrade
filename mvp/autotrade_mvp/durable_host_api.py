@@ -57,7 +57,7 @@ class JournalBackedHostCommandStore:
         if not isinstance(max_events, int) or isinstance(max_events, bool) or max_events < 1:
             raise ValueError("max_events must be positive")
         self._journal = journal
-        self.account_id = account_id
+        self.account_id = account_id.strip()
         self.environment = environment
         self.aggregate_id = "host:" + payload_digest(
             {

@@ -325,6 +325,14 @@ class MarketNormalizationTests(unittest.TestCase):
                 )
             )
 
+        with self.assertRaisesRegex(MarketDataError, "UTC instant"):
+            normalizer.normalize(
+                raw(
+                    "FUNDING",
+                    {"rate": "0.001", "next_funding_at": "2026-09-25Z"},
+                )
+            )
+
     def test_funding_rate_can_be_negative_without_float_coercion(self):
         normalizer = MarketNormalizer(registry())
         event = normalizer.normalize(

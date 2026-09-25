@@ -46,6 +46,91 @@ class SecurityBoundaryTests(unittest.TestCase):
             ttl_seconds=60,
         )
 
+    def _boundary_with_idle_timeout(self, seconds):
+        return SecurityBoundary(
+            allowed_origins={"https://local.autotrade.invalid"},
+            credential_vault=self.vault,
+            session_authorizer=self.session_authorizer,
+            now=lambda: self.clock[0],
+            session_idle_timeout_seconds=seconds,
+        )
+
+    def test_session_idle_timeout_expires_before_absolute_lifetime(self):
+        boundary = self._boundary_with_idle_timeout(10)
+        session = boundary.create_session(
+            subject="operator",
+            role="OPERATOR",
+            origin="https://local.autotrade.invalid",
+            ttl_seconds=60,
+        )
+        self.assertEqual(session.expires_at, 1060.0)
+        self.assertEqual(session.idle_expires_at, 1010.0)
+
+        self.clock[0] = 1010.0
+        with self.assertRaisesRegex(PermissionError, "idle timeout"):
+            boundary.validate_session(session.token, origin=session.origin)
+        with self.assertRaisesRegex(PermissionError, "Unknown session"):
+            boundary.validate_session(session.token, origin=session.origin)
+
+    def test_successful_session_use_refreshes_idle_deadline_but_not_absolute_expiry(self):
+        boundary = self._boundary_with_idle_timeout(10)
+        session = boundary.create_session(
+            subject="operator",
+            role="OPERATOR",
+            origin="https://local.autotrade.invalid",
+            ttl_seconds=15,
+        )
+
+        self.clock[0] = 1009.0
+        refreshed = boundary.validate_session(session.token, origin=session.origin)
+        self.assertEqual(refreshed.idle_expires_at, 1015.0)
+        self.assertEqual(refreshed.expires_at, 1015.0)
+
+        self.clock[0] = 1014.0
+        still_valid = boundary.validate_session(session.token, origin=session.origin)
+        self.assertEqual(still_valid.idle_expires_at, 1015.0)
+
+        self.clock[0] = 1015.0
+        with self.assertRaisesRegex(PermissionError, "Session expired"):
+            boundary.validate_session(session.token, origin=session.origin)
+
+    def test_failed_origin_or_role_check_does_not_refresh_idle_deadline(self):
+        boundary = self._boundary_with_idle_timeout(10)
+        session = boundary.create_session(
+            subject="operator",
+            role="OPERATOR",
+            origin="https://local.autotrade.invalid",
+            ttl_seconds=60,
+        )
+
+        self.clock[0] = 1009.0
+        with self.assertRaisesRegex(PermissionError, "origin mismatch"):
+            boundary.validate_session(
+                session.token,
+                origin="https://wrong.autotrade.invalid",
+            )
+        with self.assertRaisesRegex(PermissionError, "Role is not authorized"):
+            boundary.validate_session(
+                session.token,
+                origin=session.origin,
+                required_roles={"OWNER"},
+            )
+
+        self.clock[0] = 1010.0
+        with self.assertRaisesRegex(PermissionError, "idle timeout"):
+            boundary.validate_session(session.token, origin=session.origin)
+
+    def test_session_idle_timeout_policy_is_strictly_bounded(self):
+        for invalid in (True, 0, -1, 3601, 10.0, "10"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                SecurityBoundary(
+                    allowed_origins={"https://local.autotrade.invalid"},
+                    credential_vault=self.vault,
+                    session_authorizer=self.session_authorizer,
+                    now=lambda: self.clock[0],
+                    session_idle_timeout_seconds=invalid,
+                )
+
     def _credential(self):
         return self.boundary.register_secret(
             self.owner.token,

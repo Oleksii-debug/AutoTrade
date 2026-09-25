@@ -249,7 +249,8 @@ class FundingLedger:
     """Idempotent funding-event accumulator with conflict detection."""
 
     def __init__(self) -> None:
-        self._events: dict[str, tuple[str, str, Decimal]] = {}
+        self._events: dict[str, tuple[str, str, str, Decimal]] = {}
+        self._periods: dict[tuple[str, str], tuple[str, str, Decimal]] = {}
         self._balances: dict[str, Decimal] = {}
 
     @staticmethod
@@ -269,11 +270,13 @@ class FundingLedger:
         self,
         *,
         event_id: str,
+        funding_period_id: str,
         instrument_id: str,
         currency: str,
         amount: Decimal | str | int,
     ) -> Decimal:
         identifier = _text(event_id, "event_id")
+        period = _text(funding_period_id, "funding_period_id")
         instrument = _text(instrument_id, "instrument_id")
         unit = _text(currency, "currency")
         value = _decimal(amount, "amount")
@@ -281,12 +284,24 @@ class FundingLedger:
 
         existing = self._events.get(identifier)
         if existing is not None:
-            old_fingerprint, old_currency, old_amount = existing
-            if old_fingerprint != fingerprint:
+            old_fingerprint, old_period, old_currency, old_amount = existing
+            if old_fingerprint != fingerprint or old_period != period:
                 raise PerpetualError("funding event id was reused with different content")
             return old_amount
 
-        self._events[identifier] = (fingerprint, unit, value)
+        period_key = (instrument, period)
+        existing_period = self._periods.get(period_key)
+        if existing_period is not None:
+            old_fingerprint, old_currency, old_amount = existing_period
+            if old_fingerprint != fingerprint:
+                raise PerpetualError(
+                    "funding period was reused with different economic content"
+                )
+            self._events[identifier] = (fingerprint, period, unit, value)
+            return old_amount
+
+        self._events[identifier] = (fingerprint, period, unit, value)
+        self._periods[period_key] = (fingerprint, unit, value)
         self._balances[unit] = self._balances.get(unit, Decimal("0")) + value
         return value
 

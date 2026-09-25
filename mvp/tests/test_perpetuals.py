@@ -123,20 +123,61 @@ class PerpetualLifecycleTests(unittest.TestCase):
     def test_funding_ledger_is_idempotent_and_conflict_detecting(self):
         ledger = FundingLedger()
         self.assertEqual(
-            ledger.apply(event_id="f1", instrument_id="BTC-PERP", currency="USDT", amount="-1.25"),
+            ledger.apply(event_id="f1", funding_period_id="2026-09-24T12:00Z", instrument_id="BTC-PERP", currency="USDT", amount="-1.25"),
             Decimal("-1.25"),
         )
         self.assertEqual(
-            ledger.apply(event_id="f1", instrument_id="BTC-PERP", currency="USDT", amount="-1.25"),
+            ledger.apply(event_id="f1", funding_period_id="2026-09-24T12:00Z", instrument_id="BTC-PERP", currency="USDT", amount="-1.25"),
             Decimal("-1.25"),
         )
         self.assertEqual(ledger.balance("USDT"), Decimal("-1.25"))
         with self.assertRaises(PerpetualError):
-            ledger.apply(event_id="f1", instrument_id="BTC-PERP", currency="USDT", amount="-1.30")
+            ledger.apply(event_id="f1", funding_period_id="2026-09-24T12:00Z", instrument_id="BTC-PERP", currency="USDT", amount="-1.30")
 
     def test_binary_float_inputs_are_rejected(self):
         with self.assertRaises(PerpetualError):
             linear_notional(signed_contracts=1.0, multiplier="0.001", price="100000")
+
+
+    def test_same_funding_period_with_different_event_id_is_not_double_counted(self):
+        ledger = FundingLedger()
+        first = ledger.apply(
+            event_id="provider-event-a",
+            funding_period_id="2026-09-24T12:00Z",
+            instrument_id="BTC-PERP",
+            currency="USDT",
+            amount="-1.25",
+        )
+        duplicate = ledger.apply(
+            event_id="provider-event-b",
+            funding_period_id="2026-09-24T12:00Z",
+            instrument_id="BTC-PERP",
+            currency="USDT",
+            amount="-1.25",
+        )
+        self.assertEqual(first, Decimal("-1.25"))
+        self.assertEqual(duplicate, Decimal("-1.25"))
+        self.assertEqual(ledger.balance("USDT"), Decimal("-1.25"))
+
+    def test_same_funding_period_with_changed_amount_conflicts(self):
+        ledger = FundingLedger()
+        ledger.apply(
+            event_id="provider-event-a",
+            funding_period_id="2026-09-24T12:00Z",
+            instrument_id="BTC-PERP",
+            currency="USDT",
+            amount="-1.25",
+        )
+        with self.assertRaisesRegex(
+            PerpetualError, "funding period was reused"
+        ):
+            ledger.apply(
+                event_id="provider-event-b",
+                funding_period_id="2026-09-24T12:00Z",
+                instrument_id="BTC-PERP",
+                currency="USDT",
+                amount="-1.30",
+            )
 
 
 if __name__ == "__main__":

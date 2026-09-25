@@ -70,6 +70,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 "input_snapshot_digest": "2" * 64,
                 "information_cutoff": "2026-09-25T18:20:00Z",
                 "desired_notional": "500",
+                "desired_notional_currency": "USD",
                 "expected_return_rate": objective_rate,
                 "risk_penalty_rate": "0.01",
             },
@@ -92,6 +93,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 "contract_multiplier": "1",
                 "quote_currency": "USD",
                 "settlement_currency": "USD",
+                "monetary_constraint_currency": "USD",
                 "price": "10",
                 "lot_size": "1",
                 "cost_rate": "0.001",
@@ -117,6 +119,9 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 "settlement_currency": "USD",
                 "source_price": "10",
                 "portfolio_base_currency": "USD",
+                "source_monetary_currency": "USD",
+                "desired_notional_currency": "USD",
+                "desired_notional_base": "500",
                 "fx_rate": "1",
                 "fx_source_id": "IDENTITY",
                 "unit_base_notional": "10",
@@ -315,6 +320,38 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 bundle=self.cross_currency_bundle(
                     omit_desired_currency=True,
                 ),
+            )
+
+    def test_same_currency_requires_explicit_monetary_unit_declarations(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        objective_payload = dict(objective.payload)
+        objective_payload.pop("desired_notional_currency")
+        objective = self.evidence(
+            evidence_id=objective.evidence_id,
+            kind="OBJECTIVE",
+            payload=objective_payload,
+        )
+        resolved = dict(resolved)
+        resolved[objective.evidence_id] = objective
+        with self.assertRaisesRegex(ValueError, "desired_notional_currency"):
+            self.allocate(
+                bundle=(objective, market, capital, stress, resolved),
+            )
+
+    def test_same_currency_rejects_mismatched_monetary_unit_declarations(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        market_payload = dict(market.payload)
+        market_payload["monetary_constraint_currency"] = "EUR"
+        market = self.evidence(
+            evidence_id=market.evidence_id,
+            kind="MARKET_CONSTRAINT",
+            payload=market_payload,
+        )
+        resolved = dict(resolved)
+        resolved[market.evidence_id] = market
+        with self.assertRaisesRegex(ValueError, "quote-currency units"):
+            self.allocate(
+                bundle=(objective, market, capital, stress, resolved),
             )
 
     def test_bound_allocation_is_deterministic_and_revalidates(self):

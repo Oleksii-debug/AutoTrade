@@ -3,7 +3,9 @@ from decimal import Decimal
 import unittest
 
 from mvp.autotrade_mvp.provider_core import (
+    BoundReconciliationResponse,
     ClockGuard,
+    PreparedReconciliationRead,
     PROVIDERS,
     REQUIRED_QUALIFICATION_CASES,
     ProviderCoreError,
@@ -11,6 +13,7 @@ from mvp.autotrade_mvp.provider_core import (
     QuotaBucket,
     classify_write_outcome,
     provider_definition,
+    require_reconciliation_response,
 )
 
 
@@ -103,6 +106,68 @@ class ProviderCoreTests(unittest.TestCase):
             evidence.status(now=NOW, exact_code_sha=CODE_SHA),
             "INCOMPLETE",
         )
+
+    def test_reconciliation_response_is_bound_to_prepared_scope_and_bytes(self):
+        read = PreparedReconciliationRead.create(
+            provider_id="BYBIT",
+            account_id="paper-account-1",
+            environment="TESTNET",
+            surface="EXECUTIONS",
+            endpoint="/v5/execution/list",
+            request={"category": "spot", "limit": 100},
+        )
+        source = {"retCode": 0, "result": {"list": []}}
+        bound = BoundReconciliationResponse.bind(read, source)
+        source["result"]["list"].append({"execId": "forged-after-bind"})
+        payload, account_id, environment = require_reconciliation_response(
+            bound,
+            provider_id="BYBIT",
+            surface="EXECUTIONS",
+            endpoint="/v5/execution/list",
+        )
+        self.assertEqual(payload, {"retCode": 0, "result": {"list": []}})
+        self.assertEqual(account_id, "paper-account-1")
+        self.assertEqual(environment, "TESTNET")
+        self.assertTrue(bound.evidence_id.startswith("sha256:"))
+
+    def test_reconciliation_response_cannot_be_relabelled_at_consumer_boundary(self):
+        bound = BoundReconciliationResponse.bind(
+            PreparedReconciliationRead.create(
+                provider_id="ALPACA",
+                account_id="account-a",
+                environment="PAPER",
+                surface="ACTIVITIES",
+                endpoint="/v2/account/activities/FILL",
+                request={"activity_types": "FILL"},
+            ),
+            [],
+        )
+        payload, account_id, environment = require_reconciliation_response(
+            bound,
+            provider_id="ALPACA",
+            surface="ACTIVITIES",
+            endpoint="/v2/account/activities/FILL",
+        )
+        self.assertEqual(payload, [])
+        self.assertEqual((account_id, environment), ("account-a", "PAPER"))
+        with self.assertRaisesRegex(ProviderCoreError, "provenance scope mismatch"):
+            require_reconciliation_response(
+                bound,
+                provider_id="BYBIT",
+                surface="EXECUTIONS",
+                endpoint="/v5/execution/list",
+            )
+
+    def test_reconciliation_provenance_rejects_binary_float_request_identity(self):
+        with self.assertRaisesRegex(ProviderCoreError, "binary float"):
+            PreparedReconciliationRead.create(
+                provider_id="BINANCE",
+                account_id="account-a",
+                environment="TESTNET",
+                surface="EXECUTIONS",
+                endpoint="/api/v3/myTrades",
+                request={"limit": 100.0},
+            )
 
     def test_research_cannot_consume_recovery_quota(self):
         bucket = QuotaBucket(capacity=Decimal("100"), recovery_reserve=Decimal("20"))

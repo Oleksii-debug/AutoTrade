@@ -1349,7 +1349,7 @@ class DurableModelCallOrchestrator:
             "observation_evidence_issuer": observation_evidence.issuer,
             "observation_digest": observation_evidence.observation_digest,
             "pricing_evidence_id": spec.pricing_evidence_id,
-            "pricing_evidence_digest": pricing.evidence_digest,
+            "pricing_evidence_digest": pricing_evidence_digest,
             "cost_currency": spec.cost_currency,
             "incurred_cost": str(observation.incurred_cost),
             "estimated_unbilled": str(observation.estimated_unbilled),

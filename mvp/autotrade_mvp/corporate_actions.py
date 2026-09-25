@@ -405,6 +405,12 @@ class CorporateActionBook:
         if not all(isinstance(event, CorporateEvent) for event in materialized):
             raise TypeError("events must contain CorporateEvent values")
 
+        for previous, current in zip(materialized, materialized[1:]):
+            if current.effective_date < previous.effective_date:
+                raise ValueError(
+                    "corporate events must be replayed in non-decreasing effective-date order"
+                )
+
         by_date: dict[date, list[CorporateEvent]] = {}
         for event in materialized:
             by_date.setdefault(event.effective_date, []).append(event)

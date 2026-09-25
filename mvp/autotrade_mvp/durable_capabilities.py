@@ -11,8 +11,6 @@ from __future__ import annotations
 from datetime import datetime
 from hashlib import sha256
 from typing import Any
-import json
-
 from .capabilities import (
     CapabilityError,
     CapabilityRegistry,
@@ -115,7 +113,7 @@ class DurableCapabilityRegistry:
 
     def _history(self) -> CapabilityRegistry:
         registry = CapabilityRegistry()
-        events = self.store.load_events_by_type(_EVENT_TYPE)
+        events = self.store.load_events_by_aggregate_type(_AGGREGATE_TYPE)
         seen_versions: dict[str, int] = {}
         for event in events:
             if event["aggregate_type"] != _AGGREGATE_TYPE:

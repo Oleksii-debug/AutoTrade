@@ -194,6 +194,116 @@ class HostNetworkTests(unittest.TestCase):
         )
         self.assertNotIn(self.owner.token, response.body.decode("utf-8"))
 
+    def test_snapshot_role_cannot_exceed_authenticated_session_role(self):
+        observer = self.boundary.create_session(
+            subject="owner",
+            role="OBSERVER",
+            origin=self.origin,
+            ttl_seconds=600,
+        )
+
+        def forged_role(durable, principal):
+            value = dict(self._snapshot(durable, principal))
+            value["permission_summary"] = dict(value["permission_summary"])
+            value["permission_summary"]["role"] = "OWNER"
+            return value
+
+        app = self._application(
+            origin=self.origin,
+            boundary=self.boundary,
+            session=observer,
+            path=self.path,
+            snapshot_provider=forged_role,
+        )
+        response = app.dispatch(
+            method="GET",
+            target="/api/v1/state",
+            headers=self.headers(session=observer.token),
+        )
+        self.assertEqual(response.status, 400)
+
+    def test_snapshot_permission_summary_rejects_missing_or_extra_fields(self):
+        for case in ("missing", "extra"):
+            with self.subTest(case=case):
+                def invalid(durable, principal, case=case):
+                    value = dict(self._snapshot(durable, principal))
+                    permission = dict(value["permission_summary"])
+                    if case == "missing":
+                        permission.pop("role")
+                    else:
+                        permission["unexpected"] = "value"
+                    value["permission_summary"] = permission
+                    return value
+
+                app = self._application(
+                    origin=self.origin,
+                    boundary=self.boundary,
+                    session=self.owner,
+                    path=self.path,
+                    snapshot_provider=invalid,
+                )
+                response = app.dispatch(
+                    method="GET",
+                    target="/api/v1/state",
+                    headers=self.headers(),
+                )
+                self.assertEqual(response.status, 400)
+
+    def test_snapshot_capabilities_must_be_unique_canonical_strings(self):
+        invalid_values = (
+            ["READ", "READ"],
+            [" READ "],
+            ["READ", 1],
+        )
+        for capabilities in invalid_values:
+            with self.subTest(capabilities=capabilities):
+                def invalid(durable, principal, capabilities=capabilities):
+                    value = dict(self._snapshot(durable, principal))
+                    permission = dict(value["permission_summary"])
+                    permission["capabilities"] = capabilities
+                    value["permission_summary"] = permission
+                    return value
+
+                app = self._application(
+                    origin=self.origin,
+                    boundary=self.boundary,
+                    session=self.owner,
+                    path=self.path,
+                    snapshot_provider=invalid,
+                )
+                response = app.dispatch(
+                    method="GET",
+                    target="/api/v1/state",
+                    headers=self.headers(),
+                )
+                self.assertEqual(response.status, 400)
+
+    def test_snapshot_capabilities_accept_unique_canonical_strings(self):
+        def valid(durable, principal):
+            value = dict(self._snapshot(durable, principal))
+            permission = dict(value["permission_summary"])
+            permission["capabilities"] = ["READ_STATE", "BLOCK_NEW_EXPOSURE"]
+            value["permission_summary"] = permission
+            return value
+
+        app = self._application(
+            origin=self.origin,
+            boundary=self.boundary,
+            session=self.owner,
+            path=self.path,
+            snapshot_provider=valid,
+        )
+        response = app.dispatch(
+            method="GET",
+            target="/api/v1/state",
+            headers=self.headers(),
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(
+            self.body(response)["permission_summary"]["role"],
+            "OWNER",
+        )
+
     def test_snapshot_projector_has_no_bearer_and_cannot_serialize_closure_leak(self):
         observed = {}
 

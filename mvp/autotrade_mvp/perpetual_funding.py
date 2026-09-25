@@ -182,7 +182,92 @@ def canonical_perpetual_funding_observation(
 
 
 FundingEvidenceResolver = Callable[[str], ProviderResponseObservation]
-FundingNormalizer = Callable[[ProviderResponseObservation], PerpetualFundingObservation]
+
+
+def _canonical_observation_from_sealed_response(
+    source: ProviderResponseObservation,
+) -> PerpetualFundingObservation:
+    """Parse funding economics inside the authority, never through caller code."""
+
+    payload = source.payload
+    if not isinstance(payload, Mapping):
+        raise PerpetualFundingError(
+            "provider funding payload must be a canonical object"
+        )
+    required = {
+        "external_event_id",
+        "provider_revision",
+        "funding_period_id",
+        "effective_at",
+        "instrument_id",
+        "signed_contracts",
+        "funding_rate",
+        "mark_price",
+        "index_price",
+        "price_basis",
+        "positive_rate_effect",
+        "corrects_external_event_id",
+    }
+    if set(payload) != required:
+        raise PerpetualFundingError(
+            "provider funding payload shape is not canonical"
+        )
+
+    def instant(value: object, name: str) -> datetime:
+        if not isinstance(value, str) or not value.endswith("Z"):
+            raise PerpetualFundingError(
+                f"{name} must be canonical UTC text"
+            )
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise PerpetualFundingError(
+                f"{name} must be canonical UTC text"
+            ) from error
+        return _utc(parsed, name)
+
+    return PerpetualFundingObservation(
+        provider_id=source.provider_id,
+        account_id=source.account_id,
+        environment=source.environment,
+        instrument_id=_text(payload["instrument_id"], "instrument_id"),
+        instrument_version=source.query_binding.instrument_version,
+        external_event_id=_text(
+            payload["external_event_id"],
+            "external_event_id",
+        ),
+        provider_revision=_text(
+            payload["provider_revision"],
+            "provider_revision",
+        ),
+        funding_period_id=_text(
+            payload["funding_period_id"],
+            "funding_period_id",
+        ),
+        effective_at=instant(payload["effective_at"], "effective_at"),
+        observed_at=instant(source.observed_at, "observed_at"),
+        signed_contracts=_decimal(
+            payload["signed_contracts"],
+            "signed_contracts",
+        ),
+        funding_rate=_decimal(payload["funding_rate"], "funding_rate"),
+        mark_price=_decimal(payload["mark_price"], "mark_price"),
+        index_price=_decimal(payload["index_price"], "index_price"),
+        price_basis=_text(payload["price_basis"], "price_basis"),
+        positive_rate_effect=_text(
+            payload["positive_rate_effect"],
+            "positive_rate_effect",
+        ),
+        raw_evidence_digest=source.response_sha256,
+        corrects_external_event_id=(
+            None
+            if payload["corrects_external_event_id"] is None
+            else _text(
+                payload["corrects_external_event_id"],
+                "corrects_external_event_id",
+            )
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -224,7 +309,6 @@ class DurablePerpetualFundingAuthority:
         economic_book: DurableProviderEconomicBook,
         instrument_registry: InstrumentRegistry,
         evidence_resolver: FundingEvidenceResolver,
-        normalizer: FundingNormalizer,
         funding_endpoints: frozenset[str],
         permission_scope: str,
     ) -> None:
@@ -236,12 +320,8 @@ class DurablePerpetualFundingAuthority:
             raise ValueError("funding authority and economic book must share one JournalStore")
         if not isinstance(instrument_registry, InstrumentRegistry):
             raise TypeError("instrument_registry must be InstrumentRegistry")
-        for value, name in (
-            (evidence_resolver, "evidence_resolver"),
-            (normalizer, "normalizer"),
-        ):
-            if not callable(value):
-                raise TypeError(f"{name} must be callable")
+        if not callable(evidence_resolver):
+            raise TypeError("evidence_resolver must be callable")
         if not isinstance(funding_endpoints, frozenset) or not funding_endpoints:
             raise TypeError("funding_endpoints must be a non-empty frozenset")
         endpoints = frozenset(_text(value, "funding endpoint") for value in funding_endpoints)
@@ -251,7 +331,6 @@ class DurablePerpetualFundingAuthority:
         self.economic_book = economic_book
         self.instrument_registry = instrument_registry
         self.evidence_resolver = evidence_resolver
-        self.normalizer = normalizer
         self.funding_endpoints = endpoints
         self.permission_scope = _text(permission_scope, "permission_scope")
         self.aggregate_id = _identity(
@@ -300,14 +379,7 @@ class DurablePerpetualFundingAuthority:
             raise PerpetualFundingError("provider funding evidence scope mismatch") from error
         if source.query_binding.permission_scope != self.permission_scope:
             raise PerpetualFundingError("provider funding evidence permission scope mismatch")
-        try:
-            observation = self.normalizer(source)
-        except Exception as error:
-            raise PerpetualFundingError("provider funding evidence normalization failed") from error
-        if not isinstance(observation, PerpetualFundingObservation):
-            raise PerpetualFundingError(
-                "funding normalizer must return PerpetualFundingObservation"
-            )
+        observation = _canonical_observation_from_sealed_response(source)
         source_observed = datetime.fromisoformat(
             source.observed_at.replace("Z", "+00:00")
         ).astimezone(timezone.utc)

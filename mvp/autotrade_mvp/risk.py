@@ -792,9 +792,15 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
         abs(resulting) < abs(base_position)
         and base_position * resulting >= 0
     )
+    current_after_intent = current + signed
+    reduces_current_exposure = (
+        abs(current_after_intent) < abs(current)
+        and current * current_after_intent >= 0
+    )
     protective_reduction = (
         intent.reduce_only
         and reduces_absolute_exposure
+        and reduces_current_exposure
         and gross < base_gross
         and net <= base_net
         and worst_stress_loss <= base_worst_stress_loss
@@ -1075,13 +1081,23 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
             "new futures risk requires sufficient evidenced delivery headroom",
         )
 
-    reduce_only_ok = not intent.reduce_only or reduces_absolute_exposure
+    reduce_only_ok = not intent.reduce_only or (
+        reduces_absolute_exposure and reduces_current_exposure
+    )
     add(
         "reduce_only",
         reduce_only_ok,
-        abs(resulting),
-        abs(base_position),
-        "reduce-only intent must not increase actual portfolio exposure",
+        (
+            f"current={abs(current_after_intent)};projected={abs(resulting)}"
+            if intent.reduce_only
+            else abs(resulting)
+        ),
+        (
+            f"current<{abs(current)};projected<{abs(base_position)}"
+            if intent.reduce_only
+            else abs(base_position)
+        ),
+        "reduce-only intent must reduce both current and reserved-inclusive exposure without crossing flat",
     )
 
     return RiskDecision(

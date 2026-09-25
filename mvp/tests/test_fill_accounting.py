@@ -200,6 +200,7 @@ class FillAccountingTests(unittest.TestCase):
             fill_id="fill-1-r2",
             provider_execution_id="exec-1",
             intent_id="intent-1",
+            client_order_id="client-1",
             side="BUY",
             quantity="2",
             price="101",
@@ -248,6 +249,7 @@ class FillAccountingTests(unittest.TestCase):
             fill_id=" fill-1 ",
             provider_execution_id=" exec-1 ",
             intent_id=" intent-1 ",
+            client_order_id=" client-1 ",
             side=" buy ",
             quantity="2.00",
             price="100.0",
@@ -255,6 +257,7 @@ class FillAccountingTests(unittest.TestCase):
         self.assertEqual(observed.fill_id, "fill-1")
         self.assertEqual(observed.provider_execution_id, "exec-1")
         self.assertEqual(observed.intent_id, "intent-1")
+        self.assertEqual(observed.client_order_id, "client-1")
         self.assertEqual(observed.side, "BUY")
         self.assertEqual(observed.quantity, Decimal("2.00"))
         with self.assertRaises(TypeError):

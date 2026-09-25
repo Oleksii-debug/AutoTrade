@@ -621,6 +621,15 @@ class InstrumentRegistry:
 
         existing = self._versions.get(version.instrument_id, [])
         if existing:
+            same_version = tuple(
+                item for item in existing if item.version == version.version
+            )
+            if same_version:
+                if len(same_version) == 1 and same_version[0] == version:
+                    return
+                raise InstrumentConflict(
+                    "instrument version already exists with different content"
+                )
             expected = existing[-1].version + 1
             if version.version != expected:
                 raise InstrumentConflict(f"next version must be {expected}")

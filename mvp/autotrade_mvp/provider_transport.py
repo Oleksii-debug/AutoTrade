@@ -841,7 +841,6 @@ class WhiteBitHttpTransport:
         policy: ProviderEndpointPolicy,
         account_id: str,
         capability_snapshot_id: str,
-        capability_registry: CapabilityRegistry,
         secret_resolver: ProviderSecretResolver,
         credential_handle: PersistentCredentialHandle,
         session_token: str,
@@ -1007,10 +1006,6 @@ class WhiteBitHttpTransport:
         finally:
             credential_plaintext = None
 
-        self._require_current_capability(
-            entity_id=entity_id,
-            instrument_version=instrument_version,
-        )
         final_guard()
         raw = self.wire_client.send(signed)
         if not isinstance(raw, bytes):

@@ -139,3 +139,15 @@ New fail-closed checks bind the normalized fill to the selected canonical order:
 - correction facts require provider revision and reuse the existing immutable fill correction lineage.
 
 Focused tests cover normal canonical fill ingestion, restart reconstruction, scope/unknown-field rejection without mutation, and correction replay. This does not claim that every provider adapter already emits the canonical fill shape, nor does it complete Transaction C atomic accounting/reservation/reconciliation composition. Those remain separate integration gates.
+
+
+## Whole-simulator terminal reservation integration
+
+The same lineage now closes one WP-55 semantic integration seam without creating a second reservation or order authority. A reservation may publish terminal outcome `FILLED` only when two independent durable facts agree for the exact provider/account/environment/submission attempt:
+
+- account reconciliation is complete, non-blocking, and resolves the submission as `OBSERVED_EXECUTION`;
+- the canonical durable order projection reconstructs the same client order and submission attempt at exact terminal state `FILLED`.
+
+An execution observation by itself remains insufficient. Partial fills, missing order projection, another submission attempt, and non-`FILLED` order states keep residual reservation capacity held. PAPER/LIVE replay reuses the trusted evidence ArtifactStore rather than bypassing provider-evidence verification.
+
+The whole-simulator regression now exercises authority -> reservation -> guarded dispatch -> order projection -> fill -> accounting -> reconciliation -> terminal reservation and then reconstructs order and reservation state after restart. This proves the semantic terminal-release chain, not cross-aggregate atomicity; stronger Transaction C atomic composition remains a separate gate.

@@ -100,6 +100,37 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
                 )
             )
 
+    def test_tool_arguments_are_deeply_immutable_across_admission(self):
+        nested = {"window": {"size": 20}, "fields": ["price"]}
+        request = ResearchToolRequest(
+            request_id="immutable-args",
+            tool_name="statistics",
+            requested_capabilities=("COMPUTE_STATISTICS",),
+            arguments=nested,
+        )
+        admitted = self.boundary().admit(request)
+
+        nested["window"]["size"] = 999
+        nested["fields"].append("secret")
+
+        self.assertEqual(admitted.arguments["window"]["size"], 20)
+        self.assertEqual(admitted.arguments["fields"], ("price",))
+        with self.assertRaisesRegex(TypeError, "immutable"):
+            admitted.arguments["window"]["size"] = 30
+
+    def test_tool_arguments_reject_opaque_or_nonfinite_nested_values(self):
+        for value in (object(), {1, 2}, float("nan"), float("inf")):
+            with self.subTest(value=repr(value)), self.assertRaisesRegex(
+                ResearchBoundaryError,
+                "research tool arguments.*JSON-compatible|finite JSON",
+            ):
+                ResearchToolRequest(
+                    request_id="invalid-args",
+                    tool_name="statistics",
+                    requested_capabilities=("COMPUTE_STATISTICS",),
+                    arguments={"nested": {"value": value}},
+                )
+
     def test_unknown_tool_is_rejected_even_when_requested_capability_is_safe(self):
         with self.assertRaisesRegex(PermissionError, "not allowlisted"):
             self.boundary().admit(

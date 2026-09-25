@@ -214,6 +214,21 @@ BINANCE_SPOT_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
 )
 
 
+WHITEBIT_ORDER_ENDPOINTS = frozenset(
+    {
+        "/api/v4/order/market",
+        "/api/v4/order/new",
+        "/api/v4/order/stop_market",
+        "/api/v4/order/stop_limit",
+        "/api/v4/order/stock_market",
+        "/api/v4/order/collateral/market",
+        "/api/v4/order/collateral/limit",
+        "/api/v4/order/collateral/trigger-market",
+        "/api/v4/order/collateral/stop-limit",
+    }
+)
+
+
 WHITEBIT_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
     MappingProxyType(
         {
@@ -512,7 +527,6 @@ class UrllibJsonWireClient:
 
 
 @dataclass(frozen=True)
-@dataclass(frozen=True)
 class WhiteBitCredential:
     api_key: str
     api_secret: str
@@ -805,9 +819,9 @@ class WhiteBitHttpTransport:
                 "prepared WhiteBIT request fields are not canonical"
             )
         endpoint = _canonical_text(request["endpoint"], name="endpoint")
-        if not endpoint.startswith("/api/v4/"):
+        if endpoint not in WHITEBIT_ORDER_ENDPOINTS:
             raise ProviderTransportScopeError(
-                "prepared WhiteBIT endpoint must be an /api/v4 path"
+                "prepared WhiteBIT endpoint must be a canonical order path"
             )
         body = request["body"]
         if not isinstance(body, Mapping):

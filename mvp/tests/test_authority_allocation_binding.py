@@ -374,6 +374,63 @@ class AuthorityAllocationBindingTests(unittest.TestCase):
             self.assertEqual(replay, first)
             self.assertEqual(restarted_reservations.version, 1)
 
+    def test_dispatch_barrier_blocks_after_allocation_evidence_expires(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            result, resolved = _allocation_bundle(reservations)
+            authority = AuthorityService(
+                store,
+                allocation_authority_resolver=lambda _result: _snapshot(
+                    result,
+                    resolved,
+                ),
+            )
+            authority.register_policy(_authority_policy())
+            checkpoint = _checkpoint(store)
+
+            admitted = _admit(authority, reservations, checkpoint, result)
+            self.assertEqual(admitted.outcome, "ADMITTED")
+            binding = store.load_events(
+                "risk_decision",
+                admitted.risk_decision_id,
+            )[0]["payload"]["allocation_evidence"]
+            self.assertEqual(binding["valid_until"], VALID_UNTIL)
+
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    admitted.admission_id,
+                    intent_hash="sha256:" + "a" * 64,
+                    account_id=ACCOUNT_ID,
+                    environment=ENVIRONMENT,
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    now=VALID_UNTIL,
+                    capability_snapshot_id=CAPABILITY_ID,
+                ),
+                (True, "allowed"),
+            )
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    admitted.admission_id,
+                    intent_hash="sha256:" + "a" * 64,
+                    account_id=ACCOUNT_ID,
+                    environment=ENVIRONMENT,
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    now="2026-09-24T18:02:00.000001Z",
+                    capability_snapshot_id=CAPABILITY_ID,
+                ),
+                (False, "allocation_evidence_expired"),
+            )
+
+
     def test_self_minted_bundle_absent_from_trusted_resolver_is_rejected(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

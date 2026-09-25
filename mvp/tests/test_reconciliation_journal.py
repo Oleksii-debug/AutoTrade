@@ -148,6 +148,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 now="2026-09-24T18:00:00Z",
                 authority_check=authority_check,
                 transport_send=ambiguous_transport,
+                sender_check=lambda _owner_token, _owner_epoch: None,
             )
             self.assertEqual(outcome.status, "UNKNOWN")
             self.assertEqual(len(outbound_calls), 1)

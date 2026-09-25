@@ -422,7 +422,7 @@ class DurableReservationBookTests(unittest.TestCase):
             )
             connection.commit()
 
-        with self.assertRaisesRegex(ReservationConflict, "payload hash"):
+        with self.assertRaisesRegex(ValueError, "payload hash"):
             self.book()
 
     def test_tampered_snapshot_with_recomputed_hash_still_fails_replay(self):

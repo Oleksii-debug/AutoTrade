@@ -153,6 +153,10 @@ def _validated_fill_evidence(
         raise AccountingConflict(
             "corrected fills require explicit atomic reversal/replacement evidence"
         )
+    if allow_correction and projected_fill.provider_revision is None:
+        raise AccountingConflict(
+            "corrected fill requires immutable provider_revision evidence"
+        )
     if projected_fill.provider_execution_id != provider_fill.provider_execution_id:
         raise AccountingConflict("provider execution identity does not match projection")
     if (

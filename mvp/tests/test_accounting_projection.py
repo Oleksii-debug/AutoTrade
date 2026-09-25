@@ -565,6 +565,144 @@ class EquityPositionProjectionTests(unittest.TestCase):
                 settlement_currency="USD",
             )
 
+    def test_equal_effective_time_projection_is_independent_of_append_permutation(self):
+        def projected(order):
+            book = EconomicBook()
+            transactions = {
+                "a": book_equity_fill(
+                    transaction_id="buy-a",
+                    cause_event_id="fill-a",
+                    instrument="ABC",
+                    settlement_currency="USD",
+                    side="BUY",
+                    quantity="1",
+                    price="100",
+                    economic_effective_at="2026-01-01T10:00:00Z",
+                    economic_order_key="provider:A:execution:a",
+                ),
+                "b": book_equity_fill(
+                    transaction_id="buy-b",
+                    cause_event_id="fill-b",
+                    instrument="ABC",
+                    settlement_currency="USD",
+                    side="BUY",
+                    quantity="1",
+                    price="200",
+                    economic_effective_at="2026-01-01T10:00:00Z",
+                    economic_order_key="provider:A:execution:b",
+                ),
+                "c": book_equity_fill(
+                    transaction_id="sell-c",
+                    cause_event_id="fill-c",
+                    instrument="ABC",
+                    settlement_currency="USD",
+                    side="SELL",
+                    quantity="1",
+                    price="300",
+                    economic_effective_at="2026-01-01T10:00:00Z",
+                    economic_order_key="provider:A:execution:c",
+                ),
+            }
+            for key in order:
+                book.append(transactions[key])
+
+            # Enter corrected-history mode without changing the economic value.
+            original = transactions["b"]
+            reversal = reverse_transaction(
+                original,
+                transaction_id="reverse-b",
+                cause_event_id="corr-b-reversal",
+                observed_at="2026-01-02T10:00:00Z",
+            )
+            replacement = book_equity_fill(
+                transaction_id="buy-b-r2",
+                cause_event_id="corr-b-replacement",
+                instrument="ABC",
+                settlement_currency="USD",
+                side="BUY",
+                quantity="1",
+                price="200",
+                economic_effective_at="2026-01-01T10:00:00Z",
+                economic_order_key="provider:A:execution:b",
+                observed_at="2026-01-02T10:00:00Z",
+                corrects_transaction_id=original.transaction_id,
+            )
+            book.append_batch((reversal, replacement))
+            return project_equity_position(
+                book,
+                instrument="ABC",
+                settlement_currency="USD",
+            )
+
+        first = projected(("a", "b", "c"))
+        second = projected(("b", "c", "a"))
+        self.assertEqual(first, second)
+        self.assertEqual(first.realized_pnl, Decimal("200"))
+        self.assertEqual(first.open_cost_basis, Decimal("200"))
+
+    def test_stale_correction_against_superseded_fact_fails_closed(self):
+        book = EconomicBook()
+        original = book_equity_fill(
+            transaction_id="buy-original",
+            cause_event_id="fill-original",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="1",
+            price="100",
+            economic_effective_at="2026-01-01T10:00:00Z",
+            economic_order_key="provider:A:execution:1",
+        )
+        book.append(original)
+        first_reversal = reverse_transaction(
+            original,
+            transaction_id="reverse-r1",
+            cause_event_id="corr-r1-reversal",
+            observed_at="2026-01-02T10:00:00Z",
+        )
+        first_replacement = book_equity_fill(
+            transaction_id="buy-r2",
+            cause_event_id="corr-r1-replacement",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="1",
+            price="101",
+            economic_effective_at="2026-01-01T10:00:00Z",
+            economic_order_key="provider:A:execution:1",
+            observed_at="2026-01-02T10:00:00Z",
+            corrects_transaction_id=original.transaction_id,
+        )
+        book.append_batch((first_reversal, first_replacement))
+
+        stale_replacement = book_equity_fill(
+            transaction_id="buy-stale-r3",
+            cause_event_id="corr-stale-replacement",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="1",
+            price="102",
+            economic_effective_at="2026-01-01T10:00:00Z",
+            economic_order_key="provider:A:execution:1",
+            observed_at="2026-01-02T10:00:00Z",
+            corrects_transaction_id=original.transaction_id,
+        )
+        with self.assertRaisesRegex(
+            AccountingConflict,
+            "already has a different replacement",
+        ):
+            book.append(stale_replacement)
+
+        self.assertEqual(
+            project_equity_position(
+                book,
+                instrument="ABC",
+                settlement_currency="USD",
+            ).open_cost_basis,
+            Decimal("101"),
+        )
+
     def test_binary_float_mark_fails_closed(self):
         book = EconomicBook()
         with self.assertRaises(TypeError):

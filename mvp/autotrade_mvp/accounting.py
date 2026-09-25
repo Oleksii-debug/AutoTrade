@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Iterable
 
+from .persistence import payload_digest
+
 
 class AccountingConflict(ValueError):
     """Raised when an immutable transaction identity is reused inconsistently."""
@@ -33,6 +35,16 @@ def _name(value: str, *, field: str) -> str:
     return value.strip()
 
 
+def _canonical_decimal(value: Decimal) -> str:
+    amount = _decimal(value, name="signed_amount")
+    if amount == 0:
+        return "0"
+    fixed = format(amount, "f")
+    if "." in fixed:
+        fixed = fixed.rstrip("0").rstrip(".")
+    return fixed
+
+
 @dataclass(frozen=True)
 class Posting:
     ledger_account: str
@@ -48,12 +60,60 @@ class JournalTransaction:
     reverses_transaction_id: str | None = None
 
 
+def _normalized_transaction(transaction: JournalTransaction) -> JournalTransaction:
+    if not isinstance(transaction, JournalTransaction):
+        raise TypeError("transaction must be a JournalTransaction")
+    return JournalTransaction(
+        transaction_id=_name(transaction.transaction_id, field="transaction_id"),
+        cause_event_id=_name(transaction.cause_event_id, field="cause_event_id"),
+        postings=tuple(
+            Posting(
+                ledger_account=_name(item.ledger_account, field="ledger_account"),
+                asset_or_currency=_name(
+                    item.asset_or_currency,
+                    field="asset_or_currency",
+                ),
+                signed_amount=_decimal(item.signed_amount, name="signed_amount"),
+            )
+            for item in transaction.postings
+        ),
+        reverses_transaction_id=(
+            _name(transaction.reverses_transaction_id, field="reverses_transaction_id")
+            if transaction.reverses_transaction_id is not None
+            else None
+        ),
+    )
+
+
 def posting(ledger_account: str, asset_or_currency: str, signed_amount: Decimal | str | int) -> Posting:
     return Posting(
         ledger_account=_name(ledger_account, field="ledger_account"),
         asset_or_currency=_name(asset_or_currency, field="asset_or_currency"),
         signed_amount=_decimal(signed_amount, name="signed_amount"),
     )
+
+
+def canonical_transaction(transaction: JournalTransaction) -> dict[str, object]:
+    normalized = _normalized_transaction(transaction)
+    validate_transaction(normalized)
+    return {
+        "schema_version": "1.0.0",
+        "transaction_id": normalized.transaction_id,
+        "cause_event_id": normalized.cause_event_id,
+        "reverses_transaction_id": normalized.reverses_transaction_id,
+        "postings": [
+            {
+                "ledger_account": item.ledger_account,
+                "asset_or_currency": item.asset_or_currency,
+                "signed_amount": _canonical_decimal(item.signed_amount),
+            }
+            for item in normalized.postings
+        ],
+    }
+
+
+def transaction_digest(transaction: JournalTransaction) -> str:
+    return payload_digest(canonical_transaction(transaction))
 
 
 def validate_transaction(transaction: JournalTransaction) -> None:
@@ -88,12 +148,13 @@ class EconomicBook:
         return tuple(self._transactions)
 
     def append(self, transaction: JournalTransaction) -> bool:
-        validate_transaction(transaction)
-        transaction_id = _name(transaction.transaction_id, field="transaction_id")
-        cause_event_id = _name(transaction.cause_event_id, field="cause_event_id")
+        normalized = _normalized_transaction(transaction)
+        validate_transaction(normalized)
+        transaction_id = normalized.transaction_id
+        cause_event_id = normalized.cause_event_id
         existing = self._by_id.get(transaction_id)
         if existing is not None:
-            if existing != transaction:
+            if existing != normalized:
                 raise AccountingConflict(
                     "transaction_id was already committed with different economic content"
                 )
@@ -105,11 +166,8 @@ class EconomicBook:
                 "cause_event_id was already booked by a different transaction"
             )
 
-        if transaction.reverses_transaction_id is not None:
-            original_id = _name(
-                transaction.reverses_transaction_id,
-                field="reverses_transaction_id",
-            )
+        if normalized.reverses_transaction_id is not None:
+            original_id = normalized.reverses_transaction_id
             original = self._by_id.get(original_id)
             if original is None:
                 raise AccountingConflict("Cannot reverse an unknown transaction")
@@ -119,13 +177,13 @@ class EconomicBook:
                 Posting(item.ledger_account, item.asset_or_currency, -item.signed_amount)
                 for item in original.postings
             )
-            if transaction.postings != expected:
+            if normalized.postings != expected:
                 raise AccountingConflict("A reversal must exactly negate the original postings")
-        self._by_id[transaction_id] = transaction
-        self._by_cause_event_id[cause_event_id] = transaction
-        self._transactions.append(transaction)
-        if transaction.reverses_transaction_id is not None:
-            self._reversed_transaction_ids.add(transaction.reverses_transaction_id)
+        self._by_id[transaction_id] = normalized
+        self._by_cause_event_id[cause_event_id] = normalized
+        self._transactions.append(normalized)
+        if normalized.reverses_transaction_id is not None:
+            self._reversed_transaction_ids.add(normalized.reverses_transaction_id)
         return True
 
     def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
@@ -152,6 +210,72 @@ class EconomicBook:
     def fee_expense(self, currency: str) -> Decimal:
         value = _name(currency, field="currency")
         return self.balance(f"FEE_EXPENSE:{value}", value)
+
+    def audit_digest(self) -> str:
+        return payload_digest(
+            {
+                "schema_version": "1.0.0",
+                "transactions": [
+                    {
+                        "transaction_id": _name(
+                            transaction.transaction_id,
+                            field="transaction_id",
+                        ),
+                        "digest": transaction_digest(transaction),
+                    }
+                    for transaction in self._transactions
+                ],
+            }
+        )
+
+
+class ScopedEconomicBook:
+    """Account/environment-bound facade over the canonical EconomicBook."""
+
+    _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
+
+    def __init__(
+        self,
+        *,
+        environment: str,
+        account_id: str,
+        transactions: Iterable[JournalTransaction] = (),
+    ):
+        normalized_environment = _name(environment, field="environment").upper()
+        if normalized_environment not in self._ENVIRONMENTS:
+            raise ValueError("unsupported environment")
+        self.environment = normalized_environment
+        self.account_id = _name(account_id, field="account_id")
+        self._book = EconomicBook(transactions)
+
+    @property
+    def transactions(self) -> tuple[JournalTransaction, ...]:
+        return self._book.transactions
+
+    def append(self, transaction: JournalTransaction) -> bool:
+        return self._book.append(transaction)
+
+    def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
+        return self._book.balance(ledger_account, asset_or_currency)
+
+    def cash(self, currency: str) -> Decimal:
+        return self._book.cash(currency)
+
+    def position(self, instrument: str) -> Decimal:
+        return self._book.position(instrument)
+
+    def fee_expense(self, currency: str) -> Decimal:
+        return self._book.fee_expense(currency)
+
+    def audit_digest(self) -> str:
+        return payload_digest(
+            {
+                "schema_version": "1.0.0",
+                "environment": self.environment,
+                "account_id": self.account_id,
+                "economic_book_digest": self._book.audit_digest(),
+            }
+        )
 
 
 def book_external_cash_flow(

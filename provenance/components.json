@@ -14,7 +14,8 @@
       "source_import_allowed": "PENDING_EXACT_COMPOSITION_AND_NOTICE_REVIEW",
       "revision_type": "commit",
       "tree": "4b163abf9fca60e731b76510b9ae6721ffff7e6c",
-      "identity_evidence_url": "https://api.github.com/repos/QuantConnect/Lean/commits/985ef30ad3ac774218c5ac516b4cb0aa2655730f"
+      "identity_evidence_url": "https://api.github.com/repos/QuantConnect/Lean/commits/985ef30ad3ac774218c5ac516b4cb0aa2655730f",
+      "release_distribution_state": "BLOCKED"
     },
     {
       "name": "WhiteBit.Net",
@@ -24,7 +25,8 @@
       "license": "MIT",
       "license_blob_sha": "caa4070bbb26bbb7ab7d137725697cf690393d5b",
       "adoption_state": "CANDIDATE_FOR_WP24",
-      "source_import_allowed": "PREFER_DIRECT_DEPENDENCY_AFTER_EXACT_GRAPH_QUALIFICATION"
+      "source_import_allowed": "PREFER_DIRECT_DEPENDENCY_AFTER_EXACT_GRAPH_QUALIFICATION",
+      "release_distribution_state": "BLOCKED"
     },
     {
       "name": "CryptoExchange.Net",
@@ -34,7 +36,8 @@
       "license": "MIT",
       "license_blob_sha": "caa4070bbb26bbb7ab7d137725697cf690393d5b",
       "adoption_state": "CANDIDATE_SHARED_TRANSPORT_FOR_WP24_AND_OTHER_JKORF_ADAPTERS",
-      "source_import_allowed": "PREFER_DIRECT_DEPENDENCY_AFTER_EXACT_GRAPH_QUALIFICATION"
+      "source_import_allowed": "PREFER_DIRECT_DEPENDENCY_AFTER_EXACT_GRAPH_QUALIFICATION",
+      "release_distribution_state": "BLOCKED"
     },
     {
       "name": "Alpaca official C# SDK",
@@ -44,7 +47,8 @@
       "license": "Apache-2.0",
       "license_blob_sha": "261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64",
       "adoption_state": "CANDIDATE_FOR_WP27_STABLE_RELEASE_7_2_2_PREFERRED_FOR_FIRST_QUALIFICATION",
-      "source_import_allowed": "PREFER_DIRECT_DEPENDENCY_AFTER_STABLE_PACKAGE_AND_TRANSITIVE_REVIEW"
+      "source_import_allowed": "PREFER_DIRECT_DEPENDENCY_AFTER_STABLE_PACKAGE_AND_TRANSITIVE_REVIEW",
+      "release_distribution_state": "BLOCKED"
     },
     {
       "name": "Autosport first-party source",
@@ -60,7 +64,8 @@
       ],
       "root_license_file_found": false,
       "adoption_state": "NARROW_NEUTRAL_MIGRATION_IN_PROGRESS",
-      "source_import_allowed": "OWNER_AUTHORIZED_MIGRATION_FOR_PROJECT_DEVELOPMENT; RELEASE_DISTRIBUTION_RIGHTS_CHAIN_STILL_REQUIRES_WP03_RECORD"
+      "source_import_allowed": "OWNER_AUTHORIZED_MIGRATION_FOR_PROJECT_DEVELOPMENT; RELEASE_DISTRIBUTION_RIGHTS_CHAIN_STILL_REQUIRES_WP03_RECORD",
+      "release_distribution_state": "BLOCKED"
     },
     {
       "name": "Nika Core first-party source",
@@ -76,7 +81,8 @@
       ],
       "root_license_file_found": false,
       "adoption_state": "CONTRACT_SEMANTICS_CHARACTERIZED_NO_RUNTIME_DEPENDENCY",
-      "source_import_allowed": "OWNER_AUTHORIZED_SEMANTIC_ADAPTATION; RELEASE_DISTRIBUTION_RIGHTS_CHAIN_STILL_REQUIRES_WP03_RECORD"
+      "source_import_allowed": "OWNER_AUTHORIZED_SEMANTIC_ADAPTATION; RELEASE_DISTRIBUTION_RIGHTS_CHAIN_STILL_REQUIRES_WP03_RECORD",
+      "release_distribution_state": "BLOCKED"
     }
   ]
 }

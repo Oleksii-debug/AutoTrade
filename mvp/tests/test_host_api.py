@@ -9,7 +9,8 @@ class HostCommandStateTests(unittest.TestCase):
         self.store = HostCommandStore(
             account_id="paper-account-1",
             environment="PAPER",
-            session_validator=lambda session, actor: (session, actor) in self.sessions,
+            session_validator=lambda session, actor, origin, action: (session, actor) in self.sessions,
+            request_origin_provider=lambda: "https://local.autotrade.invalid",
             max_events=3,
         )
 

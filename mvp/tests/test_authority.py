@@ -498,17 +498,17 @@ class AuthorityTests(unittest.TestCase):
 
     def test_policy_expiry_and_revocation_fail_dispatch_barrier(self):
         service = AuthorityService()
-        service.register_policy(policy(autonomous=True))
+        service.register_policy(policy(autonomous=True, environments={"SIMULATION"}))
         admitted = service._admit_unverified(
             admission_id="a1", policy_id="p1", intent_hash="h1",
-            account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1,
+            account_id="paper-1", environment="SIMULATION", instrument_id=INSTRUMENT_ID, instrument_version=1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
             risk_admitted=True, now="2026-09-24T18:00:00Z",
         )
         self.assertEqual(admitted.outcome, "ADMITTED")
         self.assertEqual(
             service.dispatch_allowed(
-                "a1", intent_hash="h1", account_id="paper-1", environment="PAPER",
+                "a1", intent_hash="h1", account_id="paper-1", environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID, instrument_version=1, action="ORDER.SUBMIT", now="2026-09-24T18:01:00Z"
             ),
             (True, "allowed"),
@@ -518,17 +518,17 @@ class AuthorityTests(unittest.TestCase):
         )
         self.assertEqual(
             service.dispatch_allowed(
-                "a1", intent_hash="h1", account_id="paper-1", environment="PAPER",
+                "a1", intent_hash="h1", account_id="paper-1", environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID, instrument_version=1, action="ORDER.SUBMIT", now="2026-09-24T18:03:00Z"
             ),
             (False, "policy_revoked"),
         )
 
         second = AuthorityService()
-        second.register_policy(policy(autonomous=True))
+        second.register_policy(policy(autonomous=True, environments={"SIMULATION"}))
         expired = second._admit_unverified(
             admission_id="a2", policy_id="p1", intent_hash="h2",
-            account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1,
+            account_id="paper-1", environment="SIMULATION", instrument_id=INSTRUMENT_ID, instrument_version=1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
             risk_admitted=True, now="2026-09-25T00:00:00Z",
         )
@@ -576,10 +576,10 @@ class AuthorityTests(unittest.TestCase):
 
     def test_future_revocation_applies_only_at_its_effective_time(self):
         service = AuthorityService()
-        service.register_policy(policy(autonomous=True))
+        service.register_policy(policy(autonomous=True, environments={"SIMULATION"}))
         service._admit_unverified(
             admission_id="a1", policy_id="p1", intent_hash="h1",
-            account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1,
+            account_id="paper-1", environment="SIMULATION", instrument_id=INSTRUMENT_ID, instrument_version=1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
             risk_admitted=True, now="2026-09-24T18:00:00Z",
         )
@@ -587,22 +587,22 @@ class AuthorityTests(unittest.TestCase):
             "p1", reason="scheduled revoke", revoked_at="2026-09-24T18:05:00Z"
         )
         before = service.dispatch_allowed(
-            "a1", intent_hash="h1", account_id="paper-1", environment="PAPER",
+            "a1", intent_hash="h1", account_id="paper-1", environment="SIMULATION",
             instrument_id=INSTRUMENT_ID, instrument_version=1, action="ORDER.SUBMIT", now="2026-09-24T18:04:59Z"
         )
         self.assertEqual(before, (True, "allowed"))
         at = service.dispatch_allowed(
-            "a1", intent_hash="h1", account_id="paper-1", environment="PAPER",
+            "a1", intent_hash="h1", account_id="paper-1", environment="SIMULATION",
             instrument_id=INSTRUMENT_ID, instrument_version=1, action="ORDER.SUBMIT", now="2026-09-24T18:05:00Z"
         )
         self.assertEqual(at, (False, "policy_revoked"))
 
     def test_unrelated_policy_registration_does_not_cancel_admission(self):
         service = AuthorityService()
-        service.register_policy(policy(autonomous=True))
+        service.register_policy(policy(autonomous=True, environments={"SIMULATION"}))
         service._admit_unverified(
             admission_id="a1", policy_id="p1", intent_hash="h1",
-            account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1,
+            account_id="paper-1", environment="SIMULATION", instrument_id=INSTRUMENT_ID, instrument_version=1,
             action="ORDER.SUBMIT", notional="100", state_version=1,
             risk_admitted=True, now="2026-09-24T18:00:00Z",
         )
@@ -611,7 +611,7 @@ class AuthorityTests(unittest.TestCase):
         ))
         self.assertEqual(
             service.dispatch_allowed(
-                "a1", intent_hash="h1", account_id="paper-1", environment="PAPER",
+                "a1", intent_hash="h1", account_id="paper-1", environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID, instrument_version=1, action="ORDER.SUBMIT", now="2026-09-24T18:01:00Z"
             ),
             (True, "allowed"),
@@ -717,13 +717,13 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             service = AuthorityService(store)
-            service.register_policy(policy())
+            service.register_policy(policy(environments={"SIMULATION"}))
             service.add_confirmation(
                 confirmation_id="c-durable",
                 policy_id="p1",
                 intent_hash="h-durable",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -732,7 +732,7 @@ class AuthorityTests(unittest.TestCase):
             )
             admitted = service._admit_unverified(
                 admission_id="a-durable", policy_id="p1", intent_hash="h-durable",
-                account_id="paper-1", environment="PAPER",
+                account_id="paper-1", environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID, instrument_version=1,
                 action="ORDER.SUBMIT", notional="100", state_version=1,
                 risk_admitted=True, now="2026-09-24T18:00:00Z",
@@ -744,7 +744,7 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(
                 restarted.dispatch_allowed(
                     "a-durable", intent_hash="h-durable",
-                    account_id="paper-1", environment="PAPER",
+                    account_id="paper-1", environment="SIMULATION",
                     instrument_id=INSTRUMENT_ID, instrument_version=1,
                     action="ORDER.SUBMIT", now="2026-09-24T18:01:00Z",
                 ),
@@ -753,7 +753,7 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(
                 restarted.dispatch_allowed(
                     "a-durable", intent_hash="h-durable",
-                    account_id="paper-1", environment="PAPER",
+                    account_id="paper-1", environment="SIMULATION",
                     instrument_id=INSTRUMENT_ID, instrument_version=2,
                     action="ORDER.SUBMIT", now="2026-09-24T18:01:00Z",
                 ),
@@ -761,7 +761,7 @@ class AuthorityTests(unittest.TestCase):
             )
             reused = restarted._admit_unverified(
                 admission_id="a-durable-2", policy_id="p1", intent_hash="h-durable",
-                account_id="paper-1", environment="PAPER",
+                account_id="paper-1", environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID, instrument_version=1,
                 action="ORDER.SUBMIT", notional="100", state_version=2,
                 risk_admitted=True, now="2026-09-24T18:02:00Z",
@@ -773,10 +773,10 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             service = AuthorityService(store)
-            service.register_policy(policy(autonomous=True))
+            service.register_policy(policy(autonomous=True, environments={"SIMULATION"}))
             service._admit_unverified(
                 admission_id="a-revoke", policy_id="p1", intent_hash="h-revoke",
-                account_id="paper-1", environment="PAPER",
+                account_id="paper-1", environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID, instrument_version=1,
                 action="ORDER.SUBMIT", notional="100", state_version=1,
                 risk_admitted=True, now="2026-09-24T18:00:00Z",
@@ -788,7 +788,7 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(
                 restarted.dispatch_allowed(
                     "a-revoke", intent_hash="h-revoke",
-                    account_id="paper-1", environment="PAPER",
+                    account_id="paper-1", environment="SIMULATION",
                     instrument_id=INSTRUMENT_ID, instrument_version=1,
                     action="ORDER.SUBMIT", now="2026-09-24T18:03:00Z",
                 ),
@@ -814,10 +814,10 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = AuthorityService(store)
-            authority.register_policy(policy(autonomous=True))
+            authority.register_policy(policy(autonomous=True, environments={"SIMULATION"}))
             admitted = authority._admit_unverified(
                 admission_id="a-guard", policy_id="p1", intent_hash="h-guard",
-                account_id="paper-1", environment="PAPER",
+                account_id="paper-1", environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID, instrument_version=1,
                 action="ORDER.SUBMIT", notional="100", state_version=1,
                 risk_admitted=True, now="2026-09-24T18:00:00Z",
@@ -826,14 +826,14 @@ class AuthorityTests(unittest.TestCase):
             guard = authority.dispatch_guard(
                 "a-guard",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
             )
             dispatcher = GuardedDispatcher(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
                 owner_token="owner",
             )
@@ -975,13 +975,13 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             service = AuthorityService(store)
-            service.register_policy(policy())
+            service.register_policy(policy(environments={"SIMULATION"}))
             service.add_confirmation(
                 confirmation_id="single-use",
                 policy_id="p1",
                 intent_hash="same-intent",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -993,7 +993,7 @@ class AuthorityTests(unittest.TestCase):
                 policy_id="p1",
                 intent_hash="same-intent",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -1047,13 +1047,13 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             process_a = AuthorityService(store)
-            process_a.register_policy(policy(autonomous=True))
+            process_a.register_policy(policy(autonomous=True, environments={"SIMULATION"}))
             process_a._admit_unverified(
                 admission_id="a-stale-read",
                 policy_id="p1",
                 intent_hash="h-stale-read",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -1074,7 +1074,7 @@ class AuthorityTests(unittest.TestCase):
                     "a-stale-read",
                     intent_hash="h-stale-read",
                     account_id="paper-1",
-                    environment="PAPER",
+                    environment="SIMULATION",
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
                     action="ORDER.SUBMIT",
@@ -1088,13 +1088,13 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             process_a = AuthorityService(store)
-            process_a.register_policy(policy(autonomous=True))
+            process_a.register_policy(policy(autonomous=True, environments={"SIMULATION"}))
             admitted = process_a._admit_unverified(
                 admission_id="a-stale-guard",
                 policy_id="p1",
                 intent_hash="h-stale-guard",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -1108,14 +1108,14 @@ class AuthorityTests(unittest.TestCase):
             guard = process_a.dispatch_guard(
                 "a-stale-guard",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
             )
             dispatcher = GuardedDispatcher(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
                 owner_token="owner-stale-guard",
             )
@@ -1153,13 +1153,13 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             seed = AuthorityService(store)
-            seed.register_policy(policy())
+            seed.register_policy(policy(environments={"SIMULATION"}))
             seed.add_confirmation(
                 confirmation_id="concurrent-single-use",
                 policy_id="p1",
                 intent_hash="h-concurrent",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -1175,7 +1175,7 @@ class AuthorityTests(unittest.TestCase):
                 policy_id="p1",
                 intent_hash="h-concurrent",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -1196,7 +1196,7 @@ class AuthorityTests(unittest.TestCase):
                     policy_id="p1",
                     intent_hash="h-concurrent",
                     account_id="paper-1",
-                    environment="PAPER",
+                    environment="SIMULATION",
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
                     action="ORDER.SUBMIT",
@@ -1213,7 +1213,7 @@ class AuthorityTests(unittest.TestCase):
                     "winner",
                     intent_hash="h-concurrent",
                     account_id="paper-1",
-                    environment="PAPER",
+                    environment="SIMULATION",
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
                     action="ORDER.SUBMIT",
@@ -1268,6 +1268,86 @@ class AuthorityTests(unittest.TestCase):
                 2,
             )
 
+
+    def test_store_backed_unverified_paper_admission_cannot_persist(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            service = AuthorityService(store)
+            service.register_policy(policy(autonomous=True))
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "unverified PAPER/LIVE admission",
+            ):
+                service._admit_unverified(
+                    admission_id="legacy-direct",
+                    policy_id="p1",
+                    intent_hash="legacy-direct-intent",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    state_version=1,
+                    risk_admitted=True,
+                    now="2026-09-24T18:00:00Z",
+                )
+
+            admission_events = [
+                event
+                for event in store.load_events("authority_state", "canonical")
+                if event["event_type"] == "AuthorityAdmissionRecorded"
+            ]
+            self.assertEqual(admission_events, [])
+            restarted = AuthorityService(JournalStore(path))
+            self.assertEqual(
+                restarted.dispatch_allowed(
+                    "legacy-direct",
+                    intent_hash="legacy-direct-intent",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    now="2026-09-24T18:01:00Z",
+                ),
+                (False, "admission_missing"),
+            )
+
+    def test_legacy_paper_admission_is_readable_but_never_dispatchable(self):
+        service = AuthorityService()
+        service.register_policy(policy(autonomous=True))
+        legacy = service._admit_unverified(
+            admission_id="legacy-readable",
+            policy_id="p1",
+            intent_hash="legacy-readable-intent",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument_id=INSTRUMENT_ID,
+            instrument_version=1,
+            action="ORDER.SUBMIT",
+            notional="100",
+            state_version=1,
+            risk_admitted=True,
+            now="2026-09-24T18:00:00Z",
+        )
+        self.assertEqual(legacy.outcome, "ADMITTED")
+        self.assertIsNone(legacy.risk_decision_id)
+        self.assertEqual(
+            service.dispatch_allowed(
+                "legacy-readable",
+                intent_hash="legacy-readable-intent",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                now="2026-09-24T18:01:00Z",
+            ),
+            (False, "financial_evidence_missing"),
+        )
 
     def test_public_financial_admission_commit_failure_leaves_transaction_a_clean(self):
         class FailingFinancialJournalStore(JournalStore):

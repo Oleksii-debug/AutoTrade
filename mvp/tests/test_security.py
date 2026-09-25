@@ -32,9 +32,11 @@ class SecurityBoundaryTests(unittest.TestCase):
             protector=DeterministicProtector(),
         )
         self.clock = [1000.0]
+        self.session_authorizer = lambda subject, role, origin: True
         self.boundary = SecurityBoundary(
             allowed_origins={"https://local.autotrade.invalid"},
             credential_vault=self.vault,
+            session_authorizer=self.session_authorizer,
             now=lambda: self.clock[0],
         )
         self.owner = self.boundary.create_session(
@@ -121,6 +123,66 @@ class SecurityBoundaryTests(unittest.TestCase):
                 provider="SIMULATED",
                 environment="PAPER",
                 purpose="TRADE",
+            )
+
+    def test_paired_origin_alone_cannot_mint_privileged_session(self):
+        boundary = SecurityBoundary(
+            allowed_origins={"https://local.autotrade.invalid"},
+            credential_vault=self.vault,
+        )
+        with self.assertRaisesRegex(PermissionError, "verifier"):
+            boundary.create_session(
+                subject="owner",
+                role="OWNER",
+                origin="https://local.autotrade.invalid",
+            )
+
+    def test_session_authorizer_binds_normalized_identity_role_and_origin(self):
+        observed = []
+
+        def authorize(subject, role, origin):
+            observed.append((subject, role, origin))
+            return subject == "alice" and role == "OPERATOR"
+
+        boundary = SecurityBoundary(
+            allowed_origins={"https://LOCAL.AUTOTRADE.INVALID:443/"},
+            credential_vault=self.vault,
+            session_authorizer=authorize,
+            now=lambda: self.clock[0],
+        )
+        session = boundary.create_session(
+            subject=" alice ",
+            role="operator",
+            origin="https://local.autotrade.invalid/",
+        )
+        self.assertEqual(session.subject, "alice")
+        self.assertEqual(session.role, "OPERATOR")
+        self.assertEqual(session.origin, "https://local.autotrade.invalid")
+        self.assertEqual(
+            observed,
+            [("alice", "OPERATOR", "https://local.autotrade.invalid")],
+        )
+        with self.assertRaisesRegex(PermissionError, "not authenticated"):
+            boundary.create_session(
+                subject="alice",
+                role="OWNER",
+                origin="https://local.autotrade.invalid",
+            )
+
+    def test_session_authorizer_failure_is_fail_closed(self):
+        def broken_authorizer(subject, role, origin):
+            raise RuntimeError("identity provider unavailable")
+
+        boundary = SecurityBoundary(
+            allowed_origins={"https://local.autotrade.invalid"},
+            credential_vault=self.vault,
+            session_authorizer=broken_authorizer,
+        )
+        with self.assertRaisesRegex(PermissionError, "authentication failed"):
+            boundary.create_session(
+                subject="owner",
+                role="OWNER",
+                origin="https://local.autotrade.invalid",
             )
 
     def test_expired_session_is_rejected(self):
@@ -234,6 +296,7 @@ class SecurityBoundaryTests(unittest.TestCase):
         bad = SecurityBoundary(
             allowed_origins={"https://local.autotrade.invalid"},
             credential_vault=self.vault,
+            session_authorizer=self.session_authorizer,
             now=lambda: float("nan"),
         )
         with self.assertRaisesRegex(RuntimeError, "clock"):
@@ -248,6 +311,7 @@ class SecurityBoundaryTests(unittest.TestCase):
             account_id="paper-account-1",
             environment="PAPER",
             session_validator=self.boundary.validate_host_session,
+            request_origin_provider=lambda: self.owner.origin,
         )
         command = {
             "command_id": "11111111-1111-1111-1111-111111111111",
@@ -276,6 +340,7 @@ class SecurityBoundaryTests(unittest.TestCase):
             account_id="paper-account-1",
             environment="PAPER",
             session_validator=self.boundary.validate_host_session,
+            request_origin_provider=lambda: self.owner.origin,
         )
         operator = self.boundary.create_session(
             subject="operator",
@@ -319,6 +384,77 @@ class SecurityBoundaryTests(unittest.TestCase):
                 store.submit(command)
             self.assertEqual(store.state_version, 1)
 
+    def test_operator_cannot_grant_or_revoke_authority(self):
+        operator = self.boundary.create_session(
+            subject="operator",
+            role="OPERATOR",
+            origin=self.owner.origin,
+        )
+        current_session = [operator]
+        store = HostCommandStore(
+            account_id="paper-account-1",
+            environment="PAPER",
+            session_validator=self.boundary.validate_host_session,
+            request_origin_provider=lambda: self.owner.origin,
+        )
+
+        for index, action in enumerate(("SET_AUTHORITY", "REVOKE_AUTHORITY"), start=1):
+            command = {
+                "command_id": f"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb{index}",
+                "expected_state_version": "0",
+                "idempotency_key": f"owner-only-{action.lower()}",
+                "actor": current_session[0].subject,
+                "session": current_session[0].token,
+                "account_id": "paper-account-1",
+                "environment": "PAPER",
+                "action": action,
+                "payload": {},
+            }
+            with self.subTest(action=action), self.assertRaises(PermissionError):
+                store.submit(command)
+            self.assertEqual(store.state_version, 0)
+
+        current_session[0] = self.owner
+        owner_command = {
+            "command_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "expected_state_version": "0",
+            "idempotency_key": "owner-set-authority",
+            "actor": self.owner.subject,
+            "session": self.owner.token,
+            "account_id": "paper-account-1",
+            "environment": "PAPER",
+            "action": "SET_AUTHORITY",
+            "payload": {},
+        }
+        self.assertEqual(store.submit(owner_command).status, "ACCEPTED")
+
+    def test_host_mutation_is_bound_to_current_request_origin(self):
+        current_origin = ["https://evil.invalid"]
+        store = HostCommandStore(
+            account_id="paper-account-1",
+            environment="PAPER",
+            session_validator=self.boundary.validate_host_session,
+            request_origin_provider=lambda: current_origin[0],
+        )
+        command = {
+            "command_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "expected_state_version": "0",
+            "idempotency_key": "security-origin-binding",
+            "actor": "owner",
+            "session": self.owner.token,
+            "account_id": "paper-account-1",
+            "environment": "PAPER",
+            "action": "BLOCK_NEW_EXPOSURE",
+            "payload": {},
+        }
+        with self.assertRaises(PermissionError):
+            store.submit(command)
+        self.assertEqual(store.state_version, 0)
+
+        current_origin[0] = self.owner.origin
+        self.assertEqual(store.submit(command).status, "ACCEPTED")
+        self.assertEqual(store.state_version, 1)
+
     def test_revoked_session_cannot_be_reused(self):
         token = self.owner.token
         self.boundary.revoke_session(token)
@@ -330,11 +466,13 @@ class SecurityBoundaryTests(unittest.TestCase):
             SecurityBoundary(
                 allowed_origins={"http://remote.example"},
                 credential_vault=self.vault,
+                session_authorizer=self.session_authorizer,
             )
         with self.assertRaises(ValueError):
             SecurityBoundary(
                 allowed_origins={"https://local.autotrade.invalid/path"},
                 credential_vault=self.vault,
+                session_authorizer=self.session_authorizer,
             )
         with self.assertRaises(ValueError):
             self.boundary.pair_origin(
@@ -346,6 +484,7 @@ class SecurityBoundaryTests(unittest.TestCase):
         loopback = SecurityBoundary(
             allowed_origins={"http://127.0.0.1:8765/"},
             credential_vault=self.vault,
+            session_authorizer=self.session_authorizer,
         )
         session = loopback.create_session(
             subject="owner",
@@ -358,6 +497,7 @@ class SecurityBoundaryTests(unittest.TestCase):
         canonical = SecurityBoundary(
             allowed_origins={"https://LOCAL.AUTOTRADE.INVALID:443/"},
             credential_vault=self.vault,
+            session_authorizer=self.session_authorizer,
         )
         session = canonical.create_session(
             subject="owner",
@@ -369,6 +509,7 @@ class SecurityBoundaryTests(unittest.TestCase):
             SecurityBoundary(
                 allowed_origins={"https://local.autotrade.invalid:99999"},
                 credential_vault=self.vault,
+                session_authorizer=self.session_authorizer,
             )
 
     def test_diagnostic_redaction_masks_sensitive_labeled_strings(self):

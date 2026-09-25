@@ -77,6 +77,107 @@ class ScientificRegistryTests(unittest.TestCase):
             with self.assertRaisesRegex(ProtocolViolation, "cannot be empty"):
                 store.register_protocol(value)
 
+    def test_protocol_periods_and_purge_embargo_are_machine_checked(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+
+            overlapping = copy.deepcopy(protocol())
+            overlapping["validation_period"]["start"] = "2024-12-31"
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "train_period must end before validation_period starts",
+            ):
+                store.register_protocol(overlapping)
+
+            insufficient_gap = copy.deepcopy(protocol())
+            insufficient_gap["purge_embargo"] = {
+                "purge": "2d",
+                "embargo": "2d",
+            }
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "gap is shorter than the registered purge/embargo",
+            ):
+                store.register_protocol(insufficient_gap)
+
+            uncovered_horizon = copy.deepcopy(protocol())
+            uncovered_horizon["horizons"] = ["2d"]
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "purge must cover the longest registered label horizon",
+            ):
+                store.register_protocol(uncovered_horizon)
+
+    def test_completeness_hash_binds_recorded_trial_outcomes(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registered = store.register_protocol(protocol())
+            before = store.completeness(registered.protocol_id)
+            store.record_trial(
+                registered.protocol_id,
+                status="FAILED",
+                payload={"reason": "fit"},
+            )
+            after = store.completeness(registered.protocol_id)
+            self.assertNotEqual(before["trial_log_hash"], after["trial_log_hash"])
+            self.assertEqual(after["recorded_trials"], 1)
+            self.assertTrue(after["includes_non_successes"])
+
+    def test_locked_evaluation_exposes_exact_immutable_hashes(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registered = store.register_protocol(protocol())
+            row = store.register_evaluation(
+                registered.protocol_id,
+                holdout_id="holdout-A",
+                holdout_identity=holdout_identity(),
+                result={"score": "0.1"},
+            )
+            evidence = store.locked_evaluation(row["evaluation_id"])
+            self.assertEqual(evidence.protocol_id, registered.protocol_id)
+            self.assertEqual(evidence.protocol_hash, registered.protocol_hash)
+            self.assertEqual(evidence.result_hash, row["result_hash"])
+            self.assertTrue(evidence.untouched)
+            self.assertEqual(evidence.prior_access_count, 0)
+            self.assertEqual(evidence.result, {"score": "0.1"})
+
+    def test_triggered_stopping_rule_requires_immutable_artifact_evidence(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registered = store.register_protocol(protocol())
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "immutable artifact evidence",
+            ):
+                store.register_evaluation(
+                    registered.protocol_id,
+                    holdout_id="holdout-invalid-stop",
+                    holdout_identity=holdout_identity(),
+                    result={
+                        "stopping_rule_triggered": True,
+                        "stopping_evidence_ref": "ticket-123",
+                    },
+                )
+
+            canonical_ref = (
+                "artifact:11111111-1111-4111-8111-111111111111@sha256:"
+                + "a" * 64
+            )
+            row = store.register_evaluation(
+                registered.protocol_id,
+                holdout_id="holdout-valid-stop",
+                holdout_identity=holdout_identity(),
+                result={
+                    "stopping_rule_triggered": True,
+                    "stopping_evidence_ref": canonical_ref,
+                },
+            )
+            locked = store.locked_evaluation(row["evaluation_id"])
+            self.assertEqual(
+                locked.result["stopping_evidence_ref"],
+                canonical_ref,
+            )
+
     def test_failed_and_discarded_trials_are_preserved(self):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")

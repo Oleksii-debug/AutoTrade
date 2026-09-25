@@ -32,8 +32,8 @@ def execution_observation(
     *,
     account_id="paper-1",
     environment="PAPER",
-    surface=Surface.AUTHENTICATED_READ,
     instrument_version="BTCUSDT:v1",
+    surface=Surface.AUTHENTICATED_READ,
 ):
     query = prepare_authenticated_read_query(
         capability=capability(
@@ -76,7 +76,7 @@ def capability(
             account_id=account_id,
             entity_id="global",
             environment=environment,
-            instrument_version=instrument_version,
+            instrument_version="BTCUSDT:v1",
             observed_at=observed_at,
             expires_at=NOW + timedelta(hours=1),
             supported_order_types=frozenset(order_types),
@@ -211,8 +211,9 @@ class BinanceSpotFoundationTests(unittest.TestCase):
                 "time": 1790272800123,
             }
         ]
+        observation = execution_observation([rows[0], dict(rows[0])])
         fills = parse_account_trades(
-            execution_observation([rows[0], dict(rows[0])]),
+            observation,
             instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
             client_ids_by_order_id={42: "at-ack-1"},
         )
@@ -220,6 +221,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         self.assertEqual(fills[0].provider_execution_id, "BINANCE-SPOT:BTCUSDT:7")
         self.assertEqual(fills[0].client_order_id, "at-ack-1")
         self.assertEqual(fills[0].account_id, "paper-1")
+        self.assertEqual(fills[0].environment, "PAPER")
         self.assertEqual(fills[0].evidence_refs, (observation.evidence_ref,))
         self.assertEqual(fills[0].quantity, Decimal("0.2"))
         self.assertEqual(fills[0].fee_currency, "BNB")

@@ -348,8 +348,9 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             "symbol": "BTCUSDT",
             "time": 1569514978020,
         }
+        observation = execution_observation([row, dict(row)])
         fills = parse_account_trades(
-            execution_observation([row, dict(row)]),
+            observation,
             instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
             client_ids_by_order_id={25851813: "at-usdm-fill"},
         )
@@ -357,6 +358,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
         fill = fills[0]
         self.assertEqual(fill.provider_execution_id, "BINANCE-USDM:BTCUSDT:698759")
         self.assertEqual(fill.account_id, "paper-1")
+        self.assertEqual(fill.environment, "PAPER")
         self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
         self.assertEqual(fill.client_order_id, "at-usdm-fill")
         self.assertEqual(fill.quantity, Decimal("0.002"))

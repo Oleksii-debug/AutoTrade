@@ -38,7 +38,8 @@ class JournalBackedHostCommandStore:
         *,
         account_id: str,
         environment: str,
-        session_validator: Callable[[str, str], bool],
+        session_validator: Callable[[str, str, str, str], bool],
+        request_origin_provider: Callable[[], str],
         max_events: int = 100,
         now: Callable[[], str] | None = None,
     ) -> None:
@@ -50,12 +51,15 @@ class JournalBackedHostCommandStore:
             raise ValueError("environment must be a canonical Environment")
         if not callable(session_validator):
             raise TypeError("session_validator must be callable")
+        if not callable(request_origin_provider):
+            raise TypeError("request_origin_provider must be callable")
         if not isinstance(max_events, int) or isinstance(max_events, bool) or max_events < 1:
             raise ValueError("max_events must be positive")
         self._journal = journal
         self.account_id = account_id
         self.environment = environment
         self._session_validator = session_validator
+        self._request_origin_provider = request_origin_provider
         self._max_events = max_events
         self._now = now or (
             lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -209,8 +213,13 @@ class JournalBackedHostCommandStore:
             raise ValueError("payload must be an object")
         if not expected_raw.isdigit():
             raise ValueError("expected_state_version must be a sequence")
-        if not self._session_validator(session, actor):
-            raise PermissionError("Session is not authorized for actor")
+        request_origin = self._request_origin_provider()
+        if not isinstance(request_origin, str) or not request_origin.strip():
+            raise PermissionError("Current request origin is unavailable")
+        if not self._session_validator(session, actor, request_origin.strip(), action):
+            raise PermissionError(
+                "Session is not authorized for actor, request origin, and action"
+            )
 
         current = self.state_version
         expected = int(expected_raw)

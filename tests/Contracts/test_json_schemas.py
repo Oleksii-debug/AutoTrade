@@ -179,6 +179,28 @@ class ContractSchemaTests(unittest.TestCase):
         validator = Draft202012Validator({"$ref": f"{schema['$id']}#/$defs/UiCommand"}, registry=self.registry)
         self.assertFalse(validator.is_valid(fixture))
 
+    def test_ui_command_requires_account_and_environment_scope(self):
+        fixture = json.loads((FIXTURES / "ui-command.valid.json").read_text())
+        schema = self.schemas["ui.schema.json"]
+        validator = Draft202012Validator(
+            {"$ref": f"{schema['$id']}#/$defs/UiCommand"},
+            registry=self.registry,
+        )
+        legacy_unscoped = dict(fixture)
+        legacy_unscoped.pop("account_id")
+        legacy_unscoped.pop("environment")
+        self.assertFalse(validator.is_valid(legacy_unscoped))
+
+    def test_ui_command_rejects_noncanonical_environment(self):
+        fixture = json.loads((FIXTURES / "ui-command.valid.json").read_text())
+        fixture["environment"] = "PRODUCTION"
+        schema = self.schemas["ui.schema.json"]
+        validator = Draft202012Validator(
+            {"$ref": f"{schema['$id']}#/$defs/UiCommand"},
+            registry=self.registry,
+        )
+        self.assertFalse(validator.is_valid(fixture))
+
 
 if __name__ == "__main__":
     unittest.main()

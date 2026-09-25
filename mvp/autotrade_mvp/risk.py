@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from hashlib import sha256
 import json
+import re
 from typing import Mapping, Sequence
+from uuid import UUID
 
 
 RISK_ACTIONS = frozenset({"TRADE", "REDUCE", "HEDGE", "FLATTEN", "EXERCISE"})
@@ -187,6 +190,189 @@ def _normalize_scenario_digests(
     if not normalized:
         raise ValueError(f"{name} must contain at least one digest")
     return tuple(sorted(normalized.items()))
+
+
+
+RISK_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _utc(value: datetime, *, name: str) -> datetime:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
+        raise ValueError(f"{name} must be timezone-aware")
+    return value.astimezone(timezone.utc)
+
+
+def _utc_text(value: datetime) -> str:
+    return _utc(value, name="timestamp").isoformat().replace("+00:00", "Z")
+
+
+@dataclass(frozen=True)
+class LiquidationScope:
+    provider_id: str
+    account_id: str
+    environment: str
+    margin_mode: str
+    risk_tier_version: str
+
+    def __post_init__(self) -> None:
+        provider = _identity_key(self.provider_id, name="provider_id").upper()
+        account = _identity_key(self.account_id, name="account_id")
+        environment = _identity_key(self.environment, name="environment").upper()
+        if environment not in RISK_ENVIRONMENTS:
+            raise ValueError("environment is unsupported")
+        margin_mode = _identity_key(self.margin_mode, name="margin_mode").upper()
+        tier = _identity_key(self.risk_tier_version, name="risk_tier_version")
+        object.__setattr__(self, "provider_id", provider)
+        object.__setattr__(self, "account_id", account)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "margin_mode", margin_mode)
+        object.__setattr__(self, "risk_tier_version", tier)
+
+
+@dataclass(frozen=True)
+class LiquidationHeadroomEvidence:
+    headroom: Decimal
+    state_version: int
+    provider_id: str
+    account_id: str
+    environment: str
+    margin_mode: str
+    risk_tier_version: str
+    observed_at: datetime
+    expires_at: datetime
+    artifact_id: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.state_version, int)
+            or isinstance(self.state_version, bool)
+            or self.state_version < 0
+        ):
+            raise ValueError("liquidation evidence state_version must be non-negative")
+        scope = LiquidationScope(
+            provider_id=self.provider_id,
+            account_id=self.account_id,
+            environment=self.environment,
+            margin_mode=self.margin_mode,
+            risk_tier_version=self.risk_tier_version,
+        )
+        observed = _utc(self.observed_at, name="liquidation evidence observed_at")
+        expires = _utc(self.expires_at, name="liquidation evidence expires_at")
+        if expires <= observed:
+            raise ValueError("liquidation evidence expires_at must follow observed_at")
+        try:
+            artifact_id = str(UUID(self.artifact_id))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise ValueError("liquidation evidence artifact_id must be a UUID") from error
+        digest = _identity_key(self.sha256, name="liquidation evidence sha256")
+        if _SHA256_RE.fullmatch(digest) is None:
+            raise ValueError(
+                "liquidation evidence sha256 must be canonical lowercase sha256:<64-hex>"
+            )
+        object.__setattr__(
+            self,
+            "headroom",
+            _decimal(self.headroom, name="liquidation evidence headroom"),
+        )
+        object.__setattr__(self, "provider_id", scope.provider_id)
+        object.__setattr__(self, "account_id", scope.account_id)
+        object.__setattr__(self, "environment", scope.environment)
+        object.__setattr__(self, "margin_mode", scope.margin_mode)
+        object.__setattr__(self, "risk_tier_version", scope.risk_tier_version)
+        object.__setattr__(self, "observed_at", observed)
+        object.__setattr__(self, "expires_at", expires)
+        object.__setattr__(self, "artifact_id", artifact_id)
+        object.__setattr__(self, "sha256", digest)
+
+    @classmethod
+    def create(cls, **values) -> "LiquidationHeadroomEvidence":
+        return cls(**values)
+
+    @property
+    def scope(self) -> LiquidationScope:
+        return LiquidationScope(
+            provider_id=self.provider_id,
+            account_id=self.account_id,
+            environment=self.environment,
+            margin_mode=self.margin_mode,
+            risk_tier_version=self.risk_tier_version,
+        )
+
+
+def liquidation_evidence_payload(
+    evidence: LiquidationHeadroomEvidence,
+) -> dict[str, object]:
+    if not isinstance(evidence, LiquidationHeadroomEvidence):
+        raise TypeError("evidence must be LiquidationHeadroomEvidence")
+    return {
+        "artifact_kind": "LIQUIDATION_HEADROOM_EVIDENCE",
+        "schema_version": 1,
+        "provider_id": evidence.provider_id,
+        "account_id": evidence.account_id,
+        "environment": evidence.environment,
+        "margin_mode": evidence.margin_mode,
+        "risk_tier_version": evidence.risk_tier_version,
+        "state_version": evidence.state_version,
+        "observed_at": _utc_text(evidence.observed_at),
+        "expires_at": _utc_text(evidence.expires_at),
+        "headroom": _canonical_decimal_text(evidence.headroom),
+    }
+
+
+def _verify_liquidation_headroom_evidence(
+    *,
+    evidence: LiquidationHeadroomEvidence | None,
+    expected_scope: LiquidationScope | None,
+    expected_state_version: int,
+    decision_time: datetime | None,
+    evidence_store: object | None,
+) -> bool:
+    if (
+        evidence is None
+        or expected_scope is None
+        or decision_time is None
+        or evidence_store is None
+    ):
+        return False
+    if evidence.scope != expected_scope or evidence.state_version != expected_state_version:
+        return False
+    point = _utc(decision_time, name="decision_time")
+    if not (evidence.observed_at <= point < evidence.expires_at):
+        return False
+    try:
+        manifest = evidence_store.load_manifest(evidence.artifact_id)
+        raw = evidence_store.read_bytes(evidence.artifact_id)
+    except Exception:
+        return False
+    if type(manifest) is not dict or not isinstance(raw, bytes):
+        return False
+    actual = "sha256:" + sha256(raw).hexdigest()
+    if (
+        manifest.get("artifact_id") != evidence.artifact_id
+        or manifest.get("sha256") != evidence.sha256
+        or actual != evidence.sha256
+        or not manifest.get("manifest_hash")
+    ):
+        return False
+    payload = liquidation_evidence_payload(evidence)
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if raw != canonical:
+        return False
+    metadata = manifest.get("metadata")
+    if type(metadata) is not dict:
+        return False
+    return all(metadata.get(key) == value for key, value in payload.items())
 
 
 @dataclass(frozen=True)

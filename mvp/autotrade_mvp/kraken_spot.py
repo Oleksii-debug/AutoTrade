@@ -411,6 +411,8 @@ def _seconds_to_utc(value, *, name: str) -> str:
 def parse_trade_history(
     response: Mapping[str, object],
     *,
+    account_id: str,
+    environment: str,
     instrument_versions: Mapping[str, str],
     client_ids_by_provider_order: Mapping[str, str],
     fee_currency_by_pair: Mapping[str, str],
@@ -461,6 +463,9 @@ def parse_trade_history(
             client_id = validate_spot_client_order_id(client_id)
         fills.append(
             ProviderFillEvidence.create(
+                provider_id="KRAKEN",
+                account_id=account_id,
+                environment=environment,
                 provider_execution_id=execution_id,
                 client_order_id=client_id,
                 instrument=_text(instrument_versions[pair], name="instrument_version"),
@@ -476,6 +481,8 @@ def parse_trade_history(
 
 def coverage_evidence(
     *,
+    account_id: str,
+    environment: str,
     surface: str,
     coverage_start: str,
     coverage_end: str,
@@ -505,6 +512,9 @@ def coverage_evidence(
             "Kraken Spot foundation cannot self-assert provider exclusion semantics"
         )
     return CoverageSurfaceEvidence(
+        provider_id="KRAKEN",
+        account_id=account_id,
+        environment=environment,
         surface=normalized,
         coverage_start=coverage_start,
         coverage_end=coverage_end,

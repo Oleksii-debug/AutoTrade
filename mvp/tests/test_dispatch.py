@@ -11,6 +11,8 @@ from mvp.autotrade_mvp.dispatch import (
     stable_client_order_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
+from mvp.tests.test_reconciliation_journal import reconciliation
 from mvp.autotrade_mvp.recovery import RecoveryController
 
 
@@ -19,6 +21,28 @@ class SimulatedProcessDeath(BaseException):
 
 
 class DispatchTests(unittest.TestCase):
+    def durable_ready(self, recovery, store, *, reconciliation_id):
+        owner = recovery.owner
+        self.assertIsNotNone(owner)
+        result = reconciliation(
+            account_id=recovery.owner_scope.split(":", 1)[1],
+            environment=recovery.owner_scope.split(":", 1)[0],
+        )
+        record_reconciliation_checkpoint(
+            store,
+            reconciliation_id=reconciliation_id,
+            result=result,
+            observed_at="2026-09-24T19:00:00Z",
+            host_id=owner.owner_id,
+            owner_epoch=str(owner.epoch),
+        )
+        recovery.record_reconciliation_checkpoint(
+            reconciliation_id=reconciliation_id,
+            provider_id=result.provider_id,
+            account_id=result.account_id,
+            environment=result.environment,
+        )
+
     def store(self, directory):
         return JournalStore(f"{directory}/journal.sqlite3")
 
@@ -1077,7 +1101,7 @@ class DispatchTests(unittest.TestCase):
                 owner_scope="PAPER:acct",
             )
             owner = recovery.start("host-a")
-            recovery.record_reconciliation(consistent=True)
+            self.durable_ready(recovery, store, reconciliation_id="dispatch-ready")
             dispatcher = GuardedDispatcher(
                 store,
                 environment="PAPER",

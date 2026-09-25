@@ -10,6 +10,76 @@ AUTHORITY_AGGREGATE_TYPE = "financial-authority"
 AUTHORITY_EVENT_TYPE = "AuthorityStateSnapshotted.v1"
 
 
+_STATE_COLLECTION_KEYS = {
+    "policies": "policy_id",
+    "revocations": "policy_id",
+    "confirmations": "confirmation_id",
+    "admissions": "admission_id",
+}
+
+
+def _indexed_collection(state: dict, name: str, identity_key: str) -> dict[str, dict]:
+    values = state.get(name)
+    if not isinstance(values, list):
+        raise ValueError(f"authority state {name} must be a list")
+    indexed: dict[str, dict] = {}
+    for item in values:
+        if not isinstance(item, dict):
+            raise ValueError(f"authority state {name} entry must be an object")
+        identity = item.get(identity_key)
+        if not isinstance(identity, str) or not identity.strip():
+            raise ValueError(f"authority state {name} entry has invalid {identity_key}")
+        if identity in indexed:
+            raise ValueError(f"authority state {name} contains duplicate {identity_key}")
+        indexed[identity] = item
+    return indexed
+
+
+def _assert_monotonic_authority_state(previous: dict, candidate: dict) -> None:
+    """Reject snapshots that forget or rewrite any durable authority fact."""
+    if not isinstance(previous, dict) or not isinstance(candidate, dict):
+        raise ValueError("authority state must be an object")
+    if previous.get("schema_version") != candidate.get("schema_version"):
+        raise ValueError("authority state schema cannot regress or change in snapshot lineage")
+
+    previous_epoch = previous.get("epoch")
+    candidate_epoch = candidate.get("epoch")
+    if (
+        isinstance(previous_epoch, bool)
+        or isinstance(candidate_epoch, bool)
+        or not isinstance(previous_epoch, int)
+        or not isinstance(candidate_epoch, int)
+    ):
+        raise ValueError("authority state epoch must be an integer")
+    if candidate_epoch < previous_epoch:
+        raise ValueError("authority snapshot is stale: epoch regressed")
+
+    for name, identity_key in _STATE_COLLECTION_KEYS.items():
+        old = _indexed_collection(previous, name, identity_key)
+        new = _indexed_collection(candidate, name, identity_key)
+        missing = set(old) - set(new)
+        if missing:
+            raise ValueError(
+                f"authority snapshot is stale: {name} facts were removed"
+            )
+        for identity, old_item in old.items():
+            if new[identity] != old_item:
+                raise ValueError(
+                    f"authority snapshot rewrites durable {name} fact {identity}"
+                )
+
+    old_used = previous.get("used_confirmations")
+    new_used = candidate.get("used_confirmations")
+    if not isinstance(old_used, list) or not isinstance(new_used, list):
+        raise ValueError("authority state used_confirmations must be a list")
+    if any(not isinstance(value, str) or not value.strip() for value in old_used + new_used):
+        raise ValueError("authority state used_confirmations entries must be non-empty strings")
+    if len(set(old_used)) != len(old_used) or len(set(new_used)) != len(new_used):
+        raise ValueError("authority state used_confirmations must be unique")
+    if not set(old_used).issubset(new_used):
+        raise ValueError("authority snapshot is stale: used confirmation was forgotten")
+
+
 def persist_authority_snapshot(
     store: JournalStore,
     service: AuthorityService,
@@ -32,9 +102,22 @@ def persist_authority_snapshot(
 
     authority_id = authority_id.strip()
     event_id = event_id.strip()
+    state = service.export_state()
+    existing_events = store.load_events(AUTHORITY_AGGREGATE_TYPE, authority_id)
+    if existing_events:
+        previous_payload = existing_events[-1].get("payload")
+        previous_state = (
+            previous_payload.get("state")
+            if isinstance(previous_payload, dict)
+            else None
+        )
+        if not isinstance(previous_state, dict):
+            raise ValueError("latest authority journal payload state is invalid")
+        _assert_monotonic_authority_state(previous_state, state)
+
     payload = {
         "authority_id": authority_id,
-        "state": service.export_state(),
+        "state": state,
     }
     existing = store.get_event(event_id)
     aggregate_version = (

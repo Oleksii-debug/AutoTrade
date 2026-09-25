@@ -18,6 +18,7 @@ def fill(
     instrument="ABC",
     fee_amount="0",
     environment="PAPER",
+    trade_time="2026-09-24T18:00:00Z",
 ):
     return ProviderFillEvidence.create(
         provider_id="TEST_PROVIDER",
@@ -30,7 +31,7 @@ def fill(
         price="100",
         fee_amount=fee_amount,
         fee_currency="USD",
-        trade_time="2026-09-24T18:00:00Z",
+        trade_time=trade_time,
     )
 
 
@@ -88,6 +89,49 @@ class ReconciliationTests(unittest.TestCase):
         self.assertTrue(result.complete)
         self.assertFalse(result.blocks_new_risk)
         self.assertEqual(result.matched_execution_ids, ("e1",))
+
+    def test_matching_fill_before_unknown_submission_does_not_resolve_send(self):
+        unknown = UnknownSubmission.create(
+            attempt_id="a-causal-before",
+            intent_id="intent-causal-before",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            client_order_id="c1",
+            started_at="2026-09-24T18:30:00Z",
+        )
+        result = self.base(unknown_submissions=[unknown])
+        resolution = result.submission_resolutions[0]
+        self.assertEqual(resolution.outcome, "UNKNOWN")
+        self.assertEqual(
+            resolution.evidence_reason,
+            "matching_provider_execution_outside_submission_window",
+        )
+        self.assertFalse(result.complete)
+        self.assertIn("ACCOUNT", result.blocking_resources)
+
+    def test_matching_fill_after_reconciliation_end_does_not_resolve_send(self):
+        unknown = UnknownSubmission.create(
+            attempt_id="a-causal-after",
+            intent_id="intent-causal-after",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            client_order_id="c1",
+            started_at="2026-09-24T18:00:00Z",
+        )
+        result = self.base(
+            unknown_submissions=[unknown],
+            provider_fills=[fill(trade_time="2026-09-24T19:30:00Z")],
+        )
+        resolution = result.submission_resolutions[0]
+        self.assertEqual(resolution.outcome, "UNKNOWN")
+        self.assertEqual(
+            resolution.evidence_reason,
+            "matching_provider_execution_outside_submission_window",
+        )
+        self.assertFalse(result.complete)
+        self.assertIn("ACCOUNT", result.blocking_resources)
 
     def test_incomplete_pagination_cannot_prove_unknown_send_absent(self):
         unknown = UnknownSubmission.create(

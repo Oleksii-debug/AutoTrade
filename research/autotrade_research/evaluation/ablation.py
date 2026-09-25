@@ -9,7 +9,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+import re
 from typing import Iterable
+
+
+_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _decimal(value: Decimal | int | str, field: str) -> Decimal:
@@ -22,6 +26,12 @@ def _decimal(value: Decimal | int | str, field: str) -> Decimal:
     if not number.is_finite():
         raise ValueError(f"{field} must be finite")
     return number
+
+
+def _digest(value: str, field: str) -> str:
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+        raise ValueError(f"{field} must be canonical sha256:<64 lowercase hex>")
+    return value
 
 
 def _utc(value: datetime, field: str) -> datetime:
@@ -51,10 +61,12 @@ class AblationOutcome:
     def __post_init__(self) -> None:
         if not isinstance(self.case_id, str) or not self.case_id.strip():
             raise ValueError("case_id must be a non-empty string")
-        if not isinstance(self.input_fingerprint, str) or not self.input_fingerprint.strip():
-            raise ValueError("input_fingerprint must be a non-empty string")
         object.__setattr__(self, "case_id", self.case_id.strip())
-        object.__setattr__(self, "input_fingerprint", self.input_fingerprint.strip())
+        object.__setattr__(
+            self,
+            "input_fingerprint",
+            _digest(self.input_fingerprint, "input_fingerprint"),
+        )
         if self.variant not in {"FULL", "ABLATED"}:
             raise ValueError("variant must be FULL or ABLATED")
         if (

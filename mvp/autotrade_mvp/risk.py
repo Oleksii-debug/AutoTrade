@@ -1492,6 +1492,29 @@ def evaluate_risk(
     equivalent_exposure_map = context.equivalent_exposure_per_unit or {}
     derivative_instrument_types = {"FUTURE", "PERPETUAL", "OPTION"}
     context_instrument_types = context.instrument_types or {}
+    declared_intent_type = context_instrument_types.get(intent.symbol)
+    if declared_intent_type is not None and declared_intent_type != intent.instrument_type:
+        raise ValueError(
+            "context instrument type does not match intent instrument_type"
+        )
+    directional_positive_types = {"FUTURE", "PERPETUAL"}
+    for symbol, instrument_type in context_instrument_types.items():
+        if (
+            instrument_type in directional_positive_types
+            and symbol in equivalent_exposure_map
+            and equivalent_exposure_map[symbol] <= 0
+        ):
+            raise ValueError(
+                f"{instrument_type} equivalent exposure per unit must be positive for {symbol}"
+            )
+    if (
+        intent.instrument_type in directional_positive_types
+        and intent.symbol in equivalent_exposure_map
+        and equivalent_exposure_map[intent.symbol] <= 0
+    ):
+        raise ValueError(
+            f"{intent.instrument_type} equivalent exposure per unit must be positive for {intent.symbol}"
+        )
     required_equivalent_symbols = {
         symbol
         for symbol, quantity in {

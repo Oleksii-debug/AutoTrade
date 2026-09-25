@@ -18,6 +18,7 @@ import json
 import re
 
 from .capabilities import CapabilitySnapshot
+from .provider_core import ProviderResponseObservation, Surface
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
@@ -558,21 +559,29 @@ def _seconds_to_utc(value, *, name: str) -> str:
 
 
 def parse_trade_history(
-    response: Mapping[str, object],
+    observation: ProviderResponseObservation,
     *,
-    account_id: str,
-    environment: str,
     instrument_versions: Mapping[str, str],
     client_ids_by_provider_order: Mapping[str, str],
     fee_currency_by_pair: Mapping[str, str],
 ) -> tuple[ProviderFillEvidence, ...]:
-    """Map recorded Kraken TradesHistory rows into canonical unique fills.
+    """Map one authenticated exact-byte Kraken TradesHistory read into fills.
 
     Kraken trade rows do not safely imply AutoTrade instrument versions, client
     identities or fee currency. Those mappings must come from separately
     evidenced metadata/order state and are therefore explicit inputs.
     """
 
+    if not isinstance(observation, ProviderResponseObservation):
+        raise TypeError("observation must be ProviderResponseObservation")
+    observation.require_scope(
+        provider_id="KRAKEN",
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint="/0/private/TradesHistory",
+    )
+    response = observation.payload
+    account_id = observation.account_id
+    environment = observation.environment
     if not isinstance(response, Mapping):
         raise TypeError("response must be a mapping")
     raw_errors = response.get("error")

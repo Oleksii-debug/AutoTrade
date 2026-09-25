@@ -151,6 +151,39 @@ def _canonical_request(request: Mapping[str, Any]) -> dict[str, Any]:
     return claim
 
 
+def _canonical_service_identity(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise RegistryProtocolError("service_identity must be an object")
+    allowed_raw = value.get("allowed_claim_modes")
+    if not isinstance(allowed_raw, Sequence) or isinstance(allowed_raw, (str, bytes)):
+        raise RegistryProtocolError("allowed_claim_modes must be a non-empty list")
+    allowed: list[str] = []
+    for raw in allowed_raw:
+        if not isinstance(raw, str) or raw not in ALLOWED_MODES:
+            raise RegistryProtocolError("allowed_claim_modes contains unsupported mode")
+        allowed.append(raw)
+    if not allowed or len(set(allowed)) != len(allowed):
+        raise RegistryProtocolError("allowed_claim_modes must be non-empty and unique")
+
+    digest = _require_text(value, "authentication_binding_digest")
+    if (
+        not digest.startswith("sha256:")
+        or len(digest) != 71
+        or any(ch not in "0123456789abcdef" for ch in digest[7:])
+    ):
+        raise RegistryProtocolError(
+            "authentication_binding_digest must be canonical sha256:<64 lowercase hex>"
+        )
+
+    return {
+        "service_id": _require_text(value, "service_id"),
+        "principal_id": _require_text(value, "principal_id"),
+        "authorized_account_id": _require_text(value, "authorized_account_id"),
+        "authentication_binding_digest": digest,
+        "allowed_claim_modes": sorted(allowed),
+    }
+
+
 def _validate_lease_ttl_seconds(value: int) -> int:
     if type(value) is not int or not 1 <= value <= MAX_LEASE_TTL_SECONDS:
         raise RegistryProtocolError(
@@ -209,7 +242,12 @@ def _validate_registry(registry: Mapping[str, Any]) -> None:
                 "contract_versions",
             )
         }
-        _canonical_request(canonical_claim_request)
+        canonical_request = _canonical_request(canonical_claim_request)
+        owner_identity = _canonical_service_identity(claim.get("owner_identity"))
+        if owner_identity["authorized_account_id"] != canonical_request["account_id"]:
+            raise RegistryProtocolError("claim owner identity account binding mismatch")
+        if canonical_request["claim_mode"] not in owner_identity["allowed_claim_modes"]:
+            raise RegistryProtocolError("claim owner identity is not authorized for claim mode")
         lease_until = claim.get("lease_until")
         if not isinstance(lease_until, str):
             raise RegistryProtocolError("claim lease_until must be service-issued ISO-8601 text")
@@ -250,11 +288,17 @@ def claim(
     *,
     expected_generation: int,
     now: str,
+    service_identity: Mapping[str, Any] | None = None,
     lease_ttl_seconds: int = MAX_LEASE_TTL_SECONDS,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     _validate_registry(registry)
     resolved_now = parse_instant(now)
     canonical = _canonical_request(request)
+    canonical_owner = _canonical_service_identity(service_identity)
+    if canonical_owner["authorized_account_id"] != canonical["account_id"]:
+        raise RegistryProtocolError("service identity is not bound to request account")
+    if canonical["claim_mode"] not in canonical_owner["allowed_claim_modes"]:
+        raise RegistryProtocolError("service identity is not authorized for claim mode")
     if (
         canonical["claim_mode"] in MUTATING_MODES
         and registry.get("mode") != REGISTRY_MODE_ENABLED
@@ -282,6 +326,8 @@ def claim(
             }
             if comparable != canonical:
                 raise RegistryProtocolError("request_id reuse with different claim payload")
+            if existing.get("owner_identity") != canonical_owner:
+                raise RegistryProtocolError("request_id replay by different service identity")
             return deepcopy(dict(registry)), deepcopy(dict(existing))
 
     _require_generation(registry, expected_generation)
@@ -305,6 +351,7 @@ def claim(
         "claim_id": claim_id,
         **canonical,
         "original_request": deepcopy(canonical),
+        "owner_identity": deepcopy(canonical_owner),
         "lease_until": lease_until,
         "lease_ttl_seconds": lease_ttl_seconds,
         "status": "ACTIVE",
@@ -324,17 +371,21 @@ def renew(
     run_id: str,
     expected_generation: int,
     now: str,
+    service_identity: Mapping[str, Any] | None = None,
     lease_ttl_seconds: int = MAX_LEASE_TTL_SECONDS,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     _validate_registry(registry)
     _require_generation(registry, expected_generation)
     resolved_now = parse_instant(now)
+    canonical_owner = _canonical_service_identity(service_identity)
     new_lease = parse_instant(_service_lease_until(resolved_now, lease_ttl_seconds))
 
     next_registry = deepcopy(dict(registry))
     target = next((c for c in next_registry["claims"] if c.get("claim_id") == claim_id), None)
     if target is None:
         raise RegistryProtocolError("claim_id not found")
+    if target.get("owner_identity") != canonical_owner:
+        raise RegistryProtocolError("service identity does not own claim")
     if target.get("run_id") != run_id:
         raise RegistryProtocolError("run_id does not own claim")
     if not _active(target, resolved_now):
@@ -359,10 +410,12 @@ def release(
     expected_generation: int,
     now: str,
     reason: str,
+    service_identity: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     _validate_registry(registry)
     _require_generation(registry, expected_generation)
     resolved_now = parse_instant(now)
+    canonical_owner = _canonical_service_identity(service_identity)
     if not isinstance(reason, str) or not reason.strip():
         raise RegistryProtocolError("release reason must be non-empty")
 
@@ -370,6 +423,8 @@ def release(
     target = next((c for c in next_registry["claims"] if c.get("claim_id") == claim_id), None)
     if target is None:
         raise RegistryProtocolError("claim_id not found")
+    if target.get("owner_identity") != canonical_owner:
+        raise RegistryProtocolError("service identity does not own claim")
     if target.get("run_id") != run_id:
         raise RegistryProtocolError("run_id does not own claim")
     if not _active(target, resolved_now):

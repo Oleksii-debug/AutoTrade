@@ -1,57 +1,192 @@
 {
-  "$schema":"https://json-schema.org/draft/2020-12/schema",
-  "$id":"https://schemas.autotrade.local/2.0.0/data.schema.json",
-  "title":"AutoTrade information and dataset contracts",
-  "$defs":{
-    "InformationClaim":{
-      "type":"object","additionalProperties":false,
-      "required":["claim_id","kind","text","confidence"],
-      "properties":{
-        "claim_id":{"type":"string","minLength":1},
-        "kind":{"type":"string","minLength":1},
-        "text":{"type":"string","minLength":1},
-        "confidence":{"type":"number","minimum":0,"maximum":1}
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.autotrade.local/3.0.0/data.schema.json",
+  "title": "AutoTrade information and dataset contracts",
+  "$defs": {
+    "InformationClaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claim_id",
+        "kind",
+        "text",
+        "confidence"
+      ],
+      "properties": {
+        "claim_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
       }
     },
-    "InformationEvent":{
-      "type":"object","additionalProperties":false,
-      "required":["information_id","source_id","published_at","available_at","ingested_at","revision","entities","claims","content_hash","rights_id","trust_features","language","evidence"],
-      "properties":{
-        "information_id":{"$ref":"common.schema.json#/$defs/Id"},
-        "source_id":{"type":"string","minLength":1},
-        "source_event_at":{"$ref":"common.schema.json#/$defs/UtcInstant"},
-        "published_at":{"$ref":"common.schema.json#/$defs/UtcInstant"},
-        "available_at":{"$ref":"common.schema.json#/$defs/UtcInstant"},
-        "ingested_at":{"$ref":"common.schema.json#/$defs/UtcInstant"},
-        "revision":{"$ref":"common.schema.json#/$defs/Sequence"},
-        "supersedes":{"type":"string","minLength":1},
-        "entities":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":1}},
-        "claims":{"type":"array","items":{"$ref":"#/$defs/InformationClaim"}},
-        "content_hash":{"$ref":"common.schema.json#/$defs/Digest"},
-        "rights_id":{"type":"string","minLength":1},
-        "trust_features":{"type":"object"},
-        "language":{"type":"string","minLength":2},
-        "evidence":{"type":"array","minItems":1,"items":{"$ref":"common.schema.json#/$defs/EvidenceRef"}}
+    "InformationEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "information_id",
+        "source_id",
+        "published_at",
+        "available_at",
+        "ingested_at",
+        "revision",
+        "entities",
+        "claims",
+        "content_hash",
+        "rights_id",
+        "trust_features",
+        "language",
+        "evidence"
+      ],
+      "properties": {
+        "information_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "source_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_event_at": {
+          "$ref": "common.schema.json#/$defs/UtcInstant"
+        },
+        "published_at": {
+          "$ref": "common.schema.json#/$defs/UtcInstant"
+        },
+        "available_at": {
+          "$ref": "common.schema.json#/$defs/UtcInstant"
+        },
+        "ingested_at": {
+          "$ref": "common.schema.json#/$defs/UtcInstant"
+        },
+        "revision": {
+          "$ref": "common.schema.json#/$defs/Sequence"
+        },
+        "supersedes": {
+          "type": "string",
+          "minLength": 1
+        },
+        "entities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "claims": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InformationClaim"
+          }
+        },
+        "content_hash": {
+          "$ref": "common.schema.json#/$defs/Digest"
+        },
+        "rights_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "trust_features": {
+          "type": "object"
+        },
+        "language": {
+          "type": "string",
+          "minLength": 2
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "common.schema.json#/$defs/EvidenceRef"
+          }
+        }
       }
     },
-    "DatasetManifest":{
-      "type":"object","additionalProperties":false,
-      "required":["dataset_id","version","content_hashes","instrument_universe_version","calendar_version","coverage","availability_policy","revision_policy","normalization_version","adjustment_policy","rights","missingness_report","source_evidence","created_at"],
-      "properties":{
-        "dataset_id":{"$ref":"common.schema.json#/$defs/Id"},
-        "version":{"$ref":"common.schema.json#/$defs/Sequence"},
-        "content_hashes":{"type":"array","minItems":1,"uniqueItems":true,"items":{"$ref":"common.schema.json#/$defs/Digest"}},
-        "instrument_universe_version":{"type":"string","minLength":1},
-        "calendar_version":{"type":"string","minLength":1},
-        "coverage":{"type":"object"},
-        "availability_policy":{"type":"object"},
-        "revision_policy":{"type":"object"},
-        "normalization_version":{"type":"string","minLength":1},
-        "adjustment_policy":{"type":"object"},
-        "rights":{"type":"object"},
-        "missingness_report":{"type":"object"},
-        "source_evidence":{"type":"array","items":{"$ref":"common.schema.json#/$defs/EvidenceRef"}},
-        "created_at":{"$ref":"common.schema.json#/$defs/UtcInstant"}
+    "DatasetManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dataset_id",
+        "version",
+        "content_hashes",
+        "instrument_universe_version",
+        "calendar_version",
+        "coverage",
+        "availability_policy",
+        "revision_policy",
+        "normalization_version",
+        "adjustment_policy",
+        "rights",
+        "missingness_report",
+        "source_evidence",
+        "created_at"
+      ],
+      "properties": {
+        "dataset_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "version": {
+          "$ref": "common.schema.json#/$defs/Sequence"
+        },
+        "content_hashes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.schema.json#/$defs/Digest"
+          }
+        },
+        "instrument_universe_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "calendar_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "coverage": {
+          "type": "object"
+        },
+        "availability_policy": {
+          "type": "object"
+        },
+        "revision_policy": {
+          "type": "object"
+        },
+        "normalization_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "adjustment_policy": {
+          "type": "object"
+        },
+        "rights": {
+          "type": "object"
+        },
+        "missingness_report": {
+          "type": "object"
+        },
+        "source_evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/EvidenceRef"
+          }
+        },
+        "created_at": {
+          "$ref": "common.schema.json#/$defs/UtcInstant"
+        }
       }
     }
   }

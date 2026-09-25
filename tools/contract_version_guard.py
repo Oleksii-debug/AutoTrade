@@ -146,13 +146,13 @@ def openapi_operation_blocks(
     for line in lines[start + 1 :]:
         if line and not line.startswith(" ") and not line.lstrip().startswith("#"):
             break
-        path_match = re.fullmatch(r"  (/[^:]+):\\s*", line)
+        path_match = re.fullmatch(r"  (/[^:]+):\s*", line)
         if path_match:
             current_path = path_match.group(1)
             current_key = None
             continue
         method_match = re.fullmatch(
-            r"    (" + "|".join(sorted(HTTP_METHODS)) + r"):\\s*",
+            r"    (" + "|".join(sorted(HTTP_METHODS)) + r"):\s*",
             line,
         )
         if method_match:

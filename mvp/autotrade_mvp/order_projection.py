@@ -462,14 +462,26 @@ class OrderBookProjection:
         fills: list[FillRecord] = []
         execution_owner: dict[str, str] = {}
         for order in self._orders.values():
-            for fill in order.active_fills:
-                prior_order_id = execution_owner.get(fill.provider_execution_id)
-                if prior_order_id is not None and prior_order_id != order.client_order_id:
+            # Provider execution identity is immutable historical truth, not
+            # merely an index over currently active economics. A bust or
+            # correction may change whether a fill contributes to position,
+            # but it must never make the provider execution ID available for a
+            # different order.
+            for observation in order.fill_history:
+                prior_order_id = execution_owner.get(
+                    observation.provider_execution_id
+                )
+                if (
+                    prior_order_id is not None
+                    and prior_order_id != order.client_order_id
+                ):
                     raise OrderProjectionConflict(
                         "provider_execution_id appears in multiple orders"
                     )
-                execution_owner[fill.provider_execution_id] = order.client_order_id
-                fills.append(fill)
+                execution_owner[
+                    observation.provider_execution_id
+                ] = order.client_order_id
+            fills.extend(order.active_fills)
         return tuple(fills)
 
     def snapshots(self) -> tuple[OrderSnapshot, ...]:

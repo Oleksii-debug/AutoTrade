@@ -78,7 +78,7 @@ class PopulationCoverageTests(unittest.TestCase):
         return store, negative, no_trade
 
     def _manifest(self, store, included, exclusions=None):
-        population = store.coverage_population(
+        population = store.coverage_population_snapshot(
             causal_cutoff=CUTOFF,
             granted_permissions={"research"},
             task="research",
@@ -88,7 +88,7 @@ class PopulationCoverageTests(unittest.TestCase):
             population,
             candidate_hash=H1,
             frozen_protocol_hash=H2,
-            input_snapshot_hash=H3,
+            input_snapshot_hash=population.root_hash,
             causal_cutoff=CUTOFF,
             permission_classes=["research"],
             included_episode_ids=included,
@@ -96,6 +96,132 @@ class PopulationCoverageTests(unittest.TestCase):
             task="research",
             instrument_family="equity",
         )
+
+
+    def test_caller_cannot_shrink_canonical_population_snapshot(self):
+        with TemporaryDirectory() as directory:
+            store, negative, no_trade = self._store_with_negative_and_no_trade(directory)
+            snapshot = store.coverage_population_snapshot(
+                causal_cutoff=CUTOFF,
+                granted_permissions={"research"},
+                task="research",
+                instrument_family="equity",
+            )
+            self.assertEqual(snapshot.eligible_count, 2)
+            self.assertEqual(
+                {row["episode_id"] for row in snapshot.rows},
+                {negative, no_trade},
+            )
+            with self.assertRaisesRegex(ValueError, "population root"):
+                replace(
+                    snapshot,
+                    rows=tuple(
+                        row for row in snapshot.rows if row["episode_id"] != negative
+                    ),
+                    eligible_count=1,
+                )
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical CoveragePopulationSnapshot",
+            ):
+                build_population_coverage(
+                    tuple(
+                        row for row in snapshot.rows if row["episode_id"] != negative
+                    ),
+                    candidate_hash=H1,
+                    frozen_protocol_hash=H2,
+                    input_snapshot_hash=H3,
+                    causal_cutoff=CUTOFF,
+                    permission_classes=["research"],
+                    included_episode_ids=[no_trade],
+                    exclusions={},
+                    task="research",
+                    instrument_family="equity",
+                )
+
+    def test_arbitrary_input_snapshot_hash_cannot_replace_memory_root(self):
+        with TemporaryDirectory() as directory:
+            store, negative, no_trade = self._store_with_negative_and_no_trade(directory)
+            snapshot = store.coverage_population_snapshot(
+                causal_cutoff=CUTOFF,
+                granted_permissions={"research"},
+                task="research",
+                instrument_family="equity",
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "canonical ExperienceMemory population root",
+            ):
+                build_population_coverage(
+                    snapshot,
+                    candidate_hash=H1,
+                    frozen_protocol_hash=H2,
+                    input_snapshot_hash=H3,
+                    causal_cutoff=CUTOFF,
+                    permission_classes=["research"],
+                    included_episode_ids=[negative, no_trade],
+                    exclusions={},
+                    task="research",
+                    instrument_family="equity",
+                )
+
+    def test_population_root_binds_pending_unknown_and_tombstoned_rows(self):
+        with TemporaryDirectory() as directory:
+            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            pending, _ = store.append_episode(
+                episode_id="66666666-6666-4666-8666-666666666666",
+                decision_time=DECISION,
+                information_cutoff=DECISION,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=episode_payload(
+                    "PENDING",
+                    side="BUY",
+                    label_mature=False,
+                    label="pending",
+                ),
+            )
+            unknown, _ = store.append_episode(
+                episode_id="77777777-7777-4777-8777-777777777777",
+                decision_time=DECISION,
+                information_cutoff=DECISION,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=episode_payload(
+                    "UNKNOWN",
+                    side="SELL",
+                    label_mature=False,
+                    label="unknown",
+                ),
+            )
+            store.tombstone(unknown, reason="retained qualification exclusion fact")
+            snapshot = store.coverage_population_snapshot(
+                causal_cutoff=CUTOFF,
+                granted_permissions={"research"},
+                task="research",
+                instrument_family="equity",
+            )
+            self.assertEqual(snapshot.eligible_count, 2)
+            self.assertEqual(
+                {row["episode_id"] for row in snapshot.rows},
+                {pending, unknown},
+            )
+            unknown_row = next(
+                row for row in snapshot.rows if row["episode_id"] == unknown
+            )
+            self.assertTrue(unknown_row["tombstone_lineage"])
+            with self.assertRaisesRegex(ValueError, "population root"):
+                replace(
+                    snapshot,
+                    rows=tuple(
+                        row for row in snapshot.rows if row["episode_id"] == pending
+                    ),
+                    eligible_count=1,
+                )
 
     def test_negative_and_no_trade_are_first_class_population_evidence(self):
         with TemporaryDirectory() as directory:

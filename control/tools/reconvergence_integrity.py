@@ -1,12 +1,14 @@
 """Fail-closed guard against malformed reconvergence commits.
 
-The guard is intentionally narrow: it detects repository-tree destruction, not
-semantic ownership. A PR that deletes a protected canonical sentinel is blocked.
-A PR that deletes both a material absolute number and a material fraction of the
-base tree is also blocked. Renames are not treated as deletions.
+The guard is intentionally narrow: it detects stale/diverged reconvergence and
+repository-tree destruction, not semantic ownership. A candidate must descend
+from the exact base revision supplied by the pull-request event. A PR that deletes
+a protected canonical sentinel is blocked. A PR that deletes both a material
+absolute number and a material fraction of the base tree is also blocked.
+Renames are not treated as deletions.
 
-This directly protects against commits accidentally built from a partial tree
-instead of the full current-main base tree.
+This directly protects against commits accidentally built from a stale or partial
+tree instead of the full current-main base tree.
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ class Change:
 @dataclass(frozen=True)
 class IntegrityAssessment:
     allowed: bool
+    base_is_ancestor: bool
     base_path_count: int
     deletion_count: int
     deletion_fraction: float
@@ -75,6 +78,7 @@ def assess_reconvergence(
     max_deletions: int = 50,
     max_deleted_fraction: float = 0.35,
     protected_sentinels: frozenset[str] = PROTECTED_SENTINELS,
+    base_is_ancestor: bool = True,
 ) -> IntegrityAssessment:
     if max_deletions < 1:
         raise ValueError("max_deletions must be positive")
@@ -91,6 +95,10 @@ def assess_reconvergence(
     fraction = len(deleted) / base_count
 
     reasons: list[str] = []
+    if type(base_is_ancestor) is not bool:
+        raise TypeError("base_is_ancestor must be boolean")
+    if not base_is_ancestor:
+        reasons.append("head is not descended from exact base revision")
     if protected:
         reasons.append(
             "protected canonical sentinel deletion: " + ", ".join(protected)
@@ -103,6 +111,7 @@ def assess_reconvergence(
 
     return IntegrityAssessment(
         allowed=not reasons,
+        base_is_ancestor=base_is_ancestor,
         base_path_count=base_count,
         deletion_count=len(deleted),
         deletion_fraction=fraction,
@@ -111,9 +120,13 @@ def assess_reconvergence(
     )
 
 
-def _git_lines(*args: str) -> tuple[str, ...]:
+def _git_lines(
+    *args: str,
+    cwd: str | Path | None = None,
+) -> tuple[str, ...]:
     completed = subprocess.run(
         ["git", *args],
+        cwd=cwd,
         check=True,
         text=True,
         stdout=subprocess.PIPE,
@@ -122,22 +135,65 @@ def _git_lines(*args: str) -> tuple[str, ...]:
     return tuple(completed.stdout.splitlines())
 
 
+def _git_is_ancestor(
+    base: str,
+    head: str,
+    *,
+    cwd: str | Path | None = None,
+) -> bool:
+    completed = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", base, head],
+        cwd=cwd,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode == 0:
+        return True
+    if completed.returncode == 1:
+        return False
+    raise subprocess.CalledProcessError(
+        completed.returncode,
+        completed.args,
+        output=completed.stdout,
+        stderr=completed.stderr,
+    )
+
+
 def assess_git_revisions(
     base: str,
     head: str,
     *,
     max_deletions: int = 50,
     max_deleted_fraction: float = 0.35,
+    cwd: str | Path | None = None,
 ) -> IntegrityAssessment:
-    base_paths = _git_lines("ls-tree", "-r", "--name-only", base)
+    """Assess revisions inside one explicit Git repository/worktree.
+
+    cwd defaults to the current process directory for the CLI workflow. Tests
+    and library callers can bind revision identity to another repository. Every
+    Git subprocess uses the same repository boundary.
+    """
+
+    base_is_ancestor = _git_is_ancestor(base, head, cwd=cwd)
+    base_paths = _git_lines("ls-tree", "-r", "--name-only", base, cwd=cwd)
     changes = parse_name_status(
-        _git_lines("diff", "--name-status", "--find-renames", base, head)
+        _git_lines(
+            "diff",
+            "--name-status",
+            "--find-renames",
+            base,
+            head,
+            cwd=cwd,
+        )
     )
     return assess_reconvergence(
         base_paths=base_paths,
         changes=changes,
         max_deletions=max_deletions,
         max_deleted_fraction=max_deleted_fraction,
+        base_is_ancestor=base_is_ancestor,
     )
 
 
@@ -159,6 +215,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     print(
         "Reconvergence tree guard: "
+        f"base_is_ancestor={str(assessment.base_is_ancestor).lower()} "
         f"base_paths={assessment.base_path_count} "
         f"deletions={assessment.deletion_count} "
         f"deleted_fraction={assessment.deletion_fraction:.3f}"

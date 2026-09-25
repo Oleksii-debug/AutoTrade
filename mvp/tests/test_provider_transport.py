@@ -16,7 +16,11 @@ from mvp.autotrade_mvp.alpaca import (
     prepare_order_request as prepare_alpaca_order_request,
 )
 from mvp.autotrade_mvp.binance_spot import parse_account_trades
-from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id
+from mvp.autotrade_mvp.dispatch import (
+    GuardedDispatcher,
+    load_submission_response_binding,
+    stable_client_order_id,
+)
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
     Surface,
@@ -36,6 +40,7 @@ from mvp.autotrade_mvp.provider_transport import (
     ProviderEndpointPolicy,
     ProviderTransportError,
     ProviderTransportScopeError,
+    TradingWireResponse,
     WHITEBIT_ENDPOINT_POLICIES,
     WhiteBitDurableNonceAllocator,
     WhiteBitHttpTransport,
@@ -109,7 +114,10 @@ class RecordingWire:
                 http_status=self.http_status,
                 body=self.response,
             )
-        return self.response
+        return TradingWireResponse(
+            http_status=self.http_status,
+            body=self.response,
+        )
 
 
 def trade_handle(*, environment="PAPER", account_id="acct-1"):
@@ -915,6 +923,7 @@ class ProviderTransportTests(unittest.TestCase):
             final_guard,
         )
         self.assertEqual(response.payload["ok"], True)
+        self.assertEqual(response.http_status, 200)
         self.assertEqual(events, ["quota", "resolve", "guard", "wire"])
         self.assertEqual(len(resolver.calls), 1)
         self.assertEqual(resolver.calls[0]["purpose"], "TRADE")
@@ -1051,6 +1060,74 @@ class ProviderTransportTests(unittest.TestCase):
                 clock_millis=lambda: 1700000000000,
                 wire_client=RecordingWire(events),
             )
+
+    def test_definitive_http_rejection_is_durable_response_not_unknown(self):
+        with TemporaryDirectory() as directory:
+            events = []
+            body = b'{"code":-1013,"msg":"Filter failure: LOT_SIZE"}'
+            wire = RecordingWire(
+                events,
+                response=body,
+                http_status=400,
+            )
+            transport, _resolver = self.make_transport(
+                events=events,
+                wire=wire,
+            )
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="acct-1",
+                owner_token="owner-1",
+            )
+            intent_id = "intent-http-reject-1"
+            client_id = stable_client_order_id(
+                "BINANCE",
+                intent_id,
+                environment="PAPER",
+                account_id="acct-1",
+            )
+            result = dispatcher.dispatch(
+                attempt_id="attempt-http-reject-1",
+                intent_id=intent_id,
+                intent_hash="intent-http-reject-hash",
+                provider="BINANCE",
+                request=prepared_request(client_id),
+                now="2026-09-25T10:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=transport,
+                sender_check=lambda _owner, _epoch: None,
+                final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
+                submission_scope={
+                    "capability_snapshot_id": "cap-1",
+                    "provider": "BINANCE",
+                    "account_id": "acct-1",
+                    "environment": "PAPER",
+                },
+            )
+            self.assertEqual(result.status, "SENT")
+            self.assertEqual(result.response["code"], -1013)
+            self.assertEqual(events.count("wire"), 1)
+
+            binding = load_submission_response_binding(
+                store,
+                environment="PAPER",
+                account_id="acct-1",
+                attempt_id="attempt-http-reject-1",
+            )
+            self.assertEqual(binding.http_status, 400)
+            self.assertEqual(binding.response_bytes, body)
+
+            restarted = JournalStore(f"{directory}/journal.sqlite3")
+            recovered = load_submission_response_binding(
+                restarted,
+                environment="PAPER",
+                account_id="acct-1",
+                attempt_id="attempt-http-reject-1",
+            )
+            self.assertEqual(recovered.http_status, 400)
+            self.assertEqual(recovered.response_sha256, binding.response_sha256)
 
     def test_dispatcher_marks_post_barrier_response_loss_unknown_and_never_retries(self):
         with TemporaryDirectory() as directory:

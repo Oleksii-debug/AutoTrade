@@ -54,6 +54,8 @@ class KrakenFuturesContractTests(unittest.TestCase):
             response=None,
             transport_ambiguous=True,
         )
+        self.assertNotIn("provider_received_at", unknown)
+        self.assertNotIn("observed_at", unknown)
         self.validate_submission(unknown)
 
 

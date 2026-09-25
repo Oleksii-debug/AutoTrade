@@ -600,20 +600,24 @@ class DurableModelCallOrchestrator:
                 raise
             return False
 
-    def _reservation_context(self, spec: ModelCallSpec) -> dict[str, str]:
+    def _reservation_context(
+        self,
+        spec: ModelCallSpec,
+        pricing: PricingEvidenceSnapshot | None,
+    ) -> dict[str, str]:
         context = {
             "job_id": spec.job_id,
             "input_digest": spec.input_digest,
             "policy_id": spec.policy_id,
             "pricing_evidence_id": spec.pricing_evidence_id,
-            "pricing_evidence_digest": pricing.evidence_digest,
             "pricing_as_of": spec.pricing_as_of,
-            "pricing_valid_until": pricing.valid_until,
             "cost_currency": spec.cost_currency,
             "result_schema_id": spec.result_schema_id,
-            "cost_currency": spec.cost_currency,
             "fallback_index": str(spec.fallback_index),
         }
+        if pricing is not None:
+            context["pricing_evidence_digest"] = pricing.evidence_digest
+            context["pricing_valid_until"] = pricing.valid_until
         if spec.fallback_parent_attempt_id is not None:
             context["fallback_parent_attempt_id"] = spec.fallback_parent_attempt_id
         return context
@@ -702,7 +706,7 @@ class DurableModelCallOrchestrator:
         descriptor: ModelDescriptor,
         pricing: PricingEvidenceSnapshot,
     ) -> dict[str, object]:
-        context = self._reservation_context(spec)
+        context = self._reservation_context(spec, pricing)
         return {
             "attempt_id": attempt_id,
             "request_id": attempt_id,
@@ -712,7 +716,10 @@ class DurableModelCallOrchestrator:
             "input_digest": spec.input_digest,
             "policy_id": spec.policy_id,
             "pricing_evidence_id": spec.pricing_evidence_id,
+            "pricing_evidence_digest": pricing.evidence_digest,
             "pricing_as_of": spec.pricing_as_of,
+            "pricing_valid_until": pricing.valid_until,
+            "cost_currency": spec.cost_currency,
             "result_schema_id": spec.result_schema_id,
             "fallback_parent_attempt_id": spec.fallback_parent_attempt_id,
             "fallback_index": spec.fallback_index,
@@ -911,7 +918,7 @@ class DurableModelCallOrchestrator:
         spec: ModelCallSpec,
         decision: RouteDecision,
         descriptor: ModelDescriptor,
-        pricing: PricingEvidenceSnapshot,
+        pricing_evidence_digest: str,
     ) -> ModelCallBinding:
         return ModelCallBinding(
             attempt_id=attempt_id,
@@ -927,7 +934,10 @@ class DurableModelCallOrchestrator:
             remote=descriptor.remote,
             reserved_cost=decision.reserved_cost,
             pricing_evidence_id=spec.pricing_evidence_id,
-            pricing_evidence_digest=pricing.evidence_digest,
+            pricing_evidence_digest=_digest(
+                pricing_evidence_digest,
+                name="pricing_evidence_digest",
+            ),
             pricing_as_of=spec.pricing_as_of,
             cost_currency=spec.cost_currency,
             result_schema_id=spec.result_schema_id,
@@ -1021,60 +1031,100 @@ class DurableModelCallOrchestrator:
             )
 
         materialized = tuple(descriptors)
-        pricing = None
-        if getattr(policy.mode, "value", None) != "ZERO":
-            pricing = self._pricing_evidence(spec, materialized)
-        decision = self.budget.admit_route(
-            policy,
-            request,
-            materialized,
-            now_utc=now_utc,
-            reservation_context=self._reservation_context(spec),
-        )
-        if decision.status is not RouteStatus.ADMITTED:
-            return ModelCallOutcome(
-                decision.status.value,
-                attempt_id,
-                decision,
-                decision.reason,
-            )
-        descriptor = self._selected_descriptor(decision, materialized)
-        if pricing is None:
-            raise ModelCallError("admitted model route lacks sealed pricing evidence")
-        active = self.budget.active_reservation(attempt_id)
-        if active is None or active != decision.reserved_cost:
-            raise ModelCallError(
-                "exact durable model reservation is not active"
-            )
+        first = existing[0] if existing else None
+        pricing: PricingEvidenceSnapshot | None = None
 
-        prepared_payload = self._prepared_payload(
-            attempt_id=attempt_id,
-            spec=spec,
-            decision=decision,
-            descriptor=descriptor,
-            pricing=pricing,
-        )
-        events = self._events(attempt_id)
-        if events:
-            first = events[0]
-            if first.get("event_type") == "ModelCallNotSent":
-                return self._recover_existing(
-                    attempt_id=attempt_id,
-                    decision=decision,
+        if first is not None:
+            if first.get("event_type") != "ModelCallPrepared":
+                raise ModelCallError(
+                    "model-call identity conflicts with durable prepared attempt"
                 )
-            if (
-                first.get("event_type") != "ModelCallPrepared"
-                or first.get("payload") != prepared_payload
+            prepared_payload = first.get("payload")
+            if not isinstance(prepared_payload, Mapping):
+                raise ModelCallError(
+                    "durable prepared model-call payload is invalid"
+                )
+            expected_spec = {
+                "attempt_id": attempt_id,
+                "request_id": attempt_id,
+                "budget_id": self.budget.budget_id,
+                "environment": self.budget.environment,
+                "job_id": spec.job_id,
+                "input_digest": spec.input_digest,
+                "policy_id": spec.policy_id,
+                "pricing_evidence_id": spec.pricing_evidence_id,
+                "pricing_as_of": spec.pricing_as_of,
+                "cost_currency": spec.cost_currency,
+                "result_schema_id": spec.result_schema_id,
+                "fallback_parent_attempt_id": spec.fallback_parent_attempt_id,
+                "fallback_index": spec.fallback_index,
+            }
+            if any(
+                prepared_payload.get(key) != value
+                for key, value in expected_spec.items()
             ):
                 raise ModelCallError(
                     "model-call identity conflicts with durable prepared attempt"
                 )
-            if len(events) > 1:
+            pricing_evidence_digest = _digest(
+                prepared_payload.get("pricing_evidence_digest"),
+                name="pricing_evidence_digest",
+            )
+            _utc_text(
+                prepared_payload.get("pricing_valid_until"),
+                name="pricing_valid_until",
+            )
+            decision = self._route_from_prepared(prepared_payload)
+            descriptor = self._selected_descriptor(decision, materialized)
+            if prepared_payload.get("remote") is not descriptor.remote:
+                raise ModelCallError(
+                    "durable prepared route remote/local identity changed"
+                )
+            active = self.budget.active_reservation(attempt_id)
+            if active is None or active != decision.reserved_cost:
+                raise ModelCallError(
+                    "exact durable model reservation is not active"
+                )
+            if len(existing) > 1:
                 return self._recover_existing(
                     attempt_id=attempt_id,
                     decision=decision,
                 )
         else:
+            if getattr(policy.mode, "value", None) != "ZERO":
+                pricing = self._pricing_evidence(spec, materialized)
+            decision = self.budget.admit_route(
+                policy,
+                request,
+                materialized,
+                now_utc=now_utc,
+                reservation_context=self._reservation_context(spec, pricing),
+            )
+            if decision.status is not RouteStatus.ADMITTED:
+                return ModelCallOutcome(
+                    decision.status.value,
+                    attempt_id,
+                    decision,
+                    decision.reason,
+                )
+            descriptor = self._selected_descriptor(decision, materialized)
+            if pricing is None:
+                raise ModelCallError(
+                    "admitted model route lacks sealed pricing evidence"
+                )
+            active = self.budget.active_reservation(attempt_id)
+            if active is None or active != decision.reserved_cost:
+                raise ModelCallError(
+                    "exact durable model reservation is not active"
+                )
+            prepared_payload = self._prepared_payload(
+                attempt_id=attempt_id,
+                spec=spec,
+                decision=decision,
+                descriptor=descriptor,
+                pricing=pricing,
+            )
+            pricing_evidence_digest = pricing.evidence_digest
             self._append(
                 attempt_id=attempt_id,
                 event_type="ModelCallPrepared",
@@ -1128,7 +1178,7 @@ class DurableModelCallOrchestrator:
             spec=spec,
             decision=decision,
             descriptor=descriptor,
-            pricing=pricing,
+            pricing_evidence_digest=pricing_evidence_digest,
         )
         try:
             observation = call(binding, cancelled)

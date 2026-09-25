@@ -5,6 +5,7 @@ import unittest
 
 from mvp.autotrade_mvp.persistence import (
     JournalStore,
+    _event_envelope_digest,
     _outbox_envelope_digest,
     payload_digest,
 )
@@ -863,6 +864,18 @@ class JournalStoreTests(unittest.TestCase):
             self.assertNotEqual(pending["envelope_hash"], legacy_hash)
             self.assertEqual(pending["payload"]["host_id"], "legacy-host")
             self.assertEqual(pending["payload"]["schema_version"], "1.0.0")
+            connection = sqlite3.connect(path)
+            try:
+                event_envelope_json, event_envelope_hash = connection.execute(
+                    "SELECT envelope_json, envelope_hash FROM events WHERE event_id = ?",
+                    ("evt-1",),
+                ).fetchone()
+            finally:
+                connection.close()
+            self.assertEqual(
+                event_envelope_hash,
+                _event_envelope_digest(event_envelope_json),
+            )
             self.assertTrue(
                 upgraded.mark_outbox_delivered(
                     pending["outbox_id"],
@@ -1299,6 +1312,83 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(pending[0]["topic"], "events")
 
 
+
+    def test_non_outbox_event_envelope_integrity_is_verified_on_reads(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            envelope = event()
+            envelope.update(
+                {
+                    "schema_version": "1.0.0",
+                    "host_id": "host-a",
+                    "owner_epoch": "1",
+                    "environment": "SIMULATION",
+                    "occurred_at": "2026-09-24T16:00:00+00:00",
+                    "observed_at": "2026-09-24T16:00:00+00:00",
+                    "correlation_id": "corr-1",
+                    "causation_id": None,
+                    "evidence_refs": [],
+                }
+            )
+            store.append_event(envelope)
+
+            self.assertEqual(store.get_event("evt-1")["event_id"], "evt-1")
+            self.assertEqual(len(store.load_events("account", "paper-1")), 1)
+
+            connection = sqlite3.connect(path)
+            try:
+                raw = connection.execute(
+                    "SELECT envelope_json FROM events WHERE event_id = ?",
+                    ("evt-1",),
+                ).fetchone()[0]
+                mutated = json.loads(raw)
+                mutated["host_id"] = "host-forged"
+                mutated_json = json.dumps(
+                    mutated,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                connection.execute(
+                    "UPDATE events SET envelope_json = ? WHERE event_id = ?",
+                    (mutated_json, "evt-1"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = JournalStore(path)
+            with self.assertRaisesRegex(ValueError, "event envelope hash"):
+                reopened.get_event("evt-1")
+            with self.assertRaisesRegex(ValueError, "event envelope hash"):
+                reopened.load_events("account", "paper-1")
+
+            connection = sqlite3.connect(path)
+            try:
+                mutated = json.loads(mutated_json)
+                mutated["event_type"] = "ForgedEventType"
+                forged_json = json.dumps(
+                    mutated,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                connection.execute(
+                    "UPDATE events SET envelope_json = ?, envelope_hash = ? "
+                    "WHERE event_id = ?",
+                    (
+                        forged_json,
+                        _event_envelope_digest(forged_json),
+                        "evt-1",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "conflicts with core journal event"):
+                reopened.get_event("evt-1")
 
     def test_event_reads_fail_closed_after_payload_tamper(self):
         with TemporaryDirectory() as directory:

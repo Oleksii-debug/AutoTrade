@@ -570,8 +570,28 @@
     }
   }
 
+  function resetEventHistoryForScope() {
+    const body = byId("event-history-body");
+    if (!body) return;
+    body.replaceChildren();
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 4;
+    cell.textContent = "No canonical host events received in this account/environment session.";
+    row.appendChild(cell);
+    body.appendChild(row);
+  }
+
   function renderSnapshot(snapshot, {announceRefresh = false} = {}) {
     const parsed = parseCanonicalSnapshot(snapshot);
+    const scopeChanged = state.accountId !== null && (
+      parsed.accountId !== state.accountId ||
+      parsed.environment !== state.environment);
+    if (scopeChanged) {
+      state.cursor = 0n;
+      state.version = 0n;
+      resetEventHistoryForScope();
+    }
     if (parsed.version < state.version || parsed.cursor < state.cursor) {
       throw new Error("host snapshot counters regressed");
     }

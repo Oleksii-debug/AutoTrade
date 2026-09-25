@@ -142,6 +142,50 @@ class SimulatedProviderContractHarnessTests(unittest.TestCase):
         self.assertEqual(provider.outbound_request_count, 0)
         self.assertEqual(harness.quota.used, Decimal("0"))
 
+    def test_invalid_order_fields_fail_before_guard_quota_and_outbound_boundary(self):
+        invalid_requests = (
+            request(attempt_id="not-a-uuid"),
+            request(side="HOLD"),
+            request(quantity="0"),
+            request(price="-1"),
+            request(instrument_version=" "),
+        )
+        for index, candidate in enumerate(invalid_requests):
+            with self.subTest(index=index):
+                provider = SimulatedProvider()
+                harness = SimulatedProviderContractHarness(
+                    provider,
+                    quota_capacity="5",
+                    recovery_quota_reserve="1",
+                )
+                guard_calls = []
+                with self.assertRaises((TypeError, ValueError)):
+                    harness.transport_send(
+                        f"invalid-{index}",
+                        candidate,
+                        lambda: guard_calls.append("called"),
+                    )
+                self.assertEqual(guard_calls, [])
+                self.assertEqual(provider.outbound_request_count, 0)
+                self.assertEqual(harness.quota.used, Decimal("0"))
+
+    def test_missing_required_order_field_fails_before_send_boundary(self):
+        provider = SimulatedProvider()
+        harness = SimulatedProviderContractHarness(provider)
+        candidate = request()
+        del candidate["quantity"]
+        guard_calls = []
+        with self.assertRaises((TypeError, ValueError)):
+            harness.transport_send(
+                "missing-quantity",
+                candidate,
+                lambda: guard_calls.append("called"),
+            )
+        self.assertEqual(guard_calls, [])
+        self.assertEqual(provider.outbound_request_count, 0)
+        self.assertEqual(harness.quota.used, Decimal("0"))
+
+
     def test_history_lag_rejects_invalid_coverage_and_evidence_is_canonical_utc(self):
         harness = SimulatedProviderContractHarness()
         harness.script_submission(

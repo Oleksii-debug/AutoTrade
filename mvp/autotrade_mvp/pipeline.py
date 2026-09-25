@@ -24,11 +24,20 @@ from .persistence import JournalStore, payload_digest
 MONEY_QUANTUM = Decimal("0.00000001")
 
 
-def _money(value: Decimal | str | int | float) -> Decimal:
-    numeric = Decimal(str(value))
+def _exact_decimal(value: Decimal | str | int, *, name: str) -> Decimal:
+    if isinstance(value, bool) or isinstance(value, float):
+        raise TypeError(f"{name} must use Decimal, string or integer input")
+    try:
+        numeric = value if isinstance(value, Decimal) else Decimal(value)
+    except (ValueError, ArithmeticError, TypeError) as error:
+        raise ValueError(f"{name} must be a finite decimal") from error
     if not numeric.is_finite():
-        raise ValueError("Money and quantity values must be finite")
-    return numeric.quantize(MONEY_QUANTUM)
+        raise ValueError(f"{name} must be a finite decimal")
+    return numeric
+
+
+def _money(value: Decimal | str | int) -> Decimal:
+    return _exact_decimal(value, name="money").quantize(MONEY_QUANTUM)
 
 def handle_market_data(prices: Iterable[float | str | Decimal]) -> list[Decimal]:
     normalized: list[Decimal] = []
@@ -396,7 +405,7 @@ def run_vertical_slice(
     quantity = _money(order_quantity)
     position_limit = _money(max_abs_position)
     notional_limit = _money(max_notional)
-    rate = Decimal(str(fee_rate))
+    rate = _exact_decimal(fee_rate, name="fee_rate")
     if starting_cash <= 0 or quantity <= 0 or position_limit <= 0 or notional_limit <= 0:
         raise ValueError("Cash, order quantity and risk limits must be positive")
     if not rate.is_finite() or rate < 0 or rate >= 1:

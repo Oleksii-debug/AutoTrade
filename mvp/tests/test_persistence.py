@@ -51,6 +51,29 @@ class JournalStoreTests(unittest.TestCase):
             )
             self.assertEqual(store.pending_outbox(), [])
 
+    def test_load_events_preserves_verified_full_envelope_metadata(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            item = event()
+            item.update(
+                {
+                    "environment": "PAPER",
+                    "owner_epoch": "7",
+                    "host_id": "host-a",
+                    "correlation_id": "corr-a",
+                    "causation_id": None,
+                    "evidence_refs": ["artifact:proof"],
+                }
+            )
+            store.append_event(item)
+            loaded = store.load_events("account", "paper-1")[0]
+            self.assertEqual(loaded["environment"], "PAPER")
+            self.assertEqual(loaded["owner_epoch"], "7")
+            self.assertEqual(loaded["host_id"], "host-a")
+            self.assertEqual(loaded["correlation_id"], "corr-a")
+            self.assertEqual(loaded["evidence_refs"], ["artifact:proof"])
+            self.assertEqual(loaded["aggregate_version"], 1)
+
     def test_idempotent_event_replay_rejects_corrupted_outbox_hash(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

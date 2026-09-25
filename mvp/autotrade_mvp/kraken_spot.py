@@ -18,6 +18,7 @@ import json
 import re
 
 from .capabilities import CapabilitySnapshot
+from .provider_core import BoundReconciliationResponse, require_reconciliation_response
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
@@ -558,21 +559,20 @@ def _seconds_to_utc(value, *, name: str) -> str:
 
 
 def parse_trade_history(
-    response: Mapping[str, object],
+    evidence: BoundReconciliationResponse,
     *,
-    account_id: str,
-    environment: str,
     instrument_versions: Mapping[str, str],
     client_ids_by_provider_order: Mapping[str, str],
     fee_currency_by_pair: Mapping[str, str],
 ) -> tuple[ProviderFillEvidence, ...]:
-    """Map recorded Kraken TradesHistory rows into canonical unique fills.
+    """Map a provenance-bound Kraken TradesHistory response into unique fills."""
 
-    Kraken trade rows do not safely imply AutoTrade instrument versions, client
-    identities or fee currency. Those mappings must come from separately
-    evidenced metadata/order state and are therefore explicit inputs.
-    """
-
+    response, account_id, environment = require_reconciliation_response(
+        evidence,
+        provider_id="KRAKEN",
+        surface="EXECUTIONS",
+        endpoint="/0/private/TradesHistory",
+    )
     if not isinstance(response, Mapping):
         raise TypeError("response must be a mapping")
     raw_errors = response.get("error")

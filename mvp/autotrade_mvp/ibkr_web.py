@@ -9,7 +9,7 @@ an order. Those steps require separate exact-version qualification.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Mapping
@@ -292,6 +292,7 @@ def prepare_normalized_order(
     capability: CapabilitySnapshot,
     session: IbkrBrokerageSessionStatus,
     at: datetime,
+    maximum_session_age_seconds: int,
 ) -> IbkrNormalizedOrder:
     """Build normalized fields but deliberately stop before provider serialization.
 
@@ -307,8 +308,18 @@ def prepare_normalized_order(
     if not isinstance(session, IbkrBrokerageSessionStatus):
         raise TypeError("session must be IbkrBrokerageSessionStatus")
     point = _instant(at, name="at")
+    if (
+        isinstance(maximum_session_age_seconds, bool)
+        or not isinstance(maximum_session_age_seconds, int)
+        or maximum_session_age_seconds < 0
+    ):
+        raise IbkrWebAdapterError(
+            "maximum_session_age_seconds must be a non-negative integer"
+        )
     if session.observed_at > point:
         raise IbkrWebAdapterError("session evidence is from the future")
+    if point - session.observed_at > timedelta(seconds=maximum_session_age_seconds):
+        raise IbkrWebAdapterError("brokerage session evidence is stale")
     session.require_trade_ready()
     coid = validate_coid(client_order_id)
     if capability.provider_id.upper() != "IBKR":

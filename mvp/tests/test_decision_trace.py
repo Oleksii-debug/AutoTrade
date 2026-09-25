@@ -117,12 +117,14 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "message": "Authorization: Bearer bearer-secret",
                 "dsn": "host=db;password=hunter2;database=autotrade",
                 "key_material": "-----BEGIN PRIVATE KEY-----\\nsecret\\n-----END PRIVATE KEY-----",
+                "token_text": "token=plain-token-secret",
+                "session_text": "session: plain-session-secret",
                 "safe": "symbol=BTC",
             }
             store.append(item)
 
             raw = path.read_text(encoding="utf-8")
-            for leaked in ("abc123", "bearer-secret", "hunter2", "\\nsecret\\n"):
+            for leaked in ("abc123", "bearer-secret", "hunter2", "plain-token-secret", "plain-session-secret", "\\nsecret\\n"):
                 self.assertNotIn(leaked, raw)
             persisted = json.loads(raw)
             attrs = persisted["attributes"]
@@ -130,6 +132,8 @@ class DecisionTraceStoreTests(unittest.TestCase):
             self.assertIn("Authorization: [REDACTED]", attrs["message"])
             self.assertIn("password=[REDACTED]", attrs["dsn"])
             self.assertEqual(attrs["key_material"], "[REDACTED]")
+            self.assertIn("token=[REDACTED]", attrs["token_text"])
+            self.assertIn("session:[REDACTED]", attrs["session_text"])
             self.assertEqual(attrs["safe"], "symbol=BTC")
 
     def test_non_finite_diagnostic_numbers_cannot_enter_durable_trace(self):

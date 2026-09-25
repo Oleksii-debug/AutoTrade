@@ -32,8 +32,18 @@ class JournalStoreTests(unittest.TestCase):
             pending = store.pending_outbox()
             self.assertEqual(len(pending), 1)
             self.assertEqual(pending[0]["event_id"], "evt-1")
-            self.assertTrue(store.mark_outbox_delivered(pending[0]["outbox_id"]))
-            self.assertFalse(store.mark_outbox_delivered(pending[0]["outbox_id"]))
+            self.assertTrue(
+                store.mark_outbox_delivered(
+                    pending[0]["outbox_id"],
+                    expected_envelope_hash=pending[0]["envelope_hash"],
+                )
+            )
+            self.assertFalse(
+                store.mark_outbox_delivered(
+                    pending[0]["outbox_id"],
+                    expected_envelope_hash=pending[0]["envelope_hash"],
+                )
+            )
             self.assertEqual(store.pending_outbox(), [])
 
     def test_idempotent_event_replay_rejects_corrupted_outbox_hash(self):
@@ -54,6 +64,92 @@ class JournalStoreTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "conflicts"):
                 store.append_event(event(), outbox_topic="events")
+
+    def test_delivery_ack_is_bound_to_verified_outbox_envelope_across_restart(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event(), outbox_topic="events")
+            pending = store.pending_outbox()[0]
+
+            connection = sqlite3.connect(path)
+            try:
+                payload = json.loads(
+                    connection.execute(
+                        "SELECT payload_json FROM outbox WHERE outbox_id = ?",
+                        (pending["outbox_id"],),
+                    ).fetchone()[0]
+                )
+                payload["aggregate_id"] = "tampered-account"
+                payload_json = json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                replacement_hash = payload_digest(payload)
+                connection.execute(
+                    "UPDATE outbox SET payload_json = ?, envelope_hash = ? "
+                    "WHERE outbox_id = ?",
+                    (
+                        payload_json,
+                        replacement_hash,
+                        pending["outbox_id"],
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = JournalStore(path)
+            with self.assertRaisesRegex(ValueError, "acknowledgement is stale"):
+                reopened.mark_outbox_delivered(
+                    pending["outbox_id"],
+                    expected_envelope_hash=pending["envelope_hash"],
+                )
+
+            connection = sqlite3.connect(path)
+            try:
+                delivered_at = connection.execute(
+                    "SELECT delivered_at FROM outbox WHERE outbox_id = ?",
+                    (pending["outbox_id"],),
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertIsNone(delivered_at)
+
+    def test_delivery_ack_revalidates_authoritative_event(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event(), outbox_topic="events")
+            pending = store.pending_outbox()[0]
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE events SET payload_json = ? WHERE event_id = ?",
+                    ('{"kind":"fill","quantity":"999"}', "evt-1"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "payload hash"):
+                JournalStore(path).mark_outbox_delivered(
+                    pending["outbox_id"],
+                    expected_envelope_hash=pending["envelope_hash"],
+                )
+
+            connection = sqlite3.connect(path)
+            try:
+                delivered_at = connection.execute(
+                    "SELECT delivered_at FROM outbox WHERE outbox_id = ?",
+                    (pending["outbox_id"],),
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertIsNone(delivered_at)
 
     def test_outbox_envelope_metadata_tamper_fails_closed(self):
         with TemporaryDirectory() as directory:

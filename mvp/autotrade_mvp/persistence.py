@@ -840,29 +840,127 @@ class JournalStore:
                     "topic": row["topic"],
                     "payload": outbox_payload,
                     "created_at": row["created_at"],
+                    "envelope_hash": row["envelope_hash"],
                 }
             )
         return pending
 
-    def mark_outbox_delivered(self, outbox_id: str) -> bool:
+    def mark_outbox_delivered(
+        self,
+        outbox_id: str,
+        *,
+        expected_envelope_hash: str,
+    ) -> bool:
+        """Acknowledge exactly the verified outbox envelope that was delivered.
+
+        The caller must echo the envelope hash returned by pending_outbox().
+        Revalidate both the outbox bytes and their authoritative journal event
+        under the same write transaction before marking delivery. A stale
+        worker therefore cannot acknowledge a row that changed after it read
+        the pending publication intent.
+        """
+
         outbox_id = self._require_text(outbox_id, "outbox_id")
+        expected_envelope_hash = self._require_text(
+            expected_envelope_hash,
+            "expected_envelope_hash",
+        )
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT delivered_at FROM outbox WHERE outbox_id = ?", (outbox_id,)
-            ).fetchone()
-            if row is None:
-                connection.rollback()
-                raise KeyError(outbox_id)
-            if row["delivered_at"] is not None:
+            try:
+                row = connection.execute(
+                    """
+                    SELECT
+                        outbox.event_id,
+                        outbox.topic,
+                        outbox.payload_json AS outbox_payload_json,
+                        outbox.envelope_hash,
+                        outbox.delivered_at,
+                        events.event_type,
+                        events.aggregate_type,
+                        events.aggregate_id,
+                        events.aggregate_version,
+                        events.payload_json AS event_payload_json,
+                        events.payload_hash,
+                        events.committed_at
+                    FROM outbox
+                    JOIN events ON events.event_id = outbox.event_id
+                    WHERE outbox.outbox_id = ?
+                    """,
+                    (outbox_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(outbox_id)
+
+                actual_outbox_hash = (
+                    "sha256:"
+                    + sha256(
+                        str(row["outbox_payload_json"]).encode("utf-8")
+                    ).hexdigest()
+                )
+                if row["envelope_hash"] != actual_outbox_hash:
+                    raise ValueError(
+                        "outbox envelope hash does not match stored payload"
+                    )
+                if row["envelope_hash"] != expected_envelope_hash:
+                    raise ValueError(
+                        "outbox delivery acknowledgement is stale"
+                    )
+
+                event_row = {
+                    "event_id": row["event_id"],
+                    "event_type": row["event_type"],
+                    "aggregate_type": row["aggregate_type"],
+                    "aggregate_id": row["aggregate_id"],
+                    "aggregate_version": row["aggregate_version"],
+                    "payload_json": row["event_payload_json"],
+                    "payload_hash": row["payload_hash"],
+                    "committed_at": row["committed_at"],
+                }
+                event = self._decode_event_row(event_row)
+                try:
+                    outbox_payload = json.loads(row["outbox_payload_json"])
+                except (json.JSONDecodeError, TypeError) as error:
+                    raise ValueError("outbox payload is not valid JSON") from error
+                expected_envelope = {
+                    "event_id": event["event_id"],
+                    "event_type": event["event_type"],
+                    "aggregate_type": event["aggregate_type"],
+                    "aggregate_id": event["aggregate_id"],
+                    "aggregate_version": str(event["aggregate_version"]),
+                    "payload": event["payload"],
+                    "payload_hash": event["payload_hash"],
+                    "committed_at": event["committed_at"],
+                }
+                for key, expected in expected_envelope.items():
+                    if outbox_payload.get(key) != expected:
+                        raise ValueError(
+                            "outbox payload does not match authoritative journal event"
+                        )
+
+                if row["delivered_at"] is not None:
+                    connection.commit()
+                    return False
+
+                updated = connection.execute(
+                    """
+                    UPDATE outbox
+                    SET delivered_at = ?
+                    WHERE outbox_id = ?
+                      AND delivered_at IS NULL
+                      AND envelope_hash = ?
+                    """,
+                    (self._now(), outbox_id, expected_envelope_hash),
+                )
+                if updated.rowcount != 1:
+                    raise ValueError(
+                        "outbox delivery state changed before acknowledgement"
+                    )
                 connection.commit()
-                return False
-            connection.execute(
-                "UPDATE outbox SET delivered_at = ? WHERE outbox_id = ? AND delivered_at IS NULL",
-                (self._now(), outbox_id),
-            )
-            connection.commit()
-        return True
+                return True
+            except Exception:
+                connection.rollback()
+                raise
 
     @staticmethod
     def _command_environment(value: object) -> str:

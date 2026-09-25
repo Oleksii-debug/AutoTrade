@@ -19,13 +19,17 @@ Schema v4 requires an `outbox.envelope_hash` integrity value and `pending_outbox
 
 The repair computes SHA-256 over the canonical stored outbox envelope and writes the hash in the same SQLite transaction as command dedupe, journal events and outbox intent. No schema migration is required.
 
+The same integrity identity now crosses the delivery boundary. `pending_outbox()` returns the verified immutable `envelope_hash`; `mark_outbox_delivered()` requires the caller to echo that exact hash, revalidates the stored envelope and authoritative journal event inside one `BEGIN IMMEDIATE` transaction, and uses the hash in the delivery compare-and-set. A stale process cannot acknowledge a different or tampered publication intent merely because its `outbox_id` is unchanged.
+
 ## Recovery/idempotency regression
 
 The focused atomic-command test now:
 1. commits command + ordered events + one publication intent;
 2. closes that logical process boundary and constructs a fresh `JournalStore` over the same database;
 3. reads and verifies the pending outbox after restart;
-4. replays the same scoped idempotency key and confirms no duplicate event/outbox creation.
+4. replays the same scoped idempotency key and confirms no duplicate event/outbox creation;
+5. proves a pre-restart delivery receipt cannot mark a replaced envelope delivered;
+6. proves delivery acknowledgement revalidates authoritative event integrity before setting `delivered_at`.
 
 Existing tests continue to cover event/payload tamper rejection, aggregate-version gaps, transaction rollback, migration rollback, scoped command dedupe and legacy migration.
 

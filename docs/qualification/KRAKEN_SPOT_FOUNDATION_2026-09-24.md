@@ -49,3 +49,8 @@ credential rotation; and secret-redacted logs.
 Kraken Futures/Derivatives remains a separately qualified adapter lineage. No
 result here proves profitability, paper/live parity, or permission for
 real-money trading.
+
+
+## Canonical send outcome hardening
+
+The Spot path now uses the same financial send boundary as the Futures foundation: a recorded AddOrder provider response becomes ACKNOWLEDGED or REJECTED, while an ambiguous transport with no provider response becomes UNKNOWN with RECONCILE_FIRST. ACK never proves fill. Each recorded response carries the exact attempt/client identity, observation time, declared provider environment, and a content-addressed evidence URI for the exact HTTPS AddOrder endpoint. This is still a pure parser/contract foundation and performs no network operation.

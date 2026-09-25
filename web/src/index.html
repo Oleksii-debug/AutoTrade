@@ -17,6 +17,7 @@
     <ul>
       <li><a href="#overview">Overview</a></li>
       <li><a href="#accounts">Accounts and host</a></li>
+      <li><a href="#opportunities">Opportunities and decisions</a></li>
       <li><a href="#portfolio">Portfolio and orders</a></li>
       <li><a href="#risk">Risk and authority</a></li>
       <li><a href="#research">Research and replay</a></li>
@@ -37,6 +38,7 @@
         <dt>State version</dt><dd><output id="state-version">Unavailable</output></dd>
         <dt>Event cursor</dt><dd><output id="event-cursor">Unavailable</output></dd>
         <dt>Freshness</dt><dd><output id="freshness">Unavailable</output></dd>
+        <dt>Host evidence time</dt><dd><output id="server-time">Unavailable</output></dd>
       </dl>
     </section>
 
@@ -47,11 +49,37 @@
         <dt>Account</dt><dd><output id="active-account">Unavailable</output></dd>
         <dt>Environment</dt><dd><output id="active-environment">Unavailable</output></dd>
       </dl>
+      <div id="permissions-region" class="table-scroll" role="region" aria-label="Authenticated permission and capability evidence" tabindex="0">
+        <table>
+          <caption>Authenticated permission and capability evidence</caption>
+          <thead><tr><th scope="col">Field</th><th scope="col">Host evidence</th></tr></thead>
+          <tbody id="permissions-body"><tr><td colspan="2">No permission evidence loaded.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="opportunities" aria-labelledby="opportunities-heading">
+      <h2 id="opportunities-heading">Opportunities and decisions</h2>
+      <p>This is the canonical strategy projection from the host snapshot; it is not an instruction to trade.</p>
+      <div id="strategy-region" class="table-scroll" role="region" aria-label="Strategy and decision projection" tabindex="0">
+        <table>
+          <caption>Strategy and decision projection</caption>
+          <thead><tr><th scope="col">Field</th><th scope="col">Host evidence</th></tr></thead>
+          <tbody id="strategy-body"><tr><td colspan="2">No strategy projection loaded.</td></tr></tbody>
+        </table>
+      </div>
     </section>
 
     <section id="portfolio" aria-labelledby="portfolio-heading">
       <h2 id="portfolio-heading">Portfolio and orders</h2>
       <p>Financial values remain host-authoritative. Accepted commands are not fills.</p>
+      <div id="portfolio-region" class="table-scroll" role="region" aria-label="Portfolio projection" tabindex="0">
+        <table>
+          <caption>Portfolio projection</caption>
+          <thead><tr><th scope="col">Field</th><th scope="col">Host evidence</th></tr></thead>
+          <tbody id="portfolio-body"><tr><td colspan="2">No portfolio projection loaded.</td></tr></tbody>
+        </table>
+      </div>
       <div id="operations-region" class="table-scroll" role="region"
            aria-label="Current host operations table" tabindex="0">
         <table>
@@ -66,6 +94,13 @@
 
     <section id="risk" aria-labelledby="risk-heading">
       <h2 id="risk-heading">Risk and authority</h2>
+      <div id="risk-region" class="table-scroll" role="region" aria-label="Risk and authority projection" tabindex="0">
+        <table>
+          <caption>Risk and authority projection</caption>
+          <thead><tr><th scope="col">Field</th><th scope="col">Host evidence</th></tr></thead>
+          <tbody id="risk-body"><tr><td colspan="2">No risk projection loaded.</td></tr></tbody>
+        </table>
+      </div>
       <form id="host-command-form">
         <input id="expected-state-version" name="expected_state_version" type="hidden" value="0">
         <fieldset>
@@ -82,9 +117,19 @@
       <p id="command-result" tabindex="-1">No host command has been submitted.</p>
     </section>
 
-    <section id="research" aria-labelledby="research-heading"><h2 id="research-heading">Research and replay</h2><p>Not loaded.</p></section>
-    <section id="learning" aria-labelledby="learning-heading"><h2 id="learning-heading">Learning and memory</h2><p>Not loaded.</p></section>
-    <section id="models" aria-labelledby="models-heading"><h2 id="models-heading">Models and costs</h2><p>Not loaded.</p></section>
+    <section id="research" aria-labelledby="research-heading">
+      <h2 id="research-heading">Research and replay</h2>
+      <p>Background job evidence is read-only here until canonical research control contracts are exposed.</p>
+      <div id="jobs-region" class="table-scroll" role="region" aria-label="Background research and replay jobs" tabindex="0">
+        <table>
+          <caption>Background research and replay jobs</caption>
+          <thead><tr><th scope="col">Job</th><th scope="col">Host evidence</th></tr></thead>
+          <tbody id="jobs-body"><tr><td colspan="2">No job projection loaded.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+    <section id="learning" aria-labelledby="learning-heading"><h2 id="learning-heading">Learning and memory</h2><p>No canonical learning projection is exposed in the current UiSnapshot. No learning state is inferred by the browser.</p></section>
+    <section id="models" aria-labelledby="models-heading"><h2 id="models-heading">Models and costs</h2><p>No canonical model-cost projection is exposed in the current UiSnapshot. No model availability or budget is inferred by the browser.</p></section>
 
     <section id="history" aria-labelledby="history-heading">
       <h2 id="history-heading">History and diagnostics</h2>

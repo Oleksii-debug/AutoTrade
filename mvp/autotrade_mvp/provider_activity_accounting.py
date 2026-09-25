@@ -170,7 +170,6 @@ def book_external_provider_cash_activity(
     account_id: str,
     environment: str,
     activity: ProviderActivityEvidence,
-    amount: Decimal | str | int,
     observed_at: str,
 ) -> tuple[JournalTransaction, bool]:
     """Atomically import one confirmed external cash activity and book economics.
@@ -193,6 +192,8 @@ def book_external_provider_cash_activity(
         raise ValueError("provider activity evidence provider_id mismatch")
     if activity.account_id != account:
         raise ValueError("provider activity evidence account_id mismatch")
+    if activity.environment != scope:
+        raise ValueError("provider activity evidence environment mismatch")
     if activity.origin not in _ALLOWED_EXTERNAL_ORIGINS:
         raise ValueError(
             "only MANUAL or EXTERNAL provider activity may be booked as an external cash flow"
@@ -218,9 +219,13 @@ def book_external_provider_cash_activity(
             + ", ".join(present_links)
         )
 
-    value = _decimal(amount, name="amount")
+    if activity.signed_amount is None:
+        raise ValueError(
+            "external cash activity requires provider-evidenced signed_amount"
+        )
+    value = activity.signed_amount
     if value == 0:
-        raise ValueError("external cash activity amount must be non-zero")
+        raise ValueError("external cash activity signed_amount must be non-zero")
     if activity.activity_type == "DEPOSIT" and value <= 0:
         raise ValueError("DEPOSIT amount must be positive")
     if activity.activity_type == "WITHDRAWAL" and value >= 0:
@@ -265,11 +270,13 @@ def book_external_provider_cash_activity(
         "activity": {
             "provider_id": activity.provider_id,
             "account_id": activity.account_id,
+            "environment": activity.environment,
             "activity_id": activity.activity_id,
             "activity_type": activity.activity_type,
             "origin": activity.origin,
             "occurred_at": activity.occurred_at,
             "currency": activity.currency,
+            "signed_amount": amount_text,
         },
         "amount": amount_text,
     }

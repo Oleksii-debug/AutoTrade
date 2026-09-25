@@ -471,6 +471,28 @@ class ScientificRegistry:
                 holdout_id=holdout,
                 holdout_identity=holdout_identity,
             )
+            protocol_payload = json.loads(p["payload_json"])
+            forward_start, forward_end = _period(
+                protocol_payload["forward_period"],
+                "forward_period",
+            )
+            identity_payload = json.loads(
+                con.execute(
+                    "SELECT identity_json FROM holdouts WHERE holdout_identity_hash=?",
+                    (identity_hash,),
+                ).fetchone()["identity_json"]
+            )
+            if identity_payload["role"] != "LOCKED_FORWARD":
+                raise ProtocolViolation(
+                    "locked evaluation holdout role must be LOCKED_FORWARD"
+                )
+            if (
+                identity_payload["segment_start"] != forward_start.isoformat()
+                or identity_payload["segment_end"] != forward_end.isoformat()
+            ):
+                raise ProtocolViolation(
+                    "locked evaluation holdout segment must match registered forward_period"
+                )
             existing = con.execute("SELECT * FROM evaluations WHERE evaluation_id=?", (identifier,)).fetchone()
             if existing is not None:
                 if (

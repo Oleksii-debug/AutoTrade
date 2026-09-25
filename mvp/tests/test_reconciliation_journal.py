@@ -235,10 +235,56 @@ class ReconciliationJournalTests(unittest.TestCase):
                     max_age_seconds="60",
                 )
 
+            relabelled_old_snapshot = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="after-settlement-old-provider-cut",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:20Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "resource availability snapshot predates settlement financial truth",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=relabelled_old_snapshot["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                )
+
+            fresh_snapshot = SnapshotConsistencyEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                mode="ATOMIC",
+                query_started_at="2026-09-24T19:00:15Z",
+                query_completed_at="2026-09-24T19:00:20Z",
+            )
+            fresh_availability = ResourceAvailabilityEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                snapshot_id="snapshot-capacity-2",
+                query_started_at="2026-09-24T19:00:15Z",
+                query_completed_at="2026-09-24T19:00:20Z",
+                provider_as_of="2026-09-24T19:00:19Z",
+                valid_until="2026-09-24T19:05:00Z",
+                available_resources={"CASH:USD": "850", "MARGIN:USD": "1200.50"},
+                evidence_refs=("provider:snapshot-capacity-2",),
+            )
             refreshed = record_reconciliation_checkpoint(
                 store,
-                reconciliation_id="after-settlement",
-                result=reconciliation(resource_availability=availability()),
+                reconciliation_id="after-settlement-fresh-provider-cut",
+                result=reconciliation(
+                    snapshot_consistency=fresh_snapshot,
+                    resource_availability=fresh_availability,
+                ),
                 observed_at="2026-09-24T19:00:20Z",
                 host_id="test-host",
                 owner_epoch="epoch-1",

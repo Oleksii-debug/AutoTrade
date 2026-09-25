@@ -318,6 +318,26 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
         self.assertFalse(output.exists())
         self.assertFalse(output.with_suffix(".zip.sha256").exists())
 
+    def test_windows_case_insensitive_path_collisions_are_rejected(self):
+        upper = self.staging / "CaseCollision.dll"
+        lower = self.staging / "casecollision.dll"
+        upper.write_bytes(b"one")
+        try:
+            lower.write_bytes(b"two")
+        except OSError:
+            self.skipTest("filesystem is case-insensitive")
+        if upper.resolve() == lower.resolve():
+            self.skipTest("filesystem is case-insensitive")
+        with self.assertRaisesRegex(BundleError, "Windows path collision"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "collision.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
     def test_source_sha_and_empty_staging_are_rejected(self):
         with self.assertRaisesRegex(BundleError, "source_sha"):
             build_bundle(

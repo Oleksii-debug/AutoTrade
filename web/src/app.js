@@ -19,6 +19,10 @@
     "RECONCILIATION_REQUIRED",
     "AUTHORITY_REVOKED"
   ]);
+  const HOST_ACTION_ROLES = Object.freeze({
+    BLOCK_NEW_EXPOSURE: new Set(["OWNER", "OPERATOR"]),
+    REVOKE_AUTHORITY: new Set(["OWNER"])
+  });
 
   const state = {
     cursor: 0n,
@@ -148,8 +152,29 @@
     if (actor === undefined && session === undefined) return null;
     return {
       actor: requiredText(actor, "permission_summary.actor"),
-      session: requiredText(session, "permission_summary.session")
+      session: requiredText(session, "permission_summary.session"),
+      role: requiredText(permissionSummary.role, "permission_summary.role")
     };
+  }
+
+  function roleCanSubmitAction(role, action) {
+    const allowedRoles = HOST_ACTION_ROLES[action];
+    return allowedRoles instanceof Set && allowedRoles.has(role);
+  }
+
+  function syncHostActionOptions(role) {
+    const select = byId("host-action");
+    if (!select) return false;
+    let firstAllowed = null;
+    for (const option of select.options) {
+      const allowed = roleCanSubmitAction(role, option.value);
+      option.disabled = !allowed;
+      if (allowed && firstAllowed === null) firstAllowed = option.value;
+    }
+    if (!roleCanSubmitAction(role, select.value) && firstAllowed !== null) {
+      select.value = firstAllowed;
+    }
+    return firstAllowed !== null;
   }
 
   function parseCanonicalSnapshot(value) {
@@ -281,7 +306,14 @@
   function setCommandAvailability(enabled) {
     const form = byId("host-command-form");
     const button = form && form.querySelector('button[type="submit"]');
-    if (button) button.disabled = !enabled;
+    const action = byId("host-action");
+    const effectiveAction = state.pendingCommand !== null
+      ? state.pendingCommand.action
+      : (action === null ? null : action.value);
+    const roleAllowed = state.sessionIdentity !== null &&
+      effectiveAction !== null &&
+      roleCanSubmitAction(state.sessionIdentity.role, effectiveAction);
+    if (button) button.disabled = !enabled || !roleAllowed;
   }
 
   function freshnessText(parsed) {
@@ -553,12 +585,16 @@
       "No strategy or decision projection reported by the host snapshot.");
     renderJobs(parsed.jobs);
 
-    const canSubmit = parsed.sessionIdentity !== null;
+    const hasAllowedAction = parsed.sessionIdentity !== null &&
+      syncHostActionOptions(parsed.sessionIdentity.role);
+    const canSubmit = parsed.sessionIdentity !== null && hasAllowedAction;
     setCommandAvailability(canSubmit);
     if (!canSubmit) {
       text(
         "command-result",
-        "Authenticated host session identity is unavailable. Commands remain blocked.");
+        parsed.sessionIdentity === null
+          ? "Authenticated host session identity is unavailable. Commands remain blocked."
+          : "The authenticated role has no permitted host safety command. Commands remain blocked.");
     }
 
     if (announceRefresh) {
@@ -740,6 +776,17 @@
       byId("command-result").focus();
       return;
     }
+    if (recovering && !roleCanSubmitAction(
+        state.sessionIdentity.role,
+        state.pendingCommand.action)) {
+      setCommandAvailability(false);
+      text(
+        "command-result",
+        "The authenticated role no longer permits the unresolved command. " +
+          "Its original identity is preserved, but the browser will not retry it.");
+      byId("command-result").focus();
+      return;
+    }
     const payload = commandForSubmission(action);
     const commandId = payload.command_id;
     if (recovering && action !== payload.action) {
@@ -838,6 +885,9 @@
 
   async function start() {
     byId("host-command-form").addEventListener("submit", submitCommand);
+    byId("host-action").addEventListener("change", () => {
+      setCommandAvailability(state.snapshotReady && state.sessionIdentity !== null);
+    });
     byId("refresh-state").addEventListener("click", refreshStateFromUser);
     setCommandAvailability(false);
     try {

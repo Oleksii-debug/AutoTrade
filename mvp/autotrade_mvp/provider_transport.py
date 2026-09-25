@@ -7,9 +7,10 @@ boundary, calls the dispatcher's final guard exactly once, and performs exactly
 one outbound HTTP request. Any exception after the guard is deliberately left
 for GuardedDispatcher to classify as UNKNOWN.
 
-Only Binance Spot PAPER/LIVE signing is wired here as the first concrete signer.
-Other providers must reuse this network lifecycle and supply their own pure
-signer/nonce rules rather than introduce another dispatcher.
+Binance Spot and WhiteBIT reuse this network lifecycle. Provider-specific
+signing/nonce rules remain pure or journal-backed prerequisites to the same
+final guard; future providers must extend this seam rather than introduce
+another dispatcher.
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ from urllib.request import (
 
 from .capabilities import CapabilityRegistry, CapabilitySnapshot
 from .dispatch import ExactJsonTransportResponse
+from .persistence import JournalStore, payload_digest
+from .whitebit import sign_private_request, validate_client_order_id
 from .provider_core import (
     AuthenticatedReadQueryBinding,
     ProviderResponseObservation,
@@ -205,6 +208,35 @@ BINANCE_SPOT_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
                 environment="LIVE",
                 base_url="https://api.binance.com",
                 allowed_hosts=frozenset({"api.binance.com"}),
+            ),
+        }
+    )
+)
+
+
+WHITEBIT_ORDER_ENDPOINTS = frozenset(
+    {
+        "/api/v4/order/market",
+        "/api/v4/order/new",
+        "/api/v4/order/stop_market",
+        "/api/v4/order/stop_limit",
+        "/api/v4/order/stock_market",
+        "/api/v4/order/collateral/market",
+        "/api/v4/order/collateral/limit",
+        "/api/v4/order/collateral/trigger-market",
+        "/api/v4/order/collateral/stop-limit",
+    }
+)
+
+
+WHITEBIT_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
+    MappingProxyType(
+        {
+            "LIVE": ProviderEndpointPolicy(
+                provider_id="WHITEBIT",
+                environment="LIVE",
+                base_url="https://whitebit.com",
+                allowed_hosts=frozenset({"whitebit.com"}),
             ),
         }
     )
@@ -492,6 +524,386 @@ class UrllibJsonWireClient:
                 body=raw,
             )
         return raw
+
+
+@dataclass(frozen=True)
+class WhiteBitCredential:
+    api_key: str
+    api_secret: str
+
+    @classmethod
+    def parse(cls, plaintext: object) -> "WhiteBitCredential":
+        if not isinstance(plaintext, str) or not plaintext:
+            raise ProviderTransportScopeError(
+                "WhiteBIT credential material is unavailable"
+            )
+        try:
+            value = json.loads(plaintext)
+        except json.JSONDecodeError as error:
+            raise ProviderTransportScopeError(
+                "WhiteBIT credential material has invalid format"
+            ) from error
+        if not isinstance(value, dict) or set(value) != {
+            "api_key",
+            "api_secret",
+        }:
+            raise ProviderTransportScopeError(
+                "WhiteBIT credential material must contain exact api_key/api_secret fields"
+            )
+        return cls(
+            api_key=_canonical_text(value["api_key"], name="api_key"),
+            api_secret=_canonical_text(value["api_secret"], name="api_secret"),
+        )
+
+
+class WhiteBitDurableNonceAllocator:
+    """Journal-backed monotonic WhiteBIT nonce authority.
+
+    WhiteBIT requires every private-request nonce to be larger than prior
+    requests. Allocations are durably committed before signing/send. A nonce
+    consumed by a pre-send failure is intentionally never reused.
+    """
+
+    AGGREGATE_TYPE = "provider_nonce"
+    EVENT_TYPE = "ProviderNonceAllocated"
+
+    def __init__(
+        self,
+        *,
+        journal: JournalStore,
+        account_id: str,
+        environment: str,
+        clock_millis: ClockMillis,
+        clock_utc: ClockUtc | None = None,
+        max_contention_retries: int = 32,
+    ) -> None:
+        if not isinstance(journal, JournalStore):
+            raise TypeError("journal must be JournalStore")
+        account = _canonical_text(account_id, name="account_id")
+        env = _canonical_environment(environment)
+        if env != "LIVE":
+            raise ProviderTransportScopeError(
+                "WhiteBIT durable nonce allocation is qualified only for LIVE"
+            )
+        if not callable(clock_millis):
+            raise TypeError("clock_millis must be callable")
+        if clock_utc is not None and not callable(clock_utc):
+            raise TypeError("clock_utc must be callable or None")
+        if (
+            isinstance(max_contention_retries, bool)
+            or not isinstance(max_contention_retries, int)
+            or max_contention_retries < 1
+            or max_contention_retries > 1024
+        ):
+            raise ProviderTransportScopeError(
+                "max_contention_retries must be an integer from 1 through 1024"
+            )
+        self.journal = journal
+        self.account_id = account
+        self.environment = env
+        self.clock_millis = clock_millis
+        self.clock_utc = clock_utc or (lambda: datetime.now(timezone.utc))
+        self.max_contention_retries = max_contention_retries
+        self.aggregate_id = (
+            "WHITEBIT:"
+            + sha256(f"{self.account_id}|{self.environment}".encode("utf-8")).hexdigest()
+        )
+
+    def _history(self) -> tuple[int, int]:
+        events = self.journal.load_events(self.AGGREGATE_TYPE, self.aggregate_id)
+        previous_nonce = 0
+        previous_version = 0
+        for event in events:
+            if event.get("event_type") != self.EVENT_TYPE:
+                raise ProviderTransportError(
+                    "WhiteBIT nonce journal contains an unexpected event type"
+                )
+            payload = event.get("payload")
+            if not isinstance(payload, Mapping):
+                raise ProviderTransportError(
+                    "WhiteBIT nonce journal payload is invalid"
+                )
+            if (
+                payload.get("provider_id") != "WHITEBIT"
+                or payload.get("account_id") != self.account_id
+                or payload.get("environment") != self.environment
+            ):
+                raise ProviderTransportError(
+                    "WhiteBIT nonce journal scope does not match allocator"
+                )
+            nonce = payload.get("nonce")
+            if (
+                isinstance(nonce, bool)
+                or not isinstance(nonce, int)
+                or nonce <= previous_nonce
+            ):
+                raise ProviderTransportError(
+                    "WhiteBIT nonce journal is not strictly monotonic"
+                )
+            version = event.get("aggregate_version")
+            if (
+                isinstance(version, bool)
+                or not isinstance(version, int)
+                or version != previous_version + 1
+            ):
+                raise ProviderTransportError(
+                    "WhiteBIT nonce journal aggregate sequence is invalid"
+                )
+            previous_nonce = nonce
+            previous_version = version
+        return previous_nonce, previous_version
+
+    def allocate(self) -> int:
+        for _ in range(self.max_contention_retries):
+            previous_nonce, previous_version = self._history()
+            candidate = self.clock_millis()
+            if (
+                isinstance(candidate, bool)
+                or not isinstance(candidate, int)
+                or candidate <= 0
+            ):
+                raise ProviderTransportScopeError(
+                    "WhiteBIT nonce clock must return a positive integer"
+                )
+            nonce = max(candidate, previous_nonce + 1)
+            committed_at = self.clock_utc()
+            if (
+                not isinstance(committed_at, datetime)
+                or committed_at.tzinfo is None
+                or committed_at.utcoffset() is None
+            ):
+                raise ProviderTransportScopeError(
+                    "clock_utc must return a timezone-aware datetime"
+                )
+            committed_at = committed_at.astimezone(timezone.utc)
+            version = previous_version + 1
+            payload = {
+                "provider_id": "WHITEBIT",
+                "account_id": self.account_id,
+                "environment": self.environment,
+                "nonce": nonce,
+            }
+            allocation_identity = (
+                f"{self.aggregate_id}|{version}|{nonce}|"
+                f"{committed_at.isoformat()}"
+            )
+            envelope = {
+                "event_id": "whitebit-nonce-"
+                + sha256(allocation_identity.encode("utf-8")).hexdigest()[:40],
+                "event_type": self.EVENT_TYPE,
+                "aggregate_type": self.AGGREGATE_TYPE,
+                "aggregate_id": self.aggregate_id,
+                "aggregate_version": str(version),
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+                "committed_at": committed_at.isoformat().replace("+00:00", "Z"),
+            }
+            try:
+                result = self.journal.append_event(envelope)
+            except ValueError as error:
+                if "aggregate_version must be" in str(error):
+                    continue
+                raise
+            if not result.inserted:
+                # Another local allocator committed this exact candidate first.
+                # Re-read the durable aggregate and allocate a strictly larger
+                # nonce; never reuse the already-consumed value.
+                continue
+            return nonce
+        raise ProviderTransportError(
+            "WhiteBIT nonce allocation exceeded local contention budget"
+        )
+
+    def __call__(self) -> int:
+        return self.allocate()
+
+
+class WhiteBitHttpTransport:
+    """GuardedDispatcher-compatible WhiteBIT LIVE order transport.
+
+    Quota admission, durable nonce allocation, secret resolution and signing all
+    complete before the dispatcher's final guard. After the guard, the only
+    operation is one HTTP POST. The transport owns no retry or fill authority.
+    """
+
+    def __init__(
+        self,
+        *,
+        policy: ProviderEndpointPolicy,
+        account_id: str,
+        capability_snapshot_id: str,
+        secret_resolver: ProviderSecretResolver,
+        credential_handle: PersistentCredentialHandle,
+        session_token: str,
+        origin: str,
+        execution_identity: str,
+        nonce_allocator: WhiteBitDurableNonceAllocator,
+        quota_gate: QuotaGate | None = None,
+        wire_client: ProviderWireClient | None = None,
+    ) -> None:
+        if not isinstance(policy, ProviderEndpointPolicy):
+            raise TypeError("policy must be ProviderEndpointPolicy")
+        if policy.provider_id != "WHITEBIT" or policy.environment != "LIVE":
+            raise ProviderTransportScopeError(
+                "WhiteBIT order transport requires WHITEBIT LIVE policy"
+            )
+        if not isinstance(credential_handle, PersistentCredentialHandle):
+            raise TypeError(
+                "credential_handle must be PersistentCredentialHandle"
+            )
+        if (
+            credential_handle.provider != "WHITEBIT"
+            or credential_handle.environment != "LIVE"
+            or credential_handle.purpose != "TRADE"
+        ):
+            raise ProviderTransportScopeError(
+                "credential handle provider/environment/purpose mismatch"
+            )
+        account = _canonical_text(account_id, name="account_id")
+        if credential_handle.account_id != account:
+            raise ProviderTransportScopeError(
+                "credential handle account mismatch"
+            )
+        if not hasattr(secret_resolver, "resolve_for_execution"):
+            raise TypeError(
+                "secret_resolver must implement resolve_for_execution"
+            )
+        if not isinstance(nonce_allocator, WhiteBitDurableNonceAllocator):
+            raise TypeError(
+                "nonce_allocator must be WhiteBitDurableNonceAllocator"
+            )
+        if (
+            nonce_allocator.account_id != account
+            or nonce_allocator.environment != "LIVE"
+        ):
+            raise ProviderTransportScopeError(
+                "nonce allocator account/environment mismatch"
+            )
+        if quota_gate is not None and not callable(quota_gate):
+            raise TypeError("quota_gate must be callable or None")
+        if wire_client is not None and not hasattr(wire_client, "send"):
+            raise TypeError("wire_client must implement send")
+
+        self.policy = policy
+        self.account_id = account
+        self.capability_snapshot_id = _canonical_text(
+            capability_snapshot_id,
+            name="capability_snapshot_id",
+        )
+        self.secret_resolver = secret_resolver
+        self.credential_handle = credential_handle
+        self.session_token = _canonical_text(session_token, name="session_token")
+        self.origin = _canonical_text(origin, name="origin")
+        self.execution_identity = _canonical_text(
+            execution_identity,
+            name="execution_identity",
+        )
+        self.nonce_allocator = nonce_allocator
+        self.quota_gate = quota_gate
+        self.wire_client = wire_client or UrllibJsonWireClient()
+
+    @staticmethod
+    def _prepared_fields(
+        request: Mapping[str, Any],
+    ) -> tuple[str, Mapping[str, object], str]:
+        if not isinstance(request, Mapping):
+            raise ProviderTransportScopeError(
+                "prepared provider request must be a mapping"
+            )
+        if set(request) != {
+            "endpoint",
+            "body",
+            "capability_snapshot_id",
+        }:
+            raise ProviderTransportScopeError(
+                "prepared WhiteBIT request fields are not canonical"
+            )
+        endpoint = _canonical_text(request["endpoint"], name="endpoint")
+        if endpoint not in WHITEBIT_ORDER_ENDPOINTS:
+            raise ProviderTransportScopeError(
+                "prepared WhiteBIT endpoint must be a canonical order path"
+            )
+        body = request["body"]
+        if not isinstance(body, Mapping):
+            raise ProviderTransportScopeError(
+                "prepared WhiteBIT request body must be a mapping"
+            )
+        normalized = dict(body)
+        if {"request", "nonce", "nonceWindow"} & set(normalized):
+            raise ProviderTransportScopeError(
+                "prepared WhiteBIT body contains transport-owned authentication fields"
+            )
+        capability = _canonical_text(
+            request["capability_snapshot_id"],
+            name="capability_snapshot_id",
+        )
+        return endpoint, MappingProxyType(normalized), capability
+
+    def __call__(
+        self,
+        client_order_id: str,
+        request: Mapping[str, Any],
+        final_guard: Callable[[], None],
+    ) -> ExactJsonTransportResponse:
+        if not callable(final_guard):
+            raise TypeError("final_guard must be callable")
+        client_id = validate_client_order_id(client_order_id)
+        endpoint, body, capability = self._prepared_fields(request)
+        if capability != self.capability_snapshot_id:
+            raise ProviderTransportScopeError(
+                "prepared request capability snapshot mismatch"
+            )
+        if body.get("clientOrderId") != client_id:
+            raise ProviderTransportScopeError(
+                "prepared request client order identity mismatch"
+            )
+
+        if self.quota_gate is not None:
+            self.quota_gate(
+                "WHITEBIT",
+                self.account_id,
+                "LIVE",
+                "ORDER_WRITE",
+            )
+
+        nonce = self.nonce_allocator.allocate()
+        credential_plaintext = self.secret_resolver.resolve_for_execution(
+            self.session_token,
+            origin=self.origin,
+            handle=self.credential_handle,
+            execution_identity=self.execution_identity,
+            account_id=self.account_id,
+            provider="WHITEBIT",
+            environment="LIVE",
+            purpose="TRADE",
+        )
+        try:
+            credential = WhiteBitCredential.parse(credential_plaintext)
+            provider_signed = sign_private_request(
+                endpoint=endpoint,
+                parameters=body,
+                nonce=nonce,
+                api_key=credential.api_key,
+                api_secret=credential.api_secret,
+                nonce_window=False,
+            )
+            signed = SignedHttpRequest(
+                method="POST",
+                url=self.policy.absolute_url(provider_signed.endpoint),
+                headers=provider_signed.headers,
+                body=provider_signed.body,
+                timeout_seconds=self.policy.timeout_seconds,
+            )
+        finally:
+            credential_plaintext = None
+
+        final_guard()
+        raw = self.wire_client.send(signed)
+        if not isinstance(raw, bytes):
+            raise ProviderTransportError(
+                "WhiteBIT order wire client must return exact response bytes"
+            )
+        return ExactJsonTransportResponse(raw)
 
 
 @dataclass(frozen=True)

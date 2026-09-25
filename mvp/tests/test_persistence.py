@@ -531,7 +531,7 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(legacy.current_schema_version(), 1)
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 4)
+            self.assertEqual(upgraded.current_schema_version(), 5)
             self.assertEqual(
                 upgraded.load_events("account", "paper-1")[0]["event_id"],
                 "evt-1",
@@ -568,7 +568,7 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 4)
+            self.assertEqual(upgraded.current_schema_version(), 5)
             with self.assertRaisesRegex(ValueError, "legacy unscoped"):
                 upgraded.record_command(
                     actor="alice",
@@ -592,13 +592,103 @@ class JournalStoreTests(unittest.TestCase):
             self.assertTrue(inserted)
             self.assertEqual(saved, {"status": "ACCEPTED"})
 
+    def test_v4_upgrade_hashes_command_results_and_repairs_missing_outbox_hash(self):
+        class V4JournalStore(JournalStore):
+            SCHEMA_VERSION = 4
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            legacy = V4JournalStore(path)
+            legacy.append_event(event(), outbox_topic="events")
+
+            request = {"action": "A"}
+            result_json = '{"status":"ACCEPTED"}'
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO command_dedupe(
+                        command_id, actor, environment, idempotency_key,
+                        request_hash, result_json, state_version, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "v4-command",
+                        "alice",
+                        "PAPER",
+                        "v4-key",
+                        payload_digest(request),
+                        result_json,
+                        1,
+                        "2026-09-24T16:00:00Z",
+                    ),
+                )
+                connection.execute(
+                    "UPDATE outbox SET envelope_hash = NULL WHERE event_id = ?",
+                    ("evt-1",),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            upgraded = JournalStore(path)
+            self.assertEqual(upgraded.current_schema_version(), 5)
+            replayed, inserted = upgraded.record_command(
+                actor="alice",
+                environment="PAPER",
+                command_id="ignored-on-replay",
+                idempotency_key="v4-key",
+                request=request,
+                result={"status": "MUST_NOT_REPLACE"},
+                state_version=999,
+            )
+            self.assertFalse(inserted)
+            self.assertEqual(replayed, {"status": "ACCEPTED"})
+            self.assertEqual(upgraded.pending_outbox()[0]["event_id"], "evt-1")
+
+    def test_command_result_tamper_fails_closed_on_replay(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.record_command(
+                actor="alice",
+                environment="PAPER",
+                command_id="cmd-integrity",
+                idempotency_key="key-integrity",
+                request={"action": "A"},
+                result={"status": "ACCEPTED"},
+                state_version=1,
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE command_dedupe SET result_json = ? WHERE command_id = ?",
+                    ('{"status":"FABRICATED"}', "cmd-integrity"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = JournalStore(path)
+            with self.assertRaisesRegex(ValueError, "command result hash"):
+                reopened.record_command(
+                    actor="alice",
+                    environment="PAPER",
+                    command_id="cmd-replay",
+                    idempotency_key="key-integrity",
+                    request={"action": "A"},
+                    result={"status": "OTHER"},
+                    state_version=2,
+                )
+
     def test_failed_migration_rolls_back_schema_and_data_changes(self):
         class BrokenMigrationStore(JournalStore):
-            SCHEMA_VERSION = 5
+            SCHEMA_VERSION = 6
 
             @classmethod
             def _migration_statements(cls, version):
-                if version == 5:
+                if version == 6:
                     return (
                         "CREATE TABLE migration_probe(value TEXT NOT NULL)",
                         "CREATE TABL definitely_invalid(statement TEXT)",
@@ -609,7 +699,7 @@ class JournalStoreTests(unittest.TestCase):
             path = f"{directory}/journal.sqlite3"
             healthy = JournalStore(path)
             healthy.append_event(event())
-            self.assertEqual(healthy.current_schema_version(), 4)
+            self.assertEqual(healthy.current_schema_version(), 5)
 
             with self.assertRaises(sqlite3.OperationalError):
                 BrokenMigrationStore(path)
@@ -632,7 +722,7 @@ class JournalStoreTests(unittest.TestCase):
             finally:
                 connection.close()
 
-            self.assertEqual(versions, [1, 2, 3, 4])
+            self.assertEqual(versions, [1, 2, 3, 4, 5])
             self.assertIsNone(probe)
             self.assertEqual(event_count, 1)
 

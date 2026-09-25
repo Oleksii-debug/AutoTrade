@@ -221,11 +221,27 @@ _FORBIDDEN_PRIVILEGED_FIELDS = frozenset(
         "credential",
         "secret",
         "token",
-        "authority_grant",
-        "tool_grant",
+        "apikey",
+        "accesstoken",
+        "refreshtoken",
+        "password",
+        "privatekey",
+        "signingkey",
+        "authorization",
+        "bearertoken",
+        "sessioncookie",
+        "authoritygrant",
+        "toolgrant",
+        "tradingauthority",
+        "executionauthority",
+        "withdrawalauthority",
     }
 )
 _MAX_PROPOSAL_DEPTH = 32
+
+
+def _privileged_key(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())
 
 
 def _scan_privileged_fields(value: object, *, depth: int = 0) -> frozenset[str]:
@@ -236,7 +252,7 @@ def _scan_privileged_fields(value: object, *, depth: int = 0) -> frozenset[str]:
         for key, nested in value.items():
             if not isinstance(key, str):
                 raise ResearchBoundaryError("model proposal object keys must be strings")
-            normalized = key.strip().lower()
+            normalized = _privileged_key(key.strip())
             if normalized in _FORBIDDEN_PRIVILEGED_FIELDS:
                 found.add(normalized)
             found.update(_scan_privileged_fields(nested, depth=depth + 1))

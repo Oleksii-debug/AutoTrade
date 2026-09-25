@@ -226,6 +226,7 @@ class RetentionDecision:
     recent_improvement: Decimal | None
     regimes: tuple[RegimeDecision, ...]
     reasons: tuple[str, ...]
+    population_coverage_digest: str | None = None
 
 
 def evaluate_retention(

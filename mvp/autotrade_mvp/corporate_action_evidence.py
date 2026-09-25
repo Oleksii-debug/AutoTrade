@@ -368,11 +368,6 @@ def resolve_authoritative_corporate_action(
     evidence_ref: str,
     *,
     evidence_resolver: EvidenceResolver,
-    normalizer: CorporateActionNormalizer,
-    instrument_resolverdef resolve_authoritative_corporate_action(
-    evidence_ref: str,
-    *,
-    evidence_resolver: EvidenceResolver,
     instrument_registry: InstrumentRegistry,
     expected_provider_id: str,
     expected_account_id: str,

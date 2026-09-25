@@ -3,7 +3,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from uuid import NAMESPACE_URL, uuid5
 
-from autotrade_research.artifacts.store import ArtifactStore
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 from mvp.autotrade_mvp.bounded_real import (
     BoundedRealEnvelope,
@@ -13,6 +13,17 @@ from mvp.autotrade_mvp.bounded_real import (
     QualificationEvidence,
     artifact_store_evidence_verifier,
     assess_bounded_real_qualification,
+)
+from mvp.autotrade_mvp.qualification_attestation import (
+    EvidenceArtifactRef,
+    QualificationScope,
+    SignedQualificationAttestation,
+)
+from mvp.tests.test_qualification_attestation import (
+    attestation,
+    policy as attestation_policy,
+    root as attestation_root,
+    sign,
 )
 
 
@@ -172,7 +183,7 @@ def _publish_ref(store, evidence_ref, *, payload=None, metadata_overrides=None):
         data=payload,
         media_type="application/octet-stream",
         rights={"storage": True, "export": False},
-        source_refs=["test:bounded-real"],
+        source_refs=[f"git:{evidence_ref.source_sha}"],
         metadata=metadata,
     )
     return manifest
@@ -186,6 +197,50 @@ def _populate_bundle(store, prerequisite_items, observed, *, exclude=()):
     for evidence_ref in observed.evidence_refs:
         if evidence_ref.artifact_id not in excluded:
             _publish_ref(store, evidence_ref)
+
+
+def _all_refs(prerequisite_items, observed):
+    return tuple(
+        [item.evidence_ref for item in prerequisite_items]
+        + list(observed.evidence_refs)
+    )
+
+
+def _signed_bounded_receipt(bounded, refs):
+    trust_root = attestation_root(
+        scopes=(QualificationScope("BOUNDED_REAL", "QUALIFICATION"),)
+    )
+    trust_policy = attestation_policy(trust_root)
+    signed = attestation(
+        trust_root,
+        source_sha=bounded.source_sha,
+        domain="BOUNDED_REAL",
+        gate="QUALIFICATION",
+        package_id="WP-58",
+        protocol_id="bounded-real-qualification-v1",
+        protocol_version="1.0.0",
+        requirement_ids=(
+            "bounded-real-terminal-evidence",
+            f"envelope/{bounded.envelope_digest}",
+        ),
+        evidence_refs=tuple(
+            EvidenceArtifactRef(
+                artifact_id=item.artifact_id,
+                sha256=item.sha256,
+                media_type="application/octet-stream",
+                evidence_kind=item.evidence_kind,
+                source_sha=item.source_sha,
+            )
+            for item in refs
+        ),
+        result="PASS",
+        release_artifact_id=None,
+        release_artifact_sha256=None,
+    )
+    return (
+        SignedQualificationAttestation(signed, sign(signed)),
+        trust_policy,
+    )
 
 
 class _ArtifactStoreStub:
@@ -224,7 +279,7 @@ class _ArtifactStoreStub:
 
 
 class BoundedRealQualificationTests(unittest.TestCase):
-    def test_complete_bundle_is_evidence_complete_but_never_authority(self):
+    def test_self_published_complete_store_is_not_terminal_trust(self):
         bounded = envelope()
         prerequisite_items = prerequisites()
         observed = observations()
@@ -237,8 +292,11 @@ class BoundedRealQualificationTests(unittest.TestCase):
                 observations=observed,
                 evidence_verifier=artifact_store_evidence_verifier(store),
             )
-        self.assertTrue(result.complete)
-        self.assertEqual(result.reason_codes, ())
+        self.assertFalse(result.complete)
+        self.assertIn(
+            "independent_evidence_trust_unavailable",
+            result.reason_codes,
+        )
         self.assertFalse(result.authorizes_trading)
         self.assertEqual(result.exact_source_sha, SHA)
         self.assertEqual(result.envelope_digest, bounded.envelope_digest)
@@ -246,6 +304,62 @@ class BoundedRealQualificationTests(unittest.TestCase):
             result.evidence_verifier_identity.startswith(
                 "AUTOTRADE_ARTIFACT_STORE_BOUNDED_REAL_V1:"
             )
+        )
+
+    def test_signed_exact_bounded_real_receipt_allows_terminal_completion(self):
+        bounded = envelope()
+        prerequisite_items = prerequisites()
+        observed = observations()
+        refs = _all_refs(prerequisite_items, observed)
+        receipt, trust_policy = _signed_bounded_receipt(bounded, refs)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _populate_bundle(store, prerequisite_items, observed)
+            result = assess_bounded_real_qualification(
+                envelope=bounded,
+                prerequisite_evidence=prerequisite_items,
+                observations=observed,
+                evidence_verifier=artifact_store_evidence_verifier(store),
+                qualification_receipt=receipt,
+                qualification_policy=trust_policy,
+                expected_policy_id=trust_policy.policy_id,
+                expected_policy_version=trust_policy.policy_version,
+            )
+        self.assertTrue(result.complete)
+        self.assertEqual(result.reason_codes, ())
+        self.assertFalse(result.authorizes_trading)
+        self.assertIsNotNone(result.qualification_attestation_id)
+        self.assertTrue(
+            result.qualification_attestation_digest.startswith("sha256:")
+        )
+        self.assertTrue(result.qualification_policy_id.startswith("sha256:"))
+        self.assertTrue(
+            result.qualification_trust_root_id.startswith("sha256:")
+        )
+
+    def test_signed_bounded_real_receipt_must_cover_exact_evidence_set(self):
+        bounded = envelope()
+        prerequisite_items = prerequisites()
+        observed = observations()
+        refs = _all_refs(prerequisite_items, observed)
+        receipt, trust_policy = _signed_bounded_receipt(bounded, refs[:-1])
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _populate_bundle(store, prerequisite_items, observed)
+            result = assess_bounded_real_qualification(
+                envelope=bounded,
+                prerequisite_evidence=prerequisite_items,
+                observations=observed,
+                evidence_verifier=artifact_store_evidence_verifier(store),
+                qualification_receipt=receipt,
+                qualification_policy=trust_policy,
+                expected_policy_id=trust_policy.policy_id,
+                expected_policy_version=trust_policy.policy_version,
+            )
+        self.assertFalse(result.complete)
+        self.assertIn(
+            "independent_evidence_set_mismatch",
+            result.reason_codes,
         )
 
     def test_caller_booleans_without_immutable_verifier_never_pass(self):

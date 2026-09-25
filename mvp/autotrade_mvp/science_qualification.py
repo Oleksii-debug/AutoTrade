@@ -13,6 +13,16 @@ from hashlib import sha256
 import json
 from typing import Callable
 
+from research.autotrade_research.artifacts.store import ArtifactStore
+
+from .qualification_attestation import (
+    AcceptedQualificationAttestation,
+    QualificationTrustError,
+    QualificationTrustPolicy,
+    SignedQualificationAttestation,
+    verify_qualification_attestation,
+)
+
 
 _VALID_STATUS = {"PASS", "FAIL", "INCONCLUSIVE"}
 _VALID_CLAIMS = {"NONE", "RESEARCH_CANDIDATE", "ECONOMIC_EDGE_QUALIFIED"}
@@ -28,6 +38,23 @@ _REQUIRED_GATES = (
 )
 
 GateEvidenceVerifier = Callable[["QualificationGate"], bool]
+
+_QUALIFICATION_DOMAIN = "SCIENCE"
+_QUALIFICATION_GATE = "ECONOMIC_EDGE"
+_QUALIFICATION_PACKAGE = "WP-56"
+_QUALIFICATION_PROTOCOL_VERSION = "1.0.0"
+_QUALIFICATION_REQUIREMENT = "scientific-learning-qualification"
+
+
+def _git_sha_identity(value: str, name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 40
+        or value != value.lower()
+        or any(c not in "0123456789abcdef" for c in value)
+    ):
+        raise ValueError(f"{name} must be a lowercase 40-character Git SHA")
+    return value
 
 
 def _sha256_identity(value: str, name: str) -> str:
@@ -81,6 +108,7 @@ class ScientificQualificationInput:
     holdout_used_for_tuning: bool = False
     future_information_used_for_routing: bool = False
     population_coverage_hash: str | None = None
+    source_sha: str | None = None
 
     def __post_init__(self) -> None:
         _sha256_identity(self.candidate_hash, "candidate_hash")
@@ -101,6 +129,8 @@ class ScientificQualificationInput:
                 self.population_coverage_hash,
                 "population_coverage_hash",
             )
+        if self.source_sha is not None:
+            _git_sha_identity(self.source_sha, "source_sha")
         ids = [gate.gate_id for gate in self.gates]
         if len(ids) != len(set(ids)):
             raise ValueError("duplicate qualification gate")
@@ -114,14 +144,55 @@ class ScientificQualificationResult:
     checks: tuple[tuple[str, str], ...]
     reason_codes: tuple[str, ...]
     release_or_trading_authority: bool = False
+    qualification_attestation_id: str | None = None
+    qualification_attestation_digest: str | None = None
+    qualification_policy_id: str | None = None
+    qualification_trust_root_id: str | None = None
+
+
+def _required_signed_bindings(
+    evidence: ScientificQualificationInput,
+) -> frozenset[str]:
+    bindings = {
+        _QUALIFICATION_REQUIREMENT,
+        f"candidate/{evidence.candidate_hash}",
+        f"input/{evidence.input_snapshot_hash}",
+        *(f"gate/{gate_id}" for gate_id in _REQUIRED_GATES),
+    }
+    if evidence.population_coverage_hash is not None:
+        bindings.add(f"population/{evidence.population_coverage_hash}")
+    return frozenset(bindings)
+
+
+def _required_evidence_digests(
+    evidence: ScientificQualificationInput,
+) -> frozenset[str]:
+    digests = {
+        digest
+        for gate in evidence.gates
+        for digest in gate.evidence_hashes
+    }
+    if evidence.population_coverage_hash is not None:
+        digests.add(evidence.population_coverage_hash)
+    return frozenset(digests)
 
 
 def qualify_scientific_learning(
     evidence: ScientificQualificationInput,
     *,
     evidence_verifier: GateEvidenceVerifier | None = None,
+    qualification_receipt: SignedQualificationAttestation | None = None,
+    qualification_policy: QualificationTrustPolicy | None = None,
+    evidence_store: ArtifactStore | None = None,
+    expected_policy_id: str | None = None,
+    expected_policy_version: str | None = None,
 ) -> ScientificQualificationResult:
-    """Audit independently verified scientific evidence without authority expansion."""
+    """Audit scientific evidence without granting release or trading authority.
+
+    ``evidence_verifier`` is retained only for source compatibility. A
+    caller-selected callback is not an independent trust boundary and can
+    never make a gate terminally VERIFIED.
+    """
     if not isinstance(evidence, ScientificQualificationInput):
         raise TypeError("evidence must be ScientificQualificationInput")
     by_id = {gate.gate_id: gate for gate in evidence.gates}
@@ -129,6 +200,64 @@ def qualify_scientific_learning(
     reasons: list[str] = []
     effective_status: dict[str, str] = {}
     verification_state: dict[str, str] = {}
+
+    accepted: AcceptedQualificationAttestation | None = None
+    signed_digest_set: frozenset[str] = frozenset()
+    signed_requirement_set: frozenset[str] = frozenset()
+    trust_status = "INCONCLUSIVE"
+    trust_inputs = (
+        qualification_receipt,
+        qualification_policy,
+        evidence_store,
+        expected_policy_id,
+        expected_policy_version,
+    )
+    if all(value is None for value in trust_inputs):
+        reasons.append("SCIENCE.INDEPENDENT_ATTESTATION_MISSING")
+    elif any(value is None for value in trust_inputs) or evidence.source_sha is None:
+        reasons.append("SCIENCE.INDEPENDENT_ATTESTATION_INCOMPLETE")
+    else:
+        try:
+            accepted = verify_qualification_attestation(
+                qualification_receipt,
+                policy=qualification_policy,
+                evidence_store=evidence_store,
+                expected_policy_id=expected_policy_id,
+                expected_policy_version=expected_policy_version,
+                expected_source_sha=evidence.source_sha,
+                expected_domain=_QUALIFICATION_DOMAIN,
+                expected_gate=_QUALIFICATION_GATE,
+                expected_package_id=_QUALIFICATION_PACKAGE,
+                expected_protocol_id=evidence.frozen_protocol_hash,
+                expected_protocol_version=_QUALIFICATION_PROTOCOL_VERSION,
+                expected_requirement_id=_QUALIFICATION_REQUIREMENT,
+            )
+        except (QualificationTrustError, TypeError, ValueError):
+            trust_status = "FAIL"
+            reasons.append("SCIENCE.INDEPENDENT_ATTESTATION_INVALID")
+        else:
+            signed_digest_set = frozenset(
+                item.sha256
+                for item in qualification_receipt.attestation.evidence_refs
+            )
+            signed_requirement_set = frozenset(
+                qualification_receipt.attestation.requirement_ids
+            )
+            if accepted.result == "FAIL":
+                trust_status = "FAIL"
+                reasons.append("SCIENCE.INDEPENDENT_ATTESTATION_RESULT_FAIL")
+            elif accepted.result != "PASS":
+                reasons.append("SCIENCE.INDEPENDENT_ATTESTATION_INCONCLUSIVE")
+            elif not _required_signed_bindings(evidence) <= signed_requirement_set:
+                trust_status = "FAIL"
+                reasons.append("SCIENCE.INDEPENDENT_ATTESTATION_BINDING_MISMATCH")
+            elif not _required_evidence_digests(evidence) <= signed_digest_set:
+                trust_status = "FAIL"
+                reasons.append("SCIENCE.INDEPENDENT_ATTESTATION_EVIDENCE_MISMATCH")
+            else:
+                trust_status = "PASS"
+
+    checks.append(("independent_attestation", trust_status))
 
     for gate_id in _REQUIRED_GATES:
         gate = by_id.get(gate_id)
@@ -150,15 +279,11 @@ def qualify_scientific_learning(
             reasons.append("SCIENCE.EVIDENCE_BINDING_MISMATCH:" + gate_id)
             continue
 
-        verified = False
-        if evidence_verifier is not None:
-            try:
-                verification = evidence_verifier(gate)
-            except Exception:
-                verification = False
-            if not isinstance(verification, bool):
-                verification = False
-            verified = verification
+        verified = (
+            trust_status == "PASS"
+            and f"gate/{gate_id}" in signed_requirement_set
+            and all(digest in signed_digest_set for digest in gate.evidence_hashes)
+        )
         if not verified:
             checks.append((gate_id, "INCONCLUSIVE"))
             effective_status[gate_id] = "INCONCLUSIVE"
@@ -239,6 +364,7 @@ def qualify_scientific_learning(
     canonical = json.dumps(
         {
             "candidate_hash": evidence.candidate_hash,
+            "source_sha": evidence.source_sha,
             "protocol": evidence.frozen_protocol_hash,
             "snapshot": evidence.input_snapshot_hash,
             "claim": evidence.economic_claim,
@@ -259,6 +385,17 @@ def qualify_scientific_learning(
             ],
             "checks": checks,
             "reasons": sorted(set(reasons)),
+            "qualification_attestation": (
+                None
+                if accepted is None
+                else {
+                    "attestation_id": accepted.attestation_id,
+                    "attestation_digest": accepted.attestation_digest,
+                    "policy_id": accepted.policy_id,
+                    "trust_root_id": accepted.trust_root_id,
+                    "result": accepted.result,
+                }
+            ),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -270,4 +407,16 @@ def qualify_scientific_learning(
         economic_claim_accepted=economic_claim_accepted,
         checks=tuple(checks),
         reason_codes=tuple(dict.fromkeys(reasons)),
+        qualification_attestation_id=(
+            None if accepted is None else accepted.attestation_id
+        ),
+        qualification_attestation_digest=(
+            None if accepted is None else accepted.attestation_digest
+        ),
+        qualification_policy_id=(
+            None if accepted is None else accepted.policy_id
+        ),
+        qualification_trust_root_id=(
+            None if accepted is None else accepted.trust_root_id
+        ),
     )

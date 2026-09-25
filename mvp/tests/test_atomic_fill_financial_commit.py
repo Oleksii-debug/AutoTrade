@@ -595,10 +595,18 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
 
 
 class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
-    def projected_fill(self, *, side="BUY", quantity="1", price="100"):
+    def projected_fill(
+        self,
+        *,
+        side="BUY",
+        quantity="1",
+        price="100",
+        fill_id="fill-1",
+        provider_execution_id="provider-execution-1",
+    ):
         return ProjectedFillEvidence.create(
-            fill_id="fill-1",
-            provider_execution_id="provider-execution-1",
+            fill_id=fill_id,
+            provider_execution_id=provider_execution_id,
             intent_id="intent-1",
             client_order_id="client-order-1",
             side=side,
@@ -615,12 +623,13 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
         fee_amount="0",
         fee_currency="USD",
         position_side=None,
+        provider_execution_id="provider-execution-1",
     ):
         return ProviderFillEvidence.create(
             provider_id=PROVIDER,
             account_id=ACCOUNT,
             environment=ENVIRONMENT,
-            provider_execution_id="provider-execution-1",
+            provider_execution_id=provider_execution_id,
             client_order_id="client-order-1",
             instrument="ABC",
             quantity=quantity,
@@ -641,12 +650,14 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
         projected=None,
         provider=None,
         asset_family="CASH_EQUITY",
+        command_id="evidence-fill-command-1",
+        idempotency_key="evidence-fill-idempotency-1",
     ):
         return commit_provider_fill_with_reservation_consumption(
             economics,
             reservations,
-            command_id="evidence-fill-command-1",
-            idempotency_key="evidence-fill-idempotency-1",
+            command_id=command_id,
+            idempotency_key=idempotency_key,
             reservation_id="reservation-1",
             projected_fill=(
                 self.projected_fill() if projected is None else projected
@@ -673,6 +684,82 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("100"))
             self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("20"))
             self.assertEqual(economics.position("ABC"), Decimal("1"))
+
+    def test_two_partial_fills_accumulate_exact_reservation_consumption(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            first_projected = self.projected_fill(
+                quantity="0.4",
+                fill_id="fill-partial-1",
+                provider_execution_id="provider-execution-partial-1",
+            )
+            first_provider = self.provider_fill(
+                quantity="0.4",
+                provider_execution_id="provider-execution-partial-1",
+            )
+            second_projected = self.projected_fill(
+                quantity="0.6",
+                fill_id="fill-partial-2",
+                provider_execution_id="provider-execution-partial-2",
+            )
+            second_provider = self.provider_fill(
+                quantity="0.6",
+                provider_execution_id="provider-execution-partial-2",
+            )
+
+            self.assertTrue(
+                self.commit_evidenced_fill(
+                    economics,
+                    reservations,
+                    projected=first_projected,
+                    provider=first_provider,
+                    command_id="partial-command-1",
+                    idempotency_key="partial-idempotency-1",
+                )
+            )
+            self.assertTrue(
+                self.commit_evidenced_fill(
+                    economics,
+                    reservations,
+                    projected=second_projected,
+                    provider=second_provider,
+                    command_id="partial-command-2",
+                    idempotency_key="partial-idempotency-2",
+                )
+            )
+
+            snapshot = reservations.get("reservation-1")
+            self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("100.0"))
+            self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("20.0"))
+            self.assertEqual(economics.position("ABC"), Decimal("1.0"))
+            self.assertEqual(len(economics.transactions), 2)
+
+    def test_fill_cannot_consume_beyond_admitted_reservation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "exceeds admitted reservation",
+            ):
+                self.commit_evidenced_fill(
+                    economics,
+                    reservations,
+                    projected=self.projected_fill(quantity="2"),
+                    provider=self.provider_fill(quantity="2"),
+                )
+
+            self.assertEqual(economics.transactions, ())
+            snapshot = reservations.get("reservation-1")
+            self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("0"))
+            self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("120"))
 
     def test_positive_settlement_fee_consumes_same_reserved_cash(self):
         with TemporaryDirectory() as directory:

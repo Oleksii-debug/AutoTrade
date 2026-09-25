@@ -17,7 +17,7 @@ const declarationPath = path.resolve(
 const corpus = JSON.parse(fs.readFileSync(corpusPath, "utf8"));
 const declaration = fs.readFileSync(declarationPath, "utf8");
 const declarationVersion = declaration.match(
-  /export declare const CONTRACT_VERSION:\\s*"([^"]+)";/
+  /export declare const CONTRACT_VERSION:\s*"([^"]+)";/
 );
 if (!declarationVersion) {
   throw new Error("TypeScript declaration does not expose literal CONTRACT_VERSION");

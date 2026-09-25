@@ -234,6 +234,7 @@ class ExperienceMemory:
                 CREATE TABLE IF NOT EXISTS episodes(
                     episode_id TEXT PRIMARY KEY,
                     episode_hash TEXT NOT NULL,
+                    availability_hash TEXT,
                     decision_time TEXT NOT NULL,
                     information_cutoff TEXT NOT NULL,
                     task TEXT NOT NULL,
@@ -264,6 +265,15 @@ class ExperienceMemory:
                     ON tombstones(episode_id, created_at);
                 """
             )
+            episode_columns = {
+                row["name"]
+                for row in con.execute("PRAGMA table_info(episodes)").fetchall()
+            }
+            if "availability_hash" not in episode_columns:
+                # Historical created_at was not part of episode_hash. Do not
+                # silently bless it as causal availability evidence.
+                con.execute("ALTER TABLE episodes ADD COLUMN availability_hash TEXT")
+
             correction_columns = {
                 row["name"]
                 for row in con.execute("PRAGMA table_info(corrections)").fetchall()
@@ -345,9 +355,25 @@ class ExperienceMemory:
         )
         if row["episode_hash"] != expected:
             raise MemoryIntegrityError("episode integrity mismatch")
+        created = _stored_time(row["created_at"], name="episode created_at")
+        availability_hash = row["availability_hash"]
+        if availability_hash is None:
+            raise MemoryIntegrityError(
+                "legacy episode availability lacks integrity identity; explicit recovery is required"
+            )
+        expected_availability = _hash(
+            {
+                "episode_id": row["episode_id"],
+                "episode_hash": row["episode_hash"],
+                "created_at": row["created_at"],
+            }
+        )
+        if availability_hash != expected_availability:
+            raise MemoryIntegrityError("episode availability integrity mismatch")
         return {
             "decision": decision,
             "cutoff": cutoff,
+            "created": created,
             "task": task,
             "regime": regime,
             "instrument_family": family,
@@ -497,26 +523,41 @@ class ExperienceMemory:
             }
         )
         canonical = _canonical(payload)
+        created_at = datetime.now(timezone.utc).isoformat()
+        availability_digest = _hash(
+            {
+                "episode_id": identifier,
+                "episode_hash": digest,
+                "created_at": created_at,
+            }
+        )
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             existing = con.execute("SELECT * FROM episodes WHERE episode_id=?", (identifier,)).fetchone()
             if existing is not None:
+                self._verified_episode(existing)
                 if existing["episode_hash"] != digest:
                     raise MemoryConflict("episode identity already exists with different content")
                 return identifier, False
-            duplicate = con.execute("SELECT episode_id FROM episodes WHERE episode_hash=?", (digest,)).fetchone()
+            duplicate = con.execute(
+                "SELECT * FROM episodes WHERE episode_hash=?",
+                (digest,),
+            ).fetchone()
             if duplicate is not None:
+                self._verified_episode(duplicate)
                 return str(duplicate["episode_id"]), False
             con.execute(
                 """
                 INSERT INTO episodes(
-                    episode_id,episode_hash,decision_time,information_cutoff,task,regime,
-                    instrument_family,permission_class,payload_json,created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                    episode_id,episode_hash,availability_hash,decision_time,
+                    information_cutoff,task,regime,instrument_family,permission_class,
+                    payload_json,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     identifier,
                     digest,
+                    availability_digest,
                     decision.isoformat(),
                     cutoff.isoformat(),
                     normalized_task,
@@ -524,7 +565,7 @@ class ExperienceMemory:
                     normalized_family,
                     normalized_permission,
                     canonical,
-                    datetime.now(timezone.utc).isoformat(),
+                    created_at,
                 ),
             )
             con.commit()
@@ -965,7 +1006,7 @@ class ExperienceMemory:
             rows = con.execute("SELECT * FROM episodes ORDER BY episode_id").fetchall()
             for row in rows:
                 verified = self._verified_episode(row)
-                created = _stored_time(row["created_at"], name="episode created_at")
+                created = verified["created"]
                 if (
                     verified["cutoff"] > cutoff
                     or verified["decision"] > cutoff

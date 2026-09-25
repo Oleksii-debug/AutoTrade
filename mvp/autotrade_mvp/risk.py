@@ -698,6 +698,9 @@ class RiskContext:
     stress_scenario_labels: tuple[str, ...] = ()
     tail_scenarios: Sequence[Mapping[str, Decimal]] = ()
     liquidation_headroom: Decimal | None = None
+    liquidation_scope: LiquidationScope | None = None
+    liquidation_headroom_evidence: LiquidationHeadroomEvidence | None = None
+    decision_time: datetime | None = None
     asset_buckets: Mapping[str, str] | None = None
     venues: Mapping[str, str] | None = None
     liquidity_capacity: Mapping[str, Decimal] | None = None
@@ -732,6 +735,9 @@ class RiskContext:
         stress_scenario_labels: Sequence[str] = (),
         tail_scenarios: Sequence[Mapping[str, object]] = (),
         liquidation_headroom=None,
+        liquidation_scope: LiquidationScope | None = None,
+        liquidation_headroom_evidence: LiquidationHeadroomEvidence | None = None,
+        decision_time: datetime | None = None,
         asset_buckets: Mapping[str, str] | None = None,
         venues: Mapping[str, str] | None = None,
         liquidity_capacity: Mapping[str, object] | None = None,
@@ -896,6 +902,73 @@ class RiskContext:
                 name="liquidation_headroom",
             )
         )
+
+        if liquidation_scope is not None and not isinstance(
+            liquidation_scope, LiquidationScope
+        ):
+            raise TypeError("liquidation_scope must be LiquidationScope or None")
+        normalized_scope = (
+            None
+            if liquidation_scope is None
+            else LiquidationScope(
+                provider_id=liquidation_scope.provider_id,
+                account_id=liquidation_scope.account_id,
+                environment=liquidation_scope.environment,
+                margin_mode=liquidation_scope.margin_mode,
+                risk_tier_version=liquidation_scope.risk_tier_version,
+            )
+        )
+        if liquidation_headroom_evidence is not None and not isinstance(
+            liquidation_headroom_evidence, LiquidationHeadroomEvidence
+        ):
+            raise TypeError(
+                "liquidation_headroom_evidence must be "
+                "LiquidationHeadroomEvidence or None"
+            )
+        normalized_liquidation_evidence = (
+            None
+            if liquidation_headroom_evidence is None
+            else LiquidationHeadroomEvidence.create(
+                headroom=liquidation_headroom_evidence.headroom,
+                state_version=liquidation_headroom_evidence.state_version,
+                provider_id=liquidation_headroom_evidence.provider_id,
+                account_id=liquidation_headroom_evidence.account_id,
+                environment=liquidation_headroom_evidence.environment,
+                margin_mode=liquidation_headroom_evidence.margin_mode,
+                risk_tier_version=liquidation_headroom_evidence.risk_tier_version,
+                observed_at=liquidation_headroom_evidence.observed_at,
+                expires_at=liquidation_headroom_evidence.expires_at,
+                artifact_id=liquidation_headroom_evidence.artifact_id,
+                sha256=liquidation_headroom_evidence.sha256,
+            )
+        )
+        normalized_decision_time = (
+            None
+            if decision_time is None
+            else _utc(decision_time, name="decision_time")
+        )
+        if normalized_liquidation_evidence is not None:
+            if normalized_scope is None or normalized_decision_time is None:
+                raise ValueError(
+                    "liquidation evidence requires exact scope and decision_time"
+                )
+            if normalized_liquidation_evidence.scope != normalized_scope:
+                raise ValueError(
+                    "liquidation evidence scope differs from risk context scope"
+                )
+            if normalized_liquidation_evidence.state_version != state_version:
+                raise ValueError(
+                    "liquidation evidence state_version differs from risk context"
+                )
+            if (
+                normalized_liquidation_headroom is not None
+                and normalized_liquidation_headroom
+                != normalized_liquidation_evidence.headroom
+            ):
+                raise ValueError(
+                    "liquidation_headroom differs from immutable evidence"
+                )
+            normalized_liquidation_headroom = normalized_liquidation_evidence.headroom
         normalized_drawdown = _positive(
             drawdown_fraction,
             name="drawdown_fraction",
@@ -934,6 +1007,9 @@ class RiskContext:
             stress_scenario_labels=normalized_stress_labels,
             tail_scenarios=normalized_tail_scenarios,
             liquidation_headroom=normalized_liquidation_headroom,
+            liquidation_scope=normalized_scope,
+            liquidation_headroom_evidence=normalized_liquidation_evidence,
+            decision_time=normalized_decision_time,
             asset_buckets=normalized_asset_buckets,
             venues=normalized_venues,
             liquidity_capacity=normalized_liquidity,

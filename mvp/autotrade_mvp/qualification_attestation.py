@@ -20,7 +20,7 @@ class QualificationTrustError(ValueError):
     """Raised when qualification evidence cannot cross the trust boundary."""
 
 
-_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_GIT_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$")
 _RSA_METHOD = "RSA_PKCS1V15_SHA256"
@@ -90,7 +90,7 @@ def _uuid(value: str, *, name: str) -> str:
 def _git_sha(value: str, *, name: str) -> str:
     if not isinstance(value, str) or _GIT_SHA.fullmatch(value) is None:
         raise QualificationTrustError(
-            f"{name} must be a lowercase 40-character Git SHA"
+            f"{name} must be a lowercase 40- or 64-character Git object id"
         )
     return value
 

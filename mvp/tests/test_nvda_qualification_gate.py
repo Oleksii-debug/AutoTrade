@@ -5,6 +5,8 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 import zipfile
 
 from tools.check_nvda_qualification import (
@@ -12,6 +14,7 @@ from tools.check_nvda_qualification import (
     _workflow_requirement_digest,
     validate_evidence,
     validate_release_artifact_binding,
+    validate_trusted_nvda_qualification,
 )
 
 
@@ -95,13 +98,86 @@ class NvdaQualificationGateTests(unittest.TestCase):
 
     def test_complete_real_evidence_shape_can_qualify_exact_artifact(self):
         result = validate_evidence(complete_evidence(), REQUIREMENTS)
-        self.assertTrue(result["qualified"])
+        self.assertTrue(result["evidence_complete"])
+        self.assertFalse(result["qualified"])
+        self.assertEqual(
+            result["reason"],
+            "SIGNED_QUALIFICATION_ATTESTATION_REQUIRED",
+        )
         self.assertEqual(result["source_sha"], "a" * 40)
         self.assertEqual(result["artifact_sha256"], "sha256:" + "b" * 64)
         self.assertEqual(
             result["workflow_count"],
             len(REQUIREMENTS["workflows"]),
         )
+
+    def test_signed_trust_adapter_binds_exact_workflows_and_raw_evidence(self):
+        evidence = complete_evidence()
+        requirement_ids = tuple(
+            sorted(item["id"] for item in REQUIREMENTS["workflows"])
+        )
+        evidence_sha = "sha256:" + "e" * 64
+        release_sha = evidence["artifact_sha256"]
+        receipt = SimpleNamespace(
+            attestation=SimpleNamespace(
+                requirement_ids=requirement_ids,
+                release_artifact_id="11111111-1111-4111-8111-111111111111",
+                release_artifact_sha256=release_sha,
+                evidence_refs=(
+                    SimpleNamespace(
+                        sha256=evidence_sha,
+                        evidence_kind="NVDA_REAL_RUN",
+                        source_sha=evidence["source_sha"],
+                    ),
+                ),
+            )
+        )
+        accepted = SimpleNamespace(
+            result="PASS",
+            attestation_id="22222222-2222-4222-8222-222222222222",
+            attestation_digest="sha256:" + "1" * 64,
+            policy_id="sha256:" + "2" * 64,
+            trust_root_id="sha256:" + "3" * 64,
+        )
+        with patch(
+            "tools.check_nvda_qualification.verify_qualification_attestation",
+            return_value=accepted,
+        ) as verify:
+            result = validate_trusted_nvda_qualification(
+                evidence,
+                REQUIREMENTS,
+                evidence_sha256=evidence_sha,
+                release_artifact_sha256=release_sha,
+                receipt=receipt,
+                policy=SimpleNamespace(),
+                evidence_store=SimpleNamespace(),
+                expected_policy_id="sha256:" + "4" * 64,
+                expected_policy_version="2026.09",
+            )
+        self.assertTrue(result["qualified"])
+        self.assertEqual(result["attestation_id"], accepted.attestation_id)
+        self.assertEqual(verify.call_count, len(requirement_ids))
+
+        bad_receipt = SimpleNamespace(
+            attestation=SimpleNamespace(
+                requirement_ids=requirement_ids[:-1],
+                release_artifact_id=receipt.attestation.release_artifact_id,
+                release_artifact_sha256=release_sha,
+                evidence_refs=receipt.attestation.evidence_refs,
+            )
+        )
+        with self.assertRaisesRegex(NvdaQualificationError, "workflow set"):
+            validate_trusted_nvda_qualification(
+                evidence,
+                REQUIREMENTS,
+                evidence_sha256=evidence_sha,
+                release_artifact_sha256=release_sha,
+                receipt=bad_receipt,
+                policy=SimpleNamespace(),
+                evidence_store=SimpleNamespace(),
+                expected_policy_id="sha256:" + "4" * 64,
+                expected_policy_version="2026.09",
+            )
 
     def test_workflow_evidence_is_bound_to_exact_requirement_revision(self):
         evidence = complete_evidence()
@@ -349,9 +425,13 @@ class NvdaQualificationGateTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.returncode, 3, result.stderr)
             validated = json.loads(result.stdout)
-            self.assertTrue(validated["qualified"])
+            self.assertFalse(validated["qualified"])
+            self.assertEqual(
+                validated["reason"],
+                "SIGNED_QUALIFICATION_ATTESTATION_REQUIRED",
+            )
             self.assertEqual(
                 validated["artifact_sha256"],
                 evidence_value["artifact_sha256"],

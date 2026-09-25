@@ -338,6 +338,8 @@ def _validate_pairs(target_component: str, pairs: Iterable[AblationPair]) -> lis
     seen_case_ids: set[str] = set()
     seen_input_fingerprints: set[str] = set()
     seen_population_units: set[str] = set()
+    seen_target_content_digests: set[str] = set()
+    seen_target_syndication_groups: set[str] = set()
     for pair in selected:
         case_id = pair.full.case_id
         fingerprint = pair.full.input_fingerprint
@@ -355,6 +357,28 @@ def _validate_pairs(target_component: str, pairs: Iterable[AblationPair]) -> lis
                 "cases must be deduplicated"
             )
         seen_population_units.add(population_unit)
+
+        target_evidence = [
+            item
+            for item in pair.full.input_evidence
+            if item.component_id == target_component
+        ]
+        for item in target_evidence:
+            if item.content_digest in seen_target_content_digests:
+                raise ValueError(
+                    "duplicate target evidence content across matched cases; "
+                    "cases are not independent"
+                )
+            seen_target_content_digests.add(item.content_digest)
+
+            group = item.syndication_group
+            if group is not None:
+                if group in seen_target_syndication_groups:
+                    raise ValueError(
+                        "duplicate target syndication group across matched cases; "
+                        "cases are not independent"
+                    )
+                seen_target_syndication_groups.add(group)
     return selected
 
 

@@ -1087,7 +1087,13 @@ class JournalStore:
         ):
             raise ValueError("aggregate_version must be a non-negative integer")
         state_json = canonical_json(state)
-        state_hash = payload_digest(state)
+        state_hash = payload_digest(
+            {
+                "projection_name": projection_name,
+                "journal_sequence": journal_sequence,
+                "state": state,
+            }
+        )
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1308,11 +1314,18 @@ class JournalStore:
             raise ValueError(
                 "global projection checkpoint state is not canonical JSON"
             )
-        if payload_digest(state) != row["state_hash"]:
-            raise ValueError(
-                "global projection checkpoint hash does not match state"
-            )
         journal_sequence = int(row["journal_sequence"])
+        expected_hash = payload_digest(
+            {
+                "projection_name": projection_name,
+                "journal_sequence": journal_sequence,
+                "state": state,
+            }
+        )
+        if expected_hash != row["state_hash"]:
+            raise ValueError(
+                "global projection checkpoint hash does not match identity, cut, and state"
+            )
         if journal_sequence > current:
             raise ValueError(
                 "global projection checkpoint is ahead of the journal"

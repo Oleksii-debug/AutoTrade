@@ -12,7 +12,14 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
+from .allocation import (
+    EvidenceBoundObjectiveAllocationResult,
+    ImmutableAllocationEvidence,
+    revalidate_evidence_bound_allocation,
+)
+from .capabilities import CapabilityError, CapabilityRegistry
 from .durable_reservations import DurableReservationBook
+from .instruments import InstrumentRegistry, InstrumentRegistryError
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reconciliation_journal import load_account_resource_availability_evidence
 from .securities_borrow import (
@@ -393,12 +400,165 @@ def _authority_event_id(event_type: str, key: str) -> str:
     return str(uuid5(NAMESPACE_URL, f"https://events.autotrade.local/authority/{event_type}/{key}"))
 
 
+_ALLOCATION_EVIDENCE_AGGREGATE = "allocation_evidence"
+_ALLOCATION_EVIDENCE_EVENT = "AllocationEvidenceRecorded"
+
+
+def _canonical_financial_value(value):
+    if isinstance(value, Decimal):
+        if value == 0:
+            return "0"
+        return format(value.normalize(), "f")
+    if isinstance(value, Mapping):
+        return {
+            str(key): _canonical_financial_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (tuple, list)):
+        return [_canonical_financial_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted(_canonical_financial_value(item) for item in value)
+    if hasattr(value, "__dataclass_fields__"):
+        return _canonical_financial_value(vars(value))
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    raise TypeError(
+        f"unsupported financial policy fingerprint value: {type(value).__name__}"
+    )
+
+
+def allocation_admission_policy_version(
+    authority_policy: AuthorityPolicy,
+    risk_policy: RiskPolicy,
+) -> str:
+    """Deterministic policy identity required by allocation-originated admission."""
+
+    if not isinstance(authority_policy, AuthorityPolicy):
+        raise TypeError("authority_policy must be AuthorityPolicy")
+    if not isinstance(risk_policy, RiskPolicy):
+        raise TypeError("risk_policy must be RiskPolicy")
+    payload = {
+        "authority_policy_id": authority_policy.policy_id,
+        "authority_policy_version": authority_policy.version,
+        "risk_policy": _canonical_financial_value(risk_policy),
+    }
+    digest = sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return "financial-policy:sha256:" + digest
+
+
+def _allocation_evidence_payload(
+    evidence: ImmutableAllocationEvidence,
+) -> dict[str, Any]:
+    if not isinstance(evidence, ImmutableAllocationEvidence):
+        raise TypeError("evidence must be ImmutableAllocationEvidence")
+    return {
+        "evidence_id": evidence.evidence_id,
+        "kind": evidence.kind,
+        "environment": evidence.environment,
+        "schema_version": evidence.schema_version,
+        "observed_at": evidence.observed_at,
+        "valid_until": evidence.valid_until,
+        "payload": _canonical_financial_value(evidence.payload),
+        "digest": evidence.digest,
+    }
+
+
+def record_canonical_allocation_evidence(
+    store: JournalStore,
+    evidence: ImmutableAllocationEvidence,
+    *,
+    committed_at: str,
+) -> dict[str, Any]:
+    """Persist one immutable allocation input in the existing durable journal.
+
+    This function is a persistence adapter for the canonical producer of the
+    evidence.  It does not turn caller-authored data into financial authority;
+    final admission resolves only records that are already present in the
+    shared JournalStore and revalidates their live account/provider scope.
+    """
+
+    if not isinstance(store, JournalStore):
+        raise TypeError("store must be JournalStore")
+    payload = _allocation_evidence_payload(evidence)
+    timestamp = _text(committed_at, name="committed_at")
+    _instant(timestamp, name="committed_at")
+    events = store.load_events(_ALLOCATION_EVIDENCE_AGGREGATE, evidence.evidence_id)
+    if events:
+        if (
+            len(events) == 1
+            and events[0].get("event_type") == _ALLOCATION_EVIDENCE_EVENT
+            and events[0].get("payload") == payload
+        ):
+            return events[0]
+        raise AuthorityConflict(
+            "allocation evidence_id already has different durable content"
+        )
+    event_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            "https://events.autotrade.local/allocation-evidence/"
+            + evidence.evidence_id
+            + "/"
+            + evidence.digest,
+        )
+    )
+    envelope = {
+        "event_id": event_id,
+        "event_type": _ALLOCATION_EVIDENCE_EVENT,
+        "aggregate_type": _ALLOCATION_EVIDENCE_AGGREGATE,
+        "aggregate_id": evidence.evidence_id,
+        "aggregate_version": "1",
+        "payload": payload,
+        "payload_hash": payload_digest(payload),
+        "committed_at": timestamp,
+    }
+    store.append_event(envelope)
+    persisted = store.get_event(event_id)
+    if persisted is None:
+        raise RuntimeError("allocation evidence was not persisted")
+    return persisted
+
+
+def _financial_risk_fingerprint(
+    risk_fingerprint: str,
+    allocation_binding: Mapping[str, Any] | None,
+) -> str:
+    payload = {
+        "risk_decision_fingerprint": _text(
+            risk_fingerprint,
+            name="risk_decision_fingerprint",
+        ),
+        "allocation_binding": (
+            None
+            if allocation_binding is None
+            else _canonical_financial_value(allocation_binding)
+        ),
+    }
+    return sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 class AuthorityService:
     def __init__(
         self,
         store: JournalStore | None = None,
         *,
         evidence_artifact_store: ArtifactStore | None = None,
+        instrument_registry: InstrumentRegistry | None = None,
+        capability_registry: CapabilityRegistry | None = None,
     ):
         self.store = store
         if (
@@ -406,7 +566,19 @@ class AuthorityService:
             and not isinstance(evidence_artifact_store, ArtifactStore)
         ):
             raise TypeError("evidence_artifact_store must be ArtifactStore")
+        if (
+            instrument_registry is not None
+            and not isinstance(instrument_registry, InstrumentRegistry)
+        ):
+            raise TypeError("instrument_registry must be InstrumentRegistry")
+        if (
+            capability_registry is not None
+            and not isinstance(capability_registry, CapabilityRegistry)
+        ):
+            raise TypeError("capability_registry must be CapabilityRegistry")
         self.evidence_artifact_store = evidence_artifact_store
+        self.instrument_registry = instrument_registry
+        self.capability_registry = capability_registry
         self._policies: dict[str, AuthorityPolicy] = {}
         self._revocations: dict[str, tuple[str, str]] = {}
         self._confirmations: dict[str, Confirmation] = {}

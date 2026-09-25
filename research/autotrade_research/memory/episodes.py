@@ -237,22 +237,30 @@ class ExperienceMemory:
             raise MemoryIntegrityError("correction payload must be a non-empty object")
         created = _stored_time(row["created_at"], name="correction created_at")
         if row["available_at"] is None:
-            # Historical rows written before causal availability was added retain
-            # their original payload-only checksum. They are verified as legacy
-            # evidence rather than silently rewritten.
+            # Pre-causal rows used a payload-only checksum and therefore cannot
+            # cryptographically prove their original episode parent. Preserve
+            # the bytes for explicit migration/audit, but never present them as
+            # trusted causal correction evidence.
             availability = created
-            expected = _hash(payload)
-        else:
-            availability = _stored_time(
-                row["available_at"],
-                name="correction available_at",
-            )
-            expected = _hash(
-                {
-                    "available_at": row["available_at"],
-                    "payload": payload,
-                }
-            )
+            legacy_expected = _hash(payload)
+            if row["correction_hash"] == legacy_expected:
+                raise MemoryIntegrityError(
+                    "legacy correction lacks episode-bound integrity; explicit recovery is required"
+                )
+            raise MemoryIntegrityError("correction integrity mismatch")
+
+        availability = _stored_time(
+            row["available_at"],
+            name="correction available_at",
+        )
+        expected = _hash(
+            {
+                "correction_id": row["correction_id"],
+                "episode_id": row["episode_id"],
+                "available_at": row["available_at"],
+                "payload": payload,
+            }
+        )
         if row["correction_hash"] != expected:
             raise MemoryIntegrityError("correction integrity mismatch")
         return payload, availability
@@ -437,6 +445,8 @@ class ExperienceMemory:
                 )
                 current_digest = _hash(
                     {
+                        "correction_id": identifier,
+                        "episode_id": episode,
                         "available_at": existing_availability,
                         "payload": payload,
                     }
@@ -463,6 +473,8 @@ class ExperienceMemory:
                 )
             digest = _hash(
                 {
+                    "correction_id": identifier,
+                    "episode_id": episode,
                     "available_at": availability.isoformat(),
                     "payload": payload,
                 }

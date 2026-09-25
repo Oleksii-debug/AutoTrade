@@ -475,11 +475,18 @@ class JournalStore:
                     and existing["committed_at"] == committed_at
                 )
                 existing_outbox = connection.execute(
-                    "SELECT topic, payload_json FROM outbox WHERE event_id = ?",
+                    "SELECT topic, payload_json, envelope_hash "
+                    "FROM outbox WHERE event_id = ?",
                     (event_id,),
                 ).fetchone()
                 expected_outbox_payload = (
                     canonical_json(envelope) if outbox_topic is not None else None
+                )
+                expected_outbox_hash = (
+                    "sha256:"
+                    + sha256(expected_outbox_payload.encode("utf-8")).hexdigest()
+                    if expected_outbox_payload is not None
+                    else None
                 )
                 outbox_exact = (
                     (
@@ -491,6 +498,7 @@ class JournalStore:
                         and existing_outbox is not None
                         and existing_outbox["topic"] == outbox_topic
                         and existing_outbox["payload_json"] == expected_outbox_payload
+                        and existing_outbox["envelope_hash"] == expected_outbox_hash
                     )
                 )
                 if not exact or not outbox_exact:

@@ -198,13 +198,13 @@ def _sqlite_schema_version(path: Path) -> int:
         raise BackupIntegrityError(
             "Durable journal schema migration history is not contiguous"
         )
-    if latest > JournalStore.SCHEMA_VERSION:
-        raise BackupCompatibilityError(
-            f"Unsupported journal schema version: {latest}"
-        )
     if versions != list(range(1, latest + 1)):
         raise BackupIntegrityError(
             "Durable journal schema migration history is not contiguous"
+        )
+    if latest > JournalStore.SCHEMA_VERSION:
+        raise BackupCompatibilityError(
+            f"Unsupported journal schema version: {latest}"
         )
     return latest
 
@@ -338,7 +338,10 @@ def _verify_runtime_trace_consistency(state_root: Path) -> None:
                 "checkpoint.json",
                 "learning-evidence.jsonl",
             ):
-                shutil.copy2(state_root / name, verification_state / name)
+                # Trace verification is byte-oriented.  Keep this copy path
+                # distinct from restore publication so restore fault injection
+                # cannot be consumed by preflight verification.
+                shutil.copyfile(state_root / name, verification_state / name)
             build_diagnostic_snapshot(verification_state)
     except BackupIntegrityError:
         raise

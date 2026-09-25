@@ -98,6 +98,32 @@ class EvaluationGateTests(unittest.TestCase):
     def test_complete_registered_evidence_can_pass(self):
         self.assertEqual(evaluate_gates(profile(), evidence()).status, "PASS")
 
+    def test_lower_bound_cannot_exceed_reported_point_estimate(self):
+        decision = evaluate_gates(
+            profile(),
+            evidence(
+                dependence_aware_lower_bound="999",
+                net_advantage="0.03",
+            ),
+        )
+        self.assertEqual(decision.status, "FAIL")
+        self.assertEqual(decision.checks["uncertainty_consistency"], "FAIL")
+        self.assertIn(
+            "lower bound exceeds",
+            " ".join(decision.reasons),
+        )
+
+    def test_consistent_lower_bound_and_point_estimate_can_pass(self):
+        decision = evaluate_gates(
+            profile(),
+            evidence(
+                dependence_aware_lower_bound="0.02",
+                net_advantage="0.03",
+            ),
+        )
+        self.assertEqual(decision.checks["uncertainty_consistency"], "PASS")
+        self.assertEqual(decision.status, "PASS")
+
     def test_missing_uncertainty_is_inconclusive_not_pass(self):
         self.assertEqual(
             evaluate_gates(profile(), evidence(dependence_aware_lower_bound=None)).status,

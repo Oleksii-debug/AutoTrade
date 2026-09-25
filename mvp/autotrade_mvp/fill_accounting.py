@@ -165,6 +165,11 @@ def _validated_fill_evidence(
         raise TypeError("provider_fill must be ProviderFillEvidence")
 
     provider = _text(provider_id, name="provider_id").upper()
+    durable_provider = getattr(book, "provider_id", None)
+    if durable_provider is not None and durable_provider != provider:
+        raise AccountingConflict(
+            "provider fill provider scope does not match durable economic book"
+        )
     instrument = _text(expected_instrument, name="expected_instrument")
     settlement = _text(settlement_currency, name="settlement_currency").upper()
 

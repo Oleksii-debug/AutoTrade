@@ -124,5 +124,18 @@ class AlpacaOptionEvidenceTests(unittest.TestCase):
             )
 
 
+    def test_future_effective_lifecycle_activity_fails_closed(self):
+        with self.assertRaisesRegex(AlpacaAdapterError, "cannot be after observed_at"):
+            parse_polled_option_activity(
+                {
+                    "activity_type": "OPASN",
+                    "id": "future-assignment",
+                    "symbol": "AAPL261218C00250000",
+                    "transaction_time": "2026-09-25T00:01:00Z",
+                },
+                observed_at=NOW,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

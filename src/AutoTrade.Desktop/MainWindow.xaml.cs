@@ -115,15 +115,29 @@ public partial class MainWindow : Window
     private async void BlockNewExposure_Click(object sender, RoutedEventArgs e)
     {
         BlockNewExposureButton.IsEnabled = false;
+        EmergencyOperationValue.Text = "Unavailable";
         EmergencyResult.Text = "Requesting a durable block of new exposure from the host.";
 
         try
         {
             EmergencyCommandResult result =
                 await _hostClient.BlockNewExposureAsync(_lifetime.Token);
-            EmergencyResult.Text = result.Accepted
-                ? result.Message + " The request was accepted; provider and financial outcomes remain separately tracked."
-                : result.Message;
+            EmergencyOperationValue.Text = result.OperationId;
+            string inFlight = result.InFlightActions switch
+            {
+                InFlightActionState.None => "none reported",
+                InFlightActionState.Present => "present",
+                _ => "unknown",
+            };
+            EmergencyResult.Text = result switch
+            {
+                { Accepted: false } =>
+                    result.Message + " No durable block has been confirmed. Outstanding in-flight actions: " + inFlight + ".",
+                { DurableBlockConfirmed: true } =>
+                    result.Message + " Durable block confirmed by the host. Outstanding in-flight actions: " + inFlight + ".",
+                _ =>
+                    result.Message + " Request accepted, but the durable block is not yet confirmed. Outstanding in-flight actions: " + inFlight + ".",
+            };
 
             await RefreshHostStatusAsync(announce: false, returnFocus: false);
         }
@@ -133,11 +147,13 @@ public partial class MainWindow : Window
         }
         catch (OperationCanceledException)
         {
-            EmergencyResult.Text = "The request was cancelled. No durable block has been confirmed.";
+            EmergencyOperationValue.Text = "Unavailable";
+            EmergencyResult.Text = "The request was cancelled. No durable block has been confirmed. Outstanding in-flight actions are unknown.";
         }
         catch (Exception)
         {
-            EmergencyResult.Text = "The host request failed. No durable block has been confirmed.";
+            EmergencyOperationValue.Text = "Unavailable";
+            EmergencyResult.Text = "The host request failed. No durable block has been confirmed. Outstanding in-flight actions are unknown.";
         }
         finally
         {

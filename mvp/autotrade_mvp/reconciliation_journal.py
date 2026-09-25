@@ -795,17 +795,22 @@ def load_account_resource_availability_evidence(
         raise ValueError("resources must be non-empty and unique")
 
     # A provider availability snapshot is only a safe CASH reservation authority
-    # for the exact financial cut it reconciled. A later durable settlement
-    # registration or settlement-evidence event means local trade-date/settled
-    # cash truth advanced after that provider snapshot. Reusing the older
-    # checkpoint could otherwise make sale proceeds or stale buying power
-    # reservable before a fresh provider reconciliation.
+    # for the exact financial cut it reconciled. Durable settlement registration
+    # or settlement-evidence events advance local trade-date/settled-cash truth.
+    # Two fences are required:
+    #   1. the reconciliation checkpoint must be journaled after that truth; and
+    #   2. its provider resource query must have started after the settlement
+    #      fact became available. Merely wrapping an old provider snapshot in a
+    #      newer reconciliation event must never restore reservation authority.
     if any(resource.startswith("CASH:") for resource in requested):
         checkpoint_sequence = checkpoint.get("journal_sequence")
         if type(checkpoint_sequence) is not int or checkpoint_sequence <= 0:
             raise ValueError(
                 "availability checkpoint lacks durable journal sequence"
             )
+        resource_started = datetime.fromisoformat(
+            resource_started_text.replace("Z", "+00:00")
+        )
         for settlement_event in store.load_events_by_aggregate_type(
             "settlement_book"
         ):
@@ -813,7 +818,6 @@ def load_account_resource_availability_evidence(
             settlement_payload = settlement_event.get("payload")
             if (
                 type(settlement_sequence) is not int
-                or settlement_sequence <= checkpoint_sequence
                 or not isinstance(settlement_payload, Mapping)
             ):
                 continue
@@ -821,12 +825,24 @@ def load_account_resource_availability_evidence(
             if not isinstance(settlement_scope, Mapping):
                 continue
             if (
-                settlement_scope.get("provider_id") == provider
-                and settlement_scope.get("account_id") == account
-                and settlement_scope.get("environment") == scope
+                settlement_scope.get("provider_id") != provider
+                or settlement_scope.get("account_id") != account
+                or settlement_scope.get("environment") != scope
             ):
+                continue
+            if settlement_sequence >= checkpoint_sequence:
                 raise ValueError(
                     "availability checkpoint predates settlement financial truth"
+                )
+            settlement_committed = datetime.fromisoformat(
+                _instant(
+                    settlement_event.get("committed_at"),
+                    name="settlement.committed_at",
+                ).replace("Z", "+00:00")
+            )
+            if resource_started < settlement_committed:
+                raise ValueError(
+                    "resource availability snapshot predates settlement financial truth"
                 )
     if "ACCOUNT" in blocking_resources or any(
         resource in blocking_resources for resource in requested

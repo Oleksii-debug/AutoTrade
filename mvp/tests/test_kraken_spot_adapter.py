@@ -538,7 +538,7 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         )[0]
         self.assertEqual(fill.account_id, "bound-account")
         self.assertEqual(fill.environment, "PAPER")
-        self.assertTrue(observation.evidence_ref.startswith("provider-read:sha256:"))
+        self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
 
         wrong_surface = trade_history_observation(
             response,

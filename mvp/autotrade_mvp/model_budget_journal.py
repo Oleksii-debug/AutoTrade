@@ -94,7 +94,10 @@ class DurableModelBudget:
         self._ceiling = candidate.snapshot().ceiling
         existing = self.journal.load_events(_AGGREGATE_TYPE, self.budget_id)
         if not existing:
-            payload = {"ceiling": str(self._ceiling)}
+            payload = {
+                "ceiling": str(self._ceiling),
+                "environment": self.environment,
+            }
             envelope = self._envelope(
                 event_type="ModelBudgetInitialized",
                 version=1,
@@ -168,7 +171,19 @@ class DurableModelBudget:
         events = self._events()
         if not events or events[0]["event_type"] != "ModelBudgetInitialized":
             raise ValueError("durable model budget initialization is missing")
-        ceiling = events[0]["payload"].get("ceiling")
+        initialization = events[0].get("payload")
+        if not isinstance(initialization, dict):
+            raise ValueError("durable model budget initialization payload is invalid")
+        durable_environment = initialization.get("environment")
+        if durable_environment is None:
+            raise ValueError(
+                "legacy model budget lacks durable environment binding"
+            )
+        if _environment(durable_environment) != self.environment:
+            raise ValueError(
+                "budget environment conflicts with durable model budget"
+            )
+        ceiling = initialization.get("ceiling")
         ledger = BudgetLedger(ceiling)
         for expected_version, event in enumerate(events, start=1):
             if event["aggregate_version"] != expected_version:

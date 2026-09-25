@@ -542,6 +542,8 @@ class AlpacaMlegFoundationTests(unittest.TestCase):
             at=NOW,
         )
         self.assertEqual(request.body["order_class"], "mleg")
+        self.assertEqual(request.account_id, "paper-account")
+        self.assertEqual(request.environment, "PAPER")
         self.assertEqual(request.body["qty"], "2")
         self.assertEqual(request.body["limit_price"], "-0.60")
         self.assertNotIn("symbol", request.body)

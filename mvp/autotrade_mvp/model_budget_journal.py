@@ -187,7 +187,22 @@ class DurableModelBudget:
                 or existing["aggregate_id"] != self.budget_id
                 or existing["payload"] != payload
             ):
-                raise ValueError("model budget idempotency identity conflicts with durable event")
+                raise ValueError(
+                    "model budget idempotency identity conflicts with durable event"
+                )
+            # Do not let the event-id fast path bypass canonical command scope.
+            # Exact retries must still prove the same actor/environment/key. For
+            # pre-scoped event history this also creates the command dedupe row
+            # lazily after the exact event payload has been verified.
+            self.journal.record_command(
+                command_id=command_id,
+                actor=_COMMAND_ACTOR,
+                environment=self.environment,
+                idempotency_key=idempotency_key,
+                request=request,
+                result=result,
+                state_version=int(existing["aggregate_version"]),
+            )
             return False
 
         # Validate on a fresh durable projection so rejected operations never

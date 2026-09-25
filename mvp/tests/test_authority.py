@@ -661,7 +661,7 @@ class AuthorityTests(unittest.TestCase):
         for index, case in enumerate(cases):
             with self.subTest(reason=case["reason"]):
                 reason = case.pop("reason")
-                record = service.admit(
+                record = service._admit_unverified(
                     admission_id=f"a{index}", policy_id="p1", intent_hash=f"h{index}",
                     state_version=1, now="2026-09-24T18:00:00Z", **case
                 )
@@ -690,8 +690,8 @@ class AuthorityTests(unittest.TestCase):
             risk_admitted=True, now="2026-09-24T18:00:00Z",
             confirmation_id="c1",
         )
-        first = service.admit(**kwargs)
-        second = service.admit(**kwargs)
+        first = service._admit_unverified(**kwargs)
+        second = service._admit_unverified(**kwargs)
         self.assertEqual(first, second)
         self.assertEqual(second.outcome, "ADMITTED")
 
@@ -704,11 +704,11 @@ class AuthorityTests(unittest.TestCase):
             action="ORDER.SUBMIT", notional="100", state_version=1,
             risk_admitted=True, now="2026-09-24T18:00:00Z",
         )
-        service.admit(**base)
+        service._admit_unverified(**base)
         with self.assertRaisesRegex(Exception, "admission_id"):
-            service.admit(**{**base, "notional": "101"})
+            service._admit_unverified(**{**base, "notional": "101"})
         with self.assertRaisesRegex(Exception, "admission_id"):
-            service.admit(**{**base, "instrument_version": 2})
+            service._admit_unverified(**{**base, "instrument_version": 2})
 
 
 

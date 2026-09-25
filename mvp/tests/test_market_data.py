@@ -278,6 +278,16 @@ class MarketNormalizationTests(unittest.TestCase):
                 )
             )
 
+    def test_funding_string_timestamp_must_be_a_real_utc_instant(self):
+        normalizer = MarketNormalizer(registry())
+        with self.assertRaisesRegex(MarketDataError, "UTC instant"):
+            normalizer.normalize(
+                raw(
+                    "FUNDING",
+                    {"rate": "0.001", "next_funding_at": "garbageZ"},
+                )
+            )
+
     def test_funding_rate_can_be_negative_without_float_coercion(self):
         normalizer = MarketNormalizer(registry())
         event = normalizer.normalize(

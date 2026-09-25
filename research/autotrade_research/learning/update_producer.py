@@ -20,7 +20,7 @@ from hashlib import sha256
 import json
 import re
 from types import MappingProxyType
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from uuid import UUID
 
 from ..artifacts.store import ArtifactStore
@@ -36,6 +36,7 @@ from .online import (
 from .population_coverage import (
     PopulationCoverageManifest,
     build_population_coverage,
+    resolve_reconciliation_evidence,
 )
 
 
@@ -346,6 +347,7 @@ class _LearningRow:
     label_available_at: datetime
     outcome_horizon_at: datetime
     execution_reconciled_at: datetime
+    reconciliation_evidence: Mapping[str, Any] | None
     correction_hashes: tuple[str, ...]
 
 
@@ -529,6 +531,7 @@ def _extract_learning_rows(
     cutoff: datetime,
     config: UpdateProducerConfig,
     feature_names: tuple[str, ...],
+    reconciliation_evidence_resolver: Callable[[str], Mapping[str, Any]] | None,
 ) -> tuple[
     tuple[_LearningRow, ...],
     tuple[tuple[str, str], ...],
@@ -562,7 +565,7 @@ def _extract_learning_rows(
                 learning.get("observation_id"),
                 name="observation_id",
             )
-            physical_observation_id = _physical_observation_identity(
+            base_physical_observation_id = _physical_observation_identity(
                 artifact_store,
                 raw,
                 payload,
@@ -578,10 +581,6 @@ def _extract_learning_rows(
             horizon = _time(
                 learning.get("outcome_horizon_at"),
                 name="outcome_horizon_at",
-            )
-            reconciled = _time(
-                learning.get("execution_reconciled_at"),
-                name="execution_reconciled_at",
             )
             features_raw = learning.get("features")
             if not isinstance(features_raw, Mapping):
@@ -606,12 +605,64 @@ def _extract_learning_rows(
         if (
             label_available > cutoff
             or horizon > cutoff
-            or reconciled > cutoff
             or label_available < horizon
-            or label_available < reconciled
         ):
             exclusions.append((episode_id, "LABEL_NOT_CAUSALLY_MATURE"))
             continue
+
+        intended = payload.get("intended_action")
+        if not isinstance(intended, Mapping):
+            exclusions.append((episode_id, "LEARNING_SCHEMA_INVALID"))
+            continue
+        try:
+            action_side = _text(
+                intended.get("side"),
+                name="intended_action.side",
+            ).upper()
+        except (TypeError, ValueError):
+            exclusions.append((episode_id, "LEARNING_SCHEMA_INVALID"))
+            continue
+
+        reconciliation_evidence: Mapping[str, Any] | None = None
+        physical_observation_id = base_physical_observation_id
+        if action_side == "NO_TRADE":
+            reconciled = horizon
+        else:
+            try:
+                resolved = resolve_reconciliation_evidence(
+                    episode_id,
+                    causal_cutoff=cutoff,
+                    resolver=reconciliation_evidence_resolver,
+                )
+            except (TypeError, ValueError):
+                exclusions.append(
+                    (episode_id, "RECONCILIATION_EVIDENCE_INVALID")
+                )
+                continue
+            if resolved.get("status") != "VERIFIED":
+                exclusions.append(
+                    (episode_id, "RECONCILIATION_EVIDENCE_UNVERIFIED")
+                )
+                continue
+            reconciliation_evidence = MappingProxyType(dict(resolved))
+            reconciled = _time(
+                resolved.get("observed_at"),
+                name="authority execution_reconciled_at",
+            )
+            if reconciled > cutoff or label_available < reconciled:
+                exclusions.append(
+                    (episode_id, "LABEL_NOT_CAUSALLY_MATURE")
+                )
+                continue
+            physical_observation_id = _digest_bytes(
+                _canonical_bytes(
+                    {
+                        "physical_observation_id": base_physical_observation_id,
+                        "reconciliation_evidence": dict(resolved),
+                    }
+                )
+            )
+
         corrections = raw.get("correction_lineage")
         correction_hashes: list[str] = []
         if isinstance(corrections, tuple):
@@ -638,6 +689,7 @@ def _extract_learning_rows(
                 label_available_at=label_available,
                 outcome_horizon_at=horizon,
                 execution_reconciled_at=reconciled,
+                reconciliation_evidence=reconciliation_evidence,
                 correction_hashes=tuple(sorted(correction_hashes)),
             )
         )
@@ -774,6 +826,11 @@ def _row_evidence(row: _LearningRow) -> dict[str, Any]:
         "label_available_at": _iso(row.label_available_at),
         "outcome_horizon_at": _iso(row.outcome_horizon_at),
         "execution_reconciled_at": _iso(row.execution_reconciled_at),
+        "reconciliation_evidence": (
+            None
+            if row.reconciliation_evidence is None
+            else dict(row.reconciliation_evidence)
+        ),
         "correction_hashes": list(row.correction_hashes),
     }
 
@@ -881,6 +938,7 @@ def _population_authority_reason(
     task: str,
     instrument_family: str | None,
     population_name: str,
+    reconciliation_evidence_resolver: Callable[[str], Mapping[str, Any]] | None,
 ) -> tuple[str | None, PopulationCoverageManifest | None]:
     """Verify one caller-supplied manifest against the canonical memory cut."""
 
@@ -908,6 +966,7 @@ def _population_authority_reason(
             permission_classes=permission_classes,
             included_episode_ids=included_episode_ids,
             exclusions=coverage_exclusions,
+            reconciliation_evidence_resolver=reconciliation_evidence_resolver,
             task=task,
             instrument_family=instrument_family,
         )
@@ -1009,6 +1068,7 @@ def produce_bounded_online_update(
     update_population_manifest: PopulationCoverageManifest | None = None,
     calibration_population_manifest: PopulationCoverageManifest | None = None,
     scientific_registry: ScientificRegistry | None = None,
+    reconciliation_evidence_resolver: Callable[[str], Mapping[str, Any]] | None = None,
 ) -> ProducedOnlineUpdate:
     if not isinstance(memory, ExperienceMemory):
         raise TypeError("memory must be ExperienceMemory")
@@ -1020,6 +1080,13 @@ def produce_bounded_online_update(
         raise TypeError("config must be UpdateProducerConfig")
     if not isinstance(runtime_state, OnlineUpdateRuntimeState):
         raise TypeError("runtime_state must be OnlineUpdateRuntimeState")
+    if (
+        reconciliation_evidence_resolver is not None
+        and not callable(reconciliation_evidence_resolver)
+    ):
+        raise TypeError(
+            "reconciliation_evidence_resolver must be callable or None"
+        )
     update_time = _time(update_cutoff, name="update_cutoff")
     calibration_time = _time(
         calibration_cutoff,
@@ -1075,6 +1142,7 @@ def produce_bounded_online_update(
         cutoff=update_time,
         config=config,
         feature_names=feature_names,
+        reconciliation_evidence_resolver=reconciliation_evidence_resolver,
     )
     (
         calibration_rows,
@@ -1087,6 +1155,7 @@ def produce_bounded_online_update(
         cutoff=calibration_time,
         config=config,
         feature_names=feature_names,
+        reconciliation_evidence_resolver=reconciliation_evidence_resolver,
     )
 
     cross_population_overlap = tuple(
@@ -1113,6 +1182,7 @@ def produce_bounded_online_update(
             task=config.update_task,
             instrument_family=config.instrument_family,
             population_name="UPDATE",
+            reconciliation_evidence_resolver=reconciliation_evidence_resolver,
         )
     )
     calibration_population_reason, verified_calibration_manifest = (
@@ -1128,6 +1198,7 @@ def produce_bounded_online_update(
             task=config.calibration_task,
             instrument_family=config.instrument_family,
             population_name="CALIBRATION",
+            reconciliation_evidence_resolver=reconciliation_evidence_resolver,
         )
     )
 

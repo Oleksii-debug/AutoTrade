@@ -45,6 +45,47 @@ def _utc(value: datetime, field: str) -> datetime:
 
 
 @dataclass(frozen=True)
+class CausalInputEvidence:
+    """One exact input fact with causal availability and syndication identity."""
+
+    evidence_id: str
+    content_digest: str
+    component_id: str
+    available_utc: datetime
+    syndication_group: str | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in ("evidence_id", "component_id"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be a non-empty string")
+            object.__setattr__(self, field_name, value.strip())
+        object.__setattr__(
+            self,
+            "content_digest",
+            _digest(self.content_digest, "content_digest"),
+        )
+        object.__setattr__(
+            self,
+            "available_utc",
+            _utc(self.available_utc, "available_utc"),
+        )
+        if self.syndication_group is not None:
+            if (
+                not isinstance(self.syndication_group, str)
+                or not self.syndication_group.strip()
+            ):
+                raise ValueError(
+                    "syndication_group must be None or a non-empty string"
+                )
+            object.__setattr__(
+                self,
+                "syndication_group",
+                self.syndication_group.strip(),
+            )
+
+
+@dataclass(frozen=True)
 class AblationOutcome:
     case_id: str
     input_fingerprint: str
@@ -57,11 +98,19 @@ class AblationOutcome:
     input_cutoff_utc: datetime
     decision_utc: datetime
     outcome_available_utc: datetime
+    population_unit_id: str | None = None
+    input_evidence: tuple[CausalInputEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.case_id, str) or not self.case_id.strip():
             raise ValueError("case_id must be a non-empty string")
         object.__setattr__(self, "case_id", self.case_id.strip())
+        population_unit = self.population_unit_id
+        if population_unit is None:
+            population_unit = self.case_id
+        if not isinstance(population_unit, str) or not population_unit.strip():
+            raise ValueError("population_unit_id must be a non-empty string")
+        object.__setattr__(self, "population_unit_id", population_unit.strip())
         object.__setattr__(
             self,
             "input_fingerprint",
@@ -109,6 +158,39 @@ class AblationOutcome:
         object.__setattr__(self, "decision_utc", decision)
         object.__setattr__(self, "outcome_available_utc", outcome)
 
+        if not isinstance(self.input_evidence, tuple):
+            raise TypeError("input_evidence must be an immutable tuple")
+        if any(
+            not isinstance(item, CausalInputEvidence)
+            for item in self.input_evidence
+        ):
+            raise TypeError(
+                "input_evidence entries must be CausalInputEvidence"
+            )
+        evidence_ids = [item.evidence_id for item in self.input_evidence]
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError("input_evidence must use unique evidence_id values")
+        content_digests = [
+            item.content_digest for item in self.input_evidence
+        ]
+        if len(content_digests) != len(set(content_digests)):
+            raise ValueError(
+                "syndicated duplicate content must be deduplicated by digest"
+            )
+        syndication_groups = [
+            item.syndication_group
+            for item in self.input_evidence
+            if item.syndication_group is not None
+        ]
+        if len(syndication_groups) != len(set(syndication_groups)):
+            raise ValueError(
+                "syndicated input groups must be deduplicated before ablation"
+            )
+        if any(item.available_utc > cutoff for item in self.input_evidence):
+            raise ValueError(
+                "input evidence cannot become available after the causal cutoff"
+            )
+
     @property
     def met_deadline(self) -> bool:
         return self.elapsed_ms <= self.deadline_ms
@@ -136,6 +218,42 @@ class AblationPair:
             raise ValueError("matched outcomes must share exact causal input cutoff")
         if self.full.outcome_available_utc != self.ablated.outcome_available_utc:
             raise ValueError("matched outcomes must share outcome availability")
+        if self.full.population_unit_id != self.ablated.population_unit_id:
+            raise ValueError(
+                "matched outcomes must share the same independent population unit"
+            )
+
+        full_evidence = {
+            item.evidence_id: item for item in self.full.input_evidence
+        }
+        ablated_evidence = {
+            item.evidence_id: item for item in self.ablated.input_evidence
+        }
+        for evidence_id, item in ablated_evidence.items():
+            if full_evidence.get(evidence_id) != item:
+                raise ValueError(
+                    "shared causal input evidence must match exactly"
+                )
+        removed_evidence = [
+            item
+            for evidence_id, item in full_evidence.items()
+            if evidence_id not in ablated_evidence
+        ]
+        if any(
+            item.component_id != self.target_component
+            for item in removed_evidence
+        ):
+            raise ValueError(
+                "input evidence may differ only by target-component evidence"
+            )
+        if any(
+            item.component_id == self.target_component
+            for item in ablated_evidence.values()
+        ):
+            raise ValueError(
+                "ABLATED outcome cannot retain target-component evidence"
+            )
+
         full_components = set(self.full.components)
         ablated_components = set(self.ablated.components)
         if self.target_component not in full_components:
@@ -213,11 +331,20 @@ def _validate_pairs(target_component: str, pairs: Iterable[AblationPair]) -> lis
         raise ValueError("all pairs must target the requested component")
 
     seen_cases: set[tuple[str, str]] = set()
+    seen_population_units: set[str] = set()
     for pair in selected:
         case_key = (pair.full.case_id, pair.full.input_fingerprint)
         if case_key in seen_cases:
             raise ValueError("duplicate matched ablation case")
         seen_cases.add(case_key)
+
+        population_unit = pair.full.population_unit_id
+        if population_unit in seen_population_units:
+            raise ValueError(
+                "duplicate independent population unit; syndicated or aliased "
+                "cases must be deduplicated"
+            )
+        seen_population_units.add(population_unit)
     return selected
 
 
@@ -281,6 +408,19 @@ def evaluate_incremental_value(
 
     target = target_component.strip() if isinstance(target_component, str) else target_component
     selected = _validate_pairs(target, pairs)
+    if any(not pair.full.input_evidence for pair in selected):
+        return AblationEvaluation(
+            target_component=target,
+            pair_count=0,
+            mean_net_incremental_value=None,
+            sample_stddev=None,
+            lower_bound=None,
+            required_lower_bound=required,
+            uncertainty_multiplier=multiplier,
+            status="INCONCLUSIVE",
+            reason="missing_causal_input_evidence",
+        )
+
     with localcontext() as context:
         context.prec = 50
         context.rounding = ROUND_HALF_EVEN

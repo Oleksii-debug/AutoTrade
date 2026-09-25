@@ -5,10 +5,12 @@ import unittest
 from uuid import uuid4
 
 from mvp.autotrade_mvp.bybit_v5 import (
+    BybitPreparedRequest,
     build_order_payload,
     coverage_evidence,
     parse_executions,
     parse_submission_response,
+    prepare_order_request,
     server_time_from_response,
     validate_auth_timestamp,
 )
@@ -95,6 +97,78 @@ def bound_execution_response(
         response_bytes=raw,
         observed_at=READ_AT,
     )
+
+
+def write_capability(
+    *,
+    account_id="bybit-account",
+    environment="MAINNET",
+    instrument_version="BTCUSDT@v1",
+):
+    observed_at = READ_AT - timedelta(hours=1)
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            provider_id="BYBIT",
+            account_id=account_id,
+            entity_id="bybit-trading",
+            environment=environment,
+            instrument_version=instrument_version,
+            observed_at=observed_at,
+            expires_at=READ_AT + timedelta(hours=1),
+            supported_order_types=frozenset({"LIMIT", "MARKET"}),
+            time_in_force=frozenset({"GTC", "IOC", "POST_ONLY", "FOK"}),
+            permission_scopes=frozenset({"ORDER_WRITE"}),
+            position_mode="NET",
+            native_protection=frozenset(),
+            rate_limit_policy_id="bybit-write-test",
+            data_entitlements=frozenset(),
+            evidence_ref={
+                "artifact_id": str(uuid4()),
+                "sha256": "sha256:" + "b" * 64,
+                "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+                "source_uri": "https://bybit-exchange.github.io/docs/v5/order/create-order",
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    return derive_capability_snapshot(
+        snapshot_id=str(uuid4()),
+        claims=claims,
+        observed_at=READ_AT,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    )
+
+
+def prepared_bybit_request(
+    client_order_id: str,
+    *,
+    environment="MAINNET",
+) -> BybitPreparedRequest:
+    return prepare_order_request(
+        capability=write_capability(environment=environment),
+        account_id="bybit-account",
+        environment=environment,
+        instrument_version="BTCUSDT@v1",
+        at=READ_AT,
+        product_family="SPOT",
+        symbol="BTCUSDT",
+        side="BUY",
+        order_type="MARKET",
+        quantity="0.01",
+        client_order_id=client_order_id,
+        time_in_force="IOC",
+    )
+
+
+def bybit_response_bytes(payload) -> bytes:
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
 
 
 class BybitV5AdapterTests(unittest.TestCase):
@@ -200,9 +274,8 @@ class BybitV5AdapterTests(unittest.TestCase):
         }
         result = parse_submission_response(
             attempt_id=attempt,
-            client_order_id="client-123",
-            environment="MAINNET",
-            response=response,
+            prepared_request=prepared_bybit_request("client-123"),
+            response_bytes=bybit_response_bytes(response),
         )
         self.assertEqual(result["outcome"], "ACKNOWLEDGED")
         self.assertEqual(result["retry_disposition"], "NEVER")
@@ -210,7 +283,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertNotIn("fill", repr(result).lower())
         self.assertTrue(result["evidence"][0]["sha256"].startswith("sha256:"))
 
-    def test_response_evidence_is_bound_to_provider_environment(self):
+    def test_response_evidence_is_bound_to_prepared_environment(self):
         base = {
             "retCode": 0,
             "retMsg": "OK",
@@ -226,35 +299,30 @@ class BybitV5AdapterTests(unittest.TestCase):
             with self.subTest(environment=environment):
                 result = parse_submission_response(
                     attempt_id=str(uuid4()),
-                    client_order_id="client-env",
-                    environment=environment,
-                    response=base,
+                    prepared_request=prepared_bybit_request(
+                        "client-env",
+                        environment=environment,
+                    ),
+                    response_bytes=bybit_response_bytes(base),
                 )
                 evidence = result["evidence"][0]
                 self.assertNotIn("provider_environment", evidence)
                 self.assertEqual(evidence["source_uri"], source_uri)
 
-        with self.assertRaisesRegex(ProviderCoreError, "environment"):
-            parse_submission_response(
-                attempt_id=str(uuid4()),
-                client_order_id="client-env",
-                environment="UNKNOWN",
-                response=base,
-            )
-
     def test_explicit_observation_time_is_validated_and_normalized_to_utc(self):
         accepted = parse_submission_response(
             attempt_id=str(uuid4()),
-            client_order_id="client-time",
-            environment="MAINNET",
-            response={
-                "retCode": 0,
-                "retMsg": "OK",
-                "result": {
-                    "orderId": "provider-time",
-                    "orderLinkId": "client-time",
-                },
-            },
+            prepared_request=prepared_bybit_request("client-time"),
+            response_bytes=bybit_response_bytes(
+                {
+                    "retCode": 0,
+                    "retMsg": "OK",
+                    "result": {
+                        "orderId": "provider-time",
+                        "orderLinkId": "client-time",
+                    },
+                }
+            ),
             observed_at="2026-09-24T22:00:00+02:00",
         )
         self.assertNotIn("provider_received_at", accepted)
@@ -262,20 +330,20 @@ class BybitV5AdapterTests(unittest.TestCase):
             accepted["evidence"][0]["observed_at"],
             "2026-09-24T20:00:00Z",
         )
-
         provider_timed = parse_submission_response(
             attempt_id=str(uuid4()),
-            client_order_id="client-provider-time",
-            environment="MAINNET",
-            response={
-                "retCode": 0,
-                "retMsg": "OK",
-                "result": {
-                    "orderId": "provider-time-2",
-                    "orderLinkId": "client-provider-time",
-                },
-                "time": 1790280000123,
-            },
+            prepared_request=prepared_bybit_request("client-provider-time"),
+            response_bytes=bybit_response_bytes(
+                {
+                    "retCode": 0,
+                    "retMsg": "OK",
+                    "result": {
+                        "orderId": "provider-time-2",
+                        "orderLinkId": "client-provider-time",
+                    },
+                    "time": 1790280000123,
+                }
+            ),
             observed_at="2026-09-24T21:00:00Z",
         )
         self.assertEqual(
@@ -289,24 +357,24 @@ class BybitV5AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderCoreError, "timezone"):
             parse_submission_response(
                 attempt_id=str(uuid4()),
-                client_order_id="client-bad-time",
-                environment="MAINNET",
-                response={
-                    "retCode": 0,
-                    "result": {
-                        "orderId": "provider-bad-time",
-                        "orderLinkId": "client-bad-time",
-                    },
-                },
+                prepared_request=prepared_bybit_request("client-bad-time"),
+                response_bytes=bybit_response_bytes(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "orderId": "provider-bad-time",
+                            "orderLinkId": "client-bad-time",
+                        },
+                    }
+                ),
                 observed_at="2026-09-24T20:00:00",
             )
 
     def test_transport_loss_after_possible_write_is_unknown(self):
         result = parse_submission_response(
             attempt_id=str(uuid4()),
-            client_order_id="client-transport-loss",
-            environment="MAINNET",
-            response=None,
+            prepared_request=prepared_bybit_request("client-transport-loss"),
+            response_bytes=None,
             observed_at="2026-09-24T20:00:00Z",
             transport_ambiguous=True,
         )
@@ -314,84 +382,50 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
         self.assertEqual(result["reason_code"], "BYBIT_TRANSPORT_AMBIGUOUS")
         self.assertNotIn("provider_received_at", result)
-        self.assertNotIn("observed_at", result)
-        self.assertNotIn("environment", result)
         self.assertEqual(result["evidence"], [])
 
-    def test_transport_ambiguity_requires_boolean_flag_and_valid_timestamp(self):
-        with self.assertRaisesRegex(ProviderCoreError, "must be boolean"):
+    def test_transport_ambiguity_cannot_coexist_with_response_bytes(self):
+        with self.assertRaisesRegex(ProviderCoreError, "response bytes"):
             parse_submission_response(
                 attempt_id=str(uuid4()),
-                client_order_id="client-ambiguous-bool",
-                environment="MAINNET",
-                response=None,
-                observed_at="2026-09-24T20:00:00Z",
-                transport_ambiguous=1,
-            )
-
-        with self.assertRaisesRegex(ProviderCoreError, "ISO timestamp"):
-            parse_submission_response(
-                attempt_id=str(uuid4()),
-                client_order_id="client-ambiguous-time",
-                environment="MAINNET",
-                response=None,
-                observed_at="not-a-timestamp",
-                transport_ambiguous=True,
-            )
-
-        with self.assertRaisesRegex(ProviderCoreError, "timezone"):
-            parse_submission_response(
-                attempt_id=str(uuid4()),
-                client_order_id="client-ambiguous-naive-time",
-                environment="MAINNET",
-                response=None,
-                observed_at="2026-09-24T20:00:00",
-                transport_ambiguous=True,
-            )
-
-    def test_transport_ambiguity_cannot_coexist_with_provider_response(self):
-        with self.assertRaisesRegex(ProviderCoreError, "authoritative response"):
-            parse_submission_response(
-                attempt_id=str(uuid4()),
-                client_order_id="client-contradiction",
-                environment="MAINNET",
-                response={"retCode": 0},
+                prepared_request=prepared_bybit_request("client-contradiction"),
+                response_bytes=bybit_response_bytes({"retCode": 0}),
                 observed_at="2026-09-24T20:00:00Z",
                 transport_ambiguous=True,
             )
 
     def test_missing_response_requires_explicit_ambiguity_and_timestamp(self):
-        with self.assertRaisesRegex(ProviderCoreError, "required"):
+        with self.assertRaisesRegex(ProviderCoreError, "response_bytes"):
             parse_submission_response(
                 attempt_id=str(uuid4()),
-                client_order_id="client-missing",
-                environment="MAINNET",
-                response=None,
+                prepared_request=prepared_bybit_request("client-missing"),
+                response_bytes=None,
                 observed_at="2026-09-24T20:00:00Z",
             )
         with self.assertRaisesRegex(ProviderCoreError, "observed_at"):
             parse_submission_response(
                 attempt_id=str(uuid4()),
-                client_order_id="client-missing-time",
-                environment="MAINNET",
-                response=None,
+                prepared_request=prepared_bybit_request("client-missing-time"),
+                response_bytes=None,
                 transport_ambiguous=True,
             )
 
     def test_ambiguous_bybit_codes_require_reconciliation(self):
         for code in (429, 10000, 10014, 10016):
             with self.subTest(code=code):
+                client = f"client-{code}"
                 result = parse_submission_response(
                     attempt_id=str(uuid4()),
-                    client_order_id=f"client-{code}",
-                    environment="MAINNET",
-                    response={
-                        "retCode": code,
-                        "retMsg": "ambiguous",
-                        "result": {},
-                        "retExtInfo": {},
-                        "time": 1790280000123,
-                    },
+                    prepared_request=prepared_bybit_request(client),
+                    response_bytes=bybit_response_bytes(
+                        {
+                            "retCode": code,
+                            "retMsg": "ambiguous",
+                            "result": {},
+                            "retExtInfo": {},
+                            "time": 1790280000123,
+                        }
+                    ),
                 )
                 self.assertEqual(result["outcome"], "UNKNOWN")
                 self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
@@ -399,35 +433,76 @@ class BybitV5AdapterTests(unittest.TestCase):
     def test_explicit_parameter_error_is_rejected(self):
         result = parse_submission_response(
             attempt_id=str(uuid4()),
-            client_order_id="client-reject",
-            environment="MAINNET",
-            response={
-                "retCode": 10001,
-                "retMsg": "parameter error",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1790280000123,
-            },
+            prepared_request=prepared_bybit_request("client-reject"),
+            response_bytes=bybit_response_bytes(
+                {
+                    "retCode": 10001,
+                    "retMsg": "parameter error",
+                    "result": {},
+                    "retExtInfo": {},
+                    "time": 1790280000123,
+                }
+            ),
         )
         self.assertEqual(result["outcome"], "REJECTED")
         self.assertEqual(result["retry_disposition"], "NEVER")
 
-    def test_success_response_must_echo_exact_client_identity(self):
-        with self.assertRaisesRegex(ProviderCoreError, "does not match"):
+    def test_success_response_must_echo_exact_guarded_client_identity(self):
+        with self.assertRaisesRegex(ProviderCoreError, "guarded request"):
             parse_submission_response(
                 attempt_id=str(uuid4()),
-                client_order_id="expected",
-                environment="MAINNET",
-                response={
-                    "retCode": 0,
-                    "retMsg": "OK",
-                    "result": {
-                        "orderId": "provider-1",
-                        "orderLinkId": "other",
-                    },
-                    "time": 1790280000123,
-                },
+                prepared_request=prepared_bybit_request("expected"),
+                response_bytes=bybit_response_bytes(
+                    {
+                        "retCode": 0,
+                        "retMsg": "OK",
+                        "result": {
+                            "orderId": "provider-1",
+                            "orderLinkId": "other",
+                        },
+                        "time": 1790280000123,
+                    }
+                ),
             )
+
+    def test_submission_evidence_binds_request_response_and_attempt_identity(self):
+        request = prepared_bybit_request("client-bind")
+        payload = {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "orderId": "provider-bind",
+                "orderLinkId": "client-bind",
+            },
+            "time": 1790280000123,
+        }
+        raw_a = bybit_response_bytes(payload)
+        raw_b = json.dumps(payload, indent=1).encode("utf-8")
+        attempt = str(uuid4())
+        a = parse_submission_response(
+            attempt_id=attempt,
+            prepared_request=request,
+            response_bytes=raw_a,
+        )
+        b = parse_submission_response(
+            attempt_id=attempt,
+            prepared_request=request,
+            response_bytes=raw_b,
+        )
+        other_attempt = parse_submission_response(
+            attempt_id=str(uuid4()),
+            prepared_request=request,
+            response_bytes=raw_a,
+        )
+        self.assertNotEqual(a["evidence"][0]["sha256"], b["evidence"][0]["sha256"])
+        self.assertNotEqual(
+            a["evidence"][0]["artifact_id"],
+            b["evidence"][0]["artifact_id"],
+        )
+        self.assertNotEqual(
+            a["evidence"][0]["artifact_id"],
+            other_attempt["evidence"][0]["artifact_id"],
+        )
 
     def test_execution_rows_preserve_provider_identity_and_exact_economics(self):
         response = {

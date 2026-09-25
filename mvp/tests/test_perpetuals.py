@@ -337,6 +337,50 @@ class PerpetualLifecycleTests(unittest.TestCase):
         with self.assertRaises(PerpetualError):
             ledger.apply(event_id="f1", instrument_id="BTC-PERP", currency="USDT", amount="-1.30")
 
+    def test_currency_aliases_canonicalize_across_inverse_units_and_funding(self):
+        contract = PerpetualContract(
+            instrument_id="BTC-USD-INVERSE-PERP",
+            settlement_currency=" btc ",
+            collateral_currency="BTC",
+            multiplier="1",
+            payoff="INVERSE",
+            face_currency=" usd ",
+            price_quote_currency="USD",
+            price_base_currency=" btc ",
+        )
+        self.assertEqual(contract.settlement_currency, "BTC")
+        self.assertEqual(contract.face_currency, "USD")
+        self.assertEqual(
+            inverse_perpetual_pnl_exact(
+                contract=contract,
+                signed_contracts="100",
+                entry_price="10000",
+                exit_price="11000",
+            ),
+            Fraction(1, 1100),
+        )
+
+        ledger = FundingLedger()
+        ledger.apply(
+            event_id="funding-1",
+            instrument_id="BTC-PERP",
+            currency=" usdt ",
+            amount="-1.25",
+        )
+        self.assertEqual(ledger.balance("USDT"), Decimal("-1.25"))
+        self.assertEqual(ledger.balance(" usdt "), Decimal("-1.25"))
+
+    def test_collateral_quote_currency_aliases_do_not_create_fake_conversion(self):
+        with self.assertRaisesRegex(PerpetualError, "currencies must differ"):
+            CollateralQuote(
+                from_currency=" btc ",
+                to_currency="BTC",
+                rate="1",
+                observed_at=NOW,
+                max_age=timedelta(seconds=5),
+            )
+
+
     def test_binary_float_inputs_are_rejected(self):
         with self.assertRaises(PerpetualError):
             linear_notional(signed_contracts=1.0, multiplier="0.001", price="100000")

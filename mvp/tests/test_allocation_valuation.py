@@ -111,7 +111,7 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
         self.assertEqual(result.portfolio_base_currency, "USD")
 
     def test_cross_currency_requires_fresh_exact_fx_evidence(self):
-        digest = "a" * 64
+        digest = "sha256:" + "a" * 64
         quote = {
             "base_currency": "EUR",
             "quote_currency": "USD",
@@ -221,6 +221,31 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             self.normalize(self.market(), self.valuation(), source_price=10.0)
+
+        bad_digest_quote = {
+            "base_currency": "EUR",
+            "quote_currency": "USD",
+            "bid": "1.10",
+            "ask": "1.11",
+            "available_at": "2026-09-25T18:29:30Z",
+            "source_id": "fx:eurusd:venue:v7",
+            "evidence_sha256": "a" * 64,
+            "max_age_seconds": 60,
+            "haircut": "0",
+        }
+        with self.assertRaisesRegex(AllocationValuationError, "canonical sha256"):
+            self.normalize(
+                self.market(quote_currency="EUR"),
+                self.valuation(
+                    quote_currency="EUR",
+                    portfolio_base_currency="USD",
+                    unit_base_notional="11",
+                    fx_rate="1.10",
+                    fx_source_id="fx:eurusd:venue:v7",
+                    fx_quote=bad_digest_quote,
+                    fx_evidence_sha256="a" * 64,
+                ),
+            )
 
 
 if __name__ == "__main__":

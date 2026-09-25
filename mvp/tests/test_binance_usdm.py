@@ -342,6 +342,16 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             "symbol": "BTCUSDT",
             "time": 1790272800123,
         }
+        with self.assertRaisesRegex(
+            BinanceUsdmAdapterError,
+            "must be a mapping",
+        ):
+            parse_account_trades(
+                [row],
+                instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
+                client_ids_by_order_id=[],
+            )
+
         for bad_map in (
             {"42": "at-usdm-fill"},
             {True: "at-usdm-fill"},
@@ -365,6 +375,35 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                 [row],
                 instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
                 client_ids_by_order_id={42: "bad client id with spaces"},
+            )
+
+    def test_instrument_identity_map_is_fully_validated(self):
+        row = {
+            "commission": "0.01",
+            "commissionAsset": "USDT",
+            "id": 8,
+            "orderId": 43,
+            "price": "101",
+            "qty": "0.1",
+            "positionSide": "BOTH",
+            "symbol": "BTCUSDT",
+            "time": 1790272800123,
+        }
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "uppercase"):
+            parse_account_trades(
+                [row],
+                instrument_versions={
+                    "BTCUSDT": "BTCUSDT-PERP:v1",
+                    "ethusdt": "ETHUSDT-PERP:v1",
+                },
+            )
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "instrument_version"):
+            parse_account_trades(
+                [row],
+                instrument_versions={
+                    "BTCUSDT": "BTCUSDT-PERP:v1",
+                    "ETHUSDT": "",
+                },
             )
 
     def test_conflicting_trade_identity_fails_closed(self):

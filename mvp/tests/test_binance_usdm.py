@@ -348,8 +348,9 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             "symbol": "BTCUSDT",
             "time": 1569514978020,
         }
+        observation = execution_observation([row, dict(row)])
         fills = parse_account_trades(
-            execution_observation([row, dict(row)]),
+            observation,
             instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
             client_ids_by_order_id={25851813: "at-usdm-fill"},
         )
@@ -357,7 +358,8 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
         fill = fills[0]
         self.assertEqual(fill.provider_execution_id, "BINANCE-USDM:BTCUSDT:698759")
         self.assertEqual(fill.account_id, "paper-1")
-        self.assertTrue(fill.evidence_refs)
+        self.assertEqual(fill.environment, "PAPER")
+        self.assertTrue(observation.evidence_ref.startswith("provider-read:sha256:"))
         self.assertEqual(fill.client_order_id, "at-usdm-fill")
         self.assertEqual(fill.quantity, Decimal("0.002"))
         self.assertEqual(fill.price, Decimal("7819.01"))
@@ -385,6 +387,8 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
 
     def test_empty_order_history_never_proves_absence_by_default(self):
         evidence = coverage_evidence(
+            account_id="paper-1",
+            environment="PAPER",
             surface="ORDER_HISTORY",
             coverage_start="2026-09-24T20:00:00Z",
             coverage_end="2026-09-25T00:00:00Z",
@@ -394,6 +398,8 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
         self.assertFalse(evidence.provider_semantics_exclude_execution)
 
         qualified = coverage_evidence(
+            account_id="paper-1",
+            environment="PAPER",
             surface="ORDER_HISTORY",
             coverage_start="2026-09-24T20:00:00Z",
             coverage_end="2026-09-25T00:00:00Z",

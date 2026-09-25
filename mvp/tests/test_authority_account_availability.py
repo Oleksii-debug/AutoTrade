@@ -1,4 +1,5 @@
 from copy import deepcopy
+from dataclasses import replace
 from decimal import Decimal
 from tempfile import TemporaryDirectory
 import unittest
@@ -77,7 +78,16 @@ def _risk_policy():
     )
 
 
-def _checkpoint(store, *, cash="1000", available_cash=None):
+def _checkpoint(
+    store,
+    *,
+    cash="1000",
+    available_cash=None,
+    observed_at="2026-09-24T18:00:30Z",
+    reconciliation_id="availability-authority",
+    snapshot_id="availability-snapshot",
+    force_incomplete=False,
+):
     if available_cash is None:
         available_cash = cash
     result = reconcile_account(
@@ -107,20 +117,28 @@ def _checkpoint(store, *, cash="1000", available_cash=None):
             provider_id=PROVIDER_ID,
             account_id=ACCOUNT_ID,
             environment=ENVIRONMENT,
-            snapshot_id="availability-snapshot",
+            snapshot_id=snapshot_id,
             query_started_at="2026-09-24T18:00:00Z",
             query_completed_at="2026-09-24T18:00:30Z",
             valid_until="2026-09-24T18:02:00Z",
             available_resources={"CASH:USD": available_cash},
             provider_as_of="2026-09-24T18:00:30Z",
-            evidence_refs=("provider:availability-snapshot",),
+            evidence_refs=(f"provider:{snapshot_id}",),
         ),
     )
+    if force_incomplete:
+        result = replace(
+            result,
+            complete=False,
+            snapshot_consistent=False,
+            blocking_resources=("ACCOUNT",),
+            reasons=("forced-incomplete-provider-truth",),
+        )
     return record_reconciliation_checkpoint(
         store,
-        reconciliation_id="availability-authority",
+        reconciliation_id=reconciliation_id,
         result=result,
-        observed_at="2026-09-24T18:00:30Z",
+        observed_at=observed_at,
         host_id="availability-test-host",
         owner_epoch="1",
     )
@@ -239,6 +257,114 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                     ]
                 ),
                 1,
+            )
+
+    def test_new_admission_cannot_select_superseded_reconciliation_truth(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            authority.register_policy(_policy())
+            older = _checkpoint(
+                store,
+                available_cash="1000",
+                observed_at="2026-09-24T18:00:30Z",
+                reconciliation_id="older-reconciliation",
+                snapshot_id="availability-old",
+            )
+            _checkpoint(
+                store,
+                cash="50",
+                available_cash="50",
+                observed_at="2026-09-24T18:00:40Z",
+                reconciliation_id="newer-reconciliation",
+                snapshot_id="availability-new",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+
+            with self.assertRaisesRegex(AuthorityConflict, "superseded|availability"):
+                _admit(authority, reservations, older)
+            self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("0"))
+
+    def test_newer_incomplete_truth_supersedes_older_complete_checkpoint(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            authority.register_policy(_policy())
+            older = _checkpoint(
+                store,
+                available_cash="1000",
+                observed_at="2026-09-24T18:00:30Z",
+                reconciliation_id="complete-reconciliation",
+                snapshot_id="availability-complete",
+            )
+            _checkpoint(
+                store,
+                available_cash="1000",
+                observed_at="2026-09-24T18:00:40Z",
+                reconciliation_id="incomplete-reconciliation",
+                snapshot_id="availability-incomplete",
+                force_incomplete=True,
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+
+            with self.assertRaisesRegex(AuthorityConflict, "superseded|availability"):
+                _admit(authority, reservations, older)
+            self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("0"))
+
+    def test_exact_retry_keeps_immutable_checkpoint_but_dispatch_rechecks_current_truth(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            authority = AuthorityService(store)
+            authority.register_policy(_policy())
+            older = _checkpoint(
+                store,
+                available_cash="1000",
+                observed_at="2026-09-24T18:00:30Z",
+                reconciliation_id="retry-reconciliation-a",
+                snapshot_id="availability-retry-a",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            first = _admit(authority, reservations, older)
+            self.assertEqual(first.outcome, "ADMITTED")
+            pending_before = len(store.pending_outbox())
+
+            _checkpoint(
+                store,
+                cash="50",
+                available_cash="50",
+                observed_at="2026-09-24T18:00:40Z",
+                reconciliation_id="retry-reconciliation-b",
+                snapshot_id="availability-retry-b",
+            )
+            replay = _admit(authority, reservations, older)
+            self.assertEqual(replay, first)
+            self.assertEqual(len(store.pending_outbox()), pending_before + 1)
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    first.admission_id,
+                    intent_hash=first.intent_hash,
+                    account_id=ACCOUNT_ID,
+                    environment=ENVIRONMENT,
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    now="2026-09-24T18:01:10Z",
+                    capability_snapshot_id=first.capability_snapshot_id,
+                ),
+                (False, "financial_evidence_invalid"),
             )
 
     def test_decimal_scale_is_canonical_across_admission_restart_replay(self):

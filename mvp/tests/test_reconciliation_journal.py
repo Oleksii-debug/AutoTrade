@@ -16,6 +16,7 @@ from mvp.autotrade_mvp.reconciliation_journal import (
     _reconciliation_aggregate_id,
     load_account_resource_availability_evidence,
     load_latest_reconciliation_checkpoint,
+    load_latest_reconciliation_checkpoint_for_scope,
     load_submission_resolution_evidence,
     load_reconciliation_checkpoint_for_readiness,
     record_reconciliation_checkpoint,
@@ -185,6 +186,56 @@ class ReconciliationJournalTests(unittest.TestCase):
                 latest["payload"]["resource_availability"]["available_resources"]["CASH:USD"],
                 "850",
             )
+
+    def test_scope_latest_crosses_reconciliation_ids_and_ties_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            older = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="scope-head-a",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="host-a",
+                owner_epoch="epoch-a",
+            )
+            newer = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="scope-head-b",
+                result=reconciliation(
+                    provider_cash={"USD": "901"},
+                    resource_availability=availability(),
+                ),
+                observed_at="2026-09-24T19:01:00Z",
+                host_id="host-b",
+                owner_epoch="epoch-b",
+            )
+            latest = load_latest_reconciliation_checkpoint_for_scope(
+                store,
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+            )
+            self.assertNotEqual(older["aggregate_id"], newer["aggregate_id"])
+            self.assertEqual(latest["event_id"], newer["event_id"])
+
+            record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="scope-head-c",
+                result=reconciliation(
+                    provider_cash={"USD": "902"},
+                    resource_availability=availability(),
+                ),
+                observed_at="2026-09-24T19:01:00Z",
+                host_id="host-c",
+                owner_epoch="epoch-c",
+            )
+            with self.assertRaisesRegex(ValueError, "ambiguous"):
+                load_latest_reconciliation_checkpoint_for_scope(
+                    store,
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                )
 
     def test_owner_transfer_requires_new_readiness_checkpoint(self):
         with TemporaryDirectory() as directory:

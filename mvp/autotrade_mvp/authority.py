@@ -1031,6 +1031,7 @@ class AuthorityService:
                         "max_age_seconds"
                     ),
                     evidence_artifact_store=self.evidence_artifact_store,
+                    require_latest_scope=True,
                 )
             )
         except (KeyError, TypeError, ValueError) as error:
@@ -1920,6 +1921,7 @@ class AuthorityService:
                     now=now,
                     max_age_seconds=normalized_max_age,
                     evidence_artifact_store=self.evidence_artifact_store,
+                    require_latest_scope=True,
                 )
                 availability_evidence = {
                     **loaded,

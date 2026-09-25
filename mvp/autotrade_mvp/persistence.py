@@ -879,6 +879,32 @@ class JournalStore:
             ).fetchall()
         return [self._decode_event_row(row) for row in rows]
 
+    def load_events_by_type(self, aggregate_type: str) -> list[dict[str, Any]]:
+        """Load every integrity-verified event for one aggregate type.
+
+        This is a read-only journal primitive. Callers remain responsible for
+        domain ordering semantics rather than treating SQL row order as
+        financial authority.
+        """
+
+        aggregate_type = self._require_text(aggregate_type, "aggregate_type")
+        envelope_columns = (
+            ", envelope_json, envelope_hash" if self.SCHEMA_VERSION >= 5 else ""
+        )
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT event_id, event_type, aggregate_type, aggregate_id,
+                       aggregate_version, payload_json, payload_hash, committed_at
+                       {envelope_columns}
+                FROM events
+                WHERE aggregate_type = ?
+                ORDER BY aggregate_id, aggregate_version
+                """,
+                (aggregate_type,),
+            ).fetchall()
+        return [self._decode_event_row(row) for row in rows]
+
     def save_projection_checkpoint(
         self,
         *,

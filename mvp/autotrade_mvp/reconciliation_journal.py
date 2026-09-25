@@ -343,6 +343,102 @@ def load_latest_reconciliation_checkpoint(
     return event
 
 
+def load_latest_reconciliation_checkpoint_for_scope(
+    store: JournalStore,
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+) -> dict[str, Any] | None:
+    """Resolve the unique latest durable provider truth for one account scope.
+
+    Reconciliation ids partition workflow attempts, not financial authority.
+    New financial work therefore resolves across every reconciliation aggregate
+    for the same provider/account/environment. Observation time defines the
+    provider-truth cut. Multiple reconciliation ids at the same latest cut are
+    ambiguous and fail closed; multiple versions of one aggregate at the same
+    cut use the greatest aggregate version (for example an owner transfer).
+    """
+
+    if not isinstance(store, JournalStore):
+        raise TypeError("store must be JournalStore")
+    provider, account, scope = _scope(
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
+    candidates: list[tuple[datetime, dict[str, Any]]] = []
+    for event in store.load_events_by_type("account_reconciliation"):
+        payload = event.get("payload")
+        if not isinstance(payload, Mapping):
+            raise ValueError("reconciliation checkpoint payload must be an object")
+        if (
+            payload.get("provider_id") != provider
+            or payload.get("account_id") != account
+            or payload.get("environment") != scope
+        ):
+            continue
+        if event.get("event_type") != "AccountReconciled":
+            raise ValueError(
+                "account reconciliation aggregate contains unsupported event type"
+            )
+        observed_text = _instant(
+            payload.get("observed_at"),
+            name="reconciliation observed_at",
+        )
+        observed = datetime.fromisoformat(
+            observed_text.replace("Z", "+00:00")
+        )
+        candidates.append((observed, event))
+
+    if not candidates:
+        return None
+    latest_observed = max(observed for observed, _event in candidates)
+    latest = [
+        event
+        for observed, event in candidates
+        if observed == latest_observed
+    ]
+    aggregate_ids = {
+        _text(event.get("aggregate_id"), name="aggregate_id")
+        for event in latest
+    }
+    if len(aggregate_ids) != 1:
+        raise ValueError(
+            "latest reconciliation checkpoint is ambiguous across reconciliation ids"
+        )
+    return max(
+        latest,
+        key=lambda event: int(event.get("aggregate_version", 0)),
+    )
+
+
+def require_current_reconciliation_checkpoint(
+    store: JournalStore,
+    *,
+    checkpoint_event_id: str,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+) -> dict[str, Any]:
+    """Fail closed unless an exact checkpoint is current scope-wide truth."""
+
+    event_id = _text(checkpoint_event_id, name="checkpoint_event_id")
+    latest = load_latest_reconciliation_checkpoint_for_scope(
+        store,
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
+    if latest is None:
+        raise ValueError("no reconciliation checkpoint exists for account scope")
+    if latest.get("event_id") != event_id:
+        raise ValueError(
+            "selected reconciliation checkpoint is superseded by newer provider truth"
+        )
+    return latest
+
+
 def load_reconciliation_checkpoint_for_readiness(
     store: JournalStore,
     *,
@@ -489,7 +585,7 @@ def load_submission_resolution_evidence(
     if type(aggregate_version) is not int or aggregate_version <= 0:
         raise ValueError("checkpoint aggregate_version must be a positive integer")
 
-    return {
+    evidence = {
         "checkpoint_event_id": event_id,
         "checkpoint_payload_hash": payload_hash,
         "checkpoint_aggregate_id": aggregate_id,
@@ -519,6 +615,7 @@ def load_account_resource_availability_evidence(
     now: str,
     max_age_seconds: Decimal | str | int,
     evidence_artifact_store: ArtifactStore | None = None,
+    require_latest_scope: bool = False,
 ) -> dict[str, Any]:
     """Return exact reservable availability from a fresh provider snapshot.
 
@@ -530,7 +627,18 @@ def load_account_resource_availability_evidence(
 
     if not isinstance(store, JournalStore):
         raise TypeError("store must be JournalStore")
+    if not isinstance(require_latest_scope, bool):
+        raise TypeError("require_latest_scope must be boolean")
     event_id = _text(checkpoint_event_id, name="checkpoint_event_id")
+    current_scope_head = None
+    if require_latest_scope:
+        current_scope_head = require_current_reconciliation_checkpoint(
+            store,
+            checkpoint_event_id=event_id,
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+        )
     checkpoint = store.get_event(event_id)
     if checkpoint is None:
         raise KeyError(f"Unknown reconciliation checkpoint event: {event_id}")
@@ -802,6 +910,30 @@ def load_account_resource_availability_evidence(
             for resource, detail in sorted(selected_details.items())
         },
     }
+    if current_scope_head is not None:
+        head_payload = current_scope_head.get("payload")
+        if not isinstance(head_payload, Mapping):
+            raise ValueError("current reconciliation scope head payload is malformed")
+        evidence.update(
+            {
+                "scope_head_event_id": _text(
+                    current_scope_head.get("event_id"),
+                    name="scope_head_event_id",
+                ),
+                "scope_head_aggregate_id": _text(
+                    current_scope_head.get("aggregate_id"),
+                    name="scope_head_aggregate_id",
+                ),
+                "scope_head_aggregate_version": current_scope_head.get(
+                    "aggregate_version"
+                ),
+                "scope_head_observed_at": _instant(
+                    head_payload.get("observed_at"),
+                    name="scope_head_observed_at",
+                ),
+            }
+        )
+    return evidence
 
 def unresolved_attempt_ids_from_checkpoint(
     checkpoint: Mapping[str, Any] | None,

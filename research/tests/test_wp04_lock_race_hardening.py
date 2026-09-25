@@ -183,6 +183,21 @@ class ResourceLockRaceHardeningTests(unittest.TestCase):
             )
             self.assertIsNone(lock._handle)
 
+    @unittest.skipUnless(os.name == "nt", "Windows-specific remote-share gate")
+    def test_windows_unc_share_is_rejected_before_filesystem_touch(self):
+        lock = ResourceLock(r"\\\\invalid-autotrade-host\\share\\resource.lock")
+        with patch.object(
+            Path,
+            "mkdir",
+            side_effect=AssertionError("UNC path reached filesystem mutation"),
+        ) as mkdir:
+            with self.assertRaisesRegex(
+                ResourceLockError,
+                "qualified local filesystem",
+            ):
+                lock.acquire()
+        mkdir.assert_not_called()
+
     def test_blocking_mode_requires_exact_bool(self):
         with self.assertRaisesRegex(TypeError, "blocking must be bool"):
             ResourceLock("resource.lock", blocking=1)

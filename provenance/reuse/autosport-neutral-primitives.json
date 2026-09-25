@@ -73,7 +73,10 @@
       "path_swap_after_os_lock_rejection",
       "cleanup_failure_poisoning",
       "primary_failure_preserved_during_teardown",
-      "no_autosport_runtime_import"
+      "no_autosport_runtime_import",
+      "publication_destination_symlink_rejection",
+      "publication_destination_hardlink_rejection",
+      "parent_path_alias_canonical_sidecar"
     ],
     "exact_head_ci_evidence": "PENDING"
   },

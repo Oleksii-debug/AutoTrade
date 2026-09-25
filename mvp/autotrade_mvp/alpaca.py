@@ -461,7 +461,6 @@ def parse_submission_response(
         "outcome": "ACKNOWLEDGED",
         "provider_order_id": provider_order_id,
         "client_order_id": cid,
-        "provider_received_at": when,
         "evidence": [
             _response_evidence(
                 response,

@@ -1,6 +1,9 @@
+from dataclasses import replace
 from decimal import Decimal
 import unittest
+from unittest.mock import patch
 
+from mvp.autotrade_mvp.execution_oracle import ExecutionOracleError
 from mvp.autotrade_mvp.execution_qualification import (
     ExecutionModelQualification,
     ExecutionQualificationError,
@@ -234,6 +237,34 @@ class ExecutionQualificationTests(unittest.TestCase):
             "evidence_sha256 must be a SHA-256 digest",
         ):
             qualification(exec_model, evidence_sha256="not-a-digest")
+
+
+    def test_qualified_path_requires_independent_oracle(self):
+        exec_model = model()
+        valid = simulate_qualified_execution(
+            order=order(),
+            observation=observation(),
+            model=exec_model,
+            qualification=qualification(exec_model),
+            asset_class="EQUITY",
+            protocol_sha256=PROTOCOL,
+            purpose="REPLAY",
+        )
+        forged = replace(valid, fill_price=Decimal("100"))
+        with patch(
+            "mvp.autotrade_mvp.execution_qualification.simulate_execution",
+            return_value=forged,
+        ):
+            with self.assertRaisesRegex(ExecutionOracleError, "more favorable"):
+                simulate_qualified_execution(
+                    order=order(),
+                    observation=observation(),
+                    model=exec_model,
+                    qualification=qualification(exec_model),
+                    asset_class="EQUITY",
+                    protocol_sha256=PROTOCOL,
+                    purpose="REPLAY",
+                )
 
 
 if __name__ == "__main__":

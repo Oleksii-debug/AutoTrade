@@ -7,6 +7,7 @@ from mvp.autotrade_mvp.information_claims import (
     InformationClaim,
     InformationSnapshot,
     SourceDocument,
+    ingest_claims,
 )
 
 
@@ -146,6 +147,34 @@ class InformationClaimTests(unittest.TestCase):
         self.assertEqual(store.claims, (first,))
         self.assertEqual(store.revisions("corp"), (first, revised_metadata))
         self.assertEqual(store.revisions("wire"), (mirror,))
+
+    def test_batch_ingest_keys_extraction_by_source_and_revision(self):
+        alpha = doc("alpha", "r1", "alpha passage")
+        beta = doc("beta", "r1", "beta passage")
+
+        store = ingest_claims(
+            (alpha, beta),
+            subject="X",
+            predicate="state",
+            value_by_source_revision={
+                ("alpha", "r1"): "up",
+                ("beta", "r1"): "down",
+            },
+        )
+        self.assertEqual(
+            {(claim.source_id, claim.value) for claim in store.claims},
+            {("alpha", "up"), ("beta", "down")},
+        )
+
+        with self.assertRaisesRegex(ValueError, "source identity and revision"):
+            ingest_claims(
+                (alpha, beta),
+                subject="X",
+                predicate="state",
+                value_by_source_revision={
+                    ("alpha", "r1"): "up",
+                },
+            )
 
     def test_direct_source_document_cannot_bypass_provenance_invariants(self):
         with self.assertRaisesRegex(ValueError, "unsupported source_kind"):

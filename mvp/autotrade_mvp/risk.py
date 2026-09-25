@@ -115,6 +115,12 @@ def _normalize_nested_mapping(values, *, name: str) -> dict[str, dict[str, Decim
     return normalized
 
 
+def _canonical_decimal_text(value: Decimal) -> str:
+    if value == 0:
+        return "0"
+    return format(value.normalize(), "f")
+
+
 def stress_scenario_digest(scenario: Mapping[str, object]) -> str:
     """Content identity for one normalized deterministic stress scenario."""
 
@@ -127,10 +133,29 @@ def stress_scenario_digest(scenario: Mapping[str, object]) -> str:
         ),
     )
     encoded = json.dumps(
-        {key: str(value) for key, value in sorted(normalized.items())},
+        {
+            key: _canonical_decimal_text(value)
+            for key, value in sorted(normalized.items())
+        },
         ensure_ascii=True,
         separators=(",", ":"),
         sort_keys=True,
+    ).encode("utf-8")
+    return "sha256:" + sha256(encoded).hexdigest()
+
+
+def tail_scenario_set_digest(
+    scenarios: Sequence[Mapping[str, object]],
+) -> str:
+    """Order-independent multiset identity for an equal-weight tail distribution."""
+
+    if not isinstance(scenarios, Sequence) or isinstance(scenarios, (str, bytes)):
+        raise TypeError("tail scenarios must be a sequence of mappings")
+    scenario_digests = sorted(stress_scenario_digest(item) for item in scenarios)
+    encoded = json.dumps(
+        scenario_digests,
+        ensure_ascii=True,
+        separators=(",", ":"),
     ).encode("utf-8")
     return "sha256:" + sha256(encoded).hexdigest()
 
@@ -242,6 +267,7 @@ class RiskPolicy:
     min_liquidation_headroom: Decimal | None = None
     required_stress_scenario_labels: tuple[str, ...] | None = None
     required_stress_scenario_digests: tuple[tuple[str, str], ...] | None = None
+    required_tail_scenario_set_digest: str | None = None
     max_asset_concentration_fraction: Decimal | None = None
     max_venue_concentration_fraction: Decimal | None = None
     max_order_participation_fraction: Decimal | None = None
@@ -273,6 +299,7 @@ class RiskPolicy:
         min_liquidation_headroom=None,
         required_stress_scenario_labels: Sequence[str] | None = None,
         required_stress_scenario_digests: Mapping[str, str] | None = None,
+        required_tail_scenario_set_digest: str | None = None,
         max_asset_concentration_fraction=None,
         max_venue_concentration_fraction=None,
         max_order_participation_fraction=None,
@@ -368,6 +395,34 @@ class RiskPolicy:
                     "required_stress_scenario_digests keys must exactly match required labels"
                 )
 
+        normalized_tail_set_digest = None
+        if required_tail_scenario_set_digest is not None:
+            if not isinstance(required_tail_scenario_set_digest, str):
+                raise TypeError(
+                    "required_tail_scenario_set_digest must be a SHA-256 string"
+                )
+            normalized_tail_set_digest = required_tail_scenario_set_digest.strip()
+            if (
+                not normalized_tail_set_digest.startswith("sha256:")
+                or len(normalized_tail_set_digest) != 71
+                or any(
+                    ch not in "0123456789abcdef"
+                    for ch in normalized_tail_set_digest[7:]
+                )
+            ):
+                raise ValueError(
+                    "required_tail_scenario_set_digest must be canonical "
+                    "lowercase sha256:<64-hex>"
+                )
+        if expected_shortfall_limit is not None and normalized_tail_set_digest is None:
+            raise ValueError(
+                "expected-shortfall policy requires a frozen tail distribution digest"
+            )
+        if expected_shortfall_limit is None and normalized_tail_set_digest is not None:
+            raise ValueError(
+                "tail distribution digest requires expected-shortfall policy"
+            )
+
         optional_limits: dict[str, Decimal | None] = {}
         for name, raw_value in (
             ("max_asset_concentration_fraction", max_asset_concentration_fraction),
@@ -427,6 +482,7 @@ class RiskPolicy:
             min_liquidation_headroom=liquidation_headroom_limit,
             required_stress_scenario_labels=normalized_required_stress_labels,
             required_stress_scenario_digests=normalized_required_stress_digests,
+            required_tail_scenario_set_digest=normalized_tail_set_digest,
             **optional_limits,
             max_abs_factor_exposure=factor_limit,
             max_clock_age_seconds=clock_limit,
@@ -862,6 +918,7 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
             if policy.required_stress_scenario_digests is None
             else dict(policy.required_stress_scenario_digests)
         ),
+        required_tail_scenario_set_digest=policy.required_tail_scenario_set_digest,
         max_asset_concentration_fraction=policy.max_asset_concentration_fraction,
         max_venue_concentration_fraction=policy.max_venue_concentration_fraction,
         max_order_participation_fraction=policy.max_order_participation_fraction,
@@ -1066,13 +1123,23 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
             worst_stress_loss = max(worst_stress_loss, -pnl)
 
     tail_coverage_complete = True
+    tail_distribution_matches = True
     base_tail_comparison_complete = True
     missing_tail_symbols: set[str] = set()
     missing_base_tail_symbols: set[str] = set()
     expected_shortfall: Decimal | None = None
     base_expected_shortfall: Decimal | None = None
     if policy.max_expected_shortfall is not None:
-        tail_coverage_complete = bool(context.tail_scenarios) or not stress_symbols
+        if stress_symbols:
+            tail_distribution_matches = (
+                bool(context.tail_scenarios)
+                and tail_scenario_set_digest(context.tail_scenarios)
+                == policy.required_tail_scenario_set_digest
+            )
+        tail_coverage_complete = (
+            (bool(context.tail_scenarios) or not stress_symbols)
+            and tail_distribution_matches
+        )
         for scenario in context.tail_scenarios:
             scenario_symbols = set(scenario)
             missing_tail_symbols.update(stress_symbols - scenario_symbols)
@@ -1429,7 +1496,11 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
             (
                 ",".join(sorted(missing_tail_symbols))
                 if missing_tail_symbols
-                else len(context.tail_scenarios)
+                else (
+                    "DISTRIBUTION_MISMATCH"
+                    if not tail_distribution_matches
+                    else len(context.tail_scenarios)
+                )
             ),
             "complete non-empty tail scenarios for every non-zero projected position",
             "expected-shortfall admission requires complete frozen tail evidence",

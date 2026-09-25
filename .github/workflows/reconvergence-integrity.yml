@@ -18,7 +18,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Ensure exact pull-request revisions are available
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          git cat-file -e "${{ github.event.pull_request.base.sha }}^{commit}"
+          git cat-file -e "${{ github.event.pull_request.head.sha }}^{commit}"
       - name: Guard pull-request repository tree
         if: github.event_name == 'pull_request'
         shell: bash

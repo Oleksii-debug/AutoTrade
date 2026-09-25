@@ -397,6 +397,34 @@ class SupplyChainQualificationTests(unittest.TestCase):
         self.assertEqual(left.status, right.status)
         self.assertEqual(left.qualification_id, right.qualification_id)
 
+    def test_equivalent_component_and_inventory_order_has_stable_identity(self):
+        first = component(
+            component_id="pkg:pypi/a@1.0",
+            artifact_id=artifact_id("component:a"),
+        )
+        second = component(
+            component_id="pkg:pypi/b@1.0",
+            artifact_id=artifact_id("component:b"),
+        )
+        left = qualify(
+            evidence(
+                comp=first,
+                components=(first, second),
+                distributed_component_ids=(first.component_id, second.component_id),
+                sbom_component_ids=(first.component_id, second.component_id),
+            )
+        )
+        right = qualify(
+            evidence(
+                comp=second,
+                components=(second, first),
+                distributed_component_ids=(second.component_id, first.component_id),
+                sbom_component_ids=(second.component_id, first.component_id),
+            )
+        )
+        self.assertEqual(left.status, right.status)
+        self.assertEqual(left.qualification_id, right.qualification_id)
+
 
 if __name__ == "__main__":
     unittest.main()

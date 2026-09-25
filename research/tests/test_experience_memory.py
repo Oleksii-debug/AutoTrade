@@ -2,7 +2,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import json
+import sqlite3
+import threading
 import unittest
+from unittest.mock import patch
 
 from research.autotrade_research.memory.episodes import (
     ExperienceMemory,
@@ -40,6 +43,127 @@ def payload(outcome="flat"):
 
 
 class ExperienceMemoryTests(unittest.TestCase):
+    def _assert_availability_clock_waits_for_writer_lock(self, operation):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.sqlite3"
+            store = memory(path)
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=BASE + timedelta(days=1),
+            ):
+                episode, _ = store.append_episode(
+                    decision_time=BASE,
+                    information_cutoff=BASE,
+                    task="research",
+                    regime="calm",
+                    instrument_family="equity",
+                    permission_class="research",
+                    payload=payload(),
+                )
+
+            blocker = sqlite3.connect(path, timeout=5)
+            blocker.execute("BEGIN IMMEDIATE")
+            connect_called = threading.Event()
+            clock_called = threading.Event()
+            finished = threading.Event()
+            failure = []
+            original_connect = store._connect
+
+            def observed_connect():
+                context = original_connect()
+                connect_called.set()
+                return context
+
+            def observed_now():
+                clock_called.set()
+                return BASE + timedelta(days=30)
+
+            store._connect = observed_connect
+
+            def worker():
+                try:
+                    if operation == "append":
+                        store.append_episode(
+                            episode_id="00000000-0000-0000-0000-000000000708",
+                            decision_time=BASE,
+                            information_cutoff=BASE,
+                            task="research",
+                            regime="blocked-writer",
+                            instrument_family="equity",
+                            permission_class="research",
+                            payload=payload("blocked"),
+                        )
+                    else:
+                        store.tombstone(episode, reason="blocked writer tombstone")
+                except BaseException as error:
+                    failure.append(error)
+                finally:
+                    finished.set()
+
+            thread = None
+            try:
+                with patch(
+                    "research.autotrade_research.memory.episodes._utc_now",
+                    side_effect=observed_now,
+                ):
+                    thread = threading.Thread(target=worker, daemon=True)
+                    thread.start()
+                    self.assertTrue(connect_called.wait(2))
+                    self.assertFalse(
+                        clock_called.wait(0.1),
+                        "availability clock was sampled before BEGIN IMMEDIATE acquired the writer lock",
+                    )
+                    blocker.commit()
+                    self.assertTrue(clock_called.wait(2))
+                    self.assertTrue(finished.wait(2))
+                    thread.join(timeout=2)
+            finally:
+                if blocker.in_transaction:
+                    blocker.rollback()
+                blocker.close()
+                store._connect = original_connect
+                if thread is not None and thread.is_alive():
+                    thread.join(timeout=2)
+            if failure:
+                raise failure[0]
+
+            blocked_cutoff = BASE + timedelta(days=29)
+            after_cutoff = BASE + timedelta(days=31)
+            before = store.coverage_population(
+                causal_cutoff=blocked_cutoff,
+                granted_permissions={"research"},
+            )
+            after = store.coverage_population(
+                causal_cutoff=after_cutoff,
+                granted_permissions={"research"},
+            )
+
+            if operation == "append":
+                blocked_episode = "00000000-0000-0000-0000-000000000708"
+                self.assertNotIn(
+                    blocked_episode,
+                    {item["episode_id"] for item in before},
+                )
+                self.assertIn(
+                    blocked_episode,
+                    {item["episode_id"] for item in after},
+                )
+            else:
+                before_source = next(
+                    item for item in before if item["episode_id"] == episode
+                )
+                after_source = next(
+                    item for item in after if item["episode_id"] == episode
+                )
+                self.assertEqual(before_source["tombstone_lineage"], ())
+                self.assertEqual(len(after_source["tombstone_lineage"]), 1)
+
+    def test_episode_availability_clock_is_sampled_after_writer_lock(self):
+        self._assert_availability_clock_waits_for_writer_lock("append")
+
+    def test_tombstone_availability_clock_is_sampled_after_writer_lock(self):
+        self._assert_availability_clock_waits_for_writer_lock("tombstone")
+
     def test_duplicate_episode_is_idempotent(self):
         with TemporaryDirectory() as directory:
             store = memory(Path(directory) / "memory.sqlite3")

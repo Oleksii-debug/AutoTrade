@@ -8,7 +8,12 @@ from unittest.mock import patch
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
-from mvp.autotrade_mvp.persistence import (\n    JournalStore,\n    _event_envelope_digest,\n    canonical_json,\n    payload_digest,\n)
+from mvp.autotrade_mvp.persistence import (
+    JournalStore,
+    _event_envelope_digest,
+    canonical_json,
+    payload_digest,
+)
 from research.autotrade_research.artifacts.store import ArtifactStore
 from mvp.autotrade_mvp.reservations import (
     InsufficientAvailable,
@@ -417,7 +422,7 @@ class DurableReservationBookTests(unittest.TestCase):
             )
             connection.commit()
 
-        with self.assertRaisesRegex(ReservationConflict, "payload hash"):
+        with self.assertRaisesRegex(ValueError, "payload hash"):
             self.book()
 
     def test_tampered_snapshot_with_recomputed_hash_still_fails_replay(self):

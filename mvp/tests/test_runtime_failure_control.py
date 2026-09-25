@@ -4,12 +4,84 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
+from mvp.tests.test_reconciliation_journal import reconciliation
 from mvp.autotrade_mvp.recovery import (
     HostState,
     OutboundAttempt,
     RecoveryController,
     SendPhase,
 )
+
+
+class DurableReconciliationAuthorityTests(unittest.TestCase):
+    def test_durable_controller_rejects_caller_consistency_boolean(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            controller = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:test-account",
+            )
+            controller.start("host-a")
+            with self.assertRaisesRegex(
+                PermissionError,
+                "journal-issued reconciliation checkpoint",
+            ):
+                controller.record_reconciliation(consistent=True)
+            self.assertEqual(controller.state, HostState.RECOVERING)
+            self.assertFalse(controller.provider_reconciled)
+
+    def test_latest_owner_bound_checkpoint_is_durable_readiness_authority(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            controller = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:test-account",
+            )
+            owner = controller.start("host-a")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="runtime-readiness",
+                result=reconciliation(),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id=owner.owner_id,
+                owner_epoch=str(owner.epoch),
+            )
+
+            evidence = controller.record_reconciliation_checkpoint(
+                reconciliation_id="runtime-readiness",
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+            )
+            self.assertEqual(controller.state, HostState.READY)
+            self.assertTrue(controller.provider_reconciled)
+            self.assertEqual(evidence["event_id"], checkpoint["event_id"])
+            self.assertEqual(evidence["payload_hash"], checkpoint["payload_hash"])
+            self.assertEqual(
+                evidence["journal_sequence"],
+                checkpoint["journal_sequence"],
+            )
+
+            restarted = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="PAPER:test-account",
+            )
+            new_owner = restarted.start("host-b")
+            self.assertGreater(new_owner.epoch, owner.epoch)
+            with self.assertRaisesRegex(
+                PermissionError,
+                "bound to this recovery owner",
+            ):
+                restarted.record_reconciliation_checkpoint(
+                    reconciliation_id="runtime-readiness",
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                )
+            self.assertEqual(restarted.state, HostState.RECOVERING)
+            self.assertFalse(restarted.provider_reconciled)
 
 
 class RuntimeRecoveryTests(unittest.TestCase):

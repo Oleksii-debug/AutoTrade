@@ -46,7 +46,7 @@ class JournalBackedHostCommandStore:
     ) -> None:
         if not isinstance(journal, JournalStore):
             raise TypeError("journal must be a JournalStore")
-        if not isinstance(account_id, str) or not account_id:
+        if not isinstance(account_id, str) or not account_id.strip():
             raise ValueError("account_id must be a non-empty string")
         if not is_valid_common_scalar("Environment", environment):
             raise ValueError("environment must be a canonical Environment")

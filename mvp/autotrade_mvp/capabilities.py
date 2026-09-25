@@ -627,6 +627,33 @@ class CapabilityRegistry:
             raise CapabilityError("no capability snapshot exists for the requested identity and time")
         return candidates[-1]
 
+    def exact(self, snapshot_id: str) -> CapabilitySnapshot:
+        """Return one immutable capability snapshot by its canonical identity."""
+
+        identity = _text(snapshot_id, "snapshot_id")
+        snapshot = self._by_id.get(identity)
+        if snapshot is None:
+            raise CapabilityError("capability snapshot_id is unknown")
+        return snapshot
+
+    def require_snapshot(
+        self,
+        snapshot_id: str,
+        *,
+        at: datetime,
+    ) -> CapabilitySnapshot:
+        """Resolve one exact snapshot and fail closed unless it is live + verified."""
+
+        snapshot = self.exact(snapshot_id)
+        point = _instant(at, "at")
+        if snapshot.status != "VERIFIED":
+            raise CapabilityError(f"capability status is {snapshot.status}")
+        if point < snapshot.observed_at:
+            raise CapabilityError("capability snapshot is not yet observable")
+        if point >= snapshot.expires_at:
+            raise CapabilityError("capability snapshot is expired")
+        return snapshot
+
     def require_verified(self, **kwargs) -> CapabilitySnapshot:
         snapshot = self.latest(**kwargs)
         point = _instant(kwargs["at"], "at")

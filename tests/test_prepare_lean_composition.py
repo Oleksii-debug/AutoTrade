@@ -76,6 +76,19 @@ class LeanCompositionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "upstream blob mismatch"):
                 prepare(lean, expected_blobs=expected)
 
+    def test_preflight_failure_does_not_partially_mutate_other_project(self):
+        with TemporaryDirectory() as directory:
+            lean = self._tree(Path(directory))
+            expected = self._expected_blobs(lean)
+            first_path = lean / "Compression" / "QuantConnect.Compression.csproj"
+            before_first = first_path.read_bytes()
+            second_path = lean / "Common" / "QuantConnect.csproj"
+            second_path.write_text("<Project />\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "upstream blob mismatch"):
+                prepare(lean, expected_blobs=expected)
+            self.assertEqual(first_path.read_bytes(), before_first)
+            self.assertIn(DOTNETZIP_OLD, first_path.read_text(encoding="utf-8"))
+
     def test_default_blob_map_rejects_noncanonical_fixture_tree(self):
         with TemporaryDirectory() as directory:
             lean = self._tree(Path(directory))

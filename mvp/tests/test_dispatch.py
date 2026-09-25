@@ -114,8 +114,14 @@ class DispatchTests(unittest.TestCase):
             )
             self.assertEqual(len(paper_events), 3)
             self.assertEqual(len(live_events), 3)
-            self.assertTrue(all(event["environment"] == "PAPER" for event in paper_events))
-            self.assertTrue(all(event["environment"] == "LIVE" for event in live_events))
+            self.assertEqual(paper_events[0]["payload"]["environment"], "PAPER")
+            self.assertEqual(paper_events[0]["payload"]["account_id"], "acct")
+            self.assertEqual(live_events[0]["payload"]["environment"], "LIVE")
+            self.assertEqual(live_events[0]["payload"]["account_id"], "acct")
+            self.assertNotEqual(
+                paper_events[0]["aggregate_id"],
+                live_events[0]["aggregate_id"],
+            )
 
     def test_success_uses_final_barrier_and_persists_three_states(self):
         with TemporaryDirectory() as directory:
@@ -930,8 +936,8 @@ class DispatchTests(unittest.TestCase):
                 dispatcher._aggregate_id("paper-current-owner"),
             )
             self.assertEqual(
-                [event["owner_epoch"] for event in events],
-                [str(owner.epoch), str(owner.epoch), str(owner.epoch)],
+                [event["payload"]["owner_epoch"] for event in events],
+                [owner.epoch, owner.epoch, owner.epoch],
             )
             self.assertEqual(events[0]["payload"]["owner_epoch"], owner.epoch)
             self.assertEqual(events[1]["payload"]["owner_epoch"], owner.epoch)

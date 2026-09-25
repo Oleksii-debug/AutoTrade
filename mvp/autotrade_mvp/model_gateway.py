@@ -221,6 +221,8 @@ def route_model(
 
     candidates: list[ModelDescriptor] = []
     for model_id in candidate_ids:
+        if model_id not in policy_allowed:
+            continue
         if model_id not in request_allowed:
             continue
         descriptor = by_id.get(model_id)

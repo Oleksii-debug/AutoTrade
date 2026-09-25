@@ -50,6 +50,58 @@ class EquityState:
     accrued_financing: Decimal = Decimal("0")
     recalled_quantity: Decimal = Decimal("0")
 
+    def __post_init__(self) -> None:
+        quantity = _decimal(self.quantity, name="quantity")
+        borrowed = _positive(
+            self.borrowed_quantity,
+            name="borrowed_quantity",
+            allow_zero=True,
+        )
+        recalled = _positive(
+            self.recalled_quantity,
+            name="recalled_quantity",
+            allow_zero=True,
+        )
+        if recalled > borrowed:
+            raise ValueError("recalled_quantity cannot exceed borrowed_quantity")
+        if quantity < 0 and borrowed != -quantity:
+            raise ValueError(
+                "cash-equity short quantity must be fully matched by borrowed_quantity"
+            )
+        if quantity >= 0 and borrowed != 0:
+            raise ValueError(
+                "borrowed_quantity is valid only for an open cash-equity short"
+            )
+        object.__setattr__(self, "symbol", _text(self.symbol, name="symbol"))
+        object.__setattr__(self, "quantity", quantity)
+        object.__setattr__(
+            self,
+            "total_basis",
+            _positive(self.total_basis, name="total_basis", allow_zero=True),
+        )
+        object.__setattr__(
+            self,
+            "settled_cash",
+            _decimal(self.settled_cash, name="settled_cash"),
+        )
+        object.__setattr__(
+            self,
+            "unsettled_cash",
+            _decimal(self.unsettled_cash, name="unsettled_cash"),
+        )
+        object.__setattr__(self, "currency", _text(self.currency, name="currency"))
+        object.__setattr__(self, "borrowed_quantity", borrowed)
+        object.__setattr__(
+            self,
+            "accrued_financing",
+            _positive(
+                self.accrued_financing,
+                name="accrued_financing",
+                allow_zero=True,
+            ),
+        )
+        object.__setattr__(self, "recalled_quantity", recalled)
+
     @classmethod
     def create(
         cls,
@@ -93,6 +145,41 @@ class CorporateEvent:
     source_revision: str
     payload: Mapping[str, str]
 
+    def __post_init__(self) -> None:
+        kind = _text(self.kind, name="kind").upper()
+        if kind not in {"SPLIT", "CASH_DIVIDEND", "MERGER_CASH", "DELIST"}:
+            raise ValueError("unsupported corporate event kind")
+        if not isinstance(self.effective_date, date):
+            raise ValueError("effective_date is required")
+        if not isinstance(self.payload, Mapping):
+            raise ValueError("payload must be a mapping")
+
+        normalized_payload: dict[str, str] = {}
+        for raw_key, raw_value in self.payload.items():
+            key = _text(raw_key, name="payload key")
+            if key in normalized_payload:
+                raise ValueError(
+                    "corporate-event payload keys must be unique after normalization"
+                )
+            if isinstance(raw_value, bool) or isinstance(raw_value, float):
+                raise TypeError(
+                    "corporate-event numeric payload must use exact decimal input"
+                )
+            if not isinstance(raw_value, (str, int, Decimal)):
+                raise TypeError(
+                    "corporate-event payload values must be text or exact decimal input"
+                )
+            normalized_payload[key] = str(raw_value)
+
+        object.__setattr__(self, "event_id", _text(self.event_id, name="event_id"))
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(
+            self,
+            "source_revision",
+            _text(self.source_revision, name="source_revision"),
+        )
+        object.__setattr__(self, "payload", normalized_payload)
+
     @classmethod
     def create(
         cls,
@@ -109,7 +196,20 @@ class CorporateEvent:
             raise ValueError("unsupported corporate event kind")
         if not isinstance(effective_date, date):
             raise ValueError("effective_date is required")
-        normalized_payload = {str(k): str(v) for k, v in payload.items()}
+        if not isinstance(payload, Mapping):
+            raise ValueError("payload must be a mapping")
+        normalized_payload: dict[str, str] = {}
+        for raw_key, raw_value in payload.items():
+            key = _text(raw_key, name="payload key")
+            if key in normalized_payload:
+                raise ValueError(
+                    "corporate-event payload keys must be unique after normalization"
+                )
+            if isinstance(raw_value, bool) or isinstance(raw_value, float):
+                raise TypeError("corporate-event numeric payload must use exact decimal input")
+            if not isinstance(raw_value, (str, int, Decimal)):
+                raise TypeError("corporate-event payload values must be text or exact decimal input")
+            normalized_payload[key] = str(raw_value)
         return cls(
             event_id=_text(event_id, name="event_id"),
             kind=normalized_kind,
@@ -165,7 +265,12 @@ class CorporateActionBook:
         denominator = _positive(event.payload.get("denominator"), name="denominator")
         ratio = numerator / denominator
         before = self.state
-        after = replace(before, quantity=before.quantity * ratio)
+        after = replace(
+            before,
+            quantity=before.quantity * ratio,
+            borrowed_quantity=before.borrowed_quantity * ratio,
+            recalled_quantity=before.recalled_quantity * ratio,
+        )
         return Transition(
             event_id=event.event_id,
             before=before,
@@ -223,12 +328,21 @@ class CorporateActionBook:
 
 
 def settle_cash(state: EquityState, amount) -> EquityState:
-    value = _positive(amount, name="amount", allow_zero=True)
-    if value > state.unsettled_cash:
+    """Move an evidenced receivable or payable from unsettled to settled cash."""
+
+    value = _decimal(amount, name="amount")
+    outstanding = state.unsettled_cash
+    if value == 0:
+        return state
+    if outstanding == 0:
+        raise ValueError("cannot settle cash when no unsettled balance exists")
+    if (value > 0) != (outstanding > 0):
+        raise ValueError("settlement amount must have the same sign as unsettled cash")
+    if abs(value) > abs(outstanding):
         raise ValueError("cannot settle more cash than is currently unsettled")
     return replace(
         state,
-        unsettled_cash=state.unsettled_cash - value,
+        unsettled_cash=outstanding - value,
         settled_cash=state.settled_cash + value,
     )
 
@@ -241,6 +355,10 @@ def record_unsettled_purchase(
 ) -> EquityState:
     qty = _positive(quantity, name="quantity")
     unit_price = _positive(price, name="price")
+    if state.quantity < 0 or state.borrowed_quantity != 0:
+        raise ValueError(
+            "long purchase helper cannot implicitly cover an existing cash-equity short"
+        )
     cost = qty * unit_price
     if cost > state.settled_cash:
         raise ValueError("purchase cannot spend unfunded settled cash")

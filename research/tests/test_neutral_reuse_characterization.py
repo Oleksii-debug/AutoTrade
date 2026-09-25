@@ -9,7 +9,10 @@ import unittest
 from unittest.mock import patch
 
 from autotrade_research.artifacts import durable_publish
-from autotrade_research.artifacts.durable_publish import atomic_write_json
+from autotrade_research.artifacts.durable_publish import (
+    DurablePublishLockError,
+    atomic_write_json,
+)
 from autotrade_research.artifacts.resource_lock import (
     ResourceLock,
     ResourceLockBusyError,
@@ -115,6 +118,57 @@ class NeutralReuseCharacterizationTests(unittest.TestCase):
                     for path in Path(directory).iterdir()
                 )
             )
+
+
+    def test_atomic_publish_rejects_hardlinked_lock_path(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "artifact.json"
+            destination.write_text('{"version":"old"}\n', encoding="utf-8")
+            unrelated = root / "unrelated.lock"
+            unrelated.write_bytes(b"sentinel")
+            lock_path = root / ".artifact.json.lock"
+            try:
+                os.link(unrelated, lock_path)
+            except (OSError, NotImplementedError):
+                self.skipTest("hard links unavailable on this platform")
+
+            with self.assertRaisesRegex(
+                DurablePublishLockError, "hard-link aliases"
+            ):
+                atomic_write_json(destination, {"version": "new"})
+
+            self.assertEqual(
+                destination.read_text(encoding="utf-8"),
+                '{"version":"old"}\n',
+            )
+            self.assertEqual(unrelated.read_bytes(), b"sentinel")
+
+    def test_atomic_publish_rejects_symlink_lock_path_when_supported(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("symlinks unavailable on this platform")
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "artifact.json"
+            destination.write_text('{"version":"old"}\n', encoding="utf-8")
+            unrelated = root / "unrelated.lock"
+            unrelated.write_bytes(b"sentinel")
+            lock_path = root / ".artifact.json.lock"
+            try:
+                os.symlink(unrelated, lock_path)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation unavailable on this platform")
+
+            with self.assertRaisesRegex(
+                DurablePublishLockError, "regular non-symlink"
+            ):
+                atomic_write_json(destination, {"version": "new"})
+
+            self.assertEqual(
+                destination.read_text(encoding="utf-8"),
+                '{"version":"old"}\n',
+            )
+            self.assertEqual(unrelated.read_bytes(), b"sentinel")
 
     def test_resource_lock_excludes_second_process(self):
         with TemporaryDirectory() as directory:

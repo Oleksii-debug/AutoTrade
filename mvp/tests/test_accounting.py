@@ -5,11 +5,13 @@ from mvp.autotrade_mvp.accounting import (
     AccountingConflict,
     EconomicBook,
     JournalTransaction,
+    Posting,
     book_equity_fill,
     book_external_cash_flow,
     book_fx_exchange,
     posting,
     reverse_transaction,
+    transaction_digest,
     validate_transaction,
 )
 from mvp.autotrade_mvp.economics import cash_round_trip
@@ -317,6 +319,104 @@ class AccountingFoundationTests(unittest.TestCase):
         self.assertTrue(book.append(first))
         with self.assertRaisesRegex(AccountingConflict, "transaction_id"):
             book.append(changed)
+        self.assertEqual(book.cash("USD"), Decimal("100"))
+
+    def test_audit_identity_and_balance_projection_share_canonical_posting_names(self):
+        raw = JournalTransaction(
+            transaction_id=" tx-whitespace ",
+            cause_event_id=" source-event ",
+            postings=(
+                Posting(" CASH:USD ", " USD ", Decimal("100")),
+                Posting(" CLEARING:USD ", " USD ", Decimal("-100")),
+            ),
+        )
+        book = EconomicBook()
+        self.assertTrue(book.append(raw))
+
+        self.assertEqual(book.cash("USD"), Decimal("100"))
+        stored = book.transactions[0]
+        self.assertEqual(stored.transaction_id, "tx-whitespace")
+        self.assertEqual(stored.cause_event_id, "source-event")
+        self.assertEqual(stored.postings[0].ledger_account, "CASH:USD")
+        self.assertEqual(stored.postings[0].asset_or_currency, "USD")
+        self.assertEqual(book.audit_digest(), EconomicBook(book.transactions).audit_digest())
+
+    def test_transaction_digest_is_stable_across_equivalent_decimal_scales(self):
+        first = JournalTransaction(
+            transaction_id="tx",
+            cause_event_id="cause",
+            postings=(
+                posting("CASH:USD", "USD", Decimal("1.0")),
+                posting("CLEARING:USD", "USD", Decimal("-1.00")),
+            ),
+        )
+        second = JournalTransaction(
+            transaction_id="tx",
+            cause_event_id="cause",
+            postings=(
+                posting("CASH:USD", "USD", Decimal("1.000")),
+                posting("CLEARING:USD", "USD", Decimal("-1")),
+            ),
+        )
+        self.assertEqual(transaction_digest(first), transaction_digest(second))
+
+    def test_transaction_digest_changes_with_economic_or_lineage_content(self):
+        original = book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="deposit",
+            currency="USD",
+            amount="100",
+        )
+        changed_amount = book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="deposit",
+            currency="USD",
+            amount="101",
+        )
+        changed_cause = book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="deposit-2",
+            currency="USD",
+            amount="100",
+        )
+        self.assertNotEqual(
+            transaction_digest(original),
+            transaction_digest(changed_amount),
+        )
+        self.assertNotEqual(
+            transaction_digest(original),
+            transaction_digest(changed_cause),
+        )
+
+    def test_book_audit_digest_is_restart_reproducible_and_order_sensitive(self):
+        first_tx = book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="deposit-1",
+            currency="USD",
+            amount="100",
+        )
+        second_tx = book_external_cash_flow(
+            transaction_id="cash-2",
+            cause_event_id="deposit-2",
+            currency="EUR",
+            amount="50",
+        )
+        original = EconomicBook((first_tx, second_tx))
+        restarted = EconomicBook(original.transactions)
+        reordered = EconomicBook((second_tx, first_tx))
+        self.assertEqual(original.audit_digest(), restarted.audit_digest())
+        self.assertNotEqual(original.audit_digest(), reordered.audit_digest())
+
+    def test_audit_digest_is_not_a_financial_balance_or_authority(self):
+        book = EconomicBook()
+        book.append(book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="deposit",
+            currency="USD",
+            amount="100",
+        ))
+        digest = book.audit_digest()
+        self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(book.cash("USD"), Decimal("100"))
 
     def test_unbalanced_transaction_is_rejected(self):

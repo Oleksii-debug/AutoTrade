@@ -20,14 +20,46 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertNotIn("<PackageReference", text)
         self.assertEqual(project.tag, "Project")
 
-    def test_native_surface_exposes_copyable_host_account_and_environment(self):
+    def test_native_surface_exposes_copyable_host_account_environment_and_evidence(self):
         text = XAML.read_text(encoding="utf-8")
-        for name in ("Active host", "Active account", "Active environment"):
+        for name in (
+            "Active host",
+            "Active account",
+            "Active environment",
+            "Host state version",
+            "Last host evidence time",
+        ):
             self.assertIn(f'AutomationProperties.Name="{name}"', text)
-        self.assertGreaterEqual(text.count('IsReadOnly="True"'), 3)
+        self.assertGreaterEqual(text.count('IsReadOnly="True"'), 5)
         self.assertIn('Target="{Binding ElementName=HostValue}"', text)
         self.assertIn('Target="{Binding ElementName=AccountValue}"', text)
         self.assertIn('Target="{Binding ElementName=EnvironmentValue}"', text)
+        self.assertIn('Target="{Binding ElementName=StateVersionValue}"', text)
+        self.assertIn('Target="{Binding ElementName=LastEvidenceValue}"', text)
+
+    def test_status_refresh_is_keyboard_reachable_and_announced_without_focus_theft(self):
+        text = XAML.read_text(encoding="utf-8")
+        code = CODE.read_text(encoding="utf-8")
+        self.assertIn('Content="_Refresh host status"', text)
+        self.assertIn('AutomationProperties.Name="Refresh host status"', text)
+        self.assertIn('AutomationProperties.LiveSetting="Polite"', text)
+        self.assertIn("MainWindow_Loaded", text)
+        self.assertIn("MainWindow_Closed", text)
+        self.assertIn("returnFocus: false", code)
+        self.assertIn("_lifetime.Cancel()", code)
+
+    def test_failed_refresh_preserves_last_known_values_as_stale(self):
+        code = CODE.read_text(encoding="utf-8")
+        self.assertIn("_lastKnownConnectedStatus", code)
+        self.assertIn("(stale)", code)
+        self.assertIn(
+            "Last known host values are stale and are not current evidence.",
+            code,
+        )
+        self.assertIn(
+            "No cancellation, flattening, or provider outcome is implied.",
+            code,
+        )
 
     def test_emergency_control_is_named_keyboard_reachable_and_truthful(self):
         text = XAML.read_text(encoding="utf-8")
@@ -39,8 +71,9 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("No durable block has been confirmed", code)
         self.assertIn("provider and financial outcomes remain separately tracked", code)
 
-    def test_disconnected_default_never_fabricates_host_acceptance(self):
+    def test_disconnected_default_never_fabricates_host_state_or_acceptance(self):
         client = CLIENT.read_text(encoding="utf-8")
+        self.assertIn("EmergencyHostStatus.Disconnected(", client)
         self.assertIn("new EmergencyCommandResult(", client)
         self.assertIn("false,", client)
         self.assertIn("No durable block of new exposure has been confirmed", client)

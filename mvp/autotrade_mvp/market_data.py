@@ -204,6 +204,7 @@ class MarketNormalizer:
         self._max_available_age = max_available_age
         self._last_sequence: dict[tuple[str, str, str, str], int] = {}
         self._seen_sequence: dict[tuple[str, str, str, str, int], tuple[str, str]] = {}
+        self._unverified_book_streams: set[tuple[str, str, str, str]] = set()
 
     @staticmethod
     def _instrument_version_id(instrument: InstrumentVersion) -> str:
@@ -345,8 +346,20 @@ class MarketNormalizer:
                 value = raw["next_funding_at"]
                 if isinstance(value, datetime):
                     result["next_funding_at"] = _utc_text(_instant(value, "next_funding_at"))
-                elif isinstance(value, str) and value.endswith("Z"):
-                    result["next_funding_at"] = value
+                elif (
+                    isinstance(value, str)
+                    and value.endswith("Z")
+                    and "T" in value
+                ):
+                    try:
+                        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+                    except ValueError as error:
+                        raise MarketDataError(
+                            "next_funding_at must be an UTC instant"
+                        ) from error
+                    result["next_funding_at"] = _utc_text(
+                        _instant(parsed, "next_funding_at")
+                    )
                 else:
                     raise MarketDataError("next_funding_at must be an UTC instant")
             return result
@@ -394,14 +407,24 @@ class MarketNormalizer:
             update.source_sequence,
         ) if update.source_sequence is not None else None
 
+        sequence_fingerprint = _canonical(
+            {
+                "payload_sha256": payload_digest,
+                "source_event_at": _utc_text(update.source_event_at),
+                "available_at": _utc_text(update.available_at),
+                "availability_basis": update.availability_basis,
+                "revision": update.revision,
+            }
+        )
+
         new_sequence = False
         if update.source_sequence is not None:
             existing = self._seen_sequence.get(sequence_identity)
             if existing is not None:
-                existing_digest, _ = existing
-                if existing_digest != payload_digest:
+                existing_fingerprint, _ = existing
+                if existing_fingerprint != sequence_fingerprint:
                     raise SequenceConflict(
-                        "source sequence was reused with different normalized content"
+                        "source sequence was reused with different causal content"
                     )
                 flags.add("DUPLICATE")
             else:
@@ -417,6 +440,22 @@ class MarketNormalizer:
                     if last is None
                     else max(last, update.source_sequence)
                 )
+
+        if update.kind == "BOOK_DELTA" and (
+            "SEQUENCE_GAP" in flags or "OUT_OF_ORDER" in flags
+        ):
+            self._unverified_book_streams.add(stream_key)
+
+        if (
+            update.kind == "BOOK_SNAPSHOT"
+            and update.source_sequence is not None
+            and "DUPLICATE" not in flags
+            and "OUT_OF_ORDER" not in flags
+        ):
+            self._unverified_book_streams.discard(stream_key)
+
+        if update.kind == "BOOK_DELTA" and stream_key in self._unverified_book_streams:
+            flags.add("UNVERIFIED_BOOK_STATE")
 
         identity_material = "|".join(
             [
@@ -436,7 +475,10 @@ class MarketNormalizer:
         )
         event_id = str(uuid5(NAMESPACE_URL, identity_material))
         if update.source_sequence is not None and new_sequence:
-            self._seen_sequence[sequence_identity] = (payload_digest, event_id)
+            self._seen_sequence[sequence_identity] = (
+                sequence_fingerprint,
+                event_id,
+            )
 
         return NormalizedMarketEvent(
             event_id=event_id,

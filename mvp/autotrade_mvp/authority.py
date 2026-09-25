@@ -1343,7 +1343,10 @@ class AuthorityService:
                     provider_id=provider_id,
                     account_id=account_id,
                     environment=environment,
-                    resources=tuple(sorted(normalized_requirements)),
+                    resources=tuple(
+                        resource
+                        for resource, _amount in normalized_requirements
+                    ),
                     now=now,
                     max_age_seconds=normalized_max_age,
                 )

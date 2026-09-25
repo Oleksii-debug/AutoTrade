@@ -267,6 +267,13 @@ def resolve_reconciliation_evidence(
     if not isinstance(raw, Mapping):
         raise TypeError("reconciliation evidence resolver must return a mapping")
 
+    bound_episode = _text(
+        raw.get("episode_id"),
+        name="reconciliation evidence episode_id",
+    )
+    if bound_episode != identity:
+        raise ValueError("reconciliation evidence episode binding mismatch")
+
     checkpoint_event_id = _text(raw.get("checkpoint_event_id"), name="checkpoint_event_id")
     checkpoint_payload_hash = _sha_identity(
         raw.get("checkpoint_payload_hash"),

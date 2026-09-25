@@ -5,6 +5,7 @@ import json
 from tempfile import TemporaryDirectory
 
 from mvp.autotrade_mvp.authority import (
+    AuthorityConflict,
     AuthorityPolicy,
     AuthorityService,
     InstrumentVersionIdentity,

@@ -74,6 +74,45 @@ def _canonical_json(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def _fsync_directory(path: Path) -> None:
+    """Persist directory entry changes where the platform exposes that primitive."""
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        if os.name == "posix":
+            raise
+        return
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_directory_tree(root: Path) -> None:
+    """Flush every directory entry in a staged tree before atomic publication."""
+
+    if root.is_symlink() or not root.is_dir():
+        raise BackupIntegrityError(
+            f"Durable staging root is not a regular directory: {root.name}"
+        )
+    directories = [root]
+    directories.extend(
+        path
+        for path in root.rglob("*")
+        if path.is_dir() and not path.is_symlink()
+    )
+    for directory in sorted(
+        directories,
+        key=lambda item: len(item.relative_to(root).parts),
+        reverse=True,
+    ):
+        _fsync_directory(directory)
+
+
 def _write_bytes_durable(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -83,11 +122,37 @@ def _write_bytes_durable(path: Path, payload: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        _fsync_directory(path.parent)
     finally:
         try:
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def _fsync_file(path: Path) -> None:
+    """Flush an already-published regular file before publishing its directory tree."""
+
+    if path.is_symlink() or not path.is_file():
+        raise BackupIntegrityError(f"Durable payload is not a regular file: {path.name}")
+    # Windows' CRT rejects fsync() on a read-only descriptor with EBADF.
+    # Open the already-published payload read/write there solely to obtain a
+    # flushable descriptor; no bytes are modified. POSIX keeps the narrower
+    # read-only descriptor.
+    mode = "rb+" if os.name == "nt" else "rb"
+    with path.open(mode) as handle:
+        os.fsync(handle.fileno())
+
+
+def _copy_file_durable(source: Path, destination: Path) -> None:
+    """Copy payload bytes into staging and durably flush file plus directory entry."""
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with source.open("rb") as input_handle, destination.open("wb") as output_handle:
+        shutil.copyfileobj(input_handle, output_handle, length=1024 * 1024)
+        output_handle.flush()
+        os.fsync(output_handle.fileno())
+    _fsync_directory(destination.parent)
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -695,6 +760,8 @@ def _backup_sqlite(source: Path, destination: Path) -> tuple[str, int, int]:
     copied_schema = _sqlite_schema_version(destination)
     if copied_schema != schema_version:
         raise BackupIntegrityError("SQLite backup changed the journal schema")
+    _fsync_file(destination)
+    _fsync_directory(destination.parent)
     return _sha256_file(destination), destination.stat().st_size, schema_version
 
 
@@ -905,7 +972,9 @@ def create_backup(
             f"sha256:{manifest_digest}\n".encode("ascii"),
         )
         verify_backup(stage)
+        _fsync_directory_tree(stage)
         os.replace(stage, target)
+        _fsync_directory(target.parent)
         return target
     except Exception:
         shutil.rmtree(stage, ignore_errors=True)
@@ -1073,8 +1142,7 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
             relative = _safe_relative_path(item["path"])
             source = backup / relative
             target = stage / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
+            _copy_file_durable(source, target)
             if _sha256_file(target) != item["sha256"].removeprefix("sha256:"):
                 raise BackupIntegrityError("Restored payload digest mismatch")
 
@@ -1101,7 +1169,9 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
             ),
         }
         _write_bytes_durable(stage / RESTORE_MARKER_NAME, _canonical_json(marker))
+        _fsync_directory_tree(stage)
         os.replace(stage, destination)
+        _fsync_directory(destination.parent)
         return destination
     except Exception:
         shutil.rmtree(stage, ignore_errors=True)

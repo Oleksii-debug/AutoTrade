@@ -102,6 +102,7 @@ def approval(
         "trial_log_complete": True,
         "recorded_trial_count": trial_state["recorded_trials"],
         "trial_budget": trial_state["trial_budget"],
+        "trial_log_hash": trial_state["trial_log_hash"],
     }
     if contaminate:
         science.record_holdout_access(
@@ -154,6 +155,153 @@ class _NoOffsetTZ(tzinfo):
 
 
 class ChampionRegistryTests(unittest.TestCase):
+    def test_promotion_with_unused_trial_budget_requires_registered_stop_evidence(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            value = protocol()
+            value["trial_budget"] = 2
+            value["stopping_rules"] = "stop after invariant failure"
+            registered = science.register_protocol(value)
+            candidate = "candidate-early-stop"
+            artifact = digest(candidate)
+            science.record_trial(
+                registered.protocol_id,
+                status="COMPLETED",
+                payload={
+                    "candidate_id": candidate,
+                    "artifact_hash": artifact,
+                },
+            )
+            trial_state = science.completeness(registered.protocol_id)
+            valid_until = BASE + timedelta(days=1)
+            base_result = {
+                "candidate_id": candidate,
+                "artifact_hash": artifact,
+                "evaluation_status": "PASS",
+                "retention_passed": True,
+                "risk_passed": True,
+                "authority_scope_id": "paper-scope",
+                "evidence_valid_until": valid_until.isoformat(),
+                "reproducible": True,
+                "causal_audit_passed": True,
+                "financial_invariants_passed": True,
+                "trial_log_complete": True,
+                "recorded_trial_count": trial_state["recorded_trials"],
+                "trial_budget": trial_state["trial_budget"],
+                "trial_log_hash": trial_state["trial_log_hash"],
+            }
+            locked = science.register_evaluation(
+                registered.protocol_id,
+                holdout_id="holdout-early-stop",
+                result=base_result,
+            )
+            approval_value = CandidateApproval.create(
+                candidate_id=candidate,
+                artifact_hash=artifact,
+                evidence_id="evidence:early-stop",
+                evidence_valid_until=valid_until,
+                evaluation_status="PASS",
+                retention_passed=True,
+                risk_passed=True,
+                authority_scope_id="paper-scope",
+                protocol_id=registered.protocol_id,
+                protocol_hash=registered.protocol_hash,
+                evaluation_id=locked["evaluation_id"],
+                evaluation_result_hash=locked["result_hash"],
+            )
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "trial-budget exhaustion",
+            ):
+                registry.promote(
+                    approval_value,
+                    expected_generation=0,
+                    now=BASE,
+                    open_position_count=0,
+                    existing_position_policy=None,
+                )
+
+    def test_locked_evaluation_trial_log_hash_detects_post_evaluation_trial_change(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            value = protocol()
+            value["trial_budget"] = 2
+            registered = science.register_protocol(value)
+            candidate = "candidate-log-bound"
+            artifact = digest(candidate)
+            science.record_trial(
+                registered.protocol_id,
+                status="COMPLETED",
+                payload={
+                    "candidate_id": candidate,
+                    "artifact_hash": artifact,
+                },
+            )
+            trial_state = science.completeness(registered.protocol_id)
+            valid_until = BASE + timedelta(days=1)
+            result = {
+                "candidate_id": candidate,
+                "artifact_hash": artifact,
+                "evaluation_status": "PASS",
+                "retention_passed": True,
+                "risk_passed": True,
+                "authority_scope_id": "paper-scope",
+                "evidence_valid_until": valid_until.isoformat(),
+                "reproducible": True,
+                "causal_audit_passed": True,
+                "financial_invariants_passed": True,
+                "trial_log_complete": True,
+                "recorded_trial_count": trial_state["recorded_trials"],
+                "trial_budget": trial_state["trial_budget"],
+                "trial_log_hash": trial_state["trial_log_hash"],
+                "stopping_rule_triggered": True,
+                "stopping_rules_hash": trial_state["stopping_rules_hash"],
+                "stopping_evidence_ref": "artifact:stop-proof",
+            }
+            locked = science.register_evaluation(
+                registered.protocol_id,
+                holdout_id="holdout-log-bound",
+                result=result,
+            )
+            science.record_trial(
+                registered.protocol_id,
+                status="FAILED",
+                payload={"reason": "late-recorded-attempt"},
+            )
+            approval_value = CandidateApproval.create(
+                candidate_id=candidate,
+                artifact_hash=artifact,
+                evidence_id="evidence:log-bound",
+                evidence_valid_until=valid_until,
+                evaluation_status="PASS",
+                retention_passed=True,
+                risk_passed=True,
+                authority_scope_id="paper-scope",
+                protocol_id=registered.protocol_id,
+                protocol_hash=registered.protocol_hash,
+                evaluation_id=locked["evaluation_id"],
+                evaluation_result_hash=locked["result_hash"],
+            )
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "trial_log_hash",
+            ):
+                registry.promote(
+                    approval_value,
+                    expected_generation=0,
+                    now=BASE,
+                    open_position_count=0,
+                    existing_position_policy=None,
+                )
+
     def test_candidate_evidence_time_requires_effective_utc_offset(self):
         with self.assertRaisesRegex(ValueError, "timezone-aware"):
             CandidateApproval.create(

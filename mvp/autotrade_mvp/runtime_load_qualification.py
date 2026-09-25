@@ -169,6 +169,20 @@ class RuntimeCampaignPlan:
     ) -> "RuntimeCampaignPlan":
         if not isinstance(spec, RuntimeBudgetSpec):
             raise TypeError("spec must be RuntimeBudgetSpec")
+        if (
+            isinstance(expected_financial_event_ids, (str, bytes))
+            or not isinstance(expected_financial_event_ids, Sequence)
+        ):
+            raise RuntimeBudgetError(
+                "expected_financial_event_ids must be a sequence"
+            )
+        if (
+            isinstance(financial_aggregate_types, (str, bytes))
+            or not isinstance(financial_aggregate_types, Sequence)
+        ):
+            raise RuntimeBudgetError(
+                "financial_aggregate_types must be a sequence"
+            )
         return cls(
             scenario_id=spec.scenario_id,
             spec_digest=spec.digest,

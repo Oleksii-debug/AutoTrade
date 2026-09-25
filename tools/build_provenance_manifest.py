@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
-from hashlib import sha1
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
@@ -199,15 +199,57 @@ def normalize_inspected_components(
 
 
 def git_blob_sha(path: Path) -> str:
-    """Return the canonical Git blob identity for repository UTF-8 text.
+    """Return Git's canonical object identity for a repository file.
 
-    Git normalizes tracked text to LF in the object database while a Windows
-    checkout may materialize CRLF. Hashing working-tree bytes therefore makes
-    the release manifest platform-dependent. Universal-newline text reads
-    restore the canonical LF payload before applying Git's blob framing.
+    Release provenance must identify the bytes Git would store after applying
+    the repository's clean-filter and EOL attributes, not platform-specific
+    working-tree bytes. The path is deliberately constrained to this
+    repository so callers cannot mint provenance identities for unrelated
+    filesystem content.
     """
-    data = path.read_text(encoding="utf-8").encode("utf-8")
-    return sha1(b"blob " + str(len(data)).encode("ascii") + b"\0" + data).hexdigest()
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"provenance path is unavailable: {path}") from exc
+    if not resolved.is_file():
+        raise ValueError(f"provenance path is not a file: {path}")
+
+    repository_root = ROOT.resolve()
+    try:
+        relative = resolved.relative_to(repository_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"provenance path must be inside repository: {path}"
+        ) from exc
+
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "hash-object",
+                f"--path={relative.as_posix()}",
+                str(resolved),
+            ],
+            cwd=repository_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+    except OSError as exc:
+        raise RuntimeError("git hash-object is unavailable") from exc
+
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
+        raise RuntimeError(
+            f"git hash-object failed for {relative.as_posix()}: {detail}"
+        )
+    object_id = completed.stdout.strip()
+    if GIT_OBJECT_ID.fullmatch(object_id) is None:
+        raise RuntimeError(
+            f"git hash-object returned a noncanonical object id for {relative.as_posix()}"
+        )
+    return object_id
 
 
 def python_dev_dependencies() -> list[dict[str, str]]:

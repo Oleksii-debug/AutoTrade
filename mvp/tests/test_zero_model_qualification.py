@@ -50,7 +50,7 @@ class ZeroModelQualificationTests(unittest.TestCase):
         campaign_economics = campaign["economics"]
         self.assertEqual(campaign_economics["trade_count"], 2)
         self.assertEqual(campaign_economics["evidence_count"], 2)
-        self.assertEqual(campaign_economics["ending_position"], "0")
+        self.assertEqual(Decimal(campaign_economics["ending_position"]), Decimal("0"))
         self.assertEqual(
             campaign_economics["economic_edge_claim"],
             "UNPROVEN_SIMULATION_ONLY",

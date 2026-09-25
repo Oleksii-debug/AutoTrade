@@ -636,7 +636,7 @@ def parse_trade_history(
                 fee_amount=raw["fee"],
                 fee_currency=_text(fee_currency_by_pair[pair], name="fee_currency"),
                 trade_time=_seconds_to_utc(raw.get("time"), name="time"),
-            evidence_refs=(observation.evidence_ref,),
+                evidence_refs=(observation.evidence_ref,),
             )
         )
     return tuple(fills)

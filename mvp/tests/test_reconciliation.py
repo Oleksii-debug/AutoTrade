@@ -20,6 +20,7 @@ def fill(
     fee_amount="0",
     environment="PAPER",
     trade_time="2026-09-24T18:00:00Z",
+    evidence_refs=(),
 ):
     return ProviderFillEvidence.create(
         provider_id="TEST_PROVIDER",
@@ -33,6 +34,7 @@ def fill(
         fee_amount=fee_amount,
         fee_currency="USD",
         trade_time=trade_time,
+        evidence_refs=evidence_refs,
     )
 
 
@@ -590,6 +592,17 @@ class ReconciliationTests(unittest.TestCase):
                 fee_currency="USD",
                 trade_time="2026-09-24T18:00:00Z",
             )
+
+    def test_fill_evidence_refs_are_immutable_provenance_not_economic_identity(self):
+        reference_a = "provider-read:sha256:" + "a" * 64
+        reference_b = "provider-read:sha256:" + "b" * 64
+        observed = fill(evidence_refs=(reference_a,))
+        self.assertEqual(observed.evidence_refs, (reference_a,))
+        self.assertEqual(observed, fill(evidence_refs=(reference_b,)))
+        with self.assertRaisesRegex(TypeError, "evidence_refs must be a tuple"):
+            fill(evidence_refs=[reference_a])
+        with self.assertRaisesRegex(ValueError, "evidence_refs must be unique"):
+            fill(evidence_refs=(reference_a, reference_a))
 
     def test_direct_unknown_submission_cannot_bypass_identity_or_time_validation(self):
         with self.assertRaisesRegex(ValueError, "attempt_id is required"):

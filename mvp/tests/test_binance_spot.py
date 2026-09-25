@@ -220,7 +220,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         self.assertEqual(fills[0].provider_execution_id, "BINANCE-SPOT:BTCUSDT:7")
         self.assertEqual(fills[0].client_order_id, "at-ack-1")
         self.assertEqual(fills[0].account_id, "paper-1")
-        self.assertTrue(fills[0].evidence_refs)
+        self.assertEqual(fills[0].evidence_refs, (observation.evidence_ref,))
         self.assertEqual(fills[0].quantity, Decimal("0.2"))
         self.assertEqual(fills[0].fee_currency, "BNB")
 

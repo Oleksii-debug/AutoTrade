@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
@@ -409,7 +409,7 @@ class ProviderFillEvidence:
     fee_amount: Decimal
     fee_currency: str
     trade_time: str
-    evidence_refs: tuple[str, ...] = ()
+    evidence_refs: tuple[str, ...] = field(default=(), compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(

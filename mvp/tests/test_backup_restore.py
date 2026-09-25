@@ -199,6 +199,36 @@ class BackupRestoreTests(unittest.TestCase):
             with self.assertRaisesRegex(BackupIntegrityError, "missing"):
                 verify_backup(backup)
 
+    def test_nested_manifest_named_file_cannot_hide_outside_inventory(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+
+            hidden = backup / "state" / "backup-manifest.json"
+            hidden.write_text('{"not":"inventory metadata"}\n', encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                BackupIntegrityError,
+                "untracked or missing payload files",
+            ):
+                verify_backup(backup)
+
+    def test_nested_manifest_digest_named_file_cannot_hide_outside_inventory(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+
+            hidden = backup / "artifacts" / "backup-manifest.sha256"
+            hidden.write_text("sha256:" + "0" * 64 + "\n", encoding="ascii")
+
+            with self.assertRaisesRegex(
+                BackupIntegrityError,
+                "untracked or missing payload files",
+            ):
+                verify_backup(backup)
+
     def test_incompatible_backup_schema_is_rejected_even_with_matching_manifest_digest(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

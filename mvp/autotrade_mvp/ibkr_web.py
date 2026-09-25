@@ -426,6 +426,10 @@ class IbkrAbsenceEvidence:
         ):
             if type(getattr(self, field)) is not bool:
                 raise TypeError(f"{field} must be boolean")
+        if self.exclusion_semantics_qualified:
+            raise IbkrWebAdapterError(
+                "IBKR Web foundation cannot self-assert exclusion semantics qualification"
+            )
         if self.order_found and self.exact_client_order_absent:
             raise IbkrWebAdapterError(
                 "order_found conflicts with exact_client_order_absent"

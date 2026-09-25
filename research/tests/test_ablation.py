@@ -1315,7 +1315,10 @@ class AblationTests(unittest.TestCase):
             diagnostic = evaluate_qualified_incremental_value(
                 "agent",
                 cases,
-                population=registered_population(cases),
+                population=registered_population(
+                    cases,
+                    evaluation_cutoff=evaluation_cutoff,
+                ),
                 canonical_outcomes=forged,
                 minimum_pairs=2,
                 required_lower_bound=Decimal("0"),

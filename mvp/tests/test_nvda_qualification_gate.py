@@ -291,6 +291,37 @@ class NvdaQualificationGateTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("inside qualification/nvda", result.stderr)
 
+    def test_qualified_static_status_cannot_pass_without_release_artifact_binding(self):
+        with TemporaryDirectory() as directory:
+            status = Path(directory) / "status.json"
+            status.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0.0",
+                        "qualified": True,
+                        "source_sha": "a" * 40,
+                        "artifact_sha256": "sha256:" + "b" * 64,
+                        "evidence_file": "qualification/nvda/syntactically-valid-fake.json",
+                        "evidence_sha256": "sha256:" + "c" * 64,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "tools/check_nvda_qualification.py",
+                    "--check-status",
+                    "--status",
+                    str(status),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("requires --release-artifact", result.stderr)
+
     def test_qualification_cli_binds_evidence_to_actual_release_artifact(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

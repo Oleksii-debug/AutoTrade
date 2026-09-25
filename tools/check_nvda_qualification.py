@@ -316,12 +316,25 @@ def main() -> int:
                     raise NvdaQualificationError(
                         "status evidence_file must stay inside qualification/nvda"
                     ) from error
+                if args.release_artifact is None:
+                    raise NvdaQualificationError(
+                        "qualified status requires --release-artifact or a future "
+                        "independently trusted artifact-binding attestation"
+                    )
                 evidence = _load(evidence_path, name="evidence")
                 result = validate_evidence(evidence, requirements)
+                actual_artifact_sha = validate_release_artifact_binding(
+                    evidence,
+                    args.release_artifact,
+                )
                 if result["source_sha"] != status.get("source_sha"):
                     raise NvdaQualificationError("status source SHA does not match evidence")
                 if result["artifact_sha256"] != status.get("artifact_sha256"):
                     raise NvdaQualificationError("status artifact SHA does not match evidence")
+                if actual_artifact_sha != status.get("artifact_sha256"):
+                    raise NvdaQualificationError(
+                        "status artifact SHA does not match observed release artifact"
+                    )
                 if status.get("evidence_sha256") != evidence_digest(evidence_path):
                     raise NvdaQualificationError("status evidence digest is stale")
             else:

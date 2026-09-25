@@ -142,6 +142,30 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
                 registry.holdout_access_count(registered.protocol_id, holdout), 2
             )
 
+    def test_holdout_access_by_one_protocol_contaminates_other_protocols(self):
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            first_protocol = registry.register_protocol(protocol())
+
+            second_payload = protocol()
+            second_payload["hypothesis"] = "independent candidate over same locked segment"
+            second_protocol = registry.register_protocol(second_payload)
+
+            holdout = "forward-2026-h1"
+            registry.record_holdout_access(
+                first_protocol.protocol_id,
+                holdout_id=holdout,
+                purpose="candidate-A-inspection",
+            )
+
+            evaluation = registry.register_evaluation(
+                second_protocol.protocol_id,
+                holdout_id=holdout,
+                result={"net_utility": "0.019"},
+            )
+            self.assertEqual(evaluation["prior_access_count"], 1)
+            self.assertEqual(evaluation["untouched"], 0)
+
     def test_manual_holdout_access_contaminates_later_locked_evaluation(self):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")

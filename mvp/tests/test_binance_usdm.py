@@ -11,7 +11,12 @@ from mvp.autotrade_mvp.binance_usdm import (
     parse_order_ack,
     prepare_order_request,
 )
-from mvp.autotrade_mvp.capabilities import CapabilitySnapshot
+from mvp.autotrade_mvp.capabilities import (
+    CapabilityClaim,
+    CapabilitySnapshot,
+    EvidenceVerification,
+    derive_capability_snapshot,
+)
 
 
 NOW = datetime(2026, 9, 25, 0, tzinfo=timezone.utc)
@@ -26,23 +31,14 @@ def capability(
     instrument_version="BTCUSDT-PERP:v1",
     status="VERIFIED",
 ):
-    evidence = {
-        "artifact_id": str(uuid4()),
-        "sha256": "sha256:" + "c" * 64,
-        "observed_at": "2026-09-24T23:00:00Z",
-        "source_uri": (
-            "https://developers.binance.com/en/docs/catalog/"
-            "core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/trade"
-        ),
-    }
-    return CapabilitySnapshot(
-        snapshot_id=str(uuid4()),
+    observed_at = NOW - timedelta(hours=1)
+    common = dict(
         provider_id=provider_id,
         account_id="account-1",
         entity_id="global",
         environment="PAPER",
         instrument_version=instrument_version,
-        observed_at=NOW - timedelta(hours=1),
+        observed_at=observed_at,
         expires_at=NOW + timedelta(hours=1),
         supported_order_types=frozenset(order_types),
         time_in_force=frozenset(tif),
@@ -51,11 +47,44 @@ def capability(
         native_protection=frozenset(),
         rate_limit_policy_id="binance-usdm-foundation",
         data_entitlements=frozenset({"ORDERS", "TRADES"}),
-        evidence=(evidence,),
-        status=status,
-        sources=frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}),
     )
-
+    source_uri = (
+        "https://developers.binance.com/en/docs/catalog/"
+        "core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/trade"
+    )
+    if status != "VERIFIED":
+        evidence = {
+            "artifact_id": str(uuid4()),
+            "sha256": "sha256:" + "c" * 64,
+            "observed_at": observed_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "source_uri": source_uri,
+        }
+        return CapabilitySnapshot(
+            snapshot_id=str(uuid4()),
+            **common,
+            evidence=(evidence,),
+            status=status,
+            sources=frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}),
+        )
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            **common,
+            evidence_ref={
+                "artifact_id": str(uuid4()),
+                "sha256": "sha256:" + "c" * 64,
+                "observed_at": observed_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "source_uri": source_uri,
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    return derive_capability_snapshot(
+        snapshot_id=str(uuid4()),
+        claims=claims,
+        observed_at=observed_at,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    )
 
 class BinanceUsdmFoundationTests(unittest.TestCase):
     def test_net_limit_preserves_exact_strings_and_ack_only(self):

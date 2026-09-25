@@ -3,7 +3,11 @@ from decimal import Decimal
 import unittest
 from uuid import uuid4
 
-from mvp.autotrade_mvp.capabilities import CapabilitySnapshot
+from mvp.autotrade_mvp.capabilities import (
+    CapabilityClaim,
+    EvidenceVerification,
+    derive_capability_snapshot,
+)
 from mvp.autotrade_mvp.kraken_spot import (
     KrakenSpotAbsenceEvidence,
     KrakenSpotAdapterError,
@@ -28,33 +32,39 @@ def capability(
     account_id="spot-account",
     environment="PAPER",
 ):
-    evidence = {
-        "artifact_id": str(uuid4()),
-        "sha256": "sha256:" + "b" * 64,
-        "observed_at": "2026-09-24T19:00:00Z",
-        "source_uri": "https://www.kraken.com/features/trading-api",
-    }
-    return CapabilitySnapshot(
-        snapshot_id=str(uuid4()),
-        provider_id="KRAKEN",
-        account_id=account_id,
-        entity_id="kraken-spot",
-        environment=environment,
-        instrument_version="XBTUSD:v1",
-        observed_at=NOW - timedelta(hours=1),
-        expires_at=NOW + timedelta(hours=1),
-        supported_order_types=frozenset(order_types),
-        time_in_force=frozenset(tif),
-        permission_scopes=frozenset({"ORDER_WRITE"}),
-        position_mode="CASH",
-        native_protection=frozenset(),
-        rate_limit_policy_id="kraken-spot-test",
-        data_entitlements=frozenset({"ORDERS", "TRADES", "LEDGERS"}),
-        evidence=(evidence,),
-        status="VERIFIED",
-        sources=frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}),
+    observed_at = NOW - timedelta(hours=1)
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            provider_id="KRAKEN",
+            account_id=account_id,
+            entity_id="kraken-spot",
+            environment=environment,
+            instrument_version="XBTUSD:v1",
+            observed_at=observed_at,
+            expires_at=NOW + timedelta(hours=1),
+            supported_order_types=frozenset(order_types),
+            time_in_force=frozenset(tif),
+            permission_scopes=frozenset({"ORDER_WRITE"}),
+            position_mode="CASH",
+            native_protection=frozenset(),
+            rate_limit_policy_id="kraken-spot-test",
+            data_entitlements=frozenset({"ORDERS", "TRADES", "LEDGERS"}),
+            evidence_ref={
+                "artifact_id": str(uuid4()),
+                "sha256": "sha256:" + "b" * 64,
+                "observed_at": observed_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "source_uri": "https://www.kraken.com/features/trading-api",
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-
+    return derive_capability_snapshot(
+        snapshot_id=str(uuid4()),
+        claims=claims,
+        observed_at=observed_at,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    )
 
 class KrakenSpotAdapterTests(unittest.TestCase):
     def test_direct_prepared_request_requires_canonical_factory(self):

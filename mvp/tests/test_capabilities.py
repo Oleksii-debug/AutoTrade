@@ -497,6 +497,7 @@ class CapabilityFoundationTests(unittest.TestCase):
         )
         rebuilt = replace(
             snapshot,
+            status="UNKNOWN",
             supported_order_types=[" LIMIT ", "MARKET"],
             sources={" documented ", "api", "ACCOUNT", "instrument"},
         )
@@ -506,9 +507,13 @@ class CapabilityFoundationTests(unittest.TestCase):
             frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}),
         )
         with self.assertRaisesRegex(CapabilityError, "unsupported source"):
-            replace(snapshot, sources={"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT", "MODEL"})
+            replace(
+                snapshot,
+                status="UNKNOWN",
+                sources={"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT", "MODEL"},
+            )
         with self.assertRaisesRegex(CapabilityError, "must be a collection"):
-            replace(snapshot, permission_scopes="ORDER.WRITE")
+            replace(snapshot, status="UNKNOWN", permission_scopes="ORDER.WRITE")
 
     def test_old_evidence_cannot_be_relabelled_as_fresh_claim(self):
         original = claim(

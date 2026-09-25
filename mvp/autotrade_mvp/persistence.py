@@ -71,7 +71,7 @@ class JournalStore:
     publication intent; a separate qualified dispatcher must perform delivery.
     """
 
-    SCHEMA_VERSION = 5
+    SCHEMA_VERSION = 6
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -195,6 +195,14 @@ class JournalStore:
                 "ALTER TABLE events ADD COLUMN envelope_json TEXT",
                 "ALTER TABLE events ADD COLUMN envelope_hash TEXT",
             )
+        if version == 6:
+            return (
+                "ALTER TABLE events ADD COLUMN journal_sequence INTEGER",
+                "UPDATE events SET journal_sequence = rowid "
+                "WHERE journal_sequence IS NULL",
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_journal_sequence "
+                "ON events(journal_sequence)",
+            )
         raise ValueError(f"Unsupported journal migration version: {version}")
 
     @classmethod
@@ -212,7 +220,8 @@ class JournalStore:
             "events": frozenset({
                 "event_id", "event_type", "aggregate_type", "aggregate_id",
                 "aggregate_version", "payload_json", "payload_hash", "committed_at",
-            } | ({"envelope_json", "envelope_hash"} if cls.SCHEMA_VERSION >= 5 else set())),
+            } | ({"envelope_json", "envelope_hash"} if cls.SCHEMA_VERSION >= 5 else set())
+              | ({"journal_sequence"} if cls.SCHEMA_VERSION >= 6 else set())),
             "outbox": frozenset({
                 "outbox_id", "event_id", "topic", "payload_json",
                 "created_at", "delivered_at"
@@ -258,7 +267,11 @@ class JournalStore:
         expected_unique = {
             "events": {
                 ("aggregate_type", "aggregate_id", "aggregate_version"),
-            },
+            } | (
+                {("journal_sequence",)}
+                if cls.SCHEMA_VERSION >= 6
+                else set()
+            ),
             "outbox": {("event_id",)},
             "command_dedupe": (
                 {("actor", "environment", "idempotency_key")}
@@ -293,6 +306,21 @@ class JournalStore:
                 raise ValueError(
                     f"Journal schema table {table_name} is missing unique constraint: "
                     + rendered
+                )
+
+        if cls.SCHEMA_VERSION >= 6:
+            raw_sequences = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT journal_sequence FROM events ORDER BY journal_sequence"
+                )
+            ]
+            if any(
+                type(value) is not int or value <= 0
+                for value in raw_sequences
+            ) or raw_sequences != list(range(1, len(raw_sequences) + 1)):
+                raise ValueError(
+                    "Journal schema events journal_sequence is not contiguous"
                 )
 
         foreign_keys = [
@@ -591,6 +619,10 @@ class JournalStore:
             raise ValueError("journal event payload hash does not match stored payload")
 
         row_keys = set(row.keys())
+        if "journal_sequence" in row_keys:
+            journal_sequence = row["journal_sequence"]
+            if type(journal_sequence) is not int or journal_sequence <= 0:
+                raise ValueError("journal event sequence must be a positive integer")
         if "envelope_json" in row_keys:
             raw_envelope = row["envelope_json"]
             if not isinstance(raw_envelope, str):
@@ -648,12 +680,20 @@ class JournalStore:
                     "committed_at": row["committed_at"],
                 }
             )
+        if "journal_sequence" in row_keys:
+            decoded["journal_sequence"] = journal_sequence
         return decoded
 
     def get_event(self, event_id: str) -> dict[str, Any] | None:
         event_id = self._require_text(event_id, "event_id")
         envelope_columns = (
-            ", envelope_json, envelope_hash" if self.SCHEMA_VERSION >= 5 else ""
+            ", envelope_json, envelope_hash, journal_sequence"
+            if self.SCHEMA_VERSION >= 6
+            else (
+                ", envelope_json, envelope_hash"
+                if self.SCHEMA_VERSION >= 5
+                else ""
+            )
         )
         with self._connect() as connection:
             row = connection.execute(
@@ -678,6 +718,19 @@ class JournalStore:
                 (aggregate_type, aggregate_id),
             ).fetchone()[0]
         return 1 if current is None else int(current) + 1
+
+    @staticmethod
+    def _journal_sequence_value(connection: sqlite3.Connection) -> int:
+        row = connection.execute(
+            "SELECT MAX(journal_sequence) FROM events"
+        ).fetchone()
+        return 0 if row is None or row[0] is None else int(row[0])
+
+    def current_journal_sequence(self) -> int:
+        """Return the explicit durable global journal cursor."""
+
+        with self._connect() as connection:
+            return self._journal_sequence_value(connection)
 
     def append_event(self, envelope: dict[str, Any], *, outbox_topic: str | None = None) -> AppendResult:
         event_id = self._require_text(envelope.get("event_id"), "event_id")
@@ -775,7 +828,31 @@ class JournalStore:
                     f"aggregate_version must be {expected_version} for {aggregate_type}/{aggregate_id}"
                 )
 
-            if self.SCHEMA_VERSION >= 5:
+            if self.SCHEMA_VERSION >= 6:
+                journal_sequence = self._journal_sequence_value(connection) + 1
+                connection.execute(
+                    """
+                    INSERT INTO events(
+                        event_id, event_type, aggregate_type, aggregate_id,
+                        aggregate_version, payload_json, payload_hash, committed_at,
+                        envelope_json, envelope_hash, journal_sequence
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        event_type,
+                        aggregate_type,
+                        aggregate_id,
+                        aggregate_version,
+                        payload_json,
+                        supplied_hash,
+                        committed_at,
+                        envelope_json,
+                        envelope_hash,
+                        journal_sequence,
+                    ),
+                )
+            elif self.SCHEMA_VERSION >= 5:
                 connection.execute(
                     """
                     INSERT INTO events(
@@ -863,7 +940,13 @@ class JournalStore:
         aggregate_type = self._require_text(aggregate_type, "aggregate_type")
         aggregate_id = self._require_text(aggregate_id, "aggregate_id")
         envelope_columns = (
-            ", envelope_json, envelope_hash" if self.SCHEMA_VERSION >= 5 else ""
+            ", envelope_json, envelope_hash, journal_sequence"
+            if self.SCHEMA_VERSION >= 6
+            else (
+                ", envelope_json, envelope_hash"
+                if self.SCHEMA_VERSION >= 5
+                else ""
+            )
         )
         with self._connect() as connection:
             rows = connection.execute(
@@ -892,7 +975,13 @@ class JournalStore:
 
         aggregate_type = self._require_text(aggregate_type, "aggregate_type")
         envelope_columns = (
-            ", envelope_json, envelope_hash" if self.SCHEMA_VERSION >= 5 else ""
+            ", envelope_json, envelope_hash, journal_sequence"
+            if self.SCHEMA_VERSION >= 6
+            else (
+                ", envelope_json, envelope_hash"
+                if self.SCHEMA_VERSION >= 5
+                else ""
+            )
         )
         with self._connect() as connection:
             rows = connection.execute(
@@ -902,7 +991,7 @@ class JournalStore:
                        {envelope_columns}
                 FROM events
                 WHERE aggregate_type = ?
-                ORDER BY rowid
+                ORDER BY journal_sequence
                 """,
                 (aggregate_type,),
             ).fetchall()
@@ -1410,6 +1499,7 @@ class JournalStore:
         result: Any,
         state_version: int,
         events: list[tuple[dict[str, Any], str | None]],
+        expected_journal_sequence: int | None = None,
     ) -> tuple[Any, bool, tuple[AppendResult, ...]]:
         """Atomically commit command dedupe, ordered events and outbox rows."""
 
@@ -1423,6 +1513,16 @@ class JournalStore:
             raise ValueError("state_version must be a non-negative integer")
         if not events:
             raise ValueError("At least one event is required")
+        if (
+            expected_journal_sequence is not None
+            and (
+                type(expected_journal_sequence) is not int
+                or expected_journal_sequence < 0
+            )
+        ):
+            raise ValueError(
+                "expected_journal_sequence must be a non-negative integer"
+            )
 
         request_hash = payload_digest(request)
         result_json = canonical_json(result)
@@ -1502,6 +1602,15 @@ class JournalStore:
                 ).fetchone() is not None:
                     raise ValueError("command_id already exists with another idempotency key")
 
+                if (
+                    expected_journal_sequence is not None
+                    and self._journal_sequence_value(connection)
+                    != expected_journal_sequence
+                ):
+                    raise ValueError(
+                        "journal sequence changed after financial evidence validation"
+                    )
+
                 next_versions: dict[tuple[str, str], int] = {}
                 for item in prepared:
                     if connection.execute(
@@ -1547,8 +1656,34 @@ class JournalStore:
                 )
 
                 appended: list[AppendResult] = []
+                next_journal_sequence = self._journal_sequence_value(connection) + 1
                 for item in prepared:
-                    if self.SCHEMA_VERSION >= 5:
+                    if self.SCHEMA_VERSION >= 6:
+                        connection.execute(
+                            """
+                            INSERT INTO events(
+                                event_id, event_type, aggregate_type, aggregate_id,
+                                aggregate_version, payload_json, payload_hash,
+                                committed_at, envelope_json, envelope_hash,
+                                journal_sequence
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                item["event_id"],
+                                item["event_type"],
+                                item["aggregate_type"],
+                                item["aggregate_id"],
+                                item["aggregate_version"],
+                                item["payload_json"],
+                                item["payload_hash"],
+                                item["committed_at"],
+                                item["envelope_json"],
+                                item["envelope_hash"],
+                                next_journal_sequence,
+                            ),
+                        )
+                        next_journal_sequence += 1
+                    elif self.SCHEMA_VERSION >= 5:
                         connection.execute(
                             """
                             INSERT INTO events(

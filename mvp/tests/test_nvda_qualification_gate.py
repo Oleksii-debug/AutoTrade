@@ -156,6 +156,20 @@ class NvdaQualificationGateTests(unittest.TestCase):
             ):
                 validate_evidence(evidence, REQUIREMENTS)
 
+    def test_windows_family_match_requires_token_boundary(self):
+        for fake_version in ("Windows 110", "Windows 11FAKE", "Windows 11.legacy"):
+            evidence = complete_evidence()
+            evidence["environment"]["windows_version"] = fake_version
+            with self.subTest(fake_version=fake_version), self.assertRaisesRegex(
+                NvdaQualificationError,
+                "Windows 11",
+            ):
+                validate_evidence(evidence, REQUIREMENTS)
+
+        valid = complete_evidence()
+        valid["environment"]["windows_version"] = "Windows 11"
+        self.assertTrue(validate_evidence(valid, REQUIREMENTS)["qualified"])
+
     def test_wrong_os_mouse_input_or_nonrelease_artifact_is_rejected(self):
         cases = (
             ("windows_version", "Windows 10", "Windows 11"),

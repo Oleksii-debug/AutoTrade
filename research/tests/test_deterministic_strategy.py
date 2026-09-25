@@ -13,6 +13,8 @@ from research.autotrade_research.strategies.deterministic import (
     NoTradeBaseline,
     ReturnThresholdBaseline,
     StrategyDescriptor,
+    StrategyEconomicsBinding,
+    bind_strategy_economics,
     run_baseline,
     to_decision_proposal,
 )
@@ -28,6 +30,46 @@ def obs(i, price, *, available=None):
         symbol="AAA",
         available_at=available or BASE + timedelta(minutes=i),
         price=price,
+    )
+
+
+def economics_binding(
+    proposal,
+    *,
+    instrument_version,
+    available_at=None,
+    after_cost_lower_bound="0.01",
+    max_feasible_quantity="2",
+    lot_size="1",
+    required_evidence_dimensions=(),
+    dimension_evidence=(),
+    status="QUALIFIED",
+    input_manifest_refs=("sha256:" + "c" * 64,),
+):
+    return StrategyEconomicsBinding(
+        strategy_fingerprint=proposal.strategy_fingerprint,
+        strategy_configuration_fingerprint=(
+            proposal.strategy_configuration_fingerprint
+        ),
+        instrument_version=instrument_version,
+        information_cutoff=proposal.information_cutoff,
+        decision_time=proposal.decision_time,
+        horizon_seconds=proposal.horizon_seconds,
+        expiry=proposal.expiry,
+        available_at=available_at or proposal.information_cutoff,
+        input_manifest_refs=input_manifest_refs,
+        gross_return_distribution_sha256="sha256:" + "d" * 64,
+        after_cost_return_distribution_sha256="sha256:" + "e" * 64,
+        after_cost_lower_bound=after_cost_lower_bound,
+        execution_model_fingerprint="sha256:" + "f" * 64,
+        execution_calibration_sha256="sha256:" + "1" * 64,
+        execution_fidelity="FROZEN_EX_ANTE",
+        capacity_assessment_sha256="sha256:" + "2" * 64,
+        max_feasible_quantity=max_feasible_quantity,
+        lot_size=lot_size,
+        required_evidence_dimensions=required_evidence_dimensions,
+        dimension_evidence=dimension_evidence,
+        status=status,
     )
 
 
@@ -432,8 +474,10 @@ class DeterministicStrategyTests(unittest.TestCase):
             proposal,
             proposal_id="12345678-1234-5678-9234-567812345678",
             instrument_version="instrument:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa@7",
-            input_manifest_refs=("sha256:" + "c" * 64,),
-            expected_return_distribution_ref="artifact:return-distribution:1",
+            economics_binding=economics_binding(
+                proposal,
+                instrument_version="instrument:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa@7",
+            ),
             exit_policy_ref="exit-policy:registered-v1",
             compute_cost_currency="USD",
             counterarguments=("economic edge remains unproven",),
@@ -504,8 +548,10 @@ class DeterministicStrategyTests(unittest.TestCase):
             proposal,
             proposal_id="12345678-1234-5678-9234-567812345678",
             instrument_version="instrument:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa@7",
-            input_manifest_refs=("sha256:" + "c" * 64,),
-            expected_return_distribution_ref="artifact:return-distribution:1",
+            economics_binding=economics_binding(
+                proposal,
+                instrument_version="instrument:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa@7",
+            ),
             exit_policy_ref="exit-policy:registered-v1",
             compute_cost_currency="USD",
         )
@@ -524,8 +570,7 @@ class DeterministicStrategyTests(unittest.TestCase):
                 unregistered,
                 proposal_id="12345678-1234-5678-9234-567812345678",
                 instrument_version="instrument:v1",
-                input_manifest_refs=("sha256:" + "c" * 64,),
-                expected_return_distribution_ref="artifact:return-distribution:1",
+                economics_binding=None,
                 exit_policy_ref="exit-policy:v1",
                 compute_cost_currency="USD",
             )
@@ -548,30 +593,24 @@ class DeterministicStrategyTests(unittest.TestCase):
                 proposal,
                 proposal_id="abcdefab-1234-5678-9234-567812345678".upper(),
                 instrument_version="instrument:v1",
-                input_manifest_refs=("sha256:" + "c" * 64,),
-                expected_return_distribution_ref="artifact:return-distribution:1",
+                economics_binding=economics_binding(
+                    proposal,
+                    instrument_version="instrument:v1",
+                ),
                 exit_policy_ref="exit-policy:v1",
                 compute_cost_currency="USD",
             )
         with self.assertRaisesRegex(ValueError, "immutable evidence"):
-            to_decision_proposal(
+            economics_binding(
                 proposal,
-                proposal_id="12345678-1234-5678-9234-567812345678",
                 instrument_version="instrument:v1",
                 input_manifest_refs=(),
-                expected_return_distribution_ref="artifact:return-distribution:1",
-                exit_policy_ref="exit-policy:v1",
-                compute_cost_currency="USD",
             )
         with self.assertRaisesRegex(ValueError, "canonical sha256"):
-            to_decision_proposal(
+            economics_binding(
                 proposal,
-                proposal_id="12345678-1234-5678-9234-567812345678",
                 instrument_version="instrument:v1",
                 input_manifest_refs=("not-a-digest",),
-                expected_return_distribution_ref="artifact:return-distribution:1",
-                exit_policy_ref="exit-policy:v1",
-                compute_cost_currency="USD",
             )
 
 
@@ -605,8 +644,10 @@ class DeterministicStrategyTests(unittest.TestCase):
             proposal,
             proposal_id="12345678-1234-5678-9234-567812345678",
             instrument_version="instrument:not-executable-for-hold",
-            input_manifest_refs=("sha256:" + "c" * 64,),
-            expected_return_distribution_ref="artifact:null-return-distribution",
+            economics_binding=economics_binding(
+                proposal,
+                instrument_version="instrument:not-executable-for-hold",
+            ),
             exit_policy_ref="exit-policy:no-position",
             compute_cost_currency="USD",
         )
@@ -868,6 +909,188 @@ class DeterministicStrategyTests(unittest.TestCase):
                 strategy_fingerprint=descriptor.fingerprint,
                 strategy_configuration_fingerprint=descriptor.fingerprint,
             )
+
+
+
+    def test_positive_gross_signal_with_nonpositive_after_cost_bound_cannot_qualify(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        proposal = run_baseline(
+            strategy,
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+        )
+        with self.assertRaisesRegex(ValueError, "positive after-cost lower bound"):
+            economics_binding(
+                proposal,
+                instrument_version="instrument:aaa@1",
+                after_cost_lower_bound="0",
+                status="QUALIFIED",
+            )
+
+        inconclusive = economics_binding(
+            proposal,
+            instrument_version="instrument:aaa@1",
+            after_cost_lower_bound="0",
+            status="INCONCLUSIVE",
+        )
+        bound = bind_strategy_economics(
+            proposal,
+            inconclusive,
+            instrument_version="instrument:aaa@1",
+        )
+        self.assertEqual(bound.action, "HOLD")
+        self.assertEqual(bound.quantity, Decimal("0"))
+        self.assertEqual(proposal.action, "BUY")
+        self.assertEqual(proposal.quantity, Decimal("2"))
+
+    def test_frozen_ex_ante_capacity_can_only_reduce_exposure(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        proposal = run_baseline(
+            strategy,
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+        )
+        economics = economics_binding(
+            proposal,
+            instrument_version="instrument:aaa@1",
+            max_feasible_quantity="1.4",
+            lot_size="0.5",
+        )
+        bound = bind_strategy_economics(
+            proposal,
+            economics,
+            instrument_version="instrument:aaa@1",
+        )
+        self.assertEqual(bound.action, "BUY")
+        self.assertEqual(bound.quantity, Decimal("1.0"))
+        self.assertLessEqual(bound.quantity, proposal.quantity)
+        self.assertEqual(
+            bound.fingerprint,
+            bind_strategy_economics(
+                proposal,
+                economics,
+                instrument_version="instrument:aaa@1",
+            ).fingerprint,
+        )
+
+    def test_future_economics_evidence_cannot_resize_prior_proposal(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        proposal = run_baseline(
+            strategy,
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+        )
+        with self.assertRaisesRegex(ValueError, "not causally available"):
+            economics_binding(
+                proposal,
+                instrument_version="instrument:aaa@1",
+                available_at=proposal.information_cutoff + timedelta(seconds=1),
+                max_feasible_quantity="1000000",
+            )
+
+    def test_missing_required_borrow_or_fx_evidence_fails_closed(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        proposal = run_baseline(
+            strategy,
+            [obs(0, "102"), obs(1, "100")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+        )
+        self.assertEqual(proposal.action, "SELL")
+        with self.assertRaisesRegex(ValueError, "missing required evidence"):
+            economics_binding(
+                proposal,
+                instrument_version="instrument:aaa@1",
+                required_evidence_dimensions=("BORROW", "FX"),
+                dimension_evidence=(
+                    ("FX", "sha256:" + "3" * 64),
+                ),
+                status="QUALIFIED",
+            )
+        economics = economics_binding(
+            proposal,
+            instrument_version="instrument:aaa@1",
+            required_evidence_dimensions=("BORROW", "FX"),
+            dimension_evidence=(("FX", "sha256:" + "3" * 64),),
+            status="INCONCLUSIVE",
+        )
+        self.assertEqual(economics.missing_dimensions, ("BORROW",))
+        bound = bind_strategy_economics(
+            proposal,
+            economics,
+            instrument_version="instrument:aaa@1",
+        )
+        self.assertEqual(bound.action, "HOLD")
+
+    def test_decision_projection_uses_after_cost_distribution_and_frozen_binding(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        proposal = run_baseline(
+            strategy,
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+        )
+        economics = economics_binding(
+            proposal,
+            instrument_version="instrument:aaa@1",
+            max_feasible_quantity="1",
+        )
+        body = to_decision_proposal(
+            proposal,
+            proposal_id="12345678-1234-5678-9234-567812345678",
+            instrument_version="instrument:aaa@1",
+            economics_binding=economics,
+            exit_policy_ref="exit-policy:v1",
+            compute_cost_currency="USD",
+        )
+        self.assertEqual(
+            body["expected_return_distribution_ref"],
+            economics.after_cost_return_distribution_sha256,
+        )
+        confidence = body["confidence_basis"]
+        self.assertEqual(
+            confidence["gross_return_distribution_ref"],
+            economics.gross_return_distribution_sha256,
+        )
+        self.assertEqual(confidence["gross_quantity"], "2")
+        self.assertEqual(confidence["effective_quantity"], "1")
+        self.assertEqual(
+            confidence["strategy_economics_binding_sha256"],
+            economics.fingerprint,
+        )
 
 
 if __name__ == "__main__":

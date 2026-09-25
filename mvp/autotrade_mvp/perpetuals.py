@@ -74,12 +74,12 @@ class PerpetualContract:
         object.__setattr__(
             self,
             "settlement_currency",
-            _text(self.settlement_currency, "settlement_currency"),
+            _text(self.settlement_currency, "settlement_currency").upper(),
         )
         object.__setattr__(
             self,
             "collateral_currency",
-            _text(self.collateral_currency, "collateral_currency"),
+            _text(self.collateral_currency, "collateral_currency").upper(),
         )
         object.__setattr__(self, "multiplier", _decimal(self.multiplier, "multiplier", positive=True))
         if self.payoff not in {"LINEAR", "INVERSE"}:
@@ -88,19 +88,19 @@ class PerpetualContract:
             object.__setattr__(
                 self,
                 "face_currency",
-                _text(self.face_currency, "face_currency"),
+                _text(self.face_currency, "face_currency").upper(),
             )
         if self.price_quote_currency is not None:
             object.__setattr__(
                 self,
                 "price_quote_currency",
-                _text(self.price_quote_currency, "price_quote_currency"),
+                _text(self.price_quote_currency, "price_quote_currency").upper(),
             )
         if self.price_base_currency is not None:
             object.__setattr__(
                 self,
                 "price_base_currency",
-                _text(self.price_base_currency, "price_base_currency"),
+                _text(self.price_base_currency, "price_base_currency").upper(),
             )
 
 
@@ -181,8 +181,8 @@ class CollateralQuote:
     max_age: timedelta
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "from_currency", _text(self.from_currency, "from_currency"))
-        object.__setattr__(self, "to_currency", _text(self.to_currency, "to_currency"))
+        object.__setattr__(self, "from_currency", _text(self.from_currency, "from_currency").upper())
+        object.__setattr__(self, "to_currency", _text(self.to_currency, "to_currency").upper())
         if self.from_currency == self.to_currency:
             raise PerpetualError("collateral conversion currencies must differ")
         object.__setattr__(self, "rate", _decimal(self.rate, "rate", positive=True))
@@ -488,7 +488,7 @@ class FundingLedger:
     ) -> Decimal:
         identifier = _text(event_id, "event_id")
         instrument = _text(instrument_id, "instrument_id")
-        unit = _text(currency, "currency")
+        unit = _text(currency, "currency").upper()
         value = _decimal(amount, "amount")
         fingerprint = self._fingerprint(instrument, unit, value)
 
@@ -504,4 +504,4 @@ class FundingLedger:
         return value
 
     def balance(self, currency: str) -> Decimal:
-        return self._balances.get(_text(currency, "currency"), Decimal("0"))
+        return self._balances.get(_text(currency, "currency").upper(), Decimal("0"))

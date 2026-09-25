@@ -974,6 +974,9 @@ class JournalStore:
         """
 
         aggregate_type = self._require_text(aggregate_type, "aggregate_type")
+        order_column = (
+            "journal_sequence" if self.SCHEMA_VERSION >= 6 else "rowid"
+        )
         envelope_columns = (
             ", envelope_json, envelope_hash, journal_sequence"
             if self.SCHEMA_VERSION >= 6
@@ -991,7 +994,7 @@ class JournalStore:
                        {envelope_columns}
                 FROM events
                 WHERE aggregate_type = ?
-                ORDER BY journal_sequence
+                ORDER BY {order_column}
                 """,
                 (aggregate_type,),
             ).fetchall()
@@ -1656,7 +1659,11 @@ class JournalStore:
                 )
 
                 appended: list[AppendResult] = []
-                next_journal_sequence = self._journal_sequence_value(connection) + 1
+                next_journal_sequence = (
+                    self._journal_sequence_value(connection) + 1
+                    if self.SCHEMA_VERSION >= 6
+                    else None
+                )
                 for item in prepared:
                     if self.SCHEMA_VERSION >= 6:
                         connection.execute(
@@ -1682,6 +1689,7 @@ class JournalStore:
                                 next_journal_sequence,
                             ),
                         )
+                        assert next_journal_sequence is not None
                         next_journal_sequence += 1
                     elif self.SCHEMA_VERSION >= 5:
                         connection.execute(

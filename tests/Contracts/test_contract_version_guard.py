@@ -2,8 +2,9 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
-from tools.contract_version_guard import evaluate
+from tools.contract_version_guard import evaluate, evaluate_refs
 
 
 def write_tree(root: Path, version="1.0.0", schemas=None, defs=None):
@@ -50,6 +51,23 @@ class ContractVersionGuardTests(unittest.TestCase):
             write_tree(Path(left), defs={"A": {}, "B": {}})
             write_tree(Path(right), version="2.0.0", defs={"A": {}})
             self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_ref_evaluation_uses_clean_archives_for_both_sides(self):
+        with TemporaryDirectory() as base_dir, TemporaryDirectory() as current_dir:
+            base = Path(base_dir)
+            current = Path(current_dir)
+            write_tree(base)
+            write_tree(current)
+
+            with patch(
+                "tools.contract_version_guard.export_ref",
+                side_effect=[base, current],
+            ) as export:
+                self.assertEqual(evaluate_refs("origin/main"), [])
+                self.assertEqual(
+                    [call.args[0] for call in export.call_args_list],
+                    ["origin/main", "HEAD"],
+                )
 
     def test_version_cannot_decrease(self):
         with TemporaryDirectory() as left, TemporaryDirectory() as right:

@@ -252,7 +252,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                         expected_state_version = pending.ExpectedStateVersion,
                         idempotency_key = pending.IdempotencyKey,
                         actor = pending.Actor,
-                        session = pending.Session,
+                        session = PublicSessionReference(pending.Session),
                         account_id = pending.AccountId,
                         environment = pending.Environment,
                         action = "BLOCK_NEW_EXPOSURE",
@@ -629,6 +629,15 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                 "Host snapshot permission metadata must not expose a reusable session credential.");
         }
 
+        string sessionId = RequiredString(permissions, "session_id");
+        if (!FixedTimeEquals(
+                sessionId,
+                PublicSessionReference(session.Token)))
+        {
+            throw new InvalidOperationException(
+                "Host snapshot session reference does not match the authenticated local session.");
+        }
+
         if (!string.Equals(
                 RequiredString(permissions, "actor"),
                 session.Actor,
@@ -824,6 +833,34 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         }
 
         return value;
+    }
+
+    public static string PublicSessionReference(string token)
+    {
+        if (string.IsNullOrWhiteSpace(token)
+            || !string.Equals(token, token.Trim(), StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Session token is invalid.",
+                nameof(token));
+        }
+
+        byte[] material = Encoding.UTF8.GetBytes(
+            "autotrade-ui-session-v1\0" + token);
+        byte[] digest = [];
+        try
+        {
+            digest = SHA256.HashData(material);
+            return "sid-" + Convert.ToHexString(digest).ToLowerInvariant();
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(material);
+            if (digest.Length > 0)
+            {
+                CryptographicOperations.ZeroMemory(digest);
+            }
+        }
     }
 
     private static bool FixedTimeEquals(string left, string right)

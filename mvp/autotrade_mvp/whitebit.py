@@ -775,6 +775,10 @@ def parse_submission_result(
     attempt = _text(attempt_id, name="attempt_id")
     account = _text(account_id, name="account_id")
     env = _text(environment, name="environment").upper()
+    if env not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+        raise WhiteBitAdapterError(
+            "environment must be one of REPLAY, SIMULATION, PAPER, LIVE"
+        )
     point = _instant(observed_at, name="observed_at")
     if account != prepared.account_id:
         raise WhiteBitAdapterError(

@@ -183,6 +183,17 @@ class WhiteBitAdapterTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(WhiteBitAdapterError, "endpoint"):
             WhiteBitPreparedRequest(**{**base, "endpoint": "https://evil.test/order"})
+        with self.assertRaisesRegex(WhiteBitAdapterError, "order path"):
+            WhiteBitPreparedRequest(
+                **{**base, "endpoint": "/api/v4/main-account/withdraw"}
+            )
+        for field, value in (("clientOrderId", None), ("clientOrderId", 123), ("market", True)):
+            with self.subTest(field=field, value=value), self.assertRaises(
+                WhiteBitAdapterError
+            ):
+                WhiteBitPreparedRequest(
+                    **{**base, "body": {**base["body"], field: value}}
+                )
 
     def test_spot_limit_request_uses_exact_strings_and_dispatcher_client_id(self):
         intent = WhiteBitOrderIntent.create(

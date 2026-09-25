@@ -231,7 +231,7 @@ class ProducerFixture:
         }
         self.protocol_registration = self.science.register_protocol(
             payload,
-            protocol_id=PROTOCOL_ID,
+            protocol_id=protocol_id,
         )
         return self.protocol_registration
 
@@ -323,6 +323,7 @@ class ProducerFixture:
         max_compute_units="100",
         source_sha=SOURCE_SHA,
         learning_rate="1",
+        protocol_id=PROTOCOL_ID,
     ):
         return UpdateProducerConfig(
             source_sha=source_sha,
@@ -516,6 +517,18 @@ class UpdateProducerTests(unittest.TestCase):
             self.assertFalse(
                 artifact["online_gate"]["grants_trading_authority"]
             )
+            self.assertEqual(
+                artifact["scientific_registration"]["protocol_id"],
+                PROTOCOL_ID,
+            )
+            self.assertEqual(
+                artifact["scientific_registration"]["protocol_hash"],
+                fixture.protocol_registration.protocol_hash,
+            )
+            self.assertEqual(
+                artifact["producer_config"]["protocol_id"],
+                PROTOCOL_ID,
+            )
 
             self.assertEqual(
                 artifact["producer_config"]["learning_rate"],
@@ -553,6 +566,115 @@ class UpdateProducerTests(unittest.TestCase):
                 artifact["online_envelope_sha256"].startswith("sha256:")
             )
 
+
+    def test_scientific_preregistration_is_required_before_update(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref, protocol_id=None),
+            )
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIsNone(produced.proposed_parameters)
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIn(
+                "LEARNING.SCIENTIFIC_PREREGISTRATION_REQUIRED",
+                artifact["reasons"],
+            )
+            self.assertIsNone(artifact["scientific_registration"])
+
+    def test_protocol_registered_after_checkpoint_is_too_late(self):
+        with TemporaryDirectory() as directory:
+            fixture = ProducerFixture(directory)
+            fixture.seed_calibration()
+            fixture.seed_update()
+            checkpoint = fixture.publish_checkpoint(preregister=False)
+            fixture.register_protocol()
+            test_ref = fixture.publish_test_evidence()
+            calibration = fixture.publish_calibration_evidence()
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=fixture.envelope(checkpoint),
+                config=fixture.config(test_ref),
+            )
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIn(
+                "LEARNING.SCIENTIFIC_PREREGISTRATION_LATE",
+                artifact["reasons"],
+            )
+            self.assertIsNone(artifact["scientific_registration"])
+
+    def test_frozen_protocol_rejects_later_calibration_population_change(self):
+        with TemporaryDirectory() as directory:
+            fixture = ProducerFixture(directory)
+            fixture.seed_calibration()
+            fixture.register_protocol()
+            fixture.append_learning(
+                task="calibration",
+                feature="4",
+                target="0",
+                observation_id="post-freeze-calibration",
+                label_available_at=datetime(
+                    2026, 10, 3, 13, tzinfo=timezone.utc
+                ),
+            )
+            fixture.seed_update()
+            checkpoint = fixture.publish_checkpoint()
+            test_ref = fixture.publish_test_evidence()
+            calibration = fixture.publish_calibration_evidence()
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=fixture.envelope(checkpoint),
+                config=fixture.config(test_ref, min_calibration_episodes=5),
+            )
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIn(
+                "LEARNING.SCIENTIFIC_PREREGISTRATION_SCOPE_MISMATCH",
+                artifact["reasons"],
+            )
+            self.assertIsNone(artifact["scientific_registration"])
+
+    def test_population_manifest_protocol_hash_must_be_registry_issued(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            forged = "sha256:" + "d" * 64
+            update_manifest = fixture.population_manifest(
+                checkpoint_ref=checkpoint,
+                task="update",
+                cutoff=UPDATE_CUTOFF,
+                frozen_protocol_hash=forged,
+            )
+            calibration_manifest = fixture.population_manifest(
+                checkpoint_ref=checkpoint,
+                task="calibration",
+                cutoff=CALIBRATION_CUTOFF,
+                frozen_protocol_hash=forged,
+            )
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref),
+                update_population_manifest=update_manifest,
+                calibration_population_manifest=calibration_manifest,
+            )
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIn(
+                "LEARNING.SCIENTIFIC_PREREGISTRATION_HASH_MISMATCH",
+                artifact["reasons"],
+            )
+            self.assertIsNone(artifact["scientific_registration"])
 
     def test_population_authority_is_required_before_any_update_proposal(self):
         with TemporaryDirectory() as directory:

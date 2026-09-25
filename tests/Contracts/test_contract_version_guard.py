@@ -39,6 +39,76 @@ class ContractVersionGuardTests(unittest.TestCase):
             errors = evaluate(Path(left), Path(right))
             self.assertTrue(any("without increasing" in item for item in errors))
 
+    def test_added_required_member_requires_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            base_defs = {
+                "A": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["command_id"],
+                    "properties": {
+                        "command_id": {"type": "string"},
+                        "account_id": {"type": "string"},
+                    },
+                }
+            }
+            current_defs = {
+                "A": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["command_id", "account_id"],
+                    "properties": {
+                        "command_id": {"type": "string"},
+                        "account_id": {"type": "string"},
+                    },
+                }
+            }
+            write_tree(Path(left), defs=base_defs)
+            write_tree(Path(right), version="1.1.0", defs=current_defs)
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(any("new required members" in item for item in errors))
+            self.assertTrue(any("account_id" in item for item in errors))
+
+    def test_added_required_member_allows_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            base_defs = {
+                "A": {
+                    "type": "object",
+                    "required": ["command_id"],
+                    "properties": {"command_id": {"type": "string"}},
+                }
+            }
+            current_defs = {
+                "A": {
+                    "type": "object",
+                    "required": ["command_id", "environment"],
+                    "properties": {
+                        "command_id": {"type": "string"},
+                        "environment": {"type": "string"},
+                    },
+                }
+            }
+            write_tree(Path(left), defs=base_defs)
+            write_tree(Path(right), version="2.0.0", defs=current_defs)
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_required_members_in_new_definition_do_not_force_major(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left), defs={"A": {"type": "string"}})
+            write_tree(
+                Path(right),
+                version="1.1.0",
+                defs={
+                    "A": {"type": "string"},
+                    "B": {
+                        "type": "object",
+                        "required": ["value"],
+                        "properties": {"value": {"type": "string"}},
+                    },
+                },
+            )
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
     def test_removed_definition_requires_major_increment(self):
         with TemporaryDirectory() as left, TemporaryDirectory() as right:
             write_tree(Path(left), defs={"A": {}, "B": {}})

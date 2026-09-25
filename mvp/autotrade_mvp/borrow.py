@@ -678,6 +678,14 @@ class BorrowLifecycleJournal:
                 identities[key] = digest
                 if item.recall_id not in recalls:
                     raise ValueError("recall resolution has no active provider recall")
+                resolution_observed = _instant_value(
+                    item.observed_at,
+                    name="observed_at",
+                )
+                if resolution_observed < recall_observed[item.recall_id]:
+                    raise ValueError(
+                        "recall resolution predates the active provider recall revision"
+                    )
                 remaining = recalls[item.recall_id] - item.resolved_quantity
                 if remaining < 0:
                     raise ValueError("recall resolution exceeds active recalled quantity")

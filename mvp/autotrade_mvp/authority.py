@@ -2001,21 +2001,31 @@ class AuthorityService:
                     )
                 availability_evidence = dict(durable_evidence)
             else:
-                loaded = load_account_resource_availability_evidence(
-                    self.store,
-                    checkpoint_event_id=checkpoint_event_id,
-                    provider_id=provider_id,
-                    account_id=account_id,
-                    environment=environment,
-                    resources=tuple(
-                        resource
-                        for resource, _amount in normalized_requirements
-                    ),
-                    now=now,
-                    max_age_seconds=normalized_max_age,
-                    evidence_artifact_store=self.evidence_artifact_store,
-                    require_latest_scope=True,
-                )
+                try:
+                    loaded = load_account_resource_availability_evidence(
+                        self.store,
+                        checkpoint_event_id=checkpoint_event_id,
+                        provider_id=provider_id,
+                        account_id=account_id,
+                        environment=environment,
+                        resources=tuple(
+                            resource
+                            for resource, _amount in normalized_requirements
+                        ),
+                        now=now,
+                        max_age_seconds=normalized_max_age,
+                        evidence_artifact_store=self.evidence_artifact_store,
+                        require_latest_scope=True,
+                    )
+                except ValueError as error:
+                    if (
+                        str(error)
+                        == "selected reconciliation checkpoint is superseded by newer provider truth"
+                    ):
+                        raise AuthorityConflict(
+                            "reservation checkpoint is superseded by newer provider truth"
+                        ) from error
+                    raise
                 availability_evidence = {
                     **loaded,
                     "max_age_seconds": normalized_max_age,

@@ -824,7 +824,21 @@ class JournalStoreTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
             legacy = V4JournalStore(path)
-            legacy.append_event(event(), outbox_topic="events")
+            legacy_event = event()
+            legacy_event.update(
+                {
+                    "schema_version": "1.0.0",
+                    "host_id": "legacy-host",
+                    "owner_epoch": "1",
+                    "environment": "SIMULATION",
+                    "occurred_at": "2026-09-24T16:00:00+00:00",
+                    "observed_at": "2026-09-24T16:00:00+00:00",
+                    "correlation_id": "corr-legacy-1",
+                    "causation_id": None,
+                    "evidence_refs": [],
+                }
+            )
+            legacy.append_event(legacy_event, outbox_topic="events")
 
             connection = sqlite3.connect(path)
             try:
@@ -847,6 +861,8 @@ class JournalStoreTests(unittest.TestCase):
             expected_v5 = _outbox_envelope_digest("events", legacy_payload)
             self.assertEqual(pending["envelope_hash"], expected_v5)
             self.assertNotEqual(pending["envelope_hash"], legacy_hash)
+            self.assertEqual(pending["payload"]["host_id"], "legacy-host")
+            self.assertEqual(pending["payload"]["schema_version"], "1.0.0")
             self.assertTrue(
                 upgraded.mark_outbox_delivered(
                     pending["outbox_id"],

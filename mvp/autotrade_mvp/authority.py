@@ -1525,6 +1525,7 @@ class AuthorityService:
                     now=now,
                     max_age_seconds=normalized_max_age,
                     evidence_artifact_store=self.evidence_artifact_store,
+                    require_latest=True,
                 )
                 availability_evidence = {
                     **loaded,

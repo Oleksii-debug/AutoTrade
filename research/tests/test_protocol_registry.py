@@ -41,6 +41,15 @@ def protocol() -> dict:
     }
 
 
+def holdout_identity(dataset_digit="a", *, start="2026-01-01", end="2026-06-30", role="LOCKED_FORWARD"):
+    return {
+        "dataset_digest": "sha256:" + dataset_digit * 64,
+        "segment_start": start,
+        "segment_end": end,
+        "role": role,
+    }
+
+
 class ProtocolRegistryHardeningTests(unittest.TestCase):
     def test_protocol_identity_is_immutable_and_idempotent(self):
         with TemporaryDirectory() as directory:
@@ -126,6 +135,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             first = registry.register_evaluation(
                 registered.protocol_id,
                 holdout_id=holdout,
+                holdout_identity=holdout_identity(),
                 result={"net_utility": "0.020"},
             )
             self.assertEqual(first["prior_access_count"], 0)
@@ -134,6 +144,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             second = registry.register_evaluation(
                 registered.protocol_id,
                 holdout_id=holdout,
+                holdout_identity=holdout_identity(),
                 result={"net_utility": "0.021"},
             )
             self.assertEqual(second["prior_access_count"], 1)
@@ -155,12 +166,14 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             registry.record_holdout_access(
                 first_protocol.protocol_id,
                 holdout_id=holdout,
+                holdout_identity=holdout_identity(),
                 purpose="candidate-A-inspection",
             )
 
             evaluation = registry.register_evaluation(
                 second_protocol.protocol_id,
                 holdout_id=holdout,
+                holdout_identity=holdout_identity(),
                 result={"net_utility": "0.019"},
             )
             self.assertEqual(evaluation["prior_access_count"], 1)
@@ -174,11 +187,13 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             registry.record_holdout_access(
                 registered.protocol_id,
                 holdout_id=holdout,
+                holdout_identity=holdout_identity(),
                 purpose="parameter_selection",
             )
             evaluation = registry.register_evaluation(
                 registered.protocol_id,
                 holdout_id=holdout,
+                holdout_identity=holdout_identity(),
                 result={"net_utility": "0.019"},
             )
             self.assertEqual(evaluation["prior_access_count"], 1)

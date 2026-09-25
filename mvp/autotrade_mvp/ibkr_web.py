@@ -800,33 +800,65 @@ def record_order_submission_result(
 class IbkrReplyRequest:
     endpoint: str
     body: Mapping[str, object]
+    attempt_id: str
+    account_id: str
+    client_order_id: str
+    response_sha256: str
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "endpoint", _text(self.endpoint, name="endpoint"))
         object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
+        object.__setattr__(self, "attempt_id", _text(self.attempt_id, name="attempt_id"))
+        object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
+        object.__setattr__(
+            self,
+            "client_order_id",
+            validate_coid(self.client_order_id),
+        )
+        digest = _text(self.response_sha256, name="response_sha256")
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+            raise IbkrWebAdapterError("response_sha256 must be canonical SHA-256")
+        object.__setattr__(self, "response_sha256", digest)
 
 
 def prepare_reply_confirmation(
-    outcome: IbkrSubmissionOutcome,
+    recorded: IbkrRecordedSubmission,
     *,
+    expected_attempt_id: str,
+    expected_account_id: str,
+    expected_client_order_id: str,
     explicit_authorization: bool,
 ) -> IbkrReplyRequest:
-    """Prepare, but never send, the economically consequential second request.
+    """Prepare a reply only from the durable, exact guarded attempt observation.
 
-    The returned request must still cross the normal durable GuardedDispatcher
-    final barrier. This adapter never enables provider-wide warning suppression.
+    The returned request is bound to the attempt/account/cOID/response digest
+    that produced the reply id and must still cross GuardedDispatcher.
     """
 
-    if not isinstance(outcome, IbkrSubmissionOutcome):
-        raise TypeError("outcome must be IbkrSubmissionOutcome")
+    if not isinstance(recorded, IbkrRecordedSubmission):
+        raise TypeError("recorded must be IbkrRecordedSubmission")
     if type(explicit_authorization) is not bool:
         raise TypeError("explicit_authorization must be boolean")
-    if outcome.status != "REPLY_REQUIRED":
-        raise IbkrWebAdapterError("only a reply-required outcome can be confirmed")
+    if recorded.outcome != "REPLY_REQUIRED":
+        raise IbkrWebAdapterError("only a recorded reply-required outcome can be confirmed")
+    if recorded.response_sha256 is None:
+        raise IbkrWebAdapterError("IBKR reply requires durable provider response evidence")
+    if recorded.attempt_id != _text(expected_attempt_id, name="expected_attempt_id"):
+        raise IbkrWebAdapterError("reply attempt does not match guarded attempt")
+    if recorded.account_id != _text(expected_account_id, name="expected_account_id"):
+        raise IbkrWebAdapterError("reply account does not match guarded account")
+    expected_coid = validate_coid(expected_client_order_id)
+    if recorded.client_order_id != expected_coid:
+        raise IbkrWebAdapterError("reply cOID does not match guarded client order")
     if not explicit_authorization:
         raise IbkrWebAdapterError("IBKR reply requires explicit authorization")
     return IbkrReplyRequest(
-        endpoint=f"/iserver/reply/{outcome.reply_id}",
+        endpoint=f"/iserver/reply/{recorded.reply_id}",
         body={"confirmed": True},
+        attempt_id=recorded.attempt_id,
+        account_id=recorded.account_id,
+        client_order_id=recorded.client_order_id,
+        response_sha256=recorded.response_sha256,
     )
 
 

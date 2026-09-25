@@ -746,6 +746,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 "execution_id": "0001.123.01",
                 "order_ref": "at-ibkr-1",
                 "account": "U1234567",
+                "side": "B",
                 "conid": 265598,
                 "size": Decimal("0.5"),
                 "price": "220.10",
@@ -764,6 +765,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertEqual(fills[0].environment, "PAPER")
         self.assertEqual(fills[0].provider_execution_id, "0001.123.01")
         self.assertEqual(fills[0].client_order_id, "at-ibkr-1")
+        self.assertEqual(fills[0].side, "BUY")
         self.assertEqual(fills[0].quantity, Decimal("0.5"))
         self.assertEqual(fills[0].fee_amount, Decimal("-0.35"))
 
@@ -772,6 +774,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
             "execution_id": "exec-1",
             "order_ref": "at-ibkr-1",
             "account": "U1234567",
+            "side": "B",
             "conid": 265598,
             "size": "1",
             "price": "100",
@@ -802,6 +805,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
             "execution_id": "exec-1",
             "order_ref": "at-ibkr-1",
             "account": "U1234567",
+            "side": "B",
             "conid": 265598,
             "size": "1",
             "price": "100",
@@ -820,6 +824,48 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 instrument_versions_by_conid={265598: "AAPL:v1"},
                 fee_currency_by_execution_id={"exec-1": "USD"},
             )
+
+    def test_web_api_trade_side_is_provider_evidenced_and_fail_closed(self):
+        base = {
+            "execution_id": "exec-side-1",
+            "order_ref": "at-ibkr-side",
+            "account": "U1234567",
+            "side": "S",
+            "conid": 265598,
+            "size": "1",
+            "price": "100",
+            "commission": "0.25",
+            "trade_time": "2026-09-24T20:00:01Z",
+        }
+        fills = parse_web_api_trades(
+            ibkr_trade_observation([base]),
+            instrument_versions_by_conid={265598: "AAPL:v1"},
+            fee_currency_by_execution_id={"exec-side-1": "USD"},
+        )
+        self.assertEqual(fills[0].side, "SELL")
+
+        missing = dict(base)
+        missing.pop("side")
+        with self.assertRaisesRegex(IbkrWebAdapterError, "trade.side"):
+            parse_web_api_trades(
+                ibkr_trade_observation([missing]),
+                instrument_versions_by_conid={265598: "AAPL:v1"},
+                fee_currency_by_execution_id={"exec-side-1": "USD"},
+            )
+
+        with self.assertRaisesRegex(IbkrWebAdapterError, "provider-evidenced"):
+            parse_web_api_trades(
+                ibkr_trade_observation([dict(base, side="UNKNOWN")]),
+                instrument_versions_by_conid={265598: "AAPL:v1"},
+                fee_currency_by_execution_id={"exec-side-1": "USD"},
+            )
+
+        fills = parse_web_api_trades(
+            ibkr_trade_observation([dict(base, side="Buy")]),
+            instrument_versions_by_conid={265598: "AAPL:v1"},
+            fee_currency_by_execution_id={"exec-side-1": "USD"},
+        )
+        self.assertEqual(fills[0].side, "BUY")
 
     def test_reconciliation_fill_rejects_noncanonical_environment(self):
         execution = IbkrExecutionEvidence.create(

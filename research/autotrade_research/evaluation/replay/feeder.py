@@ -260,15 +260,113 @@ class CausalDataset:
 
 
 @dataclass(frozen=True, slots=True)
-class CausalDataView:
-    """Strategy-facing immutable view bound to one frozen dataset and cutoff."""
+class CausalObservation:
+    """Strategy-visible event projection with archive-ingest provenance removed."""
 
+    event_id: str
+    kind: str
+    event_time: datetime
+    available_at: datetime
+    source_priority: int
+    source_sequence: int
+    payload: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "event_id", _text(self.event_id, name="event_id"))
+        object.__setattr__(self, "kind", _text(self.kind, name="kind").upper())
+        event_time = _utc(self.event_time, name="event_time")
+        available_at = _utc(self.available_at, name="available_at")
+        if available_at < event_time:
+            raise CausalReplayError("available_at cannot precede event_time")
+        object.__setattr__(self, "event_time", event_time)
+        object.__setattr__(self, "available_at", available_at)
+        object.__setattr__(
+            self,
+            "source_priority",
+            _nonnegative_int(self.source_priority, name="source_priority"),
+        )
+        object.__setattr__(
+            self,
+            "source_sequence",
+            _nonnegative_int(self.source_sequence, name="source_sequence"),
+        )
+        if not isinstance(self.payload, Mapping):
+            raise TypeError("payload must be a mapping")
+        object.__setattr__(self, "payload", _freeze_json(self.payload))
+
+    @classmethod
+    def from_event(cls, event: CausalEvent) -> "CausalObservation":
+        if not isinstance(event, CausalEvent):
+            raise TypeError("event must be CausalEvent")
+        return cls(
+            event_id=event.event_id,
+            kind=event.kind,
+            event_time=event.event_time,
+            available_at=event.available_at,
+            source_priority=event.source_priority,
+            source_sequence=event.source_sequence,
+            payload=event.payload,
+        )
+
+    @property
+    def ordering_key(self) -> tuple[datetime, int, int, str]:
+        return (
+            self.available_at,
+            self.source_priority,
+            self.source_sequence,
+            self.event_id,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CausalDataView:
+    """Strategy-facing view containing only causally visible observations."""
+
+    simulation_time: datetime
+    events: tuple[CausalObservation, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "simulation_time",
+            _utc(self.simulation_time, name="simulation_time"),
+        )
+        if not isinstance(self.events, tuple):
+            raise TypeError("events must be a tuple")
+        ids: set[str] = set()
+        for item in self.events:
+            if not isinstance(item, CausalObservation):
+                raise TypeError("events must contain CausalObservation")
+            if item.available_at > self.simulation_time:
+                raise CausalReplayError("causal view contains a future event")
+            if item.event_id in ids:
+                raise CausalReplayError("causal view contains duplicate event identity")
+            ids.add(item.event_id)
+        if self.events != tuple(sorted(self.events, key=lambda item: item.ordering_key)):
+            raise CausalReplayError("causal view must preserve deterministic causal order")
+
+    def by_kind(self, kind: str) -> tuple[CausalObservation, ...]:
+        target = _text(kind, name="kind").upper()
+        return tuple(item for item in self.events if item.kind == target)
+
+
+@dataclass(frozen=True, slots=True)
+class CausalInputEvidence:
+    """Privileged content-addressed identity for one strategy input cutoff."""
+
+    schema_version: int
     simulation_time: datetime
     manifest_sha256: str
     dataset_sha256: str
-    events: tuple[CausalEvent, ...]
+    published_prefix_sha256: str
 
     def __post_init__(self) -> None:
+        if (
+            isinstance(self.schema_version, bool)
+            or not isinstance(self.schema_version, int)
+            or self.schema_version != _VIEW_SCHEMA_VERSION
+        ):
+            raise CausalReplayError("unsupported input evidence schema_version")
         object.__setattr__(
             self,
             "simulation_time",
@@ -284,34 +382,22 @@ class CausalDataView:
             "dataset_sha256",
             _digest(self.dataset_sha256, name="dataset_sha256"),
         )
-        if not isinstance(self.events, tuple):
-            raise TypeError("events must be a tuple")
-        ids: set[str] = set()
-        for item in self.events:
-            if not isinstance(item, CausalEvent):
-                raise TypeError("events must contain CausalEvent")
-            if item.available_at > self.simulation_time:
-                raise CausalReplayError("causal view contains a future event")
-            if item.event_id in ids:
-                raise CausalReplayError("causal view contains duplicate event identity")
-            ids.add(item.event_id)
-        if self.events != tuple(sorted(self.events, key=lambda item: item.ordering_key)):
-            raise CausalReplayError("causal view must preserve deterministic causal order")
+        object.__setattr__(
+            self,
+            "published_prefix_sha256",
+            _digest(self.published_prefix_sha256, name="published_prefix_sha256"),
+        )
 
     @property
     def digest(self) -> str:
         identity = {
-            "schema_version": _VIEW_SCHEMA_VERSION,
+            "schema_version": self.schema_version,
             "simulation_time": self.simulation_time.isoformat(),
             "manifest_sha256": self.manifest_sha256,
             "dataset_sha256": self.dataset_sha256,
-            "event_digests": [item.digest for item in self.events],
+            "published_prefix_sha256": self.published_prefix_sha256,
         }
         return "sha256:" + sha256(_canonical_bytes(identity)).hexdigest()
-
-    def by_kind(self, kind: str) -> tuple[CausalEvent, ...]:
-        target = _text(kind, name="kind").upper()
-        return tuple(item for item in self.events if item.kind == target)
 
 
 @dataclass(frozen=True, slots=True)
@@ -500,9 +586,22 @@ class CausalFeeder:
     def view(self) -> CausalDataView:
         return CausalDataView(
             simulation_time=self._clock,
+            events=tuple(
+                CausalObservation.from_event(item)
+                for item in self._dataset.events[: self._cursor]
+            ),
+        )
+
+    def input_evidence(self) -> CausalInputEvidence:
+        return CausalInputEvidence(
+            schema_version=_VIEW_SCHEMA_VERSION,
+            simulation_time=self._clock,
             manifest_sha256=self._dataset.manifest_sha256,
             dataset_sha256=self._dataset.dataset_sha256,
-            events=self._dataset.events[: self._cursor],
+            published_prefix_sha256=_prefix_digest(
+                self._dataset.events,
+                self._cursor,
+            ),
         )
 
     def checkpoint(self) -> FeederCheckpoint:

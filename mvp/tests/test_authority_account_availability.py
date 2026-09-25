@@ -144,6 +144,20 @@ def _checkpoint(
     )
 
 
+def _dispatch(authority, record, *, now=NOW):
+    return authority.dispatch_allowed(
+        record.admission_id,
+        intent_hash=record.intent_hash,
+        account_id=record.account_id,
+        environment=record.environment,
+        instrument_id=record.instrument_version.instrument_id,
+        instrument_version=record.instrument_version.version,
+        action=record.action,
+        now=now,
+        capability_snapshot_id=record.capability_snapshot_id,
+    )
+
+
 def _admit(authority, reservations, checkpoint, **overrides):
     values = dict(
         command_id="availability-command",
@@ -364,6 +378,7 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
             self.assertGreaterEqual(journal_cut, 0)
             self.assertGreater(risk_event["journal_sequence"], journal_cut)
             pending_before = len(store.pending_outbox())
+            self.assertEqual(_dispatch(authority, first), (True, "allowed"))
 
             _checkpoint(
                 store,
@@ -376,6 +391,10 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
             replay = _admit(authority, reservations, older)
             self.assertEqual(replay, first)
             self.assertEqual(len(store.pending_outbox()), pending_before + 1)
+            self.assertEqual(
+                _dispatch(authority, first),
+                (False, "financial_evidence_invalid"),
+            )
 
             restarted_store = JournalStore(path)
             restarted_authority = AuthorityService(restarted_store)
@@ -393,6 +412,59 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
             self.assertEqual(
                 restarted_reservations.total_reserved("CASH:USD"),
                 Decimal("100"),
+            )
+            self.assertEqual(
+                _dispatch(restarted_authority, restarted_replay),
+                (False, "financial_evidence_invalid"),
+            )
+
+    def test_dispatch_rechecks_resource_expiry_at_send_time_and_after_restart(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            authority = AuthorityService(store)
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store)
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            admitted = _admit(
+                authority,
+                reservations,
+                checkpoint,
+                reservation_max_age_seconds="300",
+            )
+            self.assertEqual(
+                _dispatch(
+                    authority,
+                    admitted,
+                    now="2026-09-24T18:01:30Z",
+                ),
+                (True, "allowed"),
+            )
+            self.assertEqual(
+                _dispatch(
+                    authority,
+                    admitted,
+                    now="2026-09-24T18:02:00Z",
+                ),
+                (False, "financial_evidence_invalid"),
+            )
+
+            restarted = AuthorityService(JournalStore(path))
+            self.assertEqual(
+                _dispatch(
+                    restarted,
+                    admitted,
+                    now="2026-09-24T18:02:00Z",
+                ),
+                (False, "financial_evidence_invalid"),
+            )
+            self.assertEqual(
+                restarted._admissions[admitted.admission_id],
+                admitted,
             )
 
     def test_transaction_a_rejects_reconciliation_race_after_latest_check(self):

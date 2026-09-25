@@ -14,12 +14,7 @@ from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence, reconcile_account
 from mvp.autotrade_mvp.reservations import ReservationBook
-from mvp.autotrade_mvp.risk import (
-    RiskContext,
-    RiskIntent,
-    RiskPolicy,
-    evaluate_bound_risk,
-)
+from mvp.autotrade_mvp.risk import RiskContext, RiskIntent, RiskPolicy
 from mvp.autotrade_mvp.simulated_provider import SimulatedProvider
 
 
@@ -116,20 +111,6 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 expected_state_version=1,
             )
             intent_hash = "sha256:" + "a" * 64
-            risk = evaluate_bound_risk(
-                intent,
-                risk_context(),
-                risk_policy(),
-                intent_hash=intent_hash,
-                policy_version=1,
-                reservation_version=reservations.version,
-                reservation_requirements={"CASH:USD": "200.2"},
-                capability_snapshot_id=CAPABILITY_SNAPSHOT_ID,
-                evaluated_at=NOW,
-                valid_until="2026-09-24T18:05:00Z",
-            )
-            self.assertTrue(risk.admitted)
-
             admission = authority.admit(
                 command_id="financial-command-1",
                 idempotency_key="financial-command-1",
@@ -143,9 +124,11 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 instrument_version=1,
                 action="ORDER.SUBMIT",
                 notional="200",
-                current_state_version=1,
                 capability_snapshot_id=CAPABILITY_SNAPSHOT_ID,
-                risk_decision=risk,
+                risk_intent=intent,
+                risk_context=risk_context(),
+                risk_policy=risk_policy(),
+                risk_valid_until="2026-09-24T18:05:00Z",
                 reservation_book=reservations,
                 reservation_id="reservation-1",
                 reservation_requirements={"CASH:USD": "200.2"},

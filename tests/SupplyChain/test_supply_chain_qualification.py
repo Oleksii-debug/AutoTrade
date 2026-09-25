@@ -395,6 +395,8 @@ class SupplyChainQualificationTests(unittest.TestCase):
         left = qualify(evidence(model_rights=(first, second)))
         right = qualify(evidence(model_rights=(second, first)))
         self.assertEqual(left.status, right.status)
+        self.assertEqual(left.checks, right.checks)
+        self.assertEqual(left.reason_codes, right.reason_codes)
         self.assertEqual(left.qualification_id, right.qualification_id)
 
 

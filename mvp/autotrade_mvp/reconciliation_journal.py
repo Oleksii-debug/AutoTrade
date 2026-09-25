@@ -141,20 +141,19 @@ def _require_checkpoint_scope(
         or payload.get("environment") != scope
     ):
         raise ValueError("checkpoint reconciliation scope mismatch")
-    if provider_environment is not None:
-        expected_provider_environment = _provider_environment(
-            provider_environment,
-            environment=scope,
-            provider_id=provider,
+    expected_provider_environment = _provider_environment(
+        provider_environment,
+        environment=scope,
+        provider_id=provider,
+    )
+    actual_provider_environment = payload.get(
+        "provider_environment",
+        payload.get("environment"),
+    )
+    if actual_provider_environment != expected_provider_environment:
+        raise ValueError(
+            "checkpoint reconciliation provider_environment mismatch"
         )
-        actual_provider_environment = payload.get(
-            "provider_environment",
-            payload.get("environment"),
-        )
-        if actual_provider_environment != expected_provider_environment:
-            raise ValueError(
-                "checkpoint reconciliation provider_environment mismatch"
-            )
     return payload
 
 

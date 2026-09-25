@@ -60,10 +60,18 @@ class ExactJsonTransportResponse:
     """Exact provider wire bytes returned after the guarded send barrier."""
 
     response_bytes: bytes
+    http_status: int | None = None
 
     def __post_init__(self) -> None:
         raw = self.response_bytes
         _decode_exact_json_bytes(raw)
+        if self.http_status is not None and (
+            isinstance(self.http_status, bool)
+            or not isinstance(self.http_status, int)
+            or self.http_status < 100
+            or self.http_status > 599
+        ):
+            raise ValueError("http_status must be an integer 100..599 when provided")
 
     @property
     def response_text(self) -> str:
@@ -95,6 +103,7 @@ class SubmissionResponseBinding:
     submission_scope_hash: str
     response_bytes: bytes
     response_sha256: str
+    http_status: int | None = None
     _factory_token: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -127,6 +136,13 @@ class SubmissionResponseBinding:
         ):
             raise ValueError("durable provider response digest mismatch")
         _decode_exact_json_bytes(self.response_bytes)
+        if self.http_status is not None and (
+            isinstance(self.http_status, bool)
+            or not isinstance(self.http_status, int)
+            or self.http_status < 100
+            or self.http_status > 599
+        ):
+            raise ValueError("durable provider HTTP status must be an integer 100..599")
         environment = self.environment.upper()
         if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("invalid durable submission environment")
@@ -268,6 +284,14 @@ def load_submission_response_binding(
     response_bytes = response_text.encode("utf-8")
     if "sha256:" + sha256(response_bytes).hexdigest() != response_sha256:
         raise ValueError("durable provider response digest mismatch")
+    http_status = sent_payload.get("http_status")
+    if http_status is not None and (
+        isinstance(http_status, bool)
+        or not isinstance(http_status, int)
+        or http_status < 100
+        or http_status > 599
+    ):
+        raise ValueError("durable provider HTTP status is invalid")
     scope = payload.get("submission_scope")
     scope_hash = payload.get("submission_scope_hash")
     if not isinstance(scope, dict) or not isinstance(scope_hash, str):
@@ -292,6 +316,7 @@ def load_submission_response_binding(
         submission_scope_hash=scope_hash,
         response_bytes=response_bytes,
         response_sha256=response_sha256,
+        http_status=http_status,
         _factory_token=_SUBMISSION_RESPONSE_BINDING_TOKEN,
     )
 
@@ -893,6 +918,8 @@ class GuardedDispatcher:
                     "response_sha256": response.response_sha256,
                     "response_encoding": "utf-8-json",
                 }
+                if response.http_status is not None:
+                    sent_payload["http_status"] = response.http_status
                 outcome_response = response.payload
             else:
                 sent_payload = {

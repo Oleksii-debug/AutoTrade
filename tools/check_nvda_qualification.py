@@ -30,6 +30,9 @@ DEFAULT_REQUIREMENTS = ROOT / "qualification" / "nvda" / "requirements.json"
 DEFAULT_STATUS = ROOT / "qualification" / "nvda" / "status.json"
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+UUID_TEXT = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
 NVDA_DOMAIN = "ACCESSIBILITY"
 NVDA_GATE = "NVDA_RELEASE"
 NVDA_PACKAGE_ID = "WP-53"
@@ -91,6 +94,14 @@ def validate_evidence(
         raise NvdaQualificationError("source_sha must be an exact 40-character Git SHA")
     if SHA256.fullmatch(artifact_sha) is None:
         raise NvdaQualificationError("artifact_sha256 must be sha256:<64 lowercase hex>")
+    release_artifact_id = _required_text(
+        evidence.get("release_artifact_id"),
+        name="release_artifact_id",
+    )
+    if UUID_TEXT.fullmatch(release_artifact_id) is None:
+        raise NvdaQualificationError(
+            "release_artifact_id must be a canonical lowercase UUID"
+        )
     if evidence.get("method") != requirements.get("evidence_method"):
         raise NvdaQualificationError("evidence method is not real NVDA keyboard qualification")
 
@@ -201,6 +212,7 @@ def validate_evidence(
         "reason": SIGNED_ATTESTATION_REQUIRED,
         "source_sha": source_sha,
         "artifact_sha256": artifact_sha,
+        "release_artifact_id": release_artifact_id,
         "windows_version": environment["windows_version"],
         "nvda_version": environment["nvda_version"],
         "workflow_count": len(required_ids),
@@ -344,6 +356,10 @@ def validate_trusted_nvda_qualification(
     if release_artifact_id is None:
         raise NvdaQualificationError(
             "signed NVDA attestation must bind the delivered release artifact"
+        )
+    if release_artifact_id != result["release_artifact_id"]:
+        raise NvdaQualificationError(
+            "signed NVDA attestation release identity does not match the observed release artifact"
         )
     if receipt.attestation.release_artifact_sha256 != release_artifact_sha256:
         raise NvdaQualificationError(
@@ -521,6 +537,7 @@ def main() -> int:
                 for field in (
                     "source_sha",
                     "artifact_sha256",
+                    "release_artifact_id",
                     "evidence_sha256",
                     "attestation_id",
                     "attestation_digest",

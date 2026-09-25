@@ -47,11 +47,11 @@ def validate_evidence(
         raise NvdaQualificationError("unsupported NVDA requirements schema_version")
     if evidence.get("schema_version") != requirements["schema_version"]:
         raise NvdaQualificationError("evidence schema_version does not match requirements")
-    source_sha = _required_text(evidence.get("source_sha"), name="source_sha").lower()
+    source_sha = _required_text(evidence.get("source_sha"), name="source_sha")
     artifact_sha = _required_text(
         evidence.get("artifact_sha256"),
         name="artifact_sha256",
-    ).lower()
+    )
     if GIT_SHA.fullmatch(source_sha) is None:
         raise NvdaQualificationError("source_sha must be an exact 40-character Git SHA")
     if SHA256.fullmatch(artifact_sha) is None:
@@ -102,7 +102,7 @@ def validate_evidence(
             raise NvdaQualificationError(f"workflow did not pass: {workflow_id}")
         _required_text(item.get("keyboard_steps"), name=f"{workflow_id}.keyboard_steps")
         _required_text(item.get("nvda_observation"), name=f"{workflow_id}.nvda_observation")
-        evidence_ref = _required_text(item.get("evidence_ref"), name=f"{workflow_id}.evidence_ref").lower()
+        evidence_ref = _required_text(item.get("evidence_ref"), name=f"{workflow_id}.evidence_ref")
         if SHA256.fullmatch(evidence_ref) is None:
             raise NvdaQualificationError(
                 f"{workflow_id}.evidence_ref must be an immutable sha256 digest"
@@ -212,10 +212,10 @@ def _release_bundle_source_sha(release_artifact: Path) -> str:
     source_sha = _required_text(
         manifest.get("source_sha"),
         name="bundle-manifest.source_sha",
-    ).lower()
+    )
     if GIT_SHA.fullmatch(source_sha) is None:
         raise NvdaQualificationError(
-            "bundle-manifest.source_sha must be an exact 40-character Git SHA"
+            "bundle-manifest.source_sha must be an exact 40-character lowercase Git SHA"
         )
     return source_sha
 
@@ -227,7 +227,11 @@ def validate_release_artifact_binding(
     declared = _required_text(
         evidence.get("artifact_sha256"),
         name="artifact_sha256",
-    ).lower()
+    )
+    if SHA256.fullmatch(declared) is None:
+        raise NvdaQualificationError(
+            "artifact_sha256 must be canonical sha256:<64 lowercase hex>"
+        )
     actual = release_artifact_digest(release_artifact)
     if declared != actual:
         raise NvdaQualificationError(
@@ -237,7 +241,11 @@ def validate_release_artifact_binding(
     evidence_source_sha = _required_text(
         evidence.get("source_sha"),
         name="source_sha",
-    ).lower()
+    )
+    if GIT_SHA.fullmatch(evidence_source_sha) is None:
+        raise NvdaQualificationError(
+            "source_sha must be an exact 40-character lowercase Git SHA"
+        )
     if artifact_source_sha != evidence_source_sha:
         raise NvdaQualificationError(
             "release bundle source SHA does not match NVDA evidence"

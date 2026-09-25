@@ -305,6 +305,61 @@ class ExperienceMemoryTests(unittest.TestCase):
             )
             self.assertEqual(same_id, correction_id)
             self.assertFalse(inserted_again)
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "legacy correction lacks episode-bound integrity",
+            ):
+                reopened.retrieve(
+                    information_cutoff=BASE,
+                    granted_permissions={"research"},
+                )
+
+    def test_correction_parent_rewrite_fails_integrity_verification(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.sqlite3"
+            store = ExperienceMemory(path)
+            episode_a, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("pending-a"),
+            )
+            episode_b, _ = store.append_episode(
+                decision_time=BASE + timedelta(seconds=1),
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("pending-b"),
+            )
+            correction_id, _ = store.append_correction(
+                episode_a,
+                available_at=BASE + timedelta(seconds=1),
+                payload={
+                    "supersedes_fields": ["outcome"],
+                    "outcome": {"label": "reconciled-a"},
+                    "evidence_ref": "artifact:parent-a",
+                },
+            )
+            with store._connect() as con:
+                con.execute(
+                    "UPDATE corrections SET episode_id=? WHERE correction_id=?",
+                    (episode_b, correction_id),
+                )
+
+            reopened = ExperienceMemory(path)
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "correction integrity mismatch",
+            ):
+                reopened.retrieve(
+                    information_cutoff=BASE + timedelta(seconds=2),
+                    granted_permissions={"research"},
+                )
 
     def test_correction_cannot_be_backdated_before_episode_decision(self):
         with TemporaryDirectory() as directory:

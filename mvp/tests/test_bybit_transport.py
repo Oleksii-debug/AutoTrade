@@ -56,7 +56,8 @@ def prepared(client_order_id="bybit-order-1"):
         account_id="bybit-account",
         environment="PAPER",
         instrument_version="BTCUSDT@1",
-        permission_scope="ORDER_WRITE",
+        permission_scope="BYBIT.LINEAR.ORDER.WRITE",
+        additional_permission_scopes=("ORDER_WRITE",),
     )
     request = prepare_order_submission(
         capability=capability,

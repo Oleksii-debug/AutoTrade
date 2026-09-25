@@ -11,6 +11,13 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
 from typing import Any, Mapping
+from uuid import UUID
+
+from research.autotrade_research.artifacts.store import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+)
+from research.autotrade_research.io.strict_json import strict_json_loads
 
 from .accounting import (
     EconomicBook,
@@ -30,12 +37,17 @@ from .futures import (
     settle_and_book_inverse_variation_margin,
     settlement_identity_digest,
 )
-from .persistence import JournalStore, payload_digest
+from .persistence import JournalStore, canonical_json, payload_digest
 
 
 _AGGREGATE_TYPE = "FUTURES_VARIATION_MARGIN"
 _EVENT_TYPE = "FuturesVariationMarginSettled"
 _ACTOR = "autotrade-futures-settlement"
+_SETTLEMENT_EVIDENCE_MEDIA_TYPE = (
+    "application/vnd.autotrade.futures-settlement-evidence+json"
+)
+_SETTLEMENT_EVIDENCE_TYPE = "AUTOTRADE_FUTURES_SETTLEMENT_EVIDENCE"
+_SETTLEMENT_EVIDENCE_SCHEMA_VERSION = 1
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -110,6 +122,7 @@ def _evidence_payload(evidence: FuturesSettlementEvidence) -> dict[str, Any]:
         "settlement_price": _decimal_text(evidence.settlement_price),
         "price_currency": evidence.price_currency,
         "settlement_currency": evidence.settlement_currency,
+        "evidence_ref": evidence.evidence_ref,
     }
 
 
@@ -137,7 +150,129 @@ def _evidence_from_payload(value: object) -> FuturesSettlementEvidence:
         settlement_price=value.get("settlement_price"),
         price_currency=value.get("price_currency"),
         settlement_currency=value.get("settlement_currency"),
+        evidence_ref=value.get("evidence_ref"),
     )
+
+
+def _immutable_settlement_evidence_ref(value: object) -> tuple[str, str, str]:
+    if not isinstance(value, str) or not value.strip():
+        raise FuturesError(
+            "provider settlement requires immutable artifact evidence_ref"
+        )
+    reference = value.strip()
+    marker = "@sha256:"
+    if not reference.startswith("artifact:") or marker not in reference:
+        raise FuturesError(
+            "settlement evidence_ref must bind artifact UUID and SHA-256 digest"
+        )
+    artifact_id, digest = reference[len("artifact:"):].split(marker, 1)
+    try:
+        artifact_id = str(UUID(artifact_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise FuturesError("settlement evidence artifact identity must be a UUID") from error
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        raise FuturesError(
+            "settlement evidence_ref must use canonical lowercase SHA-256"
+        )
+    canonical = f"artifact:{artifact_id}@sha256:{digest}"
+    if reference != canonical:
+        raise FuturesError("settlement evidence_ref must be canonical")
+    return artifact_id, digest, canonical
+
+
+def provider_settlement_evidence_receipt(
+    evidence: FuturesSettlementEvidence,
+) -> dict[str, Any]:
+    """Canonical preserved-provider receipt, excluding its self-reference."""
+
+    if not isinstance(evidence, FuturesSettlementEvidence):
+        raise TypeError("evidence must be FuturesSettlementEvidence")
+    settlement = _evidence_payload(evidence)
+    settlement.pop("evidence_ref", None)
+    return {
+        "schema_version": _SETTLEMENT_EVIDENCE_SCHEMA_VERSION,
+        "evidence_type": _SETTLEMENT_EVIDENCE_TYPE,
+        "settlement": settlement,
+    }
+
+
+def provider_settlement_evidence_metadata(
+    evidence: FuturesSettlementEvidence,
+) -> dict[str, object]:
+    if not isinstance(evidence, FuturesSettlementEvidence):
+        raise TypeError("evidence must be FuturesSettlementEvidence")
+    scope = evidence.scope
+    if scope.provider_id is None or scope.account_id is None or scope.environment is None:
+        raise FuturesError("provider settlement evidence requires provider/account/environment")
+    return {
+        "evidence_type": _SETTLEMENT_EVIDENCE_TYPE,
+        "provider_id": scope.provider_id,
+        "account_id": scope.account_id,
+        "environment": scope.environment,
+        "source_id": scope.source_id,
+        "instrument_id": evidence.instrument_id,
+        "instrument_version": evidence.instrument_version,
+        "observation_id": evidence.observation_id,
+    }
+
+
+def _verify_provider_settlement_evidence(
+    evidence: FuturesSettlementEvidence,
+    artifact_store: ArtifactStore,
+) -> str:
+    if not isinstance(artifact_store, ArtifactStore):
+        raise FuturesError(
+            "durable provider settlement requires trusted ArtifactStore"
+        )
+    artifact_id, digest, canonical_ref = _immutable_settlement_evidence_ref(
+        evidence.evidence_ref
+    )
+    try:
+        manifest = artifact_store.load_manifest(artifact_id)
+        manifest_hash = manifest.get("manifest_hash")
+        if (
+            not isinstance(manifest_hash, str)
+            or len(manifest_hash) != 71
+            or not manifest_hash.startswith("sha256:")
+        ):
+            raise ArtifactIntegrityError(
+                "settlement evidence manifest lacks integrity binding"
+            )
+        if manifest.get("sha256") != f"sha256:{digest}":
+            raise ArtifactIntegrityError(
+                "settlement evidence digest does not match manifest"
+            )
+        if manifest.get("media_type") != _SETTLEMENT_EVIDENCE_MEDIA_TYPE:
+            raise ArtifactIntegrityError(
+                "settlement evidence has unsupported media type"
+            )
+        if manifest.get("metadata") != provider_settlement_evidence_metadata(evidence):
+            raise ArtifactIntegrityError(
+                "settlement evidence manifest metadata does not match financial scope"
+            )
+        rights = manifest.get("rights")
+        if not isinstance(rights, dict) or rights.get("storage") is not True:
+            raise ArtifactIntegrityError(
+                "settlement evidence manifest lacks storage provenance"
+            )
+        raw = artifact_store.read_bytes(artifact_id)
+        receipt = strict_json_loads(raw.decode("utf-8"))
+    except (
+        ArtifactIntegrityError,
+        FileNotFoundError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+    ) as error:
+        raise FuturesError("settlement provider evidence verification failed") from error
+    expected = provider_settlement_evidence_receipt(evidence)
+    if receipt != expected:
+        raise FuturesError(
+            "settlement provider evidence does not match supplied economics"
+        )
+    if raw != canonical_json(expected).encode("utf-8"):
+        raise FuturesError("settlement provider evidence must use canonical JSON bytes")
+    return canonical_ref
 
 
 def _durable_scope(

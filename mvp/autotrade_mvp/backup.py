@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath
 import shutil
 import sqlite3
 import tempfile
-from typing import Any, Sequence
+from typing import Any
 
 from .diagnostics import build_diagnostic_snapshot
 from .persistence import JournalStore, payload_digest
@@ -345,94 +345,6 @@ def _read_restore_marker(root: Path) -> dict[str, Any]:
         ):
             raise BackupIntegrityError("source_owner_epoch is invalid")
     return marker
-
-
-def _load_sender_fence_evidence(
-    root: Path,
-    digest_ref: str,
-    *,
-    marker: dict[str, Any],
-    restored_at: datetime,
-    completed_at: datetime,
-) -> dict[str, Any]:
-    canonical = _canonical_sha256_ref(
-        digest_ref,
-        name="sender fencing evidence",
-    )
-    digest = canonical.removeprefix("sha256:")
-    object_path = (
-        root
-        / "artifacts"
-        / "objects"
-        / "sha256"
-        / digest[:2]
-        / digest
-    )
-    if (
-        object_path.is_symlink()
-        or not object_path.is_file()
-        or _sha256_file(object_path) != digest
-    ):
-        raise BackupIntegrityError(
-            "Sender fencing evidence object is missing or corrupt"
-        )
-    try:
-        payload = json.loads(object_path.read_bytes())
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise BackupIntegrityError(
-            "Sender fencing evidence is not valid JSON"
-        ) from error
-    required = {
-        "schema_version",
-        "kind",
-        "backup_manifest_sha256",
-        "old_owner_id",
-        "old_owner_epoch",
-        "new_owner_id",
-        "new_owner_epoch",
-        "fenced_at",
-        "method",
-    }
-    if not isinstance(payload, dict) or set(payload) != required:
-        raise BackupIntegrityError(
-            "Sender fencing evidence structure is invalid"
-        )
-    if (
-        payload["schema_version"] != 1
-        or payload["kind"] != "AUTOTRADE_SENDER_FENCE_EVIDENCE"
-        or payload["backup_manifest_sha256"]
-        != marker["backup_manifest_sha256"]
-    ):
-        raise BackupIntegrityError(
-            "Sender fencing evidence is not bound to this restore"
-        )
-    old_owner_id = _nonempty_text(
-        payload["old_owner_id"], name="old_owner_id"
-    )
-    new_owner_id = _nonempty_text(
-        payload["new_owner_id"], name="new_owner_id"
-    )
-    old_epoch = payload["old_owner_epoch"]
-    new_epoch = payload["new_owner_epoch"]
-    if (
-        isinstance(old_epoch, bool)
-        or not isinstance(old_epoch, int)
-        or old_epoch < 1
-        or isinstance(new_epoch, bool)
-        or not isinstance(new_epoch, int)
-        or new_epoch != old_epoch + 1
-        or new_owner_id == old_owner_id
-    ):
-        raise BackupIntegrityError(
-            "Sender fencing evidence owner transition is invalid"
-        )
-    fenced_at = _utc_text(payload["fenced_at"], name="fenced_at")
-    if fenced_at < restored_at or fenced_at > completed_at:
-        raise BackupIntegrityError(
-            "Sender fencing evidence timestamp is outside restore completion window"
-        )
-    _nonempty_text(payload["method"], name="fencing method")
-    return {"sha256": canonical, **payload}
 
 
 def _validate_stored_reconciliation_payload(payload: object) -> dict[str, Any]:
@@ -1343,7 +1255,6 @@ def complete_restore_reconciliation(
     *,
     controller: RecoveryController,
     reconciliation_checkpoint_event_id: str,
-    fencing_evidence: Sequence[str],
     completed_at: str,
 ) -> dict[str, Any]:
     """Durably clear a restore gate from journal-issued reconciliation and fence evidence.
@@ -1424,43 +1335,31 @@ def complete_restore_reconciliation(
         current_owner=current_owner,
     )
 
-    if isinstance(fencing_evidence, (str, bytes)) or not isinstance(
-        fencing_evidence, Sequence
-    ):
-        raise TypeError("fencing_evidence must be a sequence")
-    refs = tuple(fencing_evidence)
     transition_chain = chain[source_owner_epoch - 1 :]
-    if len(refs) != len(transition_chain) - 1 or not refs:
+    if len(transition_chain) < 2:
         raise BackupError(
-            "Fencing evidence must cover every post-restore owner transition"
+            "Restore completion requires a post-restore sender-fence transition"
         )
-    if len(set(refs)) != len(refs):
-        raise BackupError("Fencing evidence references must be unique")
 
     evidence: list[dict[str, Any]] = []
-    for index, ref in enumerate(refs):
-        item = _load_sender_fence_evidence(
-            root,
-            ref,
-            marker=marker,
-            restored_at=restored,
-            completed_at=completed,
-        )
+    for index, new_owner in enumerate(transition_chain[1:]):
+        item = controller.durable_sender_fence_proof(new_owner.epoch)
         old_owner = transition_chain[index]
-        new_owner = transition_chain[index + 1]
         if (
             item["old_owner_id"] != old_owner.owner_id
             or item["old_owner_epoch"] != old_owner.epoch
             or item["new_owner_id"] != new_owner.owner_id
             or item["new_owner_epoch"] != new_owner.epoch
+            or item["fence_context_digest"]
+            != marker["backup_manifest_sha256"]
         ):
             raise BackupError(
-                "Fencing evidence does not match durable owner transition"
+                "Journal-issued sender fence is not bound to this restore transition"
             )
         evidence.append(item)
 
     proof = {
-        "schema_version": 2,
+        "schema_version": 3,
         "backup_manifest_sha256": marker["backup_manifest_sha256"],
         "restored_at": marker["restored_at"],
         "completed_at": completed.isoformat().replace("+00:00", "Z"),
@@ -1469,7 +1368,7 @@ def complete_restore_reconciliation(
         "source_owner_epoch": source_owner_epoch,
         "current_owner_id": current_owner.owner_id,
         "current_owner_epoch": current_owner.epoch,
-        "fencing_evidence": evidence,
+        "sender_fence_events": evidence,
         "reconciliation": reconciliation_proof,
     }
     proof_bytes = _canonical_json(proof)
@@ -1537,13 +1436,13 @@ def restore_requires_reconciliation(destination_root: str | Path) -> bool:
             "source_owner_epoch",
             "current_owner_id",
             "current_owner_epoch",
-            "fencing_evidence",
+            "sender_fence_events",
             "reconciliation",
         }
         if not isinstance(proof, dict) or set(proof) != expected_keys:
             return True
         if (
-            proof["schema_version"] != 2
+            proof["schema_version"] != 3
             or proof["backup_manifest_sha256"]
             != marker["backup_manifest_sha256"]
             or proof["restored_at"] != marker["restored_at"]
@@ -1588,41 +1487,37 @@ def restore_requires_reconciliation(destination_root: str | Path) -> bool:
             return True
 
         transition_chain = chain[source_epoch - 1 :]
-        stored_evidence = proof["fencing_evidence"]
+        stored_evidence = proof["sender_fence_events"]
         if (
             not isinstance(stored_evidence, list)
             or len(stored_evidence) != len(transition_chain) - 1
             or not stored_evidence
         ):
             return True
-        seen_refs: set[str] = set()
+        fence_reader = RecoveryController(
+            owner_store=JournalStore(root / "state" / "journal.sqlite3"),
+            owner_scope=proof["owner_scope"],
+        )
+        seen_event_ids: set[str] = set()
         for index, stored in enumerate(stored_evidence):
             if not isinstance(stored, dict):
                 return True
-            ref = stored.get("sha256")
-            canonical = _canonical_sha256_ref(
-                ref,
-                name="sender fencing evidence",
-            )
-            if canonical in seen_refs:
+            new_owner = transition_chain[index + 1]
+            loaded = fence_reader.durable_sender_fence_proof(new_owner.epoch)
+            event_id = loaded.get("event_id")
+            if not isinstance(event_id, str) or event_id in seen_event_ids:
                 return True
-            seen_refs.add(canonical)
-            loaded = _load_sender_fence_evidence(
-                root,
-                canonical,
-                marker=marker,
-                restored_at=restored,
-                completed_at=completed,
-            )
+            seen_event_ids.add(event_id)
             if loaded != stored:
                 return True
             old_owner = transition_chain[index]
-            new_owner = transition_chain[index + 1]
             if (
                 loaded["old_owner_id"] != old_owner.owner_id
                 or loaded["old_owner_epoch"] != old_owner.epoch
                 or loaded["new_owner_id"] != new_owner.owner_id
                 or loaded["new_owner_epoch"] != new_owner.epoch
+                or loaded["fence_context_digest"]
+                != proof["backup_manifest_sha256"]
             ):
                 return True
     except (

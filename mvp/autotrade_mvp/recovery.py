@@ -166,6 +166,25 @@ class RecoveryController:
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
+    @staticmethod
+    def _canonical_fence_context_digest(value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise TypeError("fence_context_digest must be a string or None")
+        normalized = value.strip()
+        prefix = "sha256:"
+        digest = normalized.removeprefix(prefix)
+        if (
+            not normalized.startswith(prefix)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError(
+                "fence_context_digest must be a canonical lowercase sha256 reference"
+            )
+        return normalized
+
     @property
     def owner_scope(self) -> str:
         """Canonical durable owner scope used by this recovery controller."""
@@ -236,12 +255,43 @@ class RecoveryController:
         chain = self.durable_owner_chain()
         return chain[-1] if chain else None
 
-    def _append_durable_owner(self, owner: OwnerFence) -> None:
+    def _append_durable_owner(
+        self,
+        owner: OwnerFence,
+        *,
+        previous_owner: OwnerFence | None,
+        fence_context_digest: str | None,
+    ) -> dict[str, object] | None:
         if self._owner_store is None:
-            return
+            return None
+        if owner.epoch == 1:
+            if previous_owner is not None:
+                raise ValueError("Initial durable owner cannot have a predecessor")
+        elif (
+            previous_owner is None
+            or previous_owner.epoch + 1 != owner.epoch
+        ):
+            raise ValueError(
+                "Durable owner transition requires the exact previous owner"
+            )
+        normalized_context = self._canonical_fence_context_digest(
+            fence_context_digest
+        )
         payload = {
             "owner_id": owner.owner_id,
             "owner_epoch": str(owner.epoch),
+            "previous_owner_id": (
+                None if previous_owner is None else previous_owner.owner_id
+            ),
+            "previous_owner_epoch": (
+                None if previous_owner is None else str(previous_owner.epoch)
+            ),
+            "fence_method": (
+                "INITIAL_OWNER"
+                if previous_owner is None
+                else "DURABLE_OWNER_EPOCH_ADVANCE"
+            ),
+            "fence_context_digest": normalized_context,
         }
         event_id = str(
             uuid5(
@@ -262,6 +312,92 @@ class RecoveryController:
                 "committed_at": self._now(),
             }
         )
+        event = self._owner_store.load_events(
+            self._OWNER_AGGREGATE_TYPE,
+            self._owner_scope,
+        )[-1]
+        if event["event_id"] != event_id:
+            raise RuntimeError("Durable owner event identity is not current")
+        return event
+
+    def durable_sender_fence_proof(
+        self,
+        new_owner_epoch: int,
+    ) -> dict[str, object]:
+        """Load an issuer-bound proof that an older sender can no longer pass.
+
+        The canonical sender check reads the same durable owner aggregate at the
+        final PAPER/LIVE send barrier.  Therefore a committed successor owner
+        event is the authority that fences the predecessor; caller-authored
+        booleans or content-addressed JSON are not equivalent evidence.
+        """
+
+        if self._owner_store is None:
+            raise PermissionError(
+                "Durable sender-fence proof requires a journal-backed owner"
+            )
+        if (
+            not isinstance(new_owner_epoch, int)
+            or isinstance(new_owner_epoch, bool)
+            or new_owner_epoch <= 1
+        ):
+            raise ValueError("new_owner_epoch must be an integer greater than one")
+        chain = self.durable_owner_chain()
+        if new_owner_epoch > len(chain):
+            raise PermissionError("Requested sender-fence event does not exist")
+        old_owner = chain[new_owner_epoch - 2]
+        new_owner = chain[new_owner_epoch - 1]
+        events = self._owner_store.load_events(
+            self._OWNER_AGGREGATE_TYPE,
+            self._owner_scope,
+        )
+        event = events[new_owner_epoch - 1]
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            raise RuntimeError("Durable sender-fence payload is invalid")
+        if (
+            event.get("event_type") != self._OWNER_EVENT_TYPE
+            or int(event.get("aggregate_version", 0)) != new_owner_epoch
+            or payload_digest(payload) != event.get("payload_hash")
+            or payload.get("owner_id") != new_owner.owner_id
+            or payload.get("owner_epoch") != str(new_owner.epoch)
+            or payload.get("previous_owner_id") != old_owner.owner_id
+            or payload.get("previous_owner_epoch") != str(old_owner.epoch)
+            or payload.get("fence_method") != "DURABLE_OWNER_EPOCH_ADVANCE"
+            or "fence_context_digest" not in payload
+        ):
+            raise PermissionError(
+                "Owner event is not an authority-issued sender-fence transition"
+            )
+        journal_sequence = event.get("journal_sequence")
+        if (
+            not isinstance(journal_sequence, int)
+            or isinstance(journal_sequence, bool)
+            or journal_sequence < 1
+        ):
+            raise RuntimeError(
+                "Durable sender-fence event lacks a valid journal sequence"
+            )
+        committed_at = event.get("committed_at")
+        if not isinstance(committed_at, str) or not committed_at.strip():
+            raise RuntimeError(
+                "Durable sender-fence event lacks a commit timestamp"
+            )
+        return {
+            "event_id": event["event_id"],
+            "payload_hash": event["payload_hash"],
+            "journal_sequence": journal_sequence,
+            "owner_scope": self._owner_scope,
+            "old_owner_id": old_owner.owner_id,
+            "old_owner_epoch": old_owner.epoch,
+            "new_owner_id": new_owner.owner_id,
+            "new_owner_epoch": new_owner.epoch,
+            "fence_method": payload["fence_method"],
+            "fence_context_digest": self._canonical_fence_context_digest(
+                payload["fence_context_digest"]
+            ),
+            "committed_at": committed_at,
+        }
 
     def _require_current_durable_owner(self) -> None:
         if self._owner_store is None or self.owner is None:
@@ -270,16 +406,36 @@ class RecoveryController:
         if durable != self.owner:
             raise PermissionError("Durable sender fence no longer belongs to this owner")
 
-    def start(self, owner_id: str) -> OwnerFence:
+    def start(
+        self,
+        owner_id: str,
+        *,
+        fence_context_digest: str | None = None,
+    ) -> OwnerFence:
         if not isinstance(owner_id, str) or not owner_id.strip():
             raise ValueError("Owner identity is required")
         if self.owner is not None:
             raise RuntimeError("Host already has an owner")
         normalized_owner = owner_id.strip()
         durable = self._latest_durable_owner()
+        context = self._canonical_fence_context_digest(fence_context_digest)
+        if durable is not None and context is None and self._owner_store is not None:
+            previous_event = self._owner_store.load_events(
+                self._OWNER_AGGREGATE_TYPE,
+                self._owner_scope,
+            )[-1]
+            previous_payload = previous_event.get("payload")
+            if isinstance(previous_payload, dict):
+                context = self._canonical_fence_context_digest(
+                    previous_payload.get("fence_context_digest")
+                )
         next_epoch = 1 if durable is None else durable.epoch + 1
         candidate = OwnerFence(owner_id=normalized_owner, epoch=next_epoch)
-        self._append_durable_owner(candidate)
+        self._append_durable_owner(
+            candidate,
+            previous_owner=durable,
+            fence_context_digest=context,
+        )
         self.owner = candidate
         self.state = HostState.RECOVERING
         self.provider_reconciled = False
@@ -533,38 +689,77 @@ class RecoveryController:
         self,
         *,
         new_owner_id: str,
-        old_sender_fenced: bool,
-        reconciled: bool,
+        old_sender_fenced: bool | None = None,
+        reconciled: bool | None = None,
     ) -> OwnerFence:
         if self.owner is None:
             raise RuntimeError("No current owner to transfer")
         if not isinstance(new_owner_id, str) or not new_owner_id.strip():
             raise ValueError("New owner identity is required")
         normalized_owner = new_owner_id.strip()
-        if type(old_sender_fenced) is not bool:
-            raise TypeError("old_sender_fenced must be a boolean")
-        if type(reconciled) is not bool:
-            raise TypeError("reconciled must be a boolean")
         if normalized_owner == self.owner.owner_id:
             raise ValueError("New owner must differ from current owner")
-        if not old_sender_fenced:
-            raise PermissionError("Old sender must be externally fenced")
-        if (
-            not reconciled
-            or not self.provider_reconciled
-            or self.unresolved_attempts
-        ):
+
+        durable = self._owner_store is not None
+        if durable:
+            if old_sender_fenced is not None or reconciled is not None:
+                raise PermissionError(
+                    "Durable owner transfer rejects caller authority flags; "
+                    "the journaled owner transition and current reconciliation "
+                    "checkpoint are the authorities"
+                )
+        else:
+            if type(old_sender_fenced) is not bool:
+                raise TypeError("old_sender_fenced must be a boolean")
+            if type(reconciled) is not bool:
+                raise TypeError("reconciled must be a boolean")
+            if not old_sender_fenced:
+                raise PermissionError("Old sender must be externally fenced")
+            if not reconciled:
+                raise PermissionError(
+                    "Ownership transfer requires recorded current reconciliation"
+                )
+
+        if not self.provider_reconciled or self.unresolved_attempts:
             raise PermissionError(
                 "Ownership transfer requires recorded current reconciliation"
             )
         self._require_current_durable_owner()
-        candidate = OwnerFence(normalized_owner, self.owner.epoch + 1)
-        self._append_durable_owner(candidate)
+        previous_owner = self.owner
+        candidate = OwnerFence(normalized_owner, previous_owner.epoch + 1)
+        context: str | None = None
+        if durable:
+            events = self._owner_store.load_events(
+                self._OWNER_AGGREGATE_TYPE,
+                self._owner_scope,
+            )
+            previous_payload = events[-1].get("payload")
+            if not isinstance(previous_payload, dict):
+                raise RuntimeError("Current durable owner payload is invalid")
+            context = self._canonical_fence_context_digest(
+                previous_payload.get("fence_context_digest")
+            )
+        self._append_durable_owner(
+            candidate,
+            previous_owner=previous_owner if durable else None,
+            fence_context_digest=context,
+        )
         self.owner = candidate
         self.provider_reconciled = False
         self.reason_codes.discard("lease_expired_no_failover")
         self.reason_codes.add("startup_reconciliation_required")
         self.state = HostState.RECOVERING
+        if durable:
+            proof = self.durable_sender_fence_proof(candidate.epoch)
+            if (
+                proof["old_owner_id"] != previous_owner.owner_id
+                or proof["old_owner_epoch"] != previous_owner.epoch
+                or proof["new_owner_id"] != candidate.owner_id
+                or proof["new_owner_epoch"] != candidate.epoch
+            ):
+                raise RuntimeError(
+                    "Durable sender-fence proof does not match owner transition"
+                )
         return self.owner
 
     def validate_sender(self, owner_id: str, owner_epoch: int) -> None:

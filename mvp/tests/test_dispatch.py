@@ -1132,8 +1132,6 @@ class DispatchTests(unittest.TestCase):
                 nonlocal outbound
                 recovery.transfer_owner(
                     new_owner_id="host-b",
-                    old_sender_fenced=True,
-                    reconciled=True,
                 )
                 final_guard()
                 outbound += 1

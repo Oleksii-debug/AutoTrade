@@ -288,6 +288,8 @@ def parse_order_ack(
 def parse_account_trades(
     rows: object,
     *,
+    account_id: str,
+    environment: str,
     instrument_versions: Mapping[str, str],
     client_ids_by_order_id: Mapping[int, str] | None = None,
 ) -> tuple[ProviderFillEvidence, ...]:
@@ -325,6 +327,9 @@ def parse_account_trades(
             client_id = validate_client_order_id(client_id)
 
         fill = ProviderFillEvidence.create(
+            provider_id="BINANCE",
+            account_id=account_id,
+            environment=environment,
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=_text(instrument_versions[symbol], name="instrument_version"),
@@ -345,6 +350,8 @@ def parse_account_trades(
 
 def coverage_evidence(
     *,
+    account_id: str,
+    environment: str,
     surface: str,
     coverage_start: str,
     coverage_end: str,
@@ -363,6 +370,9 @@ def coverage_evidence(
         if type(value) is not bool:
             raise TypeError(f"{name} must be boolean")
     return CoverageSurfaceEvidence(
+        provider_id="BINANCE",
+        account_id=account_id,
+        environment=environment,
         surface=normalized,
         coverage_start=coverage_start,
         coverage_end=coverage_end,

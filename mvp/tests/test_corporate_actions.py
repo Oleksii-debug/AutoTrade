@@ -289,5 +289,73 @@ class CorporateSettlementTests(unittest.TestCase):
             book.apply(second)
 
 
+    def test_restart_replays_split_once_and_keeps_duplicate_idempotent(self):
+        initial = EquityState.create(
+            symbol="ABC",
+            quantity="10",
+            total_basis="1000",
+            settled_cash="100",
+            currency=" usd ",
+        )
+        split = CorporateEvent.create(
+            event_id="split-restart",
+            kind="SPLIT",
+            effective_date=date(2026, 9, 25),
+            source_revision="provider:r1",
+            payload={"numerator": "2", "denominator": "1"},
+        )
+        running = CorporateActionBook(initial)
+        first = running.apply(split)
+        self.assertEqual(first.after.quantity, Decimal("20"))
+        self.assertEqual(first.after.total_basis, Decimal("1000"))
+
+        restarted = CorporateActionBook(initial, history=running.events)
+        self.assertEqual(restarted.state, first.after)
+        self.assertEqual(restarted.events, (split,))
+        duplicate = restarted.apply(split)
+        self.assertEqual(duplicate.after, first.after)
+        self.assertEqual(restarted.state.quantity, Decimal("20"))
+        self.assertEqual(restarted.state.total_basis, Decimal("1000"))
+
+    def test_restart_replays_dividend_without_double_receivable(self):
+        initial = EquityState.create(
+            symbol="ABC",
+            quantity="10",
+            total_basis="1000",
+            settled_cash="0",
+            unsettled_cash="0",
+            currency="USD",
+        )
+        dividend = CorporateEvent.create(
+            event_id="dividend-restart",
+            kind="CASH_DIVIDEND",
+            effective_date=date(2026, 9, 25),
+            source_revision="provider:r1",
+            payload={"per_share": "1.25"},
+        )
+        running = CorporateActionBook(initial)
+        running.apply(dividend)
+        self.assertEqual(running.state.unsettled_cash, Decimal("12.50"))
+
+        restarted = CorporateActionBook(initial, history=running.events)
+        restarted.apply(dividend)
+        self.assertEqual(restarted.state.unsettled_cash, Decimal("12.50"))
+        self.assertEqual(restarted.applied_event_ids, ("dividend-restart",))
+
+    def test_equity_currency_and_book_boundaries_are_canonical_and_typed(self):
+        state = EquityState.create(
+            symbol="ABC",
+            quantity="1",
+            total_basis="10",
+            settled_cash="5",
+            currency=" usd ",
+        )
+        self.assertEqual(state.currency, "USD")
+        with self.assertRaisesRegex(TypeError, "EquityState"):
+            CorporateActionBook({"symbol": "ABC"})
+        with self.assertRaisesRegex(TypeError, "CorporateEvent"):
+            CorporateActionBook(state).apply({"event_id": "forged"})
+
+
 if __name__ == "__main__":
     unittest.main()

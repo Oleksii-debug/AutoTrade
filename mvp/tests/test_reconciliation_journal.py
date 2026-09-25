@@ -714,7 +714,10 @@ class ReconciliationJournalTests(unittest.TestCase):
                         "unexpected_provider_activity_ids": "not-a-list",
                         "missing_local_provider_activity_ids": [],
                     }
-                }
+                },
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
             )
 
 

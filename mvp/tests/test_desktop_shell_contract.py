@@ -61,6 +61,31 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
             code,
         )
 
+    def test_connected_host_status_is_validated_before_becoming_current_evidence(self):
+        client = CLIENT.read_text(encoding="utf-8")
+        code = CODE.read_text(encoding="utf-8")
+        self.assertIn("public EmergencyHostStatus Validated()", client)
+        self.assertIn("Host status evidence time must be a non-default UTC instant.", client)
+        self.assertIn("Connected host status requires canonical", client)
+        self.assertIn("StringComparison.OrdinalIgnoreCase", client)
+        self.assertIn(").Validated();", code)
+        self.assertLess(code.index(").Validated();"), code.index("if (status.Connected)"))
+
+    def test_connected_environment_and_state_version_use_canonical_contracts(self):
+        client = CLIENT.read_text(encoding="utf-8")
+        self.assertIn(
+            'value is not ("REPLAY" or "SIMULATION" or "PAPER" or "LIVE")',
+            client,
+        )
+        self.assertIn(
+            "Connected host state version must be a canonical non-negative integer sequence string.",
+            client,
+        )
+        self.assertIn('value == "0"', client)
+        self.assertIn("value[0] is >= '1' and <= '9'", client)
+        self.assertIn("foreach (char character in value)", client)
+        self.assertIn("character is < '0' or > '9'", client)
+
     def test_emergency_control_is_named_keyboard_reachable_and_truthful(self):
         text = XAML.read_text(encoding="utf-8")
         code = CODE.read_text(encoding="utf-8")

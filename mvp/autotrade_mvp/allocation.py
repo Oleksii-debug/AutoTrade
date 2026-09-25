@@ -1786,6 +1786,13 @@ def allocate_evidence_bound_objective_targets(
         raise ValueError("capital evidence account_id does not match market evidence")
     if _payload_decimal(resolved_capital, "cash_available") != policy.cash_available:
         raise ValueError("policy cash_available does not match authoritative capital evidence")
+    if (
+        base_currency is not None
+        and _payload_text(resolved_capital, "base_currency") != base_currency
+    ):
+        raise ValueError(
+            "capital evidence base_currency does not match allocation valuation"
+        )
     account_snapshot_id = _payload_text(
         resolved_capital,
         "account_snapshot_id",

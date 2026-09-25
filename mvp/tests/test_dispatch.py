@@ -278,6 +278,19 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(nested[0].status, "IN_PROGRESS")
             self.assertEqual(outbound, 1)
 
+    def test_client_order_id_rejects_low_entropy_length(self):
+        for invalid in (12, 16, 19, True):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError, "at least 20"
+            ):
+                stable_client_order_id(
+                    "provider",
+                    "intent-1",
+                    environment="PAPER",
+                    account_id="acct-1",
+                    max_length=invalid,
+                )
+
     def test_stable_client_id_is_deterministic_and_bounded(self):
         first = stable_client_order_id("Provider", "intent-1", environment="PAPER", account_id="acct-1", max_length=20)
         second = stable_client_order_id("Provider", "intent-1", environment="PAPER", account_id="acct-1", max_length=20)

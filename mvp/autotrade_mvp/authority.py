@@ -330,6 +330,11 @@ class AuthorityService:
         self._used_confirmations: set[str] = set()
         self._admissions: dict[str, AdmissionRecord] = {}
         self._epoch = 0
+        # Last authority aggregate version this process has actually replayed
+        # or committed. This is deliberately separate from authority epoch:
+        # confirmations/admissions advance the journal even when they do not
+        # change the policy/revocation epoch.
+        self._journal_version = 0
         if self.store is not None:
             self._restore_journal()
 
@@ -390,35 +395,71 @@ class AuthorityService:
     def _persist(self, event_type: str, key: str, payload: dict[str, Any], *, committed_at: str) -> None:
         if self.store is None:
             return
+
+        # Compare-and-append from this process's observed journal position.
+        # Reading "next version" from the shared DB here would let a stale
+        # AuthorityService silently append after another process and make
+        # decisions from obsolete confirmation/revocation state.
+        durable_next = self.store.next_aggregate_version(
+            "authority_state", "canonical"
+        )
+        durable_version = durable_next - 1
+        if durable_version != self._journal_version:
+            raise AuthorityConflict(
+                "durable authority journal advanced; reload required"
+            )
+
         event_id = _authority_event_id(event_type, key)
         existing = self.store.get_event(event_id)
         if existing is not None:
             if existing["event_type"] != event_type or existing["payload"] != payload:
                 raise AuthorityConflict("durable authority event conflicts with existing content")
+            # If our observed version matches durable state, this event was
+            # already part of our replay. Callers should have handled the
+            # corresponding in-memory idempotency path before reaching here.
             return
         envelope = {
             "event_id": event_id,
             "event_type": event_type,
             "aggregate_type": "authority_state",
             "aggregate_id": "canonical",
-            "aggregate_version": str(self.store.next_aggregate_version("authority_state", "canonical")),
+            "aggregate_version": str(self._journal_version + 1),
             "payload": payload,
             "payload_hash": payload_digest(payload),
             "committed_at": committed_at,
         }
         try:
-            self.store.append_event(envelope)
-        except ValueError:
+            result = self.store.append_event(envelope)
+        except ValueError as error:
+            # A concurrent writer may have won after the version check but
+            # before our append. Never reinterpret that race as idempotency:
+            # the caller must reload and re-evaluate authority state.
             existing = self.store.get_event(event_id)
-            if existing is not None and existing["event_type"] == event_type and existing["payload"] == payload:
+            if (
+                existing is not None
+                and existing["event_type"] == event_type
+                and existing["payload"] == payload
+                and self.store.next_aggregate_version(
+                    "authority_state", "canonical"
+                ) - 1 == self._journal_version
+            ):
                 return
-            raise
+            raise AuthorityConflict(
+                "durable authority journal changed concurrently; reload required"
+            ) from error
+        if result.inserted:
+            self._journal_version += 1
 
     def _restore_journal(self) -> None:
         assert self.store is not None
         for event in self.store.load_events("authority_state", "canonical"):
             payload = event["payload"]
             event_type = event["event_type"]
+            event_version = int(event["aggregate_version"])
+            if event_version != self._journal_version + 1:
+                raise AuthorityConflict(
+                    "durable authority journal version sequence is invalid"
+                )
             if event_type == "AuthorityPolicyRegistered":
                 instruments = payload.get("instruments")
                 if not isinstance(instruments, list):
@@ -594,6 +635,7 @@ class AuthorityService:
                     self._used_confirmations.add(record.confirmation_id)
             else:
                 raise AuthorityConflict(f"unknown durable authority event: {event_type}")
+            self._journal_version = event_version
 
     @property
     def epoch(self) -> int:

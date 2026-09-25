@@ -624,6 +624,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
         fee_currency="USD",
         position_side=None,
         provider_execution_id="provider-execution-1",
+        evidence_refs=("provider-fill:test",),
     ):
         return ProviderFillEvidence.create(
             provider_id=PROVIDER,
@@ -639,7 +640,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             trade_time="2026-09-25T09:00:00Z",
             side=side,
             position_side=position_side,
-            evidence_refs=("provider-fill:test",),
+            evidence_refs=evidence_refs,
         )
 
     def commit_evidenced_fill(
@@ -698,6 +699,51 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             self.assertEqual(binding["derived_usage"], {"CASH:USD": "100"})
             self.assertTrue(binding["plan_digest"].startswith("sha256:"))
             self.assertTrue(binding["transaction_digest"].startswith("sha256:"))
+            self.assertTrue(binding["projected_fill_digest"].startswith("sha256:"))
+            self.assertTrue(binding["provider_fill_digest"].startswith("sha256:"))
+            self.assertEqual(
+                binding["provider_fill"]["evidence_refs"],
+                ["provider-fill:test"],
+            )
+            self.assertEqual(binding["provider_fill"]["side"], "BUY")
+            self.assertEqual(binding["provider_fill"]["quantity"], "1")
+
+    def test_provider_evidence_retargeting_conflicts_with_existing_fill_binding(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            self.commit_evidenced_fill(economics, reservations)
+            changed_provider = self.provider_fill(
+                evidence_refs=("provider-fill:retargeted",),
+            )
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "different financial binding",
+            ):
+                self.commit_evidenced_fill(
+                    economics,
+                    reservations,
+                    provider=changed_provider,
+                    command_id="evidence-fill-command-retarget",
+                    idempotency_key="evidence-fill-idempotency-retarget",
+                )
+
+            self.assertEqual(len(economics.transactions), 1)
+            self.assertEqual(
+                len(
+                    store.load_events_by_aggregate_type(
+                        "provider_fill_financial_binding"
+                    )
+                ),
+                1,
+            )
+            snapshot = reservations.get("reservation-1")
+            self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("100"))
+            self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("20"))
 
     def test_binding_is_not_left_behind_when_atomic_commit_fails(self):
         with TemporaryDirectory() as directory:

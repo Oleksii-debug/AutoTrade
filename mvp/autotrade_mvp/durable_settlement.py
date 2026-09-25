@@ -181,9 +181,14 @@ def _rule_payload(rule: SettlementRuleBinding) -> dict[str, object]:
 
 def settlement_rule_evidence_receipt(
     rule: SettlementRuleBinding,
+    *,
+    trade_date: date,
+    expected_settlement_date: date,
 ) -> dict[str, object]:
     if not isinstance(rule, SettlementRuleBinding):
         raise TypeError("rule must be SettlementRuleBinding")
+    if type(trade_date) is not date or type(expected_settlement_date) is not date:
+        raise TypeError("trade_date and expected_settlement_date must be dates")
     return {
         "schema_version": SETTLEMENT_EVIDENCE_SCHEMA_VERSION,
         "evidence_type": SETTLEMENT_EVIDENCE_TYPE,
@@ -200,12 +205,17 @@ def settlement_rule_evidence_receipt(
             "effective_to": (
                 None if rule.effective_to is None else rule.effective_to.isoformat()
             ),
+            "trade_date": trade_date.isoformat(),
+            "expected_settlement_date": expected_settlement_date.isoformat(),
         },
     }
 
 
 def settlement_rule_evidence_metadata(
     rule: SettlementRuleBinding,
+    *,
+    trade_date: date,
+    expected_settlement_date: date,
 ) -> dict[str, object]:
     return {
         "evidence_type": SETTLEMENT_EVIDENCE_TYPE,
@@ -217,12 +227,17 @@ def settlement_rule_evidence_metadata(
         "environment": rule.scope.environment,
         "instrument_version": rule.instrument_version,
         "settlement_currency": rule.settlement_currency,
+        "trade_date": trade_date.isoformat(),
+        "expected_settlement_date": expected_settlement_date.isoformat(),
     }
 
 
 def verify_settlement_rule_evidence(
     rule: SettlementRuleBinding,
     artifact_store: ArtifactStore,
+    *,
+    trade_date: date,
+    expected_settlement_date: date,
 ) -> tuple[str, ...]:
     refs = tuple(
         reference
@@ -237,8 +252,16 @@ def verify_settlement_rule_evidence(
         _verify_artifact(
             artifact_store,
             evidence_ref=reference,
-            expected_receipt=settlement_rule_evidence_receipt(rule),
-            expected_metadata=settlement_rule_evidence_metadata(rule),
+            expected_receipt=settlement_rule_evidence_receipt(
+                rule,
+                trade_date=trade_date,
+                expected_settlement_date=expected_settlement_date,
+            ),
+            expected_metadata=settlement_rule_evidence_metadata(
+                rule,
+                trade_date=trade_date,
+                expected_settlement_date=expected_settlement_date,
+            ),
             name="settlement rule",
         )
         for reference in refs
@@ -498,6 +521,8 @@ class DurableSettlementBook:
                     verify_settlement_rule_evidence(
                         obligation.rule_binding,
                         self.evidence_artifact_store,
+                        trade_date=obligation.trade_date,
+                        expected_settlement_date=obligation.settlement_date,
                     )
                     book.add(obligation)
             elif event_type == _SETTLE_EVENT:
@@ -574,6 +599,8 @@ class DurableSettlementBook:
             verify_settlement_rule_evidence(
                 obligation.rule_binding,
                 self.evidence_artifact_store,
+                trade_date=obligation.trade_date,
+                expected_settlement_date=obligation.settlement_date,
             )
 
         events = self._events()

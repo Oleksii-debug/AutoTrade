@@ -482,6 +482,200 @@ def prepare_order_request(
 
 
 @dataclass(frozen=True)
+class WhiteBitSubmissionResult:
+    """Recorded result of one guarded outbound attempt; never a fill authority."""
+
+    attempt_id: str
+    account_id: str
+    environment: str
+    client_order_id: str
+    outcome: str
+    next_action: str
+    observed_at: datetime
+    response_sha256: str | None
+    http_status: int | None
+    provider_order_id: str | None = None
+    provider_reported_status: str | None = None
+    rejection_code: str | None = None
+    rejection_message: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("attempt_id", "account_id", "environment"):
+            object.__setattr__(self, name, _text(getattr(self, name), name=name))
+        object.__setattr__(
+            self,
+            "client_order_id",
+            validate_client_order_id(self.client_order_id),
+        )
+        outcome = _text(self.outcome, name="outcome").upper()
+        if outcome not in {"ACKNOWLEDGED", "REJECTED", "UNKNOWN"}:
+            raise WhiteBitAdapterError("unsupported submission outcome")
+        object.__setattr__(self, "outcome", outcome)
+        action = _text(self.next_action, name="next_action").upper()
+        expected_action = {
+            "ACKNOWLEDGED": "OBSERVE_OR_RECONCILE",
+            "REJECTED": "DO_NOT_RETRY_BLINDLY",
+            "UNKNOWN": "RECONCILE_FIRST",
+        }[outcome]
+        if action != expected_action:
+            raise WhiteBitAdapterError(
+                f"{outcome} requires next_action {expected_action}"
+            )
+        object.__setattr__(self, "next_action", action)
+        object.__setattr__(self, "observed_at", _instant(self.observed_at, name="observed_at"))
+        if self.response_sha256 is not None:
+            digest = _text(self.response_sha256, name="response_sha256")
+            if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+                raise WhiteBitAdapterError("response_sha256 must be canonical SHA-256")
+            object.__setattr__(self, "response_sha256", digest)
+        if self.http_status is not None:
+            if (
+                isinstance(self.http_status, bool)
+                or not isinstance(self.http_status, int)
+                or not 100 <= self.http_status <= 599
+            ):
+                raise WhiteBitAdapterError("http_status must be an HTTP status integer")
+        if outcome == "ACKNOWLEDGED" and self.provider_order_id is None:
+            raise WhiteBitAdapterError("acknowledged submission requires provider_order_id")
+        if outcome == "UNKNOWN" and self.provider_order_id is not None:
+            raise WhiteBitAdapterError("unknown submission cannot assert provider_order_id")
+
+
+def _response_bytes(raw: str | bytes) -> bytes:
+    if isinstance(raw, bytes):
+        try:
+            raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise WhiteBitAdapterError("provider response must be UTF-8") from error
+        return raw
+    if isinstance(raw, str) and raw:
+        return raw.encode("utf-8")
+    raise WhiteBitAdapterError("provider response body is required")
+
+
+def parse_submission_result(
+    prepared: WhiteBitPreparedRequest,
+    *,
+    attempt_id: str,
+    account_id: str,
+    environment: str,
+    observed_at: datetime,
+    response_body: str | bytes | None,
+    http_status: int | None,
+    transport_ambiguous: bool = False,
+) -> WhiteBitSubmissionResult:
+    """Bind one authoritative response, or an ambiguous transport, to one attempt.
+
+    A successful create response is only ACKNOWLEDGED here. Economic fills must
+    still come from provider execution evidence. A send that may have reached
+    WhiteBIT but lacks an authoritative response becomes UNKNOWN and must be
+    reconciled before any retry.
+    """
+
+    if not isinstance(prepared, WhiteBitPreparedRequest):
+        raise TypeError("prepared must be WhiteBitPreparedRequest")
+    client_id = validate_client_order_id(str(prepared.body.get("clientOrderId", "")))
+    attempt = _text(attempt_id, name="attempt_id")
+    account = _text(account_id, name="account_id")
+    env = _text(environment, name="environment").upper()
+    point = _instant(observed_at, name="observed_at")
+
+    if transport_ambiguous:
+        if response_body is not None or http_status is not None:
+            raise WhiteBitAdapterError(
+                "ambiguous transport cannot claim an authoritative provider response"
+            )
+        return WhiteBitSubmissionResult(
+            attempt_id=attempt,
+            account_id=account,
+            environment=env,
+            client_order_id=client_id,
+            outcome="UNKNOWN",
+            next_action="RECONCILE_FIRST",
+            observed_at=point,
+            response_sha256=None,
+            http_status=None,
+        )
+
+    if response_body is None or http_status is None:
+        raise WhiteBitAdapterError(
+            "non-ambiguous submission requires status and authoritative response body"
+        )
+    if isinstance(http_status, bool) or not isinstance(http_status, int):
+        raise WhiteBitAdapterError("http_status must be an integer")
+    raw = _response_bytes(response_body)
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    payload = decode_whitebit_json(raw)
+    if not isinstance(payload, Mapping):
+        raise WhiteBitAdapterError("provider submission response must be an object")
+
+    if http_status == 200:
+        provider_order_id = _text(str(payload.get("orderId", "")), name="orderId")
+        response_client_id = validate_client_order_id(
+            str(payload.get("clientOrderId", ""))
+        )
+        if response_client_id != client_id:
+            raise WhiteBitAdapterError(
+                "provider response clientOrderId does not match guarded attempt"
+            )
+        provider_market = _text(str(payload.get("market", "")), name="market").upper()
+        request_market = _text(str(prepared.body.get("market", "")), name="market").upper()
+        if provider_market != request_market:
+            raise WhiteBitAdapterError(
+                "provider response market does not match guarded attempt"
+            )
+        raw_status = payload.get("status")
+        reported_status = (
+            None
+            if raw_status in {None, ""}
+            else _text(str(raw_status), name="status").upper()
+        )
+        return WhiteBitSubmissionResult(
+            attempt_id=attempt,
+            account_id=account,
+            environment=env,
+            client_order_id=client_id,
+            outcome="ACKNOWLEDGED",
+            next_action="OBSERVE_OR_RECONCILE",
+            observed_at=point,
+            response_sha256=digest,
+            http_status=http_status,
+            provider_order_id=provider_order_id,
+            provider_reported_status=reported_status,
+        )
+
+    # WhiteBIT documents HTTP 422 validation errors for these order surfaces.
+    # Do not generalize other HTTP failures into definitive rejection: a timeout,
+    # proxy failure or server error may still follow an accepted write.
+    if http_status == 422:
+        code = payload.get("code")
+        message = payload.get("message")
+        errors = payload.get("errors")
+        if code is None or message in {None, ""} or not isinstance(errors, Mapping):
+            raise WhiteBitAdapterError(
+                "422 rejection is missing documented code/message/errors evidence"
+            )
+        return WhiteBitSubmissionResult(
+            attempt_id=attempt,
+            account_id=account,
+            environment=env,
+            client_order_id=client_id,
+            outcome="REJECTED",
+            next_action="DO_NOT_RETRY_BLINDLY",
+            observed_at=point,
+            response_sha256=digest,
+            http_status=http_status,
+            rejection_code=_text(str(code), name="rejection code"),
+            rejection_message=_text(str(message), name="rejection message"),
+        )
+
+    raise WhiteBitAdapterError(
+        "HTTP outcome is not qualified as definitive acceptance or rejection; "
+        "record transport as UNKNOWN and reconcile"
+    )
+
+
+@dataclass(frozen=True)
 class WhiteBitOrderSnapshot:
     provider_order_id: str
     client_order_id: str | None

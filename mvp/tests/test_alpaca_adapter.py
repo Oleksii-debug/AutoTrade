@@ -15,9 +15,25 @@ from mvp.autotrade_mvp.alpaca import (
     prepare_order_request,
 )
 from mvp.autotrade_mvp.capabilities import CapabilitySnapshot
+from mvp.autotrade_mvp.provider_core import (
+    BoundReconciliationResponse,
+    PreparedReconciliationRead,
+)
 
 
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
+
+
+def bound_activity_response(activities, *, account_id="paper-1", environment="PAPER"):
+    read = PreparedReconciliationRead.create(
+        provider_id="ALPACA",
+        account_id=account_id,
+        environment=environment,
+        surface="ACTIVITIES",
+        endpoint="/v2/account/activities/FILL",
+        request={"activity_types": "FILL"},
+    )
+    return BoundReconciliationResponse.bind(read, activities)
 
 
 def capability(*, order_types=("MARKET", "LIMIT", "STOP", "STOP_LIMIT"), tif=("DAY", "GTC", "IOC")):
@@ -406,23 +422,20 @@ class AlpacaAdapterTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(AlpacaAdapterError, "fee evidence"):
             parse_trade_activities(
-                [row],
+                bound_activity_response([row]),
                 instrument_versions={"AAPL": "AAPL:v1"},
                 client_ids_by_order_id={order_id: "at-ack-1"},
                 fees_by_activity_id={},
-            
-                account_id="paper-1",
-                environment="PAPER",)
+            )
         fills = parse_trade_activities(
-            [row, row],
+            bound_activity_response([row, row]),
             instrument_versions={"AAPL": "AAPL:v1"},
             client_ids_by_order_id={order_id: "at-ack-1"},
             fees_by_activity_id={row["id"]: ("0.01", "USD")},
-        
-            account_id="paper-1",
-            environment="PAPER",)
+        )
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].fee_amount, Decimal("0.01"))
+        self.assertEqual((fills[0].account_id, fills[0].environment), ("paper-1", "PAPER"))
 
     def test_canonical_coverage_defaults_to_unproven_absence(self):
         evidence = coverage_evidence(

@@ -323,6 +323,24 @@ class SettlementBookTests(unittest.TestCase):
             )
 
 
+    def test_restart_rejects_duplicate_normalized_settlement_evidence_identity(self):
+        obligation = SettlementObligation(
+            "cash-1", "fill-1", "USD", Decimal("10"),
+            date(2026, 9, 20), date(2026, 9, 22),
+        )
+        with self.assertRaisesRegex(
+            SettlementConflict,
+            "duplicate normalized obligation ids",
+        ):
+            SettlementBook(
+                settled_cash={"USD": "10"},
+                obligations=(obligation,),
+                settled_obligation_evidence={
+                    "cash-1": "provider:statement:1",
+                    " cash-1 ": "provider:statement:2",
+                },
+            )
+
     def test_reservation_to_settlement_handoff_never_double_locks_same_fill(self):
         reservations = ReservationBook()
         settlement = SettlementBook(settled_cash={"USD": "1000"})

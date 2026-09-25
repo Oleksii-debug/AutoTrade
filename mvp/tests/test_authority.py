@@ -53,6 +53,7 @@ def bound_risk_decision(
     state_version=7,
     policy_version=1,
     reservation_version=0,
+    reservation_requirements=None,
     capability_snapshot_id="cap-snapshot-1",
     evaluated_at="2026-09-24T18:00:00Z",
     valid_until="2026-09-24T18:30:00Z",
@@ -79,6 +80,11 @@ def bound_risk_decision(
         state_version=state_version,
         policy_version=policy_version,
         reservation_version=reservation_version,
+        reservation_requirements=(
+            {"CASH:USD": "100"}
+            if reservation_requirements is None
+            else reservation_requirements
+        ),
         capability_snapshot_id=capability_snapshot_id,
         evaluated_at=evaluated_at,
         valid_until=valid_until,
@@ -1205,6 +1211,136 @@ class AuthorityTests(unittest.TestCase):
                 len(store.load_events("authority_state", "canonical")),
                 2,
             )
+
+    def test_public_financial_admission_rejects_under_reservation_without_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            item = policy(autonomous=True)
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+            )
+            decision = bound_risk_decision(
+                policy_version=item.version,
+                reservation_version=reservations.version,
+                reservation_requirements={"CASH:USD": "100"},
+            )
+            before_authority = len(
+                store.load_events("authority_state", "canonical")
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "reservation requirements do not match risk decision",
+            ):
+                authority.admit(
+                    command_id="cmd-under-reserved",
+                    idempotency_key="idem-under-reserved",
+                    admission_id="admission-under-reserved",
+                    policy_id=item.policy_id,
+                    intent_id="intent-under-reserved",
+                    intent_hash=decision.intent_hash,
+                    account_id="paper-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    current_state_version=7,
+                    capability_snapshot_id=decision.capability_snapshot_id,
+                    risk_decision=decision,
+                    reservation_book=reservations,
+                    reservation_id="reservation-under-reserved",
+                    reservation_requirements={"CASH:USD": "99"},
+                    reservation_available={"CASH:USD": "1000"},
+                    now="2026-09-24T18:01:00Z",
+                )
+            self.assertEqual(reservations.version, 0)
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+            self.assertEqual(
+                len(store.load_events("risk_decision", decision.decision_id)),
+                0,
+            )
+            self.assertEqual(
+                len(store.load_events("authority_state", "canonical")),
+                before_authority,
+            )
+            self.assertEqual(store.pending_outbox(), [])
+
+    def test_public_financial_admission_replay_rejects_changed_reservation_delta(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            item = policy(autonomous=True)
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+            )
+            decision = bound_risk_decision(
+                policy_version=item.version,
+                reservation_version=reservations.version,
+                reservation_requirements={"CASH:USD": "100"},
+            )
+            kwargs = dict(
+                command_id="cmd-retry-delta",
+                idempotency_key="idem-retry-delta",
+                admission_id="admission-retry-delta",
+                policy_id=item.policy_id,
+                intent_id="intent-retry-delta",
+                intent_hash=decision.intent_hash,
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                current_state_version=7,
+                capability_snapshot_id=decision.capability_snapshot_id,
+                risk_decision=decision,
+                reservation_id="reservation-retry-delta",
+                reservation_requirements={"CASH:USD": "100"},
+                reservation_available={"CASH:USD": "1000"},
+                now="2026-09-24T18:01:00Z",
+            )
+            first = authority.admit(
+                reservation_book=reservations,
+                **kwargs,
+            )
+            restarted = AuthorityService(store)
+            restarted_book = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "reservation requirements do not match risk decision",
+            ):
+                restarted.admit(
+                    reservation_book=restarted_book,
+                    **{
+                        **kwargs,
+                        "reservation_requirements": {"CASH:USD": "99"},
+                    },
+                )
+            self.assertEqual(
+                restarted_book.total_reserved("CASH:USD"),
+                Decimal("100"),
+            )
+            self.assertEqual(restarted_book.version, 1)
+            self.assertEqual(len(store.pending_outbox()), 1)
+            self.assertEqual(
+                len(store.load_events("risk_decision", decision.decision_id)),
+                1,
+            )
+            self.assertEqual(first.reservation_id, "reservation-retry-delta")
 
     def test_public_financial_admission_replay_rejects_changed_scope(self):
         with TemporaryDirectory() as directory:

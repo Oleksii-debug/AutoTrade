@@ -86,8 +86,8 @@ class FillAccountingTests(unittest.TestCase):
             settlement_currency="USD",
         ))
         changed_provider = ProviderFillEvidence.create(
-            provider_id="SIMULATED",
-            account_id="paper-1",
+            provider_id="PROVIDER-A",
+            account_id="acct-1",
             environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
@@ -131,8 +131,8 @@ class FillAccountingTests(unittest.TestCase):
         book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
 
         wrong_execution = ProviderFillEvidence.create(
-            provider_id="SIMULATED",
-            account_id="paper-1",
+            provider_id="PROVIDER-A",
+            account_id="acct-1",
             environment="PAPER",
             provider_execution_id="exec-other",
             client_order_id="client-1",
@@ -154,8 +154,8 @@ class FillAccountingTests(unittest.TestCase):
             )
 
         wrong_client = ProviderFillEvidence.create(
-            provider_id="SIMULATED",
-            account_id="paper-1",
+            provider_id="PROVIDER-A",
+            account_id="acct-1",
             environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-other",
@@ -177,8 +177,8 @@ class FillAccountingTests(unittest.TestCase):
             )
 
         wrong_quantity = ProviderFillEvidence.create(
-            provider_id="SIMULATED",
-            account_id="paper-1",
+            provider_id="PROVIDER-A",
+            account_id="acct-1",
             environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
@@ -223,8 +223,8 @@ class FillAccountingTests(unittest.TestCase):
             correction_of="fill-1",
         )
         corrected_provider = ProviderFillEvidence.create(
-            provider_id="SIMULATED",
-            account_id="paper-1",
+            provider_id="PROVIDER-A",
+            account_id="acct-1",
             environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
@@ -321,8 +321,8 @@ class FillAccountingTests(unittest.TestCase):
             correction_of="fill-1",
         )
         corrected_provider = ProviderFillEvidence.create(
-            provider_id="SIMULATED",
-            account_id="paper-1",
+            provider_id="PROVIDER-A",
+            account_id="acct-1",
             environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
@@ -407,8 +407,8 @@ class FillAccountingTests(unittest.TestCase):
             correction_of="fill-1",
         )
         corrected_provider = ProviderFillEvidence.create(
-            provider_id="SIMULATED",
-            account_id="paper-1",
+            provider_id="PROVIDER-A",
+            account_id="acct-1",
             environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
@@ -465,8 +465,8 @@ class FillAccountingTests(unittest.TestCase):
             correction_of="fill-1",
         )
         corrected_provider = ProviderFillEvidence.create(
-            provider_id="SIMULATED",
-            account_id="paper-1",
+            provider_id="PROVIDER-A",
+            account_id="acct-1",
             environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
@@ -508,8 +508,8 @@ class FillAccountingTests(unittest.TestCase):
             correction_of="fill-1",
         )
         corrected_provider = ProviderFillEvidence.create(
-            provider_id="SIMULATED",
-            account_id="paper-1",
+            provider_id="PROVIDER-A",
+            account_id="acct-1",
             environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
@@ -532,8 +532,8 @@ class FillAccountingTests(unittest.TestCase):
                 "instrument",
                 base,
                 ProviderFillEvidence.create(
-                    provider_id="SIMULATED",
-                    account_id="paper-1",
+                    provider_id="PROVIDER-A",
+                    account_id="acct-1",
                     environment="PAPER",
                     provider_execution_id="exec-1",
                     client_order_id="client-1",
@@ -587,8 +587,8 @@ class FillAccountingTests(unittest.TestCase):
             correction_of="fill-1",
         )
         first_provider = ProviderFillEvidence.create(
-            provider_id="SIMULATED",
-            account_id="paper-1",
+            provider_id="PROVIDER-A",
+            account_id="acct-1",
             environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
@@ -611,8 +611,8 @@ class FillAccountingTests(unittest.TestCase):
             correction_of="fill-1-r2",
         )
         second_provider = ProviderFillEvidence.create(
-            provider_id="SIMULATED",
-            account_id="paper-1",
+            provider_id="PROVIDER-A",
+            account_id="acct-1",
             environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
@@ -685,8 +685,8 @@ class FillAccountingTests(unittest.TestCase):
             correction_of="fill-1",
         )
         corrected_provider = ProviderFillEvidence.create(
-            provider_id="SIMULATED",
-            account_id="paper-1",
+            provider_id="PROVIDER-A",
+            account_id="acct-1",
             environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
@@ -753,6 +753,120 @@ class FillAccountingTests(unittest.TestCase):
                 for transaction in book.transactions
             )
         )
+
+
+    def test_provider_fill_scope_mismatch_fails_before_any_booking(self):
+        projected, provider = matched_fill()
+        cases = (
+            ("provider_id", "OTHER-PROVIDER", "acct-1", "PAPER"),
+            ("account_id", "PROVIDER-A", "other-account", "PAPER"),
+            ("environment", "PROVIDER-A", "acct-1", "LIVE"),
+        )
+        for label, provider_id, account_id, environment in cases:
+            with self.subTest(label=label):
+                scoped_provider = ProviderFillEvidence.create(
+                    provider_id=provider_id,
+                    account_id=account_id,
+                    environment=environment,
+                    provider_execution_id=provider.provider_execution_id,
+                    client_order_id=provider.client_order_id,
+                    instrument=provider.instrument,
+                    quantity=provider.quantity,
+                    price=provider.price,
+                    fee_amount=provider.fee_amount,
+                    fee_currency=provider.fee_currency,
+                    trade_time=provider.trade_time,
+                )
+                book = ScopedEconomicBook(
+                    environment="PAPER",
+                    account_id="acct-1",
+                )
+                before = book.audit_digest()
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    label,
+                ):
+                    book_provider_fill(
+                        book=book,
+                        provider_id="provider-a",
+                        projected_fill=projected,
+                        provider_fill=scoped_provider,
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                    )
+                self.assertEqual(book.transactions, ())
+                self.assertEqual(book.audit_digest(), before)
+                self.assertEqual(book.position("ABC"), Decimal("0"))
+                self.assertEqual(book.cash("USD"), Decimal("0"))
+
+    def test_fill_correction_scope_mismatch_fails_before_reversal(self):
+        original_projected, original_provider = matched_fill()
+        corrected_projected = ProjectedFillEvidence.create(
+            fill_id="fill-1-r2",
+            provider_execution_id="exec-1",
+            intent_id="intent-1",
+            client_order_id="client-1",
+            side="BUY",
+            quantity="2",
+            price="101",
+            provider_revision="r2",
+            correction_of="fill-1",
+        )
+        matching_corrected = dict(
+            provider_id="PROVIDER-A",
+            account_id="acct-1",
+            environment="PAPER",
+            provider_execution_id="exec-1",
+            client_order_id="client-1",
+            instrument="ABC",
+            quantity="2",
+            price="101",
+            fee_amount="1",
+            fee_currency="USD",
+            trade_time="2026-01-01T00:00:01Z",
+        )
+        cases = (
+            ("provider_id", {**matching_corrected, "provider_id": "OTHER-PROVIDER"}),
+            ("account_id", {**matching_corrected, "account_id": "other-account"}),
+            ("environment", {**matching_corrected, "environment": "LIVE"}),
+        )
+        for label, corrected_args in cases:
+            with self.subTest(label=label):
+                book = ScopedEconomicBook(
+                    environment="PAPER",
+                    account_id="acct-1",
+                )
+                self.assertTrue(
+                    book_provider_fill(
+                        book=book,
+                        provider_id="provider-a",
+                        projected_fill=original_projected,
+                        provider_fill=original_provider,
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                    )
+                )
+                before_transactions = book.transactions
+                before_digest = book.audit_digest()
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    label,
+                ):
+                    book_provider_fill_correction(
+                        book=book,
+                        provider_id="provider-a",
+                        original_projected_fill=original_projected,
+                        original_provider_fill=original_provider,
+                        corrected_projected_fill=corrected_projected,
+                        corrected_provider_fill=ProviderFillEvidence.create(
+                            **corrected_args
+                        ),
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                        correction_observed_at="2026-01-01T00:00:02Z",
+                    )
+                self.assertEqual(book.transactions, before_transactions)
+                self.assertEqual(book.audit_digest(), before_digest)
 
 
 

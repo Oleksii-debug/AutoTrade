@@ -67,7 +67,7 @@ def artifact(
     )
 
 
-def freeze_verified(candidate, *, omit_roles=(), corrupt_role=None):
+def freeze_with_integrity_store(candidate, *, omit_roles=(), corrupt_role=None):
     with TemporaryDirectory() as directory:
         store = ArtifactStore(directory)
         for item in candidate.artifacts:
@@ -114,24 +114,27 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         values.update(overrides)
         return ReleaseCandidateInput.create(**values)
 
-    def test_complete_exact_evidence_freezes_deterministic_manifest(self):
-        first = freeze_verified(self.candidate())
+    def test_complete_self_populated_store_cannot_freeze_release(self):
+        first = freeze_with_integrity_store(self.candidate())
         reordered = list(self.candidate().artifacts)
         reordered.reverse()
-        second = freeze_verified(
+        second = freeze_with_integrity_store(
             self.candidate(artifacts=tuple(reordered))
         )
-        self.assertEqual(first.status, "FROZEN")
-        self.assertEqual(first.reasons, ())
-        self.assertIsNotNone(first.manifest_json)
-        self.assertEqual(first.manifest_sha256, second.manifest_sha256)
-        self.assertEqual(first.manifest_json, second.manifest_json)
+        self.assertEqual(first.status, "BLOCKED")
+        self.assertIn(
+            "independent_evidence_trust_unavailable",
+            first.reasons,
+        )
+        self.assertIsNone(first.manifest_json)
+        self.assertIsNone(first.manifest_sha256)
+        self.assertEqual(first, second)
 
     def test_missing_required_artifact_blocks_freeze(self):
         artifacts = tuple(
             item for item in self.candidate().artifacts if item.role != "SBOM"
         )
-        decision = freeze_verified(
+        decision = freeze_with_integrity_store(
             self.candidate(artifacts=artifacts)
         )
         self.assertEqual(decision.status, "BLOCKED")
@@ -141,7 +144,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
     def test_artifact_from_another_source_sha_blocks_freeze(self):
         artifacts = list(self.candidate().artifacts)
         artifacts[0] = artifact("HOST", source_sha=OTHER_SOURCE)
-        decision = freeze_verified(
+        decision = freeze_with_integrity_store(
             self.candidate(artifacts=artifacts)
         )
         self.assertEqual(decision.status, "BLOCKED")
@@ -158,7 +161,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                     )
                     for item in self.candidate().artifacts
                 ]
-                decision = freeze_verified(
+                decision = freeze_with_integrity_store(
                     self.candidate(artifacts=artifacts)
                 )
                 self.assertEqual(decision.status, "BLOCKED")
@@ -180,7 +183,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
             )
             for item in self.candidate().artifacts
         ]
-        decision = freeze_verified(
+        decision = freeze_with_integrity_store(
             self.candidate(artifacts=artifacts)
         )
         self.assertEqual(decision.status, "BLOCKED")
@@ -195,7 +198,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
             )
             for item in self.candidate().artifacts
         ]
-        decision = freeze_verified(
+        decision = freeze_with_integrity_store(
             self.candidate(artifacts=artifacts)
         )
         self.assertEqual(decision.status, "BLOCKED")
@@ -210,7 +213,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
             for item in self.candidate().artifacts
             if item.role != "RELEASE_QUALIFICATION"
         )
-        missing = freeze_verified(
+        missing = freeze_with_integrity_store(
             self.candidate(artifacts=artifacts)
         )
         self.assertEqual(missing.status, "BLOCKED")
@@ -230,7 +233,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
             )
             for item in self.candidate().artifacts
         ]
-        inconclusive = freeze_verified(
+        inconclusive = freeze_with_integrity_store(
             self.candidate(artifacts=inconclusive_artifacts)
         )
         self.assertEqual(inconclusive.status, "BLOCKED")
@@ -240,7 +243,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         )
 
     def test_unresolved_blocker_prevents_manifest_publication(self):
-        decision = freeze_verified(
+        decision = freeze_with_integrity_store(
             self.candidate(
                 unresolved_blockers=("provider-paper-qualification",)
             )
@@ -296,19 +299,22 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 evidence_status="PASS",
             )
 
-    def test_manifest_hash_changes_when_evidence_hash_changes(self):
-        original = freeze_verified(self.candidate())
+    def test_changed_self_asserted_evidence_still_cannot_publish_manifest(self):
+        original = freeze_with_integrity_store(self.candidate())
         artifacts = list(self.candidate().artifacts)
         index = next(i for i, item in enumerate(artifacts) if item.role == "SBOM")
         artifacts[index] = artifact("SBOM", digest_char="f")
-        changed = freeze_verified(
+        changed = freeze_with_integrity_store(
             self.candidate(artifacts=artifacts)
         )
-        self.assertEqual(changed.status, "FROZEN")
-        self.assertNotEqual(
-            original.manifest_sha256,
-            changed.manifest_sha256,
+        self.assertEqual(original.status, "BLOCKED")
+        self.assertEqual(changed.status, "BLOCKED")
+        self.assertIn(
+            "independent_evidence_trust_unavailable",
+            changed.reasons,
         )
+        self.assertIsNone(original.manifest_sha256)
+        self.assertIsNone(changed.manifest_sha256)
 
 
     def test_nonbinary_missing_or_invalid_signature_status_is_unresolved(self):
@@ -322,7 +328,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                     )
                     for item in self.candidate().artifacts
                 ]
-                decision = freeze_verified(
+                decision = freeze_with_integrity_store(
                     self.candidate(artifacts=artifacts)
                 )
                 self.assertEqual(decision.status, "BLOCKED")
@@ -333,34 +339,35 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
 
 
 
-    def test_freeze_requires_trusted_evidence_store(self):
+    def test_freeze_without_store_reports_both_missing_integrity_and_trust(self):
         decision = freeze_release_candidate(self.candidate())
         self.assertEqual(decision.status, "BLOCKED")
+        self.assertIn("evidence_store_missing", decision.reasons)
         self.assertIn(
-            "trusted_evidence_store_missing",
+            "independent_evidence_trust_unavailable",
             decision.reasons,
         )
         self.assertIsNone(decision.manifest_json)
 
     def test_missing_exact_artifact_blocks_independent_verification(self):
-        decision = freeze_verified(
+        decision = freeze_with_integrity_store(
             self.candidate(),
             omit_roles={"SBOM"},
         )
         self.assertEqual(decision.status, "BLOCKED")
         self.assertIn(
-            "evidence_not_independently_verified:SBOM",
+            "evidence_integrity_unverified:SBOM",
             decision.reasons,
         )
 
     def test_corrupt_artifact_object_fails_closed(self):
-        decision = freeze_verified(
+        decision = freeze_with_integrity_store(
             self.candidate(),
             corrupt_role="HOST",
         )
         self.assertEqual(decision.status, "BLOCKED")
         self.assertIn(
-            "evidence_not_independently_verified:HOST",
+            "evidence_integrity_unverified:HOST",
             decision.reasons,
         )
 

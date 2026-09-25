@@ -169,6 +169,25 @@ class ResearchJobStoreTests(unittest.TestCase):
                 )
             )
 
+    def test_external_job_cannot_self_authorize_automatic_lease_retry(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            with self.assertRaisesRegex(
+                ValueError,
+                "not qualified for automatic lease requeue",
+            ):
+                store.enqueue(
+                    kind="research.external_annotation",
+                    dedupe_key="unsafe-self-retry",
+                    input_hashes=[digest("dataset")],
+                    resource_budget={"wall_seconds": 60},
+                    lease_requeueable=True,
+                    now=self.now,
+                )
+            self.assertIsNone(
+                store.claim("worker-a", now=self.now, lease_seconds=10)
+            )
+
     def test_expired_non_idempotent_job_is_not_requeued(self):
         with TemporaryDirectory() as directory:
             store = ResearchJobStore(Path(directory) / "jobs.sqlite3")

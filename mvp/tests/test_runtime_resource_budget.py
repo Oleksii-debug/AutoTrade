@@ -177,7 +177,7 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
             )
 
     def test_exact_evidence_identity_is_validated(self):
-        with self.assertRaisesRegex(RuntimeBudgetError, "40- or 64-character"):
+        with self.assertRaisesRegex(RuntimeBudgetError, "40-hex"):
             self.spec(release_sha="main")
         with self.assertRaisesRegex(RuntimeBudgetError, "sha256"):
             self.observation(configuration_hash="config")

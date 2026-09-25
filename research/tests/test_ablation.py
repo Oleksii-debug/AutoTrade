@@ -352,6 +352,79 @@ class AblationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "independent population unit"):
             summarize_ablation("agent", [first, second])
 
+
+    def test_target_content_cannot_be_recounted_across_distinct_cases(self):
+        target = causal_evidence(
+            evidence_id="wire-story-a",
+            digest=FINGERPRINT_C,
+            component="agent",
+        )
+        first = pair("target-dup-a", "1")
+        second = pair("target-dup-b", "1")
+        first = AblationPair(
+            "agent",
+            replace(
+                first.full,
+                input_evidence=(causal_evidence(), target),
+            ),
+            first.ablated,
+        )
+        second = AblationPair(
+            "agent",
+            replace(
+                second.full,
+                input_evidence=(
+                    causal_evidence(evidence_id="base-b", digest=FINGERPRINT_D),
+                    replace(target, evidence_id="wire-story-b"),
+                ),
+            ),
+            replace(
+                second.ablated,
+                input_evidence=(
+                    causal_evidence(evidence_id="base-b", digest=FINGERPRINT_D),
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate target evidence content"):
+            evaluate_incremental_value(
+                "agent",
+                [first, second],
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+
+    def test_target_syndication_group_cannot_be_recounted_across_cases(self):
+        first_target = causal_evidence(
+            evidence_id="wire-story-a",
+            digest=FINGERPRINT_C,
+            component="agent",
+            syndication_group="wire-group-9",
+        )
+        second_target = causal_evidence(
+            evidence_id="wire-story-b",
+            digest=FINGERPRINT_D,
+            component="agent",
+            syndication_group="wire-group-9",
+        )
+        first = pair("syndicated-a", "1")
+        second = pair("syndicated-b", "1")
+        first = AblationPair(
+            "agent",
+            replace(first.full, input_evidence=(causal_evidence(), first_target)),
+            first.ablated,
+        )
+        second_base = causal_evidence(
+            evidence_id="base-b",
+            digest="sha256:" + ("e" * 64),
+        )
+        second = AblationPair(
+            "agent",
+            replace(second.full, input_evidence=(second_base, second_target)),
+            replace(second.ablated, input_evidence=(second_base,)),
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate target syndication group"):
+            summarize_ablation("agent", [first, second])
+
     def test_inferential_value_requires_causal_input_evidence(self):
         unbound = AblationPair(
             "agent",

@@ -38,7 +38,11 @@ def _decimal(value, name: str, *, non_negative: bool = False) -> Decimal:
 
 
 def _utc(value: datetime, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
         raise SpecialistDagError(f"{name} must be timezone-aware")
     return value.astimezone(timezone.utc)
 
@@ -63,16 +67,22 @@ class SpecialistSpec:
             "expected_incremental_value",
             _decimal(self.expected_incremental_value, "expected_incremental_value"),
         )
-        object.__setattr__(
-            self,
-            "required_inputs",
-            tuple(_text(item, "required input") for item in self.required_inputs),
+        if not isinstance(self.required_inputs, tuple):
+            raise SpecialistDagError("required_inputs must be a tuple")
+        if not isinstance(self.dependencies, tuple):
+            raise SpecialistDagError("dependencies must be a tuple")
+        required_inputs = tuple(
+            _text(item, "required input") for item in self.required_inputs
         )
-        object.__setattr__(
-            self,
-            "dependencies",
-            tuple(_text(item, "dependency") for item in self.dependencies),
+        dependencies = tuple(
+            _text(item, "dependency") for item in self.dependencies
         )
+        if len(required_inputs) != len(set(required_inputs)):
+            raise SpecialistDagError("required_inputs must not contain duplicates")
+        if len(dependencies) != len(set(dependencies)):
+            raise SpecialistDagError("dependencies must not contain duplicates")
+        object.__setattr__(self, "required_inputs", required_inputs)
+        object.__setattr__(self, "dependencies", dependencies)
         if self.role_id in self.dependencies:
             raise SpecialistDagError("specialist cannot depend on itself")
 
@@ -109,17 +119,20 @@ class SpecialistRun:
             raise SpecialistDagError("direction must match score sign")
         object.__setattr__(self, "score", score)
         object.__setattr__(self, "confidence", confidence)
+        if not isinstance(self.evidence_refs, tuple):
+            raise SpecialistDagError("evidence_refs must be a tuple")
         refs = tuple(_text(item, "evidence reference") for item in self.evidence_refs)
         if not refs:
             raise SpecialistDagError("specialist output requires evidence")
         if len(set(refs)) != len(refs):
             raise SpecialistDagError("duplicate evidence references are not allowed")
+        if not isinstance(self.critique, tuple):
+            raise SpecialistDagError("critique must be a tuple")
+        critique = tuple(_text(item, "critique") for item in self.critique)
         object.__setattr__(self, "evidence_refs", refs)
         object.__setattr__(self, "cost", _decimal(self.cost, "cost", non_negative=True))
         object.__setattr__(self, "completed_at", _utc(self.completed_at, "completed_at"))
-        object.__setattr__(
-            self, "critique", tuple(_text(item, "critique") for item in self.critique)
-        )
+        object.__setattr__(self, "critique", critique)
 
 
 @dataclass(frozen=True)
@@ -130,6 +143,38 @@ class DagPlan:
     reserved_cost: Decimal
     available_inputs: tuple[str, ...]
     total_budget: Decimal
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "input_snapshot_id",
+            _text(self.input_snapshot_id, "input_snapshot_id"),
+        )
+        for name in ("scheduled_roles", "skipped_roles", "available_inputs"):
+            if not isinstance(getattr(self, name), tuple):
+                raise SpecialistDagError(f"{name} must be a tuple")
+        scheduled = tuple(_text(item, "scheduled role") for item in self.scheduled_roles)
+        if len(scheduled) != len(set(scheduled)):
+            raise SpecialistDagError("scheduled_roles must not contain duplicates")
+        available = tuple(_text(item, "available input") for item in self.available_inputs)
+        if len(available) != len(set(available)):
+            raise SpecialistDagError("available_inputs must not contain duplicates")
+        skipped: list[tuple[str, str]] = []
+        for item in self.skipped_roles:
+            if not isinstance(item, tuple) or len(item) != 2:
+                raise SpecialistDagError("skipped_roles entries must be role/reason tuples")
+            skipped.append(
+                (_text(item[0], "skipped role"), _text(item[1], "skip reason"))
+            )
+        reserved = _decimal(self.reserved_cost, "reserved_cost", non_negative=True)
+        budget = _decimal(self.total_budget, "total_budget", non_negative=True)
+        if reserved > budget:
+            raise SpecialistDagError("reserved_cost cannot exceed total_budget")
+        object.__setattr__(self, "scheduled_roles", scheduled)
+        object.__setattr__(self, "skipped_roles", tuple(skipped))
+        object.__setattr__(self, "available_inputs", available)
+        object.__setattr__(self, "reserved_cost", reserved)
+        object.__setattr__(self, "total_budget", budget)
 
 
 @dataclass(frozen=True)

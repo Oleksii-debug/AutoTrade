@@ -10,11 +10,12 @@ from mvp.autotrade_mvp.perpetual_margin import (
 )
 
 
-def tier(upper="10000", rate="0.005", fixed="0"):
+def tier(upper="10000", rate="0.005", adjustment="0", convention="ADD"):
     return MarginTier(
         notional_upper_bound=Decimal(upper),
         maintenance_rate=Decimal(rate),
-        maintenance_fixed=Decimal(fixed),
+        maintenance_adjustment=Decimal(adjustment),
+        adjustment_convention=convention,
     )
 
 
@@ -28,7 +29,7 @@ def evidence(**overrides):
         index_observed_at="2026-09-25T00:00:00Z",
         collateral_fx_observed_at="2026-09-25T00:00:00Z",
         margin_tiers_observed_at="2026-09-25T00:00:00Z",
-        margin_tiers=(tier(), tier("50000", "0.01", "10")),
+        margin_tiers=(tier(), tier("50000", "0.01", "10", "ADD")),
         evidence_ref="artifact:margin:sha256:abc",
     )
     values.update(overrides)
@@ -179,6 +180,41 @@ class PerpetualMarginTests(unittest.TestCase):
                 )
             )
 
+
+    def test_provider_tier_can_explicitly_use_rate_minus_deduction(self):
+        result = evaluate(
+            signed_notional_settlement=Decimal("15000"),
+            collateral_amount=Decimal("5000"),
+            evidence=evidence(
+                margin_tiers=(
+                    tier("10000", "0.005"),
+                    tier("50000", "0.01", "10", "DEDUCT"),
+                )
+            ),
+            stress=stress(price_loss_fraction=Decimal("0.01")),
+        )
+        self.assertEqual(result.maintenance_requirement, Decimal("140.00"))
+
+    def test_tier_convention_cannot_be_implicit_or_unknown(self):
+        with self.assertRaisesRegex(
+            PerpetualMarginError,
+            "adjustment_convention",
+        ):
+            tier("10000", "0.005", "0", "PROVIDER_MAGIC")
+
+    def test_deduction_cannot_create_negative_maintenance(self):
+        with self.assertRaisesRegex(
+            PerpetualMarginError,
+            "negative maintenance",
+        ):
+            evaluate(
+                signed_notional_settlement=Decimal("100"),
+                evidence=evidence(
+                    margin_tiers=(
+                        tier("10000", "0.001", "1", "DEDUCT"),
+                    )
+                ),
+            )
 
 if __name__ == "__main__":
     unittest.main()

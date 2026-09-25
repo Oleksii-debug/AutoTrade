@@ -487,6 +487,7 @@ def derive_capability_snapshot(
     verified_sources = frozenset(claim.source for claim in verified_live)
     evidence_missing_sources = required - verified_sources
     evidence_conflict = any(result.conflicted for result in evidence_results)
+    evidence_incomplete = any(not result.valid for result in evidence_results)
 
     order_types = _intersection(verified_live, "supported_order_types")
     tif = _intersection(verified_live, "time_in_force")
@@ -507,6 +508,8 @@ def derive_capability_snapshot(
         status = "EXPIRED"
     elif evidence_conflict:
         status = "CONFLICTED"
+    elif evidence_incomplete:
+        status = "UNKNOWN"
     elif evidence_missing_sources:
         status = "UNKNOWN"
     elif set_conflict or scalar_conflict:

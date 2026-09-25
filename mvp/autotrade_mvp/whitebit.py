@@ -627,7 +627,7 @@ def parse_submission_result(
         raw_status = payload.get("status")
         reported_status = (
             None
-            if raw_status in {None, ""}
+            if raw_status is None or raw_status == ""
             else _text(str(raw_status), name="status").upper()
         )
         return WhiteBitSubmissionResult(

@@ -340,6 +340,64 @@ class AuthorityPersistenceTests(unittest.TestCase):
                 1,
             )
 
+    def test_historical_lost_reply_retry_survives_newer_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite")
+            initial = self._service()
+            first = persist_authority_snapshot(
+                store,
+                initial,
+                authority_id="runtime-authority",
+                event_id="authority-snapshot-1",
+                committed_at="2026-09-25T01:00:01Z",
+            )
+            advanced = restore_authority_snapshot(
+                store, authority_id="runtime-authority"
+            )
+            advanced.revoke_policy(
+                "policy-1",
+                reason="operator-revoked",
+                revoked_at="2026-09-25T01:05:00Z",
+            )
+            persist_authority_snapshot(
+                store,
+                advanced,
+                authority_id="runtime-authority",
+                event_id="authority-snapshot-2",
+                committed_at="2026-09-25T01:05:01Z",
+            )
+
+            retry = persist_authority_snapshot(
+                store,
+                initial,
+                authority_id="runtime-authority",
+                event_id="authority-snapshot-1",
+                committed_at="2026-09-25T09:59:59Z",
+            )
+            self.assertFalse(retry.inserted)
+            self.assertEqual(retry.event["event_id"], first.event["event_id"])
+            self.assertEqual(
+                len(store.load_events("financial-authority", "runtime-authority")),
+                2,
+            )
+            restored = restore_authority_snapshot(
+                store, authority_id="runtime-authority"
+            )
+            self.assertEqual(2, restored.epoch)
+            self.assertEqual(
+                (False, "policy_revoked"),
+                restored.dispatch_allowed(
+                    "admit-1",
+                    intent_hash="intent-hash",
+                    account_id="account-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=2,
+                    action="BUY",
+                    now="2026-09-25T01:30:00Z",
+                ),
+            )
+
     def test_missing_durable_state_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite")

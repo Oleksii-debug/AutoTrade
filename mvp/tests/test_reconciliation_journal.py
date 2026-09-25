@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.reconciliation import (
 from mvp.autotrade_mvp.reconciliation_journal import (
     _reconciliation_aggregate_id,
     load_latest_reconciliation_checkpoint,
+    load_reconciliation_checkpoint_for_readiness,
     record_reconciliation_checkpoint,
     unknown_submissions_from_dispatch,
     unresolved_attempt_ids_from_checkpoint,
@@ -137,6 +138,84 @@ class ReconciliationJournalTests(unittest.TestCase):
                 latest["payload"]["blocking_resources"],
                 ["CASH:USD"],
             )
+
+    def test_owner_transfer_requires_new_readiness_checkpoint(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            result = reconciliation()
+
+            owner_a = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="acct-owner-transfer",
+                result=result,
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="host-a",
+                owner_epoch="epoch-a",
+            )
+            self.assertIsNone(
+                load_reconciliation_checkpoint_for_readiness(
+                    store,
+                    reconciliation_id="acct-owner-transfer",
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    host_id="host-b",
+                    owner_epoch="epoch-b",
+                )
+            )
+
+            owner_b = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="acct-owner-transfer",
+                result=result,
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="host-b",
+                owner_epoch="epoch-b",
+            )
+            self.assertNotEqual(owner_a["event_id"], owner_b["event_id"])
+            self.assertEqual(owner_b["aggregate_version"], 2)
+            self.assertEqual(
+                owner_a["payload"]["checkpoint_owner"],
+                {"host_id": "host-a", "owner_epoch": "epoch-a"},
+            )
+            self.assertEqual(
+                owner_b["payload"]["checkpoint_owner"],
+                {"host_id": "host-b", "owner_epoch": "epoch-b"},
+            )
+
+            reopened = JournalStore(path)
+            ready = load_reconciliation_checkpoint_for_readiness(
+                reopened,
+                reconciliation_id="acct-owner-transfer",
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                host_id="host-b",
+                owner_epoch="epoch-b",
+            )
+            self.assertEqual(ready["event_id"], owner_b["event_id"])
+            self.assertIsNone(
+                load_reconciliation_checkpoint_for_readiness(
+                    reopened,
+                    reconciliation_id="acct-owner-transfer",
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    host_id="host-a",
+                    owner_epoch="epoch-a",
+                )
+            )
+
+            exact_retry = record_reconciliation_checkpoint(
+                reopened,
+                reconciliation_id="acct-owner-transfer",
+                result=result,
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="host-b",
+                owner_epoch="epoch-b",
+            )
+            self.assertEqual(exact_retry["event_id"], owner_b["event_id"])
 
     def test_checkpoint_retains_exact_execution_ids_across_restart(self):
         with TemporaryDirectory() as directory:

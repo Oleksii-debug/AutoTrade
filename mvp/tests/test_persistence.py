@@ -327,7 +327,7 @@ class JournalStoreTests(unittest.TestCase):
             self.assertIsNotNone(envelope_hash)
             self.assertEqual(
                 envelope_hash,
-                "sha256:" + sha256(payload_json.encode("utf-8")).hexdigest(),
+                payload_digest({"topic": "events", "payload_json": payload_json}),
             )
 
             replayed, inserted, appended = store.commit_command(
@@ -350,6 +350,20 @@ class JournalStoreTests(unittest.TestCase):
                 tamper_connection.execute(
                     "UPDATE outbox SET payload_json = ? WHERE event_id = ?",
                     ('{"tampered":true}', "evt-1"),
+                )
+                tamper_connection.commit()
+            finally:
+                tamper_connection.close()
+            with self.assertRaisesRegex(
+                ValueError, "outbox envelope hash does not match stored payload"
+            ):
+                store.pending_outbox()
+
+            tamper_connection = sqlite3.connect(path)
+            try:
+                tamper_connection.execute(
+                    "UPDATE outbox SET payload_json = ?, topic = ? WHERE event_id = ?",
+                    (payload_json, "rerouted-events", "evt-1"),
                 )
                 tamper_connection.commit()
             finally:

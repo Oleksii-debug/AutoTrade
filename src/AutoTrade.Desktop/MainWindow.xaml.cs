@@ -93,13 +93,13 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_lastKnownConnectedStatus is { } previous)
+        if (_lastKnownConnectedStatus is { } lastConnected)
         {
-            HostValue.Text = $"{previous.HostId} (stale)";
-            AccountValue.Text = $"{previous.AccountId} (stale)";
-            EnvironmentValue.Text = $"{previous.Environment} (stale)";
-            StateVersionValue.Text = $"{previous.StateVersion} (stale)";
-            LastEvidenceValue.Text = $"{previous.ObservedAtUtc:O} (stale)";
+            HostValue.Text = $"{lastConnected.HostId} (stale)";
+            AccountValue.Text = $"{lastConnected.AccountId} (stale)";
+            EnvironmentValue.Text = $"{lastConnected.Environment} (stale)";
+            StateVersionValue.Text = $"{lastConnected.StateVersion} (stale)";
+            LastEvidenceValue.Text = $"{lastConnected.ObservedAtUtc:O} (stale)";
             ConnectionStatus.Text =
                 $"{status.Message} Last known host values are stale and are not current evidence.";
         }

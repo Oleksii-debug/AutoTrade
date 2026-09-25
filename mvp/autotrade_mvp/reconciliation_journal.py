@@ -539,6 +539,21 @@ def load_account_resource_availability_evidence(
         or checkpoint.get("aggregate_type") != "account_reconciliation"
     ):
         raise ValueError("availability evidence requires AccountReconciled checkpoint")
+    aggregate_id = _text(
+        checkpoint.get("aggregate_id"),
+        name="reconciliation aggregate_id",
+    )
+    aggregate_events = store.load_events(
+        "account_reconciliation",
+        aggregate_id,
+    )
+    if (
+        not aggregate_events
+        or aggregate_events[-1].get("event_id") != event_id
+    ):
+        raise ValueError(
+            "availability checkpoint has been superseded by newer reconciliation"
+        )
 
     payload = _require_checkpoint_scope(
         checkpoint,

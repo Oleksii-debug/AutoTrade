@@ -108,6 +108,16 @@ class JournalBackedHostApiTests(unittest.TestCase):
         )
         self.assertEqual(memory.submit(command), self.store().submit(command))
 
+    def test_account_scope_is_canonicalized_before_aggregate_identity(self):
+        canonical = self.store(account_id="paper-account")
+        padded = self.store(account_id="  paper-account  ")
+
+        self.assertEqual(padded.account_id, "paper-account")
+        self.assertEqual(padded.aggregate_id, canonical.aggregate_id)
+        result = padded.submit(self.command(account_id="paper-account"))
+        self.assertEqual(result.state_version, "1")
+        self.assertEqual(canonical.snapshot()["state_version"], "1")
+
     def test_two_account_scopes_share_one_journal_without_state_collision(self):
         first = self.store()
         first_result = first.submit(self.command())

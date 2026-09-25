@@ -13,6 +13,41 @@ public sealed record EmergencyHostStatus(
     DateTimeOffset ObservedAtUtc,
     string Message)
 {
+    public EmergencyHostStatus Validated()
+    {
+        if (string.IsNullOrWhiteSpace(Message))
+        {
+            throw new InvalidOperationException("Host status message is required.");
+        }
+
+        if (ObservedAtUtc == default || ObservedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new InvalidOperationException(
+                "Host status evidence time must be a non-default UTC instant.");
+        }
+
+        if (Connected)
+        {
+            ValidateConnectedIdentity(HostId, nameof(HostId));
+            ValidateConnectedIdentity(AccountId, nameof(AccountId));
+            ValidateConnectedIdentity(Environment, nameof(Environment));
+            ValidateConnectedIdentity(StateVersion, nameof(StateVersion));
+        }
+
+        return this;
+    }
+
+    private static void ValidateConnectedIdentity(string value, string name)
+    {
+        if (string.IsNullOrWhiteSpace(value)
+            || !string.Equals(value, value.Trim(), StringComparison.Ordinal)
+            || string.Equals(value, "Unavailable", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Connected host status requires canonical {name} evidence.");
+        }
+    }
+
     public static EmergencyHostStatus Disconnected(string message) =>
         new(
             false,
@@ -21,7 +56,9 @@ public sealed record EmergencyHostStatus(
             "Unavailable",
             "Unavailable",
             DateTimeOffset.UtcNow,
-            message);
+            string.IsNullOrWhiteSpace(message)
+                ? throw new ArgumentException("Disconnected status message is required.", nameof(message))
+                : message.Trim());
 }
 
 /// <summary>

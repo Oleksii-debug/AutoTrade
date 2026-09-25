@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import re
 import sys
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -171,6 +172,54 @@ def release_artifact_digest(path: Path) -> str:
     return "sha256:" + sha256(payload).hexdigest()
 
 
+def _release_bundle_source_sha(release_artifact: Path) -> str:
+    try:
+        with zipfile.ZipFile(release_artifact, "r") as archive:
+            manifest_names = [
+                name for name in archive.namelist()
+                if name == "bundle-manifest.json"
+            ]
+            if len(manifest_names) != 1:
+                raise NvdaQualificationError(
+                    "release artifact must contain exactly one bundle-manifest.json"
+                )
+            info = archive.getinfo("bundle-manifest.json")
+            if info.file_size > 1024 * 1024:
+                raise NvdaQualificationError("release bundle manifest is unreasonably large")
+            try:
+                manifest = json.loads(
+                    archive.read(info).decode("utf-8")
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise NvdaQualificationError(
+                    "release bundle manifest is invalid"
+                ) from error
+    except (OSError, zipfile.BadZipFile, KeyError) as error:
+        raise NvdaQualificationError(
+            "release artifact must be a readable AutoTrade release bundle"
+        ) from error
+
+    if not isinstance(manifest, dict):
+        raise NvdaQualificationError("release bundle manifest must be an object")
+    if manifest.get("product") != "AutoTrade":
+        raise NvdaQualificationError("release bundle product must be AutoTrade")
+    if manifest.get("mode") != "release":
+        raise NvdaQualificationError("NVDA qualification requires a release-mode bundle")
+    if manifest.get("release_eligible") is not True:
+        raise NvdaQualificationError(
+            "NVDA qualification requires a release-eligible bundle"
+        )
+    source_sha = _required_text(
+        manifest.get("source_sha"),
+        name="bundle-manifest.source_sha",
+    ).lower()
+    if GIT_SHA.fullmatch(source_sha) is None:
+        raise NvdaQualificationError(
+            "bundle-manifest.source_sha must be an exact 40-character Git SHA"
+        )
+    return source_sha
+
+
 def validate_release_artifact_binding(
     evidence: dict[str, object],
     release_artifact: Path,
@@ -183,6 +232,15 @@ def validate_release_artifact_binding(
     if declared != actual:
         raise NvdaQualificationError(
             "release artifact SHA-256 does not match NVDA evidence"
+        )
+    artifact_source_sha = _release_bundle_source_sha(release_artifact)
+    evidence_source_sha = _required_text(
+        evidence.get("source_sha"),
+        name="source_sha",
+    ).lower()
+    if artifact_source_sha != evidence_source_sha:
+        raise NvdaQualificationError(
+            "release bundle source SHA does not match NVDA evidence"
         )
     return actual
 

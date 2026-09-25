@@ -930,6 +930,11 @@ def load_account_resource_availability_evidence(
         },
     }
     if current_scope_head is not None:
+        scope_journal_sequence = current_scope_head.get("journal_sequence")
+        if type(scope_journal_sequence) is not int or scope_journal_sequence <= 0:
+            raise ValueError(
+                "current reconciliation scope head lacks durable journal sequence"
+            )
         head_payload = current_scope_head.get("payload")
         if not isinstance(head_payload, Mapping):
             raise ValueError("current reconciliation scope head payload is malformed")
@@ -946,6 +951,7 @@ def load_account_resource_availability_evidence(
                 "scope_latest_checkpoint_aggregate_version": current_scope_head.get(
                     "aggregate_version"
                 ),
+                "scope_latest_checkpoint_journal_sequence": scope_journal_sequence,
                 "scope_latest_checkpoint_observed_at": _instant(
                     head_payload.get("observed_at"),
                     name="scope_latest_checkpoint_observed_at",

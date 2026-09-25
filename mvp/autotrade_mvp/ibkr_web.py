@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Mapping
+import hashlib
+import json
 import re
 
 from .capabilities import CapabilitySnapshot
@@ -620,6 +622,177 @@ def parse_order_submission_response(payload: object) -> IbkrSubmissionOutcome:
     return IbkrSubmissionOutcome(
         status="REJECTED",
         rejection_reason=_text(str(item["error"]), name="error"),
+    )
+
+
+@dataclass(frozen=True)
+class IbkrRecordedSubmission:
+    """One durable-attempt observation; provider acknowledgement is never a fill."""
+
+    attempt_id: str
+    account_id: str
+    environment: str
+    client_order_id: str
+    observed_at: datetime
+    outcome: str
+    next_action: str
+    response_sha256: str | None
+    provider_order_id: str | None = None
+    provider_order_status: str | None = None
+    reply_id: str | None = None
+    rejection_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("attempt_id", "account_id", "environment"):
+            object.__setattr__(self, name, _text(getattr(self, name), name=name))
+        object.__setattr__(
+            self,
+            "client_order_id",
+            validate_coid(self.client_order_id),
+        )
+        object.__setattr__(
+            self,
+            "observed_at",
+            _instant(self.observed_at, name="observed_at"),
+        )
+        outcome = _text(self.outcome, name="outcome").upper()
+        if outcome not in {"ACKNOWLEDGED", "REPLY_REQUIRED", "REJECTED", "UNKNOWN"}:
+            raise IbkrWebAdapterError("unsupported recorded submission outcome")
+        object.__setattr__(self, "outcome", outcome)
+        expected = {
+            "ACKNOWLEDGED": "OBSERVE_OR_RECONCILE",
+            "REPLY_REQUIRED": "EXPLICIT_REPLY_REQUIRED",
+            "REJECTED": "DO_NOT_RETRY_BLINDLY",
+            "UNKNOWN": "RECONCILE_FIRST",
+        }[outcome]
+        action = _text(self.next_action, name="next_action").upper()
+        if action != expected:
+            raise IbkrWebAdapterError(f"{outcome} requires next_action {expected}")
+        object.__setattr__(self, "next_action", action)
+        if self.response_sha256 is not None:
+            digest = _text(self.response_sha256, name="response_sha256")
+            if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+                raise IbkrWebAdapterError("response_sha256 must be canonical SHA-256")
+            object.__setattr__(self, "response_sha256", digest)
+        if outcome == "ACKNOWLEDGED":
+            if self.provider_order_id is None or self.provider_order_status is None:
+                raise IbkrWebAdapterError(
+                    "recorded acknowledgement requires provider order identity and status"
+                )
+        if outcome == "REPLY_REQUIRED" and self.reply_id is None:
+            raise IbkrWebAdapterError("recorded reply-required outcome needs reply id")
+        if outcome == "REJECTED" and self.rejection_reason is None:
+            raise IbkrWebAdapterError("recorded rejection needs provider reason")
+        if outcome == "UNKNOWN":
+            if any(
+                value is not None
+                for value in (
+                    self.response_sha256,
+                    self.provider_order_id,
+                    self.provider_order_status,
+                    self.reply_id,
+                    self.rejection_reason,
+                )
+            ):
+                raise IbkrWebAdapterError(
+                    "unknown transport outcome cannot assert provider response facts"
+                )
+
+    @property
+    def proves_fill(self) -> bool:
+        return False
+
+    @property
+    def retry_same_economic_action(self) -> bool:
+        return False
+
+
+def record_order_submission_result(
+    normalized: IbkrNormalizedOrder,
+    *,
+    attempt_id: str,
+    account_id: str,
+    environment: str,
+    observed_at: datetime,
+    response_body: str | bytes | None,
+    transport_ambiguous: bool = False,
+) -> IbkrRecordedSubmission:
+    """Bind an IBKR response, or lack of one, to the exact guarded attempt.
+
+    A transport failure after a possible write is UNKNOWN. It cannot be retried
+    until reconciliation establishes whether the cOID appeared at the provider.
+    """
+
+    if not isinstance(normalized, IbkrNormalizedOrder):
+        raise TypeError("normalized must be IbkrNormalizedOrder")
+    attempt = _text(attempt_id, name="attempt_id")
+    account = _text(account_id, name="account_id")
+    environment_value = _text(environment, name="environment").upper()
+    point = _instant(observed_at, name="observed_at")
+    request_account = _text(str(normalized.fields.get("acctId", "")), name="acctId")
+    if request_account != account:
+        raise IbkrWebAdapterError(
+            "recorded account does not match normalized guarded order"
+        )
+    coid = validate_coid(str(normalized.fields.get("cOID", "")))
+
+    if transport_ambiguous:
+        if response_body is not None:
+            raise IbkrWebAdapterError(
+                "ambiguous transport cannot also claim authoritative response bytes"
+            )
+        return IbkrRecordedSubmission(
+            attempt_id=attempt,
+            account_id=account,
+            environment=environment_value,
+            client_order_id=coid,
+            observed_at=point,
+            outcome="UNKNOWN",
+            next_action="RECONCILE_FIRST",
+            response_sha256=None,
+        )
+
+    if response_body is None:
+        raise IbkrWebAdapterError(
+            "non-ambiguous submission requires authoritative provider response bytes"
+        )
+    if isinstance(response_body, bytes):
+        try:
+            text_body = response_body.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise IbkrWebAdapterError("provider response must be UTF-8") from error
+        raw = response_body
+    elif isinstance(response_body, str) and response_body:
+        text_body = response_body
+        raw = response_body.encode("utf-8")
+    else:
+        raise IbkrWebAdapterError("provider response body is required")
+
+    try:
+        payload = json.loads(text_body)
+    except json.JSONDecodeError as error:
+        raise IbkrWebAdapterError("provider response JSON is invalid") from error
+    parsed = parse_order_submission_response(payload)
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+
+    actions = {
+        "ACKNOWLEDGED": "OBSERVE_OR_RECONCILE",
+        "REPLY_REQUIRED": "EXPLICIT_REPLY_REQUIRED",
+        "REJECTED": "DO_NOT_RETRY_BLINDLY",
+    }
+    return IbkrRecordedSubmission(
+        attempt_id=attempt,
+        account_id=account,
+        environment=environment_value,
+        client_order_id=coid,
+        observed_at=point,
+        outcome=parsed.status,
+        next_action=actions[parsed.status],
+        response_sha256=digest,
+        provider_order_id=parsed.provider_order_id,
+        provider_order_status=parsed.provider_order_status,
+        reply_id=parsed.reply_id,
+        rejection_reason=parsed.rejection_reason,
     )
 
 

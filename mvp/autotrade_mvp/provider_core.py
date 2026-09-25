@@ -121,7 +121,13 @@ def _freeze_json(value: object, *, depth: int = 0) -> object:
         return MappingProxyType(frozen)
     if isinstance(value, list):
         return tuple(_freeze_json(item, depth=depth + 1) for item in value)
-    if value is None or isinstance(value, (str, bool, int, float)):
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ProviderCoreError("provider response contains non-finite decimal")
+        return value
+    if isinstance(value, float):
+        raise ProviderCoreError("provider response must not contain binary float values")
+    if value is None or isinstance(value, (str, bool, int)):
         return value
     raise ProviderCoreError("provider response contains unsupported JSON value")
 
@@ -145,6 +151,7 @@ def _decode_exact_json(raw: bytes) -> object:
         decoded = json.loads(
             text,
             object_pairs_hook=no_duplicate_keys,
+            parse_float=Decimal,
             parse_constant=lambda value: (_ for _ in ()).throw(
                 ProviderCoreError(
                     f"provider response contains non-finite JSON constant: {value}"
@@ -345,6 +352,7 @@ class ProviderResponseObservation:
 
     query_binding: AuthenticatedReadQueryBinding
     observed_at: str
+    http_status: int
     response_sha256: str
     evidence_ref: str
     payload: object
@@ -358,6 +366,15 @@ class ProviderResponseObservation:
         if not isinstance(self.query_binding, AuthenticatedReadQueryBinding):
             raise TypeError(
                 "query_binding must be AuthenticatedReadQueryBinding"
+            )
+        if (
+            isinstance(self.http_status, bool)
+            or not isinstance(self.http_status, int)
+            or self.http_status < 200
+            or self.http_status > 299
+        ):
+            raise ProviderCoreError(
+                "successful provider response observation requires HTTP 2xx status"
             )
         if re.fullmatch(r"sha256:[0-9a-f]{64}", self.response_sha256) is None:
             raise ProviderCoreError(
@@ -426,16 +443,28 @@ class ProviderResponseObservation:
 def observe_authenticated_json_response(
     *,
     query_binding: AuthenticatedReadQueryBinding,
+    http_status: int,
     response_bytes: bytes,
     observed_at: datetime,
 ) -> ProviderResponseObservation:
     if not isinstance(query_binding, AuthenticatedReadQueryBinding):
         raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
+    if (
+        isinstance(http_status, bool)
+        or not isinstance(http_status, int)
+        or http_status < 200
+        or http_status > 299
+    ):
+        raise ProviderCoreError(
+            "authenticated provider state requires an HTTP 2xx response"
+        )
     payload = _decode_exact_json(response_bytes)
     observed = _utc_text(observed_at, "observed_at")
     response_digest = "sha256:" + sha256(response_bytes).hexdigest()
     identity_material = (
         query_binding.query_digest
+        + "\n"
+        + str(http_status)
         + "\n"
         + response_digest
         + "\n"
@@ -445,6 +474,7 @@ def observe_authenticated_json_response(
     return ProviderResponseObservation(
         query_binding=query_binding,
         observed_at=observed,
+        http_status=http_status,
         response_sha256=response_digest,
         evidence_ref=evidence_ref,
         payload=payload,

@@ -1076,6 +1076,52 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertEqual(rule.observed, "MISSING:XYZ")
         self.assertFalse(decision.admitted)
 
+    def test_derivative_equivalent_exposure_rejects_context_type_mismatch(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="5",
+            expected_state_version=7,
+            instrument_type="OPTION",
+        )
+        with self.assertRaisesRegex(ValueError, "context instrument type"):
+            evaluate_risk(
+                intent,
+                context(
+                    positions={"ABC": "0"},
+                    marks={"ABC": "5"},
+                    instrument_types={"ABC": "FUTURE"},
+                    equivalent_exposure_per_unit={"ABC": "100"},
+                    stress_scenarios=({"ABC": "-0.10"},),
+                ),
+                policy(),
+            )
+
+    def test_future_and_perpetual_equivalent_exposure_cannot_reverse_direction(self):
+        for instrument_type in ("FUTURE", "PERPETUAL"):
+            with self.subTest(instrument_type=instrument_type):
+                intent = RiskIntent.create(
+                    symbol="ABC",
+                    side="BUY",
+                    quantity="1",
+                    price="100",
+                    expected_state_version=7,
+                    instrument_type=instrument_type,
+                )
+                with self.assertRaisesRegex(ValueError, "must be positive"):
+                    evaluate_risk(
+                        intent,
+                        context(
+                            positions={"ABC": "0"},
+                            marks={"ABC": "100"},
+                            instrument_types={"ABC": instrument_type},
+                            equivalent_exposure_per_unit={"ABC": "-100"},
+                            stress_scenarios=({"ABC": "-0.10"},),
+                        ),
+                        policy(),
+                    )
+
     def test_derivative_equivalent_exposure_can_reverse_direction_for_put_delta(self):
         decision = evaluate_risk(
             RiskIntent.create(

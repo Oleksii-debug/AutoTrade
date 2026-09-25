@@ -173,7 +173,11 @@ class QualificationEvidence:
         if family not in PROVIDERS[provider].product_families:
             raise ProviderCoreError("product family is not declared for provider")
         object.__setattr__(self, "product_family", family)
-        object.__setattr__(self, "environment", _text(self.environment, "environment"))
+        object.__setattr__(
+            self,
+            "environment",
+            _text(self.environment, "environment").upper(),
+        )
         object.__setattr__(self, "adapter_code_sha", _code_sha(self.adapter_code_sha))
         object.__setattr__(self, "documentation_ref", _text(self.documentation_ref, "documentation_ref"))
         observed = _utc(self.observed_at, "observed_at")
@@ -201,6 +205,8 @@ class QualificationEvidence:
         missing = REQUIRED_QUALIFICATION_CASES - self.passed_cases
         if missing:
             return "INCOMPLETE"
+        if self.environment == "LIVE":
+            return "LIVE_REQUIRES_BOUNDED_REAL"
         return "QUALIFIED_FOR_NONLIVE"
 
 

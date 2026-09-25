@@ -62,6 +62,28 @@ _OPTION_LIFECYCLE_PARSER_CONTRACT_DIGEST = payload_digest(
     }
 )
 
+_LEGACY_OPTION_LIFECYCLE_PARSER_VERSION = "1.1.0"
+_LEGACY_OPTION_LIFECYCLE_PARSER_CONTRACT_DIGEST = payload_digest(
+    {
+        "parser_id": _OPTION_LIFECYCLE_PARSER_ID,
+        "parser_version": _LEGACY_OPTION_LIFECYCLE_PARSER_VERSION,
+        "source_type": "ProviderResponseObservation",
+        "source_surface": "ACTIVITIES",
+        "payload_fields": [
+            "venue_id",
+            "external_event_id",
+            "event_kind",
+            "signed_contracts",
+            "effective_at",
+            "provider_revision",
+            "underlying_price",
+            "cash_settlement_amount",
+            "corrects_external_event_id",
+        ],
+        "financial_binding": "EXACT_SEALED_PAYLOAD",
+    }
+)
+
 OptionLifecycleEvidenceResolver = Callable[[str], ProviderResponseObservation]
 
 
@@ -371,6 +393,50 @@ def canonical_option_lifecycle_observation(
             observation.cash_settlement_amount
         ),
         "corrects_external_event_id": observation.corrects_external_event_id,
+    }
+
+
+def _legacy_canonical_option_lifecycle_observation(
+    observation: OptionLifecycleObservation,
+) -> dict[str, Any]:
+    """Reconstruct the exact pre-provider-environment observation identity.
+
+    This is used only to recognize exact retries of already durable generic
+    provider events. It never authorizes fresh writes and is intentionally
+    unavailable when provider_environment differs from runtime environment.
+    """
+
+    if observation.provider_environment != observation.environment:
+        raise OptionLifecycleConflict(
+            "legacy lifecycle compatibility is unavailable for distinct provider environments"
+        )
+    payload = canonical_option_lifecycle_observation(observation)
+    payload["schema_version"] = "1.0.0"
+    payload.pop("provider_environment")
+    return payload
+
+
+def _legacy_provider_evidence_payload(
+    provider_evidence: ProviderResponseObservation,
+) -> dict[str, Any]:
+    if provider_evidence.provider_environment != provider_evidence.environment:
+        raise OptionLifecycleConflict(
+            "legacy lifecycle evidence compatibility is unavailable for distinct provider environments"
+        )
+    return {
+        "evidence_ref": provider_evidence.evidence_ref,
+        "response_sha256": provider_evidence.response_sha256,
+        "query_digest": provider_evidence.query_binding.query_digest,
+        "endpoint": provider_evidence.query_binding.endpoint,
+        "permission_scope": provider_evidence.query_binding.permission_scope,
+        "capability_snapshot_id": (
+            provider_evidence.query_binding.capability_snapshot_id
+        ),
+        "instrument_version": provider_evidence.query_binding.instrument_version,
+        "observed_at": provider_evidence.observed_at,
+        "parser_id": _OPTION_LIFECYCLE_PARSER_ID,
+        "parser_version": _LEGACY_OPTION_LIFECYCLE_PARSER_VERSION,
+        "parser_contract_digest": _LEGACY_OPTION_LIFECYCLE_PARSER_CONTRACT_DIGEST,
     }
 
 
@@ -787,12 +853,35 @@ class DurableOptionLifecycleAuthority:
                     "external lifecycle identity appears more than once"
                 )
             saved = self._payload(same_identity[0])
+            current_exact_retry = (
+                saved.get("observation_digest") == observation_digest
+                and saved.get("instrument_digest") == instrument_digest
+                and saved.get("provider_evidence_digest")
+                == provider_evidence_digest
+            )
+            legacy_exact_retry = False
             if (
-                saved.get("observation_digest") != observation_digest
-                or saved.get("instrument_digest") != instrument_digest
-                or saved.get("provider_evidence_digest")
-                != provider_evidence_digest
+                not current_exact_retry
+                and saved.get("schema_version") == "1.0.0"
+                and self.provider_environment == self.economic_book.environment
+                and "provider_environment" not in saved
             ):
+                legacy_observation_payload = (
+                    _legacy_canonical_option_lifecycle_observation(observation)
+                )
+                legacy_provider_payload = _legacy_provider_evidence_payload(
+                    provider_evidence
+                )
+                legacy_exact_retry = (
+                    saved.get("observation_digest")
+                    == payload_digest(legacy_observation_payload)
+                    and saved.get("instrument_digest") == instrument_digest
+                    and saved.get("provider_evidence_digest")
+                    == payload_digest(legacy_provider_payload)
+                    and saved.get("provider_evidence")
+                    == legacy_provider_payload
+                )
+            if not current_exact_retry and not legacy_exact_retry:
                 raise OptionLifecycleConflict(
                     "external lifecycle identity was reused with changed evidence"
                 )

@@ -38,6 +38,7 @@ from mvp.autotrade_mvp.whitebit import (
     parse_open_position,
     parse_open_positions,
     parse_order_snapshot,
+    parse_submission_result,
     prepare_order_request,
     redact_whitebit_debug,
     provider_collateral_borrow,
@@ -359,6 +360,187 @@ class WhiteBitAdapterTests(unittest.TestCase):
             validate_client_order_id("bad id")
         with self.assertRaises(WhiteBitAdapterError):
             validate_client_order_id("a" * 65)
+
+    def test_submission_success_is_acknowledged_not_fill(self):
+        intent = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="LIMIT",
+            amount="0.010",
+            price="40000.00",
+        )
+        request = prepare_order_request(
+            intent,
+            client_order_id="at-submit-1",
+            capability=capability(),
+            market_rules=market_rules(),
+            at=NOW,
+        )
+        raw = (
+            '{"orderId":4180284841,"clientOrderId":"at-submit-1",'
+            '"market":"BTC_USDT","side":"buy","type":"limit",'
+            '"timestamp":1595792396.165973,"dealMoney":"400",'
+            '"dealStock":"0.010","amount":"0.010","left":"0",'
+            '"dealFee":"0.4","price":"40000","status":"FILLED"}'
+        )
+        result = parse_submission_result(
+            request,
+            attempt_id="attempt-1",
+            account_id="account-1",
+            environment="PAPER",
+            observed_at=NOW,
+            response_body=raw,
+            http_status=200,
+        )
+        self.assertEqual(result.outcome, "ACKNOWLEDGED")
+        self.assertEqual(result.next_action, "OBSERVE_OR_RECONCILE")
+        self.assertEqual(result.provider_order_id, "4180284841")
+        self.assertEqual(result.provider_reported_status, "FILLED")
+        self.assertTrue(result.response_sha256.startswith("sha256:"))
+        self.assertFalse(hasattr(result, "filled_quantity"))
+
+    def test_submission_response_must_match_guarded_client_and_market(self):
+        intent = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="LIMIT",
+            amount="0.010",
+            price="40000.00",
+        )
+        request = prepare_order_request(
+            intent,
+            client_order_id="at-submit-2",
+            capability=capability(),
+            market_rules=market_rules(),
+            at=NOW,
+        )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "clientOrderId"):
+            parse_submission_result(
+                request,
+                attempt_id="attempt-2",
+                account_id="account-1",
+                environment="PAPER",
+                observed_at=NOW,
+                response_body=(
+                    '{"orderId":1,"clientOrderId":"other-id",'
+                    '"market":"BTC_USDT","status":"NEW"}'
+                ),
+                http_status=200,
+            )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "market"):
+            parse_submission_result(
+                request,
+                attempt_id="attempt-2b",
+                account_id="account-1",
+                environment="PAPER",
+                observed_at=NOW,
+                response_body=(
+                    '{"orderId":1,"clientOrderId":"at-submit-2",'
+                    '"market":"ETH_USDT","status":"NEW"}'
+                ),
+                http_status=200,
+            )
+
+    def test_ambiguous_transport_requires_reconcile_before_retry(self):
+        intent = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="LIMIT",
+            amount="0.010",
+            price="40000.00",
+        )
+        request = prepare_order_request(
+            intent,
+            client_order_id="at-unknown-1",
+            capability=capability(),
+            market_rules=market_rules(),
+            at=NOW,
+        )
+        result = parse_submission_result(
+            request,
+            attempt_id="attempt-unknown",
+            account_id="account-1",
+            environment="PAPER",
+            observed_at=NOW,
+            response_body=None,
+            http_status=None,
+            transport_ambiguous=True,
+        )
+        self.assertEqual(result.outcome, "UNKNOWN")
+        self.assertEqual(result.next_action, "RECONCILE_FIRST")
+        self.assertIsNone(result.provider_order_id)
+        self.assertIsNone(result.response_sha256)
+
+    def test_documented_422_is_definitive_rejection_with_provenance(self):
+        intent = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="LIMIT",
+            amount="0.010",
+            price="40000.00",
+        )
+        request = prepare_order_request(
+            intent,
+            client_order_id="at-reject-1",
+            capability=capability(),
+            market_rules=market_rules(),
+            at=NOW,
+        )
+        raw = (
+            '{"code":30,"message":"Validation failed",'
+            '"errors":{"amount":["Invalid argument."]}}'
+        )
+        result = parse_submission_result(
+            request,
+            attempt_id="attempt-reject",
+            account_id="account-1",
+            environment="PAPER",
+            observed_at=NOW,
+            response_body=raw,
+            http_status=422,
+        )
+        self.assertEqual(result.outcome, "REJECTED")
+        self.assertEqual(result.next_action, "DO_NOT_RETRY_BLINDLY")
+        self.assertEqual(result.rejection_code, "30")
+        self.assertEqual(result.rejection_message, "Validation failed")
+        self.assertIsNone(result.provider_order_id)
+        self.assertTrue(result.response_sha256.startswith("sha256:"))
+
+    def test_unqualified_http_failure_cannot_be_guessed_as_rejected(self):
+        intent = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="LIMIT",
+            amount="0.010",
+            price="40000.00",
+        )
+        request = prepare_order_request(
+            intent,
+            client_order_id="at-http-500",
+            capability=capability(),
+            market_rules=market_rules(),
+            at=NOW,
+        )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "not qualified"):
+            parse_submission_result(
+                request,
+                attempt_id="attempt-500",
+                account_id="account-1",
+                environment="PAPER",
+                observed_at=NOW,
+                response_body='{"message":"server error"}',
+                http_status=500,
+            )
 
     def test_taker_band_cancellation_is_partial_fill_not_failure(self):
         snapshot = parse_order_snapshot(

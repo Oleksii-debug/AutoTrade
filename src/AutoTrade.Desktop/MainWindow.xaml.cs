@@ -1,4 +1,6 @@
 using System.Windows;
+using System.Windows.Automation.Peers;
+using System.Windows.Controls;
 
 namespace AutoTrade.Desktop;
 
@@ -18,6 +20,19 @@ public partial class MainWindow : Window
         _hostClient = hostClient ?? throw new ArgumentNullException(nameof(hostClient));
         InitializeComponent();
         ConnectionStatus.Text = "Host unavailable; new exposure cannot be confirmed blocked from this window.";
+    }
+
+    private void LiveRegion_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (!IsLoaded || sender is not UIElement element)
+        {
+            return;
+        }
+
+        AutomationPeer? peer =
+            UIElementAutomationPeer.FromElement(element)
+            ?? UIElementAutomationPeer.CreatePeerForElement(element);
+        peer?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)

@@ -24,6 +24,8 @@
     cursor: 0n,
     version: 0n,
     sessionIdentity: null,
+    accountId: null,
+    environment: null,
     snapshotReady: false,
     polling: false,
     stopped: false,
@@ -436,6 +438,8 @@
     state.version = parsed.version;
     state.cursor = parsed.cursor;
     state.sessionIdentity = parsed.sessionIdentity;
+    state.accountId = parsed.accountId;
+    state.environment = parsed.environment;
     state.snapshotReady = true;
 
     text("state-version", state.version.toString());
@@ -556,6 +560,8 @@
         } catch {
           state.snapshotReady = false;
           state.sessionIdentity = null;
+          state.accountId = null;
+          state.environment = null;
           setCommandAvailability(false);
           text(
             "freshness",
@@ -567,6 +573,8 @@
       } else {
         state.snapshotReady = false;
         state.sessionIdentity = null;
+        state.accountId = null;
+        state.environment = null;
         setCommandAvailability(false);
         text("freshness", "Host synchronization unavailable; displayed values may be stale.");
         announce("Host synchronization failed. Displayed values may be stale.", true);
@@ -584,6 +592,8 @@
       expected_state_version: state.version.toString(),
       actor: state.sessionIdentity.actor,
       session: state.sessionIdentity.session,
+      account_id: state.accountId,
+      environment: state.environment,
       action,
       payload: Object.freeze({})
     });
@@ -620,6 +630,19 @@
 
     const action = byId("host-action").value;
     const recovering = state.pendingCommand !== null;
+    if (recovering && (
+        state.pendingCommand.actor !== state.sessionIdentity.actor ||
+        state.pendingCommand.session !== state.sessionIdentity.session ||
+        state.pendingCommand.account_id !== state.accountId ||
+        state.pendingCommand.environment !== state.environment)) {
+      setCommandAvailability(false);
+      text(
+        "command-result",
+        "Unresolved command scope no longer matches the authenticated host snapshot. " +
+          "The original command identity is preserved and will not be retargeted.");
+      byId("command-result").focus();
+      return;
+    }
     const payload = commandForSubmission(action);
     const commandId = payload.command_id;
     if (recovering && action !== payload.action) {
@@ -674,6 +697,8 @@
       } catch {
         state.snapshotReady = false;
         state.sessionIdentity = null;
+        state.accountId = null;
+        state.environment = null;
         setCommandAvailability(false);
         announce(
           "Host state refresh failed after the command response. The confirmed command response remains unchanged.",
@@ -682,6 +707,8 @@
     } catch {
       state.snapshotReady = false;
       state.sessionIdentity = null;
+      state.accountId = null;
+      state.environment = null;
       setCommandAvailability(false);
       text(
         "command-result",
@@ -702,6 +729,8 @@
     } catch {
       state.snapshotReady = false;
       state.sessionIdentity = null;
+      state.accountId = null;
+      state.environment = null;
       setCommandAvailability(false);
       text("freshness", "Host unavailable; displayed values may be stale.");
       announce("Host state refresh failed. Displayed values may be stale.", true);
@@ -719,6 +748,8 @@
     } catch {
       state.snapshotReady = false;
       state.sessionIdentity = null;
+      state.accountId = null;
+      state.environment = null;
       setCommandAvailability(false);
       text("freshness", "Host unavailable; no current state has been confirmed.");
       announce("Host unavailable. No current state has been confirmed.", true);
@@ -731,6 +762,8 @@
     state.stopped = true;
     state.snapshotReady = false;
     state.sessionIdentity = null;
+    state.accountId = null;
+    state.environment = null;
     setCommandAvailability(false);
   });
 
@@ -739,6 +772,8 @@
     state.stopped = false;
     state.snapshotReady = false;
     state.sessionIdentity = null;
+    state.accountId = null;
+    state.environment = null;
     setCommandAvailability(false);
     try {
       await refreshSnapshot();
@@ -746,6 +781,8 @@
     } catch {
       state.snapshotReady = false;
       state.sessionIdentity = null;
+      state.accountId = null;
+      state.environment = null;
       setCommandAvailability(false);
       text("freshness", "Host unavailable after page restoration; displayed values may be stale.");
       announce(

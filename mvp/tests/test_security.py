@@ -220,5 +220,22 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertEqual(read_handle.purpose, "READ")
 
 
+    def test_redaction_masks_sensitive_strings_under_neutral_keys(self):
+        payload = {
+            "message": "Authorization: Bearer should-never-log",
+            "nested": [
+                "safe status",
+                "api_key=should-never-log",
+                {"detail": "refresh_token: should-never-log"},
+            ],
+        }
+        redacted = self.boundary.redact(payload)
+        self.assertEqual(redacted["message"], "[REDACTED]")
+        self.assertEqual(redacted["nested"][0], "safe status")
+        self.assertEqual(redacted["nested"][1], "[REDACTED]")
+        self.assertEqual(redacted["nested"][2]["detail"], "[REDACTED]")
+        self.assertNotIn("should-never-log", repr(redacted))
+
+
 if __name__ == "__main__":
     unittest.main()

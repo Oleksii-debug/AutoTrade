@@ -262,14 +262,34 @@ def _provider_fill_binding_aggregate_id(
     account_id: str,
     environment: str,
     provider_execution_id: str,
+    provider_environment: str | None = None,
 ) -> str:
-    return _scoped_identity(
-        "provider-fill-financial-binding",
-        _text(provider_id, name="provider_id").upper(),
-        _text(account_id, name="account_id"),
-        _environment(environment),
-        _text(provider_execution_id, name="provider_execution_id"),
+    provider = _text(provider_id, name="provider_id").upper()
+    runtime_environment = _environment(environment)
+    exact_provider_environment = (
+        runtime_environment
+        if provider_environment is None
+        else _text(provider_environment, name="provider_environment").upper()
     )
+    if provider == "BYBIT":
+        if provider_environment is None:
+            raise AccountingConflict(
+                "BYBIT provider fill binding requires explicit provider_environment"
+            )
+        if exact_provider_environment not in {"MAINNET", "TESTNET", "DEMO"}:
+            raise AccountingConflict(
+                "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+            )
+    identity = [
+        "provider-fill-financial-binding",
+        provider,
+        _text(account_id, name="account_id"),
+        runtime_environment,
+    ]
+    if exact_provider_environment != runtime_environment:
+        identity.append(exact_provider_environment)
+    identity.append(_text(provider_execution_id, name="provider_execution_id"))
+    return _scoped_identity(*identity)
 
 
 def _projected_fill_binding_payload(
@@ -293,7 +313,7 @@ def _projected_fill_binding_payload(
 def _provider_fill_binding_payload(
     provider_fill: ProviderFillEvidence,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "provider_id": provider_fill.provider_id,
         "account_id": provider_fill.account_id,
         "environment": provider_fill.environment,
@@ -310,6 +330,9 @@ def _provider_fill_binding_payload(
         "position_effect": getattr(provider_fill, "position_effect", None),
         "evidence_refs": list(provider_fill.evidence_refs),
     }
+    if provider_fill.provider_environment != provider_fill.environment:
+        payload["provider_environment"] = provider_fill.provider_environment
+    return payload
 
 
 def _prepare_provider_fill_binding(
@@ -341,6 +364,7 @@ def _prepare_provider_fill_binding(
         provider_id=economic_book.provider_id,
         account_id=economic_book.account_id,
         environment=economic_book.environment,
+        provider_environment=provider_fill.provider_environment,
         provider_execution_id=provider_fill.provider_execution_id,
     )
     usage = {
@@ -371,6 +395,8 @@ def _prepare_provider_fill_binding(
         ),
         "derived_usage": usage,
     }
+    if provider_fill.provider_environment != economic_book.environment:
+        request["provider_environment"] = provider_fill.provider_environment
     events = economic_book.store.load_events(
         _PROVIDER_FILL_BINDING_AGGREGATE_TYPE,
         aggregate_id,
@@ -389,6 +415,11 @@ def _prepare_provider_fill_binding(
             payload.get("provider_id") != economic_book.provider_id
             or payload.get("account_id") != economic_book.account_id
             or payload.get("environment") != economic_book.environment
+            or payload.get(
+                "provider_environment",
+                payload.get("environment"),
+            )
+            != provider_fill.provider_environment
             or payload.get("provider_execution_id") != plan.provider_execution_id
         ):
             raise AccountingConflict(
@@ -487,6 +518,8 @@ def _prepare_provider_fill_binding(
         "request_digest": request_digest,
         "request": request,
     }
+    if provider_fill.provider_environment != economic_book.environment:
+        payload["provider_environment"] = provider_fill.provider_environment
     envelope = {
         "event_id": event_id,
         "event_type": _PROVIDER_FILL_BINDING_EVENT_TYPE,

@@ -25,6 +25,8 @@ from mvp.autotrade_mvp.fill_accounting import (
 )
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
+    _provider_fill_binding_aggregate_id,
+    _provider_fill_binding_payload,
     commit_economic_batch_with_reservation_consumption,
     commit_provider_fill_with_reservation_consumption,
 )
@@ -185,6 +187,82 @@ def commit_fill(
         committed_at="2026-09-25T09:00:02Z",
         **kwargs,
     )
+
+
+class ProviderFillBindingEnvironmentTests(unittest.TestCase):
+    def test_bybit_binding_preserves_exact_provider_environment(self):
+        testnet_fill = ProviderFillEvidence.create(
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            provider_execution_id="execution-1",
+            client_order_id="client-1",
+            instrument="BTCUSDT",
+            quantity="1",
+            price="100",
+            fee_currency="USDT",
+            trade_time="2026-09-25T09:00:00Z",
+            side="BUY",
+        )
+        demo_fill = replace(testnet_fill, provider_environment="DEMO")
+
+        testnet_payload = _provider_fill_binding_payload(testnet_fill)
+        self.assertEqual(testnet_payload["provider_environment"], "TESTNET")
+        self.assertNotEqual(
+            _provider_fill_binding_aggregate_id(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                provider_execution_id="execution-1",
+            ),
+            _provider_fill_binding_aggregate_id(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="DEMO",
+                provider_execution_id="execution-1",
+            ),
+        )
+        self.assertEqual(
+            _provider_fill_binding_payload(demo_fill)["provider_environment"],
+            "DEMO",
+        )
+
+    def test_generic_binding_keeps_runtime_environment_identity(self):
+        fill = ProviderFillEvidence.create(
+            provider_id="PROVIDER-A",
+            account_id=ACCOUNT,
+            environment="PAPER",
+            provider_execution_id="execution-1",
+            client_order_id="client-1",
+            instrument="ABC",
+            quantity="1",
+            price="100",
+            fee_currency="USD",
+            trade_time="2026-09-25T09:00:00Z",
+            side="BUY",
+        )
+        self.assertNotIn(
+            "provider_environment",
+            _provider_fill_binding_payload(fill),
+        )
+        self.assertEqual(
+            _provider_fill_binding_aggregate_id(
+                provider_id="PROVIDER-A",
+                account_id=ACCOUNT,
+                environment="PAPER",
+                provider_execution_id="execution-1",
+            ),
+            _provider_fill_binding_aggregate_id(
+                provider_id="PROVIDER-A",
+                account_id=ACCOUNT,
+                environment="PAPER",
+                provider_environment="PAPER",
+                provider_execution_id="execution-1",
+            ),
+        )
 
 
 class AtomicFillFinancialCommitTests(unittest.TestCase):

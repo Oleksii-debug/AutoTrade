@@ -217,6 +217,61 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
             self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("20"))
             self.assertEqual(len(economics.transactions), 1)
 
+    def test_preexisting_reservation_consumption_without_economics_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            component_key = (
+                "atomic-fill-reservation:"
+                + __import__("hashlib").sha256(
+                    __import__("json").dumps(
+                        [
+                            PROVIDER,
+                            ACCOUNT,
+                            ENVIRONMENT,
+                            "fill-financial-idempotency-1",
+                        ],
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+            )
+            # Use the public preparation seam to emulate a legacy/crashed
+            # partial integration without mutating the economic aggregate.
+            plan = reservations.prepare_consume_mutation(
+                event_key="partial-reservation-event",
+                idempotency_key=component_key,
+                reservation_id="reservation-1",
+                usage={"CASH:USD": "100"},
+                committed_at="2026-09-25T09:00:02Z",
+            )
+            self.assertIsNotNone(plan.envelope)
+            store.commit_command(
+                command_id="partial-reservation-only",
+                actor="test-partial-financial-state",
+                environment=ENVIRONMENT,
+                idempotency_key="partial-reservation-only",
+                request=plan.request,
+                result=plan.snapshot_payload,
+                state_version=plan.aggregate_version,
+                events=[(plan.envelope, None)],
+            )
+            reservations.refresh()
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "partially committed",
+            ):
+                commit_fill(economics, reservations)
+
+            snapshot = reservations.get("reservation-1")
+            self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("100"))
+            self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("20"))
+            self.assertEqual(economics.transactions, ())
+
     def test_cross_scope_books_are_rejected_before_mutation(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

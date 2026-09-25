@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -50,7 +50,19 @@ class ProtocolViolation(ValueError):
     pass
 
 
+def _reject_binary_float(payload: Any, path: str = "$") -> None:
+    if isinstance(payload, float):
+        raise ProtocolViolation(f"binary float is not permitted in frozen scientific evidence: {path}")
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            _reject_binary_float(value, f"{path}.{key}")
+    elif isinstance(payload, (list, tuple)):
+        for index, value in enumerate(payload):
+            _reject_binary_float(value, f"{path}[{index}]")
+
+
 def _canonical(payload: Any) -> str:
+    _reject_binary_float(payload)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 
@@ -70,6 +82,31 @@ def _text(value: Any, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
+
+
+def _period(payload: Any, name: str) -> tuple[date, date]:
+    if not isinstance(payload, dict) or set(payload) != {"start", "end"}:
+        raise ProtocolViolation(f"{name} must contain exactly start and end")
+    start_raw = _text(payload.get("start"), f"{name}.start")
+    end_raw = _text(payload.get("end"), f"{name}.end")
+    try:
+        start = date.fromisoformat(start_raw)
+        end = date.fromisoformat(end_raw)
+    except ValueError as exc:
+        raise ProtocolViolation(f"{name} must use ISO calendar dates") from exc
+    if start > end:
+        raise ProtocolViolation(f"{name} start cannot follow end")
+    return start, end
+
+
+def _validate_causal_periods(payload: dict[str, Any]) -> None:
+    names = ("train_period", "validation_period", "test_period", "forward_period")
+    parsed = [(name, *_period(payload[name], name)) for name in names]
+    for (left_name, _left_start, left_end), (right_name, right_start, _right_end) in zip(parsed, parsed[1:]):
+        if left_end >= right_start:
+            raise ProtocolViolation(
+                f"{left_name} must end before {right_name} starts"
+            )
 
 
 @dataclass(frozen=True)
@@ -136,6 +173,39 @@ class ScientificRegistry:
                     untouched INTEGER NOT NULL,
                     created_at TEXT NOT NULL
                 );
+
+                CREATE TRIGGER IF NOT EXISTS protocols_no_update
+                BEFORE UPDATE ON protocols BEGIN
+                    SELECT RAISE(ABORT, 'protocols are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS protocols_no_delete
+                BEFORE DELETE ON protocols BEGIN
+                    SELECT RAISE(ABORT, 'protocols are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS trials_no_update
+                BEFORE UPDATE ON trials BEGIN
+                    SELECT RAISE(ABORT, 'trials are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS trials_no_delete
+                BEFORE DELETE ON trials BEGIN
+                    SELECT RAISE(ABORT, 'trials are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS holdout_access_no_update
+                BEFORE UPDATE ON holdout_access BEGIN
+                    SELECT RAISE(ABORT, 'holdout access is append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS holdout_access_no_delete
+                BEFORE DELETE ON holdout_access BEGIN
+                    SELECT RAISE(ABORT, 'holdout access is append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS evaluations_no_update
+                BEFORE UPDATE ON evaluations BEGIN
+                    SELECT RAISE(ABORT, 'evaluations are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS evaluations_no_delete
+                BEFORE DELETE ON evaluations BEGIN
+                    SELECT RAISE(ABORT, 'evaluations are append-only');
+                END;
                 """
             )
 
@@ -156,6 +226,7 @@ class ScientificRegistry:
             raise ProtocolViolation("required protocol fields cannot be empty: " + ", ".join(empty))
         if not isinstance(payload.get("trial_budget"), int) or isinstance(payload.get("trial_budget"), bool) or payload["trial_budget"] < 1:
             raise ProtocolViolation("trial_budget must be a positive integer")
+        _validate_causal_periods(payload)
         identifier = _id(protocol_id)
         canonical = _canonical(payload)
         digest = _hash(payload)

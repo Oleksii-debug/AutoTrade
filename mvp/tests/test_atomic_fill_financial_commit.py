@@ -19,7 +19,10 @@ from mvp.autotrade_mvp.durable_settlement import (
     settlement_rule_evidence_receipt,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
-from mvp.autotrade_mvp.fill_accounting import ProjectedFillEvidence
+from mvp.autotrade_mvp.fill_accounting import (
+    ProjectedFillEvidence,
+    build_provider_fill_financial_plan,
+)
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
     commit_economic_batch_with_reservation_consumption,
@@ -671,6 +674,111 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             observed_at="2026-09-25T09:00:01Z",
             committed_at="2026-09-25T09:00:02Z",
         )
+
+    def test_provider_fill_plan_identity_is_persisted_with_reservation_event(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            projected = self.projected_fill()
+            provider = self.provider_fill()
+            plan = build_provider_fill_financial_plan(
+                book=economics,
+                provider_id=PROVIDER,
+                projected_fill=projected,
+                provider_fill=provider,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+                reservation_snapshot=reservations.get("reservation-1"),
+                observed_at="2026-09-25T09:00:01Z",
+            )
+            self.assertTrue(
+                self.commit_evidenced_fill(
+                    economics,
+                    reservations,
+                    projected=projected,
+                    provider=provider,
+                )
+            )
+
+            events = store.load_events("reservation_book", reservations.scope_id)
+            self.assertEqual(len(events), 2)
+            request = events[-1]["payload"]["request"]
+            binding = request["evidence_binding"]
+            self.assertEqual(
+                binding["provider_execution_id"],
+                provider.provider_execution_id,
+            )
+            self.assertEqual(binding["intent_id"], projected.intent_id)
+            self.assertEqual(binding["reservation_id"], "reservation-1")
+            self.assertEqual(
+                binding["reservation_cut_digest"],
+                plan.reservation_cut_digest,
+            )
+            self.assertEqual(
+                binding["provider_fill_financial_plan_digest"],
+                plan.plan_digest,
+            )
+
+    def test_stale_provider_fill_plan_cannot_consume_changed_reservation_cut(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            projected = self.projected_fill(
+                quantity="0.5",
+                fill_id="fill-stale-cut",
+                provider_execution_id="provider-execution-stale-cut",
+            )
+            provider = self.provider_fill(
+                quantity="0.5",
+                provider_execution_id="provider-execution-stale-cut",
+            )
+            plan = build_provider_fill_financial_plan(
+                book=economics,
+                provider_id=PROVIDER,
+                projected_fill=projected,
+                provider_fill=provider,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+                reservation_snapshot=reservations.get("reservation-1"),
+                observed_at="2026-09-25T09:00:01Z",
+            )
+
+            reservations.consume(
+                command_id="concurrent-consume-command",
+                idempotency_key="concurrent-consume-idempotency",
+                reservation_id="reservation-1",
+                usage={"CASH:USD": "1"},
+            )
+            with self.assertRaisesRegex(
+                ReservationConflict,
+                "snapshot changed after provider fill plan derivation",
+            ):
+                commit_economic_batch_with_reservation_consumption(
+                    economics,
+                    reservations,
+                    command_id="stale-fill-command",
+                    idempotency_key="stale-fill-idempotency",
+                    reservation_id="reservation-1",
+                    usage=plan.usage,
+                    transactions=(plan.transaction,),
+                    reservation_expected_snapshot_digest=plan.reservation_cut_digest,
+                    reservation_evidence_binding={
+                        "provider_execution_id": plan.provider_execution_id,
+                        "provider_fill_financial_plan_digest": plan.plan_digest,
+                    },
+                    committed_at="2026-09-25T09:00:02Z",
+                )
+
+            self.assertEqual(economics.transactions, ())
+            snapshot = reservations.get("reservation-1")
+            self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("1"))
+            self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("119"))
 
     def test_usage_is_derived_from_provider_fill_not_caller_input(self):
         with TemporaryDirectory() as directory:

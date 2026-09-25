@@ -33,6 +33,7 @@ from .durable_settlement import DurableSettlementBook
 from .fill_accounting import (
     ProjectedFillEvidence,
     ProviderFillFinancialPlan,
+    build_provider_fill_correction_transactions,
     build_provider_fill_financial_plan,
 )
 from .persistence import JournalStore, canonical_json, payload_digest
@@ -1114,6 +1115,272 @@ def commit_economic_batch_with_reservation_consumption(
         settlement_book.refresh()
     return inserted
 
+
+
+
+def commit_economic_correction_with_settlement_replacement(
+    economic_book: DurableProviderEconomicBook,
+    settlement_book: DurableSettlementBook,
+    *,
+    command_id: str,
+    idempotency_key: str,
+    reversal: JournalTransaction,
+    replacement: JournalTransaction,
+    settlement_obligations: Iterable[SettlementObligation],
+    committed_at: str | None = None,
+) -> bool:
+    """Atomically bind correction economics to replacement settlement truth.
+
+    A correction reversal cancels the prior trade-date economic fact; it is not
+    a new contractual cash settlement. Only the replacement's active CASH legs
+    receive new settlement obligations. The prior obligation/evidence remains
+    immutable in the settlement journal, while SettlementBook.project() excludes
+    it because its source transaction is reversed.
+
+    This integration barrier intentionally owns no new ledger, reservation or
+    provider authority. It only composes the existing economic and settlement
+    authorities in one JournalStore transaction.
+    """
+
+    if not isinstance(economic_book, DurableProviderEconomicBook):
+        raise TypeError("economic_book must be DurableProviderEconomicBook")
+    if not isinstance(settlement_book, DurableSettlementBook):
+        raise TypeError("settlement_book must be DurableSettlementBook")
+    if economic_book.store is not settlement_book.store:
+        raise ValueError(
+            "economic and settlement books must share one JournalStore"
+        )
+    if (
+        settlement_book.scope.provider_id != economic_book.provider_id
+        or settlement_book.scope.account_id != economic_book.account_id
+        or settlement_book.scope.environment != economic_book.environment
+    ):
+        raise ValueError(
+            "settlement book must share provider/account/environment scope"
+        )
+    if not isinstance(reversal, JournalTransaction):
+        raise TypeError("reversal must be a JournalTransaction")
+    if not isinstance(replacement, JournalTransaction):
+        raise TypeError("replacement must be a JournalTransaction")
+    if reversal.reverses_transaction_id is None:
+        raise AccountingConflict(
+            "settlement-aware correction requires an explicit reversal"
+        )
+    if reversal.corrects_transaction_id is not None:
+        raise AccountingConflict(
+            "correction reversal cannot also be a replacement"
+        )
+    if replacement.reverses_transaction_id is not None:
+        raise AccountingConflict(
+            "correction replacement cannot also be a reversal"
+        )
+    if replacement.corrects_transaction_id != reversal.reverses_transaction_id:
+        raise AccountingConflict(
+            "correction replacement must target the transaction reversed in the same batch"
+        )
+
+    items = tuple(settlement_obligations)
+    if not items:
+        raise ValueError(
+            "correction replacement requires explicit settlement obligations"
+        )
+
+    when = (
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        if committed_at is None
+        else _instant_text(committed_at, name="committed_at")
+    )
+    economic_plan = economic_book.prepare_batch_mutation(
+        (reversal, replacement),
+        committed_at=when,
+    )
+    canonical_reversal, canonical_replacement = economic_plan.transactions
+    if (
+        canonical_reversal.reverses_transaction_id is None
+        or canonical_replacement.corrects_transaction_id
+        != canonical_reversal.reverses_transaction_id
+    ):
+        raise AccountingConflict(
+            "canonical correction batch lost reversal/replacement lineage"
+        )
+
+    expected_cash_legs: dict[tuple[str, str], Decimal] = {}
+    for posting in canonical_replacement.postings:
+        if posting.ledger_account == f"CASH:{posting.asset_or_currency}":
+            key = (
+                canonical_replacement.transaction_id,
+                posting.asset_or_currency,
+            )
+            expected_cash_legs[key] = (
+                expected_cash_legs.get(key, Decimal("0"))
+                + posting.signed_amount
+            )
+    expected_cash_legs = {
+        key: amount
+        for key, amount in expected_cash_legs.items()
+        if amount != 0
+    }
+    if not expected_cash_legs:
+        raise AccountingConflict(
+            "settlement-aware correction replacement has no active cash leg"
+        )
+
+    bound_cash_legs: dict[tuple[str, str], Decimal] = {}
+    for obligation in items:
+        if not isinstance(obligation, SettlementObligation):
+            raise TypeError(
+                "settlement_obligations must contain SettlementObligation"
+            )
+        if obligation.source_transaction_id != canonical_replacement.transaction_id:
+            raise AccountingConflict(
+                "correction settlement obligation must bind the replacement transaction"
+            )
+        key = (
+            obligation.source_transaction_id,
+            obligation.currency,
+        )
+        if key in bound_cash_legs:
+            raise AccountingConflict(
+                "correction has duplicate settlement coverage for one replacement cash leg"
+            )
+        bound_cash_legs[key] = obligation.amount
+
+    if set(bound_cash_legs) != set(expected_cash_legs):
+        raise AccountingConflict(
+            "correction settlement obligations do not cover every replacement cash leg"
+        )
+    for key, expected_amount in expected_cash_legs.items():
+        if bound_cash_legs[key] != expected_amount:
+            raise AccountingConflict(
+                "correction settlement obligation amount differs from replacement cash effect"
+            )
+
+    settlement_plan = settlement_book.prepare_register_mutation(
+        items,
+        committed_at=when,
+    )
+    states = (
+        economic_plan.already_committed,
+        settlement_plan.already_committed,
+    )
+    if any(states) and not all(states):
+        economic_book.refresh()
+        settlement_book.refresh()
+        raise AccountingConflict(
+            "economic correction and replacement settlement state are only partially committed"
+        )
+    if all(states):
+        economic_book.refresh()
+        settlement_book.refresh()
+        return False
+    if economic_plan.envelope is None or settlement_plan.envelope is None:
+        raise AccountingConflict(
+            "fresh settlement-aware correction is missing durable events"
+        )
+
+    cid = _text(command_id, name="command_id")
+    idem = _text(idempotency_key, name="idempotency_key")
+    request = {
+        "schema_version": "1.0.0",
+        "provider_id": economic_book.provider_id,
+        "account_id": economic_book.account_id,
+        "environment": economic_book.environment,
+        "economic_correction": economic_plan.request,
+        "replacement_settlement": settlement_plan.request,
+    }
+    result = {
+        "economic_correction": economic_plan.result,
+        "replacement_settlement": settlement_plan.result,
+    }
+    command_identity = str(
+        uuid5(
+            NAMESPACE_URL,
+            "https://commands.autotrade.local/atomic-settlement-correction/"
+            + _scoped_identity(
+                "atomic-settlement-correction-command",
+                economic_book.provider_id,
+                economic_book.account_id,
+                economic_book.environment,
+                cid,
+            ),
+        )
+    )
+    journal_idempotency_key = (
+        "atomic-settlement-correction:"
+        + _scoped_identity(
+            "atomic-settlement-correction-idempotency",
+            economic_book.provider_id,
+            economic_book.account_id,
+            economic_book.environment,
+            idem,
+        )
+    )
+    try:
+        _, inserted, _ = economic_book.store.commit_command(
+            command_id=command_identity,
+            actor="atomic-settlement-correction-integration",
+            environment=economic_book.environment,
+            idempotency_key=journal_idempotency_key,
+            request=request,
+            result=result,
+            state_version=max(
+                economic_plan.aggregate_version,
+                settlement_plan.aggregate_version,
+            ),
+            events=[
+                (economic_plan.envelope, "autotrade.economic.events"),
+                (settlement_plan.envelope, None),
+            ],
+        )
+    except Exception:
+        economic_book.refresh()
+        settlement_book.refresh()
+        raise
+
+    economic_book.refresh()
+    settlement_book.refresh()
+    return inserted
+
+
+def commit_provider_fill_correction_with_settlement_replacement(
+    economic_book: DurableProviderEconomicBook,
+    settlement_book: DurableSettlementBook,
+    *,
+    command_id: str,
+    idempotency_key: str,
+    original_projected_fill: ProjectedFillEvidence,
+    original_provider_fill: ProviderFillEvidence,
+    corrected_projected_fill: ProjectedFillEvidence,
+    corrected_provider_fill: ProviderFillEvidence,
+    expected_instrument: str,
+    settlement_currency: str,
+    correction_observed_at: str,
+    settlement_obligations: Iterable[SettlementObligation],
+    committed_at: str | None = None,
+) -> bool:
+    """Build the canonical provider correction and commit settlement atomically."""
+
+    reversal, replacement = build_provider_fill_correction_transactions(
+        book=economic_book,
+        provider_id=economic_book.provider_id,
+        original_projected_fill=original_projected_fill,
+        original_provider_fill=original_provider_fill,
+        corrected_projected_fill=corrected_projected_fill,
+        corrected_provider_fill=corrected_provider_fill,
+        expected_instrument=expected_instrument,
+        settlement_currency=settlement_currency,
+        correction_observed_at=correction_observed_at,
+    )
+    return commit_economic_correction_with_settlement_replacement(
+        economic_book,
+        settlement_book,
+        command_id=command_id,
+        idempotency_key=idempotency_key,
+        reversal=reversal,
+        replacement=replacement,
+        settlement_obligations=settlement_obligations,
+        committed_at=committed_at,
+    )
 
 
 def commit_provider_fill_with_reservation_consumption(

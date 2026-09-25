@@ -122,6 +122,48 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn('string canonicalOperationId = "Unavailable";', client)
         self.assertIn("OperationId = canonicalOperationId;", client)
 
+    def test_accepted_emergency_operation_has_same_identity_recovery_contract(self):
+        client = CLIENT.read_text(encoding="utf-8")
+        code = CODE.read_text(encoding="utf-8")
+        self.assertIn("EmergencyOperationState", client)
+        self.assertIn("EmergencyOperationStatus", client)
+        self.assertIn("Task<EmergencyOperationStatus> GetOperationAsync(", client)
+        self.assertIn(
+            "A durable block may be confirmed only by a succeeded emergency operation.",
+            client,
+        )
+        self.assertIn(
+            "A succeeded emergency operation must carry durable block confirmation.",
+            client,
+        )
+        self.assertIn(
+            "await _hostClient.GetOperationAsync(operationId, _lifetime.Token)",
+            code,
+        )
+        self.assertIn(
+            "Recovered emergency operation identity does not match the accepted operation.",
+            code,
+        )
+        self.assertIn(
+            "Do not resubmit with a new idempotency identity",
+            code,
+        )
+        self.assertIn(
+            "recover this same operation",
+            code.lower(),
+        )
+
+    def test_disconnected_operation_recovery_remains_unknown_and_does_not_resubmit(self):
+        client = CLIENT.read_text(encoding="utf-8")
+        self.assertIn("public Task<EmergencyOperationStatus> GetOperationAsync(", client)
+        self.assertIn("state: EmergencyOperationState.Unknown", client)
+        self.assertIn("durableBlockConfirmed: false", client)
+        self.assertIn("inFlightActions: InFlightActionState.Unknown", client)
+        recovery_body = client.split(
+            "public Task<EmergencyOperationStatus> GetOperationAsync(", 1
+        )[1]
+        self.assertNotIn("BlockNewExposureAsync(", recovery_body)
+
     def test_emergency_control_is_named_keyboard_reachable_and_truthful(self):
         text = XAML.read_text(encoding="utf-8")
         code = CODE.read_text(encoding="utf-8")

@@ -65,6 +65,8 @@ class SpecialistDagTests(unittest.TestCase):
         self.assertIn(("b", "non_positive_incremental_value"), plan.skipped_roles)
         self.assertIn(("c", "budget_exceeded"), plan.skipped_roles)
         self.assertEqual(plan.reserved_cost, Decimal("2"))
+        self.assertEqual(plan.available_inputs, ("price",))
+        self.assertEqual(plan.total_budget, Decimal("4"))
 
     def test_dependency_cycle_fails_closed(self):
         with self.assertRaisesRegex(SpecialistDagError, "cycle"):
@@ -173,12 +175,54 @@ class SpecialistDagTests(unittest.TestCase):
             plan.scheduled_roles,
             plan.skipped_roles,
             Decimal("0"),
+            plan.available_inputs,
+            plan.total_budget,
         )
-        with self.assertRaisesRegex(SpecialistDagError, "reserved cost"):
+        with self.assertRaisesRegex(SpecialistDagError, "canonical planner output"):
             aggregate_specialists(
                 specs,
                 [run("a", "1")],
                 plan=tampered,
+                decision_deadline=NOW,
+            )
+
+    def test_forged_schedule_with_missing_required_input_is_rejected(self):
+        specs = [spec("research", "g1", cost="1", value="2", inputs=("news",))]
+        planned = full_plan(specs, inputs=(), budget="1")
+        self.assertEqual(planned.scheduled_roles, ())
+        forged = type(planned)(
+            planned.input_snapshot_id,
+            ("research",),
+            (),
+            Decimal("1"),
+            planned.available_inputs,
+            planned.total_budget,
+        )
+        with self.assertRaisesRegex(SpecialistDagError, "canonical planner output"):
+            aggregate_specialists(
+                specs,
+                [run("research", "1")],
+                plan=forged,
+                decision_deadline=NOW,
+            )
+
+    def test_forged_budget_context_is_rejected(self):
+        specs = [spec("a", "g1", cost="2"), spec("b", "g2", cost="2")]
+        plan = full_plan(specs, budget="2")
+        self.assertEqual(plan.scheduled_roles, ("a",))
+        forged = type(plan)(
+            plan.input_snapshot_id,
+            plan.scheduled_roles,
+            plan.skipped_roles,
+            plan.reserved_cost,
+            plan.available_inputs,
+            Decimal("4"),
+        )
+        with self.assertRaisesRegex(SpecialistDagError, "canonical planner output"):
+            aggregate_specialists(
+                specs,
+                [run("a", "1")],
+                plan=forged,
                 decision_deadline=NOW,
             )
 

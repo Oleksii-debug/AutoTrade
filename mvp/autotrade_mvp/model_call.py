@@ -96,6 +96,7 @@ class ModelCallSpec:
     pricing_evidence_id: str
     pricing_as_of: str
     result_schema_id: str
+    cost_currency: str = "USD"
     fallback_parent_attempt_id: str | None = None
     fallback_index: int = 0
 
@@ -129,6 +130,10 @@ class ModelCallSpec:
             "result_schema_id",
             _canonical_text(self.result_schema_id, name="result_schema_id"),
         )
+        currency = _canonical_text(self.cost_currency, name="cost_currency").upper()
+        if currency != self.cost_currency or not currency.isalnum():
+            raise ValueError("cost_currency must be canonical uppercase alphanumeric text")
+        object.__setattr__(self, "cost_currency", currency)
         if self.fallback_parent_attempt_id is not None:
             object.__setattr__(
                 self,
@@ -169,10 +174,192 @@ class ModelCallBinding:
     remote: bool
     reserved_cost: Decimal
     pricing_evidence_id: str
+    pricing_evidence_digest: str
     pricing_as_of: str
+    cost_currency: str
     result_schema_id: str
     fallback_parent_attempt_id: str | None
     fallback_index: int
+
+
+@dataclass(frozen=True, slots=True)
+class PricingQuote:
+    provider_id: str
+    model_id: str
+    revision: str | None
+    estimated_cost: Decimal
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "provider_id", _canonical_text(self.provider_id, name="provider_id")
+        )
+        object.__setattr__(
+            self, "model_id", _canonical_text(self.model_id, name="model_id")
+        )
+        if self.revision is not None:
+            object.__setattr__(
+                self, "revision", _canonical_text(self.revision, name="revision")
+            )
+        object.__setattr__(
+            self,
+            "estimated_cost",
+            _exact_decimal(self.estimated_cost, name="estimated_cost"),
+        )
+
+    @property
+    def key(self) -> tuple[str, str, str | None]:
+        return (self.provider_id, self.model_id, self.revision)
+
+
+@dataclass(frozen=True, slots=True)
+class PricingEvidenceSnapshot:
+    evidence_id: str
+    evidence_digest: str
+    as_of: str
+    valid_until: str
+    cost_currency: str
+    quotes: tuple[PricingQuote, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "evidence_id", _canonical_text(self.evidence_id, name="evidence_id")
+        )
+        object.__setattr__(
+            self,
+            "evidence_digest",
+            _digest(self.evidence_digest, name="evidence_digest"),
+        )
+        object.__setattr__(self, "as_of", _utc_text(self.as_of, name="as_of"))
+        object.__setattr__(
+            self,
+            "valid_until",
+            _utc_text(self.valid_until, name="valid_until"),
+        )
+        if datetime.fromisoformat(self.valid_until.replace("Z", "+00:00")) < datetime.fromisoformat(
+            self.as_of.replace("Z", "+00:00")
+        ):
+            raise ValueError("pricing evidence validity cannot precede as_of")
+        currency = _canonical_text(
+            self.cost_currency, name="cost_currency"
+        ).upper()
+        if currency != self.cost_currency or not currency.isalnum():
+            raise ValueError(
+                "cost_currency must be canonical uppercase alphanumeric text"
+            )
+        object.__setattr__(self, "cost_currency", currency)
+        if isinstance(self.quotes, (str, bytes)):
+            raise TypeError("pricing quotes must be a collection")
+        quotes = tuple(self.quotes)
+        if not quotes or any(not isinstance(item, PricingQuote) for item in quotes):
+            raise ValueError("pricing evidence requires PricingQuote values")
+        if len({item.key for item in quotes}) != len(quotes):
+            raise ValueError("pricing evidence quote identities must be unique")
+        object.__setattr__(
+            self,
+            "quotes",
+            tuple(sorted(quotes, key=lambda item: (item.provider_id, item.model_id, item.revision or ""))),
+        )
+
+    def quote_for(
+        self,
+        provider_id: str,
+        model_id: str,
+        revision: str | None,
+    ) -> PricingQuote:
+        key = (
+            _canonical_text(provider_id, name="provider_id"),
+            _canonical_text(model_id, name="model_id"),
+            _canonical_text(revision, name="revision") if revision is not None else None,
+        )
+        matches = [item for item in self.quotes if item.key == key]
+        if len(matches) != 1:
+            raise ModelCallError(
+                "pricing evidence does not uniquely cover provider/model/revision"
+            )
+        return matches[0]
+
+
+@dataclass(frozen=True, slots=True)
+class ModelObservationEvidence:
+    attempt_id: str
+    evidence_id: str
+    evidence_digest: str
+    issuer: str
+    observation_digest: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "attempt_id", _canonical_text(self.attempt_id, name="attempt_id")
+        )
+        object.__setattr__(
+            self, "evidence_id", _canonical_text(self.evidence_id, name="evidence_id")
+        )
+        object.__setattr__(
+            self,
+            "evidence_digest",
+            _digest(self.evidence_digest, name="evidence_digest"),
+        )
+        object.__setattr__(
+            self, "issuer", _canonical_text(self.issuer, name="issuer")
+        )
+        object.__setattr__(
+            self,
+            "observation_digest",
+            _digest(self.observation_digest, name="observation_digest"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BillingEvidence:
+    attempt_id: str
+    billing_id: str
+    provider_id: str
+    model_id: str
+    revision: str | None
+    billed: Decimal
+    cost_currency: str
+    observed_at: str
+    evidence_id: str
+    evidence_digest: str
+    issuer: str
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "attempt_id",
+            "billing_id",
+            "provider_id",
+            "model_id",
+            "evidence_id",
+            "issuer",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _canonical_text(getattr(self, field_name), name=field_name),
+            )
+        if self.revision is not None:
+            object.__setattr__(
+                self, "revision", _canonical_text(self.revision, name="revision")
+            )
+        object.__setattr__(
+            self, "billed", _exact_decimal(self.billed, name="billed")
+        )
+        currency = _canonical_text(
+            self.cost_currency, name="cost_currency"
+        ).upper()
+        if currency != self.cost_currency or not currency.isalnum():
+            raise ValueError(
+                "cost_currency must be canonical uppercase alphanumeric text"
+            )
+        object.__setattr__(self, "cost_currency", currency)
+        object.__setattr__(
+            self, "observed_at", _utc_text(self.observed_at, name="observed_at")
+        )
+        object.__setattr__(
+            self,
+            "evidence_digest",
+            _digest(self.evidence_digest, name="evidence_digest"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +447,18 @@ InferenceCall = Callable[
     [ModelCallBinding, Callable[[], bool]],
     ModelCallObservation,
 ]
+PricingEvidenceResolver = Callable[
+    [ModelCallSpec, tuple[ModelDescriptor, ...]],
+    PricingEvidenceSnapshot,
+]
+ObservationEvidenceResolver = Callable[
+    [ModelCallObservation, ModelCallBinding],
+    ModelObservationEvidence,
+]
+BillingEvidenceResolver = Callable[
+    [str, str, Decimal, Mapping[str, object]],
+    BillingEvidence,
+]
 ResultValidator = Callable[[object], bool]
 CancelCheck = Callable[[], bool]
 RecoveryFence = Callable[[], None]
@@ -273,6 +472,9 @@ class DurableModelCallOrchestrator:
         *,
         budget: DurableModelBudget,
         clock: Callable[[], str],
+        pricing_evidence_resolver: PricingEvidenceResolver,
+        observation_evidence_resolver: ObservationEvidenceResolver,
+        billing_evidence_resolver: BillingEvidenceResolver,
         started_lease_seconds: int = 60,
         owner_token: str | None = None,
     ) -> None:
@@ -280,6 +482,12 @@ class DurableModelCallOrchestrator:
             raise TypeError("budget must be DurableModelBudget")
         if not callable(clock):
             raise TypeError("clock must be callable")
+        if not callable(pricing_evidence_resolver):
+            raise TypeError("pricing_evidence_resolver must be callable")
+        if not callable(observation_evidence_resolver):
+            raise TypeError("observation_evidence_resolver must be callable")
+        if not callable(billing_evidence_resolver):
+            raise TypeError("billing_evidence_resolver must be callable")
         if (
             not isinstance(started_lease_seconds, int)
             or isinstance(started_lease_seconds, bool)
@@ -292,6 +500,9 @@ class DurableModelCallOrchestrator:
         self.budget = budget
         self.journal = budget.journal
         self.clock = clock
+        self.pricing_evidence_resolver = pricing_evidence_resolver
+        self.observation_evidence_resolver = observation_evidence_resolver
+        self.billing_evidence_resolver = billing_evidence_resolver
         self.started_lease_seconds = started_lease_seconds
         self.owner_token = (
             _canonical_text(owner_token, name="owner_token")

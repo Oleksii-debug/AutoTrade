@@ -398,10 +398,34 @@ class BybitV5AdapterTests(unittest.TestCase):
             },
             observed_at="2026-09-24T22:00:00+02:00",
         )
-        self.assertEqual(accepted["provider_received_at"], "2026-09-24T20:00:00Z")
+        self.assertNotIn("provider_received_at", accepted)
         self.assertEqual(
             accepted["evidence"][0]["observed_at"],
             "2026-09-24T20:00:00Z",
+        )
+
+        provider_timed = parse_submission_response(
+            attempt_id=str(uuid4()),
+            client_order_id="client-provider-time",
+            environment="MAINNET",
+            response={
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "orderId": "provider-time-2",
+                    "orderLinkId": "client-provider-time",
+                },
+                "time": 1790280000123,
+            },
+            observed_at="2026-09-24T21:00:00Z",
+        )
+        self.assertEqual(
+            provider_timed["provider_received_at"],
+            "2026-09-24T20:00:00.123Z",
+        )
+        self.assertEqual(
+            provider_timed["evidence"][0]["observed_at"],
+            "2026-09-24T21:00:00Z",
         )
         with self.assertRaisesRegex(ProviderCoreError, "timezone"):
             parse_submission_response(
@@ -434,6 +458,37 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertNotIn("observed_at", result)
         self.assertNotIn("environment", result)
         self.assertEqual(result["evidence"], [])
+
+    def test_transport_ambiguity_requires_boolean_flag_and_valid_timestamp(self):
+        with self.assertRaisesRegex(ProviderCoreError, "must be boolean"):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                client_order_id="client-ambiguous-bool",
+                environment="MAINNET",
+                response=None,
+                observed_at="2026-09-24T20:00:00Z",
+                transport_ambiguous=1,
+            )
+
+        with self.assertRaisesRegex(ProviderCoreError, "ISO timestamp"):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                client_order_id="client-ambiguous-time",
+                environment="MAINNET",
+                response=None,
+                observed_at="not-a-timestamp",
+                transport_ambiguous=True,
+            )
+
+        with self.assertRaisesRegex(ProviderCoreError, "timezone"):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                client_order_id="client-ambiguous-naive-time",
+                environment="MAINNET",
+                response=None,
+                observed_at="2026-09-24T20:00:00",
+                transport_ambiguous=True,
+            )
 
     def test_transport_ambiguity_cannot_coexist_with_provider_response(self):
         with self.assertRaisesRegex(ProviderCoreError, "authoritative response"):

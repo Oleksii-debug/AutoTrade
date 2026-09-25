@@ -555,7 +555,6 @@ def option_risk_evidence_payload(
 ) -> dict[str, object]:
     if not isinstance(evidence, OptionRiskEvidence):
         raise TypeError("evidence must be OptionRiskEvidence")
-    _verify_option_risk_evidence(evidence, artifact_store)
     return {
         "schema_version": evidence.schema_version,
         "instrument": evidence.instrument,

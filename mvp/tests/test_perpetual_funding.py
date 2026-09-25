@@ -221,11 +221,64 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
             instrument_registry=registry
             or InstrumentRegistry(versions=(perpetual_version(),)),
             evidence_resolver=resolver.__getitem__,
-            normalizer=normalize,
             funding_endpoints=frozenset({ENDPOINT}),
             permission_scope="ORDER.READ",
         )
         return authority, book
+
+    def test_arbitrary_funding_normalizer_cannot_be_injected(self):
+        evidence = sealed_funding()
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = DurableProviderEconomicBook(
+                store,
+                provider_id="BINANCE",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            seed_position(book)
+            resolver = {evidence.evidence_ref: evidence}
+
+            def forged_normalizer(source):
+                valid = normalize(source)
+                return PerpetualFundingObservation(
+                    provider_id=valid.provider_id,
+                    account_id=valid.account_id,
+                    environment=valid.environment,
+                    instrument_id=valid.instrument_id,
+                    instrument_version=valid.instrument_version,
+                    external_event_id="forged-event",
+                    provider_revision="forged-revision",
+                    funding_period_id="forged-period",
+                    effective_at=valid.effective_at + timedelta(hours=8),
+                    observed_at=valid.observed_at,
+                    signed_contracts=Decimal("999"),
+                    funding_rate=Decimal("0.99"),
+                    mark_price=Decimal("1"),
+                    index_price=Decimal("1"),
+                    price_basis="INDEX",
+                    positive_rate_effect="LONG_RECEIVES",
+                    raw_evidence_digest=valid.raw_evidence_digest,
+                )
+
+            with self.assertRaises(TypeError):
+                DurablePerpetualFundingAuthority(
+                    store,
+                    economic_book=book,
+                    instrument_registry=InstrumentRegistry(
+                        versions=(perpetual_version(),)
+                    ),
+                    evidence_resolver=resolver.__getitem__,
+                    normalizer=forged_normalizer,
+                    funding_endpoints=frozenset({ENDPOINT}),
+                    permission_scope="ORDER.READ",
+                )
+
+            self.assertEqual(
+                store.load_events_by_aggregate_type("perpetual_funding"),
+                [],
+            )
+            self.assertEqual(len(book.transactions), 1)
 
     def test_sealed_funding_uses_canonical_registry_and_durable_position_cut(self):
         evidence = sealed_funding()

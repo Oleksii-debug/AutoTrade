@@ -30,8 +30,12 @@ from .accounting import (
 )
 from .durable_reservations import DurableReservationBook
 from .durable_settlement import DurableSettlementBook
+from .fill_accounting import (
+    ProjectedFillEvidence,
+    build_provider_fill_financial_plan,
+)
 from .persistence import JournalStore, canonical_json, payload_digest
-from .reconciliation import ProviderActivityEvidence
+from .reconciliation import ProviderActivityEvidence, ProviderFillEvidence
 from .settlement import SettlementObligation
 
 
@@ -784,6 +788,70 @@ def commit_economic_batch_with_reservation_consumption(
     if settlement_book is not None:
         settlement_book.refresh()
     return inserted
+
+
+
+def commit_provider_fill_with_reservation_consumption(
+    economic_book: DurableProviderEconomicBook,
+    reservation_book: DurableReservationBook,
+    *,
+    command_id: str,
+    idempotency_key: str,
+    reservation_id: str,
+    projected_fill: ProjectedFillEvidence,
+    provider_fill: ProviderFillEvidence,
+    expected_instrument: str,
+    settlement_currency: str,
+    asset_family: str = "CASH_EQUITY",
+    observed_at: str | None = None,
+    committed_at: str | None = None,
+    settlement_book: DurableSettlementBook | None = None,
+    settlement_obligations: Iterable[SettlementObligation] = (),
+) -> bool:
+    """Atomically book one provider fill and consume only evidence-derived resources.
+
+    This is the provider-fill entrypoint for the shared atomic integration
+    barrier. It deliberately accepts no caller-authored transaction batch and
+    no caller-authored reservation usage map. Both are derived from the same
+    normalized provider/projected fill evidence and the admission-bound
+    reservation envelope before JournalStore mutation.
+    """
+
+    if not isinstance(economic_book, DurableProviderEconomicBook):
+        raise TypeError("economic_book must be DurableProviderEconomicBook")
+    if not isinstance(reservation_book, DurableReservationBook):
+        raise TypeError("reservation_book must be DurableReservationBook")
+    rid = _text(reservation_id, name="reservation_id")
+    snapshot = reservation_book.get(rid)
+    plan = build_provider_fill_financial_plan(
+        book=economic_book,
+        provider_id=economic_book.provider_id,
+        projected_fill=projected_fill,
+        provider_fill=provider_fill,
+        expected_instrument=expected_instrument,
+        settlement_currency=settlement_currency,
+        reservation_snapshot=snapshot,
+        asset_family=asset_family,
+        observed_at=observed_at,
+    )
+    if plan.reservation_id != rid:
+        raise AccountingConflict(
+            "provider fill financial plan reservation identity changed"
+        )
+
+    caller_idempotency = _text(idempotency_key, name="idempotency_key")
+    return commit_economic_batch_with_reservation_consumption(
+        economic_book,
+        reservation_book,
+        command_id=command_id,
+        idempotency_key=f"{caller_idempotency}:provider-fill",
+        reservation_id=rid,
+        usage=plan.usage,
+        transactions=(plan.transaction,),
+        committed_at=committed_at,
+        settlement_book=settlement_book,
+        settlement_obligations=settlement_obligations,
+    )
 
 
 def book_external_provider_cash_activity(

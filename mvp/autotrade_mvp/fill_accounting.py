@@ -14,17 +14,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from types import MappingProxyType
+from typing import Mapping
 
 from .accounting import (
     AccountingConflict,
     JournalTransaction,
     ScopedEconomicBook,
     book_equity_fill,
+    canonical_transaction,
     reverse_transaction,
 )
 from .persistence import JournalStore, payload_digest
 from .reconciliation import ProviderFillEvidence
 from .reconciliation_journal import require_current_reconciliation_checkpoint
+from .reservations import ReservationSnapshot
 
 
 def _text(value: str, *, name: str) -> str:
@@ -481,6 +485,132 @@ def build_provider_fill_transaction(
             if observed_at is not None
             else None
         ),
+    )
+
+
+@dataclass(frozen=True)
+class ProviderFillFinancialPlan:
+    """Immutable evidence-derived economic + reservation-consumption plan.
+
+    The plan is deliberately narrow: today it qualifies only cash-equity BUY
+    fills. Unsupported payoff/resource families fail closed rather than
+    pretending notional is universal margin/collateral usage.
+    """
+
+    reservation_id: str
+    intent_id: str
+    provider_execution_id: str
+    transaction: JournalTransaction
+    usage_items: tuple[tuple[str, Decimal], ...]
+    plan_digest: str
+
+    @property
+    def usage(self) -> Mapping[str, Decimal]:
+        return MappingProxyType(dict(self.usage_items))
+
+
+def build_provider_fill_financial_plan(
+    *,
+    book: ScopedEconomicBook,
+    provider_id: str,
+    projected_fill: ProjectedFillEvidence,
+    provider_fill: ProviderFillEvidence,
+    expected_instrument: str,
+    settlement_currency: str,
+    reservation_snapshot: ReservationSnapshot,
+    asset_family: str = "CASH_EQUITY",
+    observed_at: str | None = None,
+) -> ProviderFillFinancialPlan:
+    """Derive one fail-closed fill economics/reservation plan from shared evidence.
+
+    No caller-authored usage map is accepted. The same independently
+    provider-evidenced fill that determines canonical accounting determines the
+    reservation consumption. Positive fees consume reserved cash in their
+    exact currency; zero/negative fees never release or create authority.
+    """
+
+    if not isinstance(reservation_snapshot, ReservationSnapshot):
+        raise TypeError("reservation_snapshot must be ReservationSnapshot")
+    family = _text(asset_family, name="asset_family").upper()
+    if family != "CASH_EQUITY":
+        raise AccountingConflict(
+            "provider fill reservation mapping is not qualified for this asset family"
+        )
+    if reservation_snapshot.intent_id != projected_fill.intent_id:
+        raise AccountingConflict(
+            "provider fill intent does not match admitted reservation"
+        )
+
+    # Validate the complete independent provider/projection identity first.
+    # Asset-family admission must never mask contradictory provider truth.
+    transaction = build_provider_fill_transaction(
+        book=book,
+        provider_id=provider_id,
+        projected_fill=projected_fill,
+        provider_fill=provider_fill,
+        expected_instrument=expected_instrument,
+        settlement_currency=settlement_currency,
+        observed_at=observed_at,
+    )
+
+    if provider_fill.side != "BUY":
+        raise AccountingConflict(
+            "cash-equity reservation consumption is qualified only for BUY fills"
+        )
+    if provider_fill.position_side is not None:
+        raise AccountingConflict(
+            "cash-equity reservation consumption rejects derivative position_side"
+        )
+
+    settlement = _text(settlement_currency, name="settlement_currency").upper()
+    usage: dict[str, Decimal] = {
+        f"CASH:{settlement}": provider_fill.quantity * provider_fill.price,
+    }
+    if provider_fill.fee_amount > 0:
+        fee_key = f"CASH:{provider_fill.fee_currency}"
+        usage[fee_key] = usage.get(fee_key, Decimal("0")) + provider_fill.fee_amount
+
+    original = dict(reservation_snapshot.original)
+    for resource, amount in usage.items():
+        if resource not in original:
+            raise AccountingConflict(
+                f"provider fill requires unreserved resource {resource}"
+            )
+        if amount <= 0:
+            raise AccountingConflict(
+                "provider fill reservation usage must be strictly positive"
+            )
+        if amount > original[resource]:
+            raise AccountingConflict(
+                f"provider fill usage exceeds admitted reservation for {resource}"
+            )
+
+    usage_items = tuple(sorted(usage.items()))
+    material = {
+        "schema_version": "1.0.0",
+        "provider_id": provider_fill.provider_id,
+        "account_id": provider_fill.account_id,
+        "environment": provider_fill.environment,
+        "reservation_id": reservation_snapshot.reservation_id,
+        "intent_id": reservation_snapshot.intent_id,
+        "provider_execution_id": provider_fill.provider_execution_id,
+        "admitted_resources": {
+            key: format(value, "f")
+            for key, value in sorted(original.items())
+        },
+        "transaction": canonical_transaction(transaction),
+        "derived_usage": {
+            key: format(value, "f")
+            for key, value in usage_items
+        },
+    }
+    return ProviderFillFinancialPlan(
+        reservation_id=reservation_snapshot.reservation_id,
+        intent_id=reservation_snapshot.intent_id,
+        provider_execution_id=provider_fill.provider_execution_id,
+        transaction=transaction,
+        usage_items=usage_items,
+        plan_digest=payload_digest(material),
     )
 
 

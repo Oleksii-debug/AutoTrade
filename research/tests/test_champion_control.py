@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone, tzinfo
 from hashlib import sha256
 import json
@@ -11,8 +12,10 @@ from autotrade_research.artifacts.store import ArtifactStore
 from research.autotrade_research.learning.champion import (
     CandidateApproval,
     ChampionRegistry,
+    ManagementPolicyRef,
     OnlineEnvelope,
     OnlineEvidenceRef,
+    OpenObligationSnapshotRef,
     ParameterBound,
     PromotionConflict,
 )
@@ -26,6 +29,116 @@ BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 def digest(value: str) -> str:
     return "sha256:" + sha256(value.encode("utf-8")).hexdigest()
+
+
+class FakeObligationAuthority:
+    def __init__(self, *, scope="paper-scope"):
+        self.scope = scope
+        self.sequence = 1
+        self.version = 1
+        self.read_count = 0
+        self.registered_policy_digests = set()
+        self._positions = ()
+        self._working = ()
+        self._unknown = ()
+        self._lineage = ()
+        self.mutate_on_read = None
+        self.guard_count = 0
+        self.mutate_on_guard = None
+        self.guard_active = False
+
+    def set_obligations(
+        self,
+        *,
+        positions=(),
+        working=(),
+        unknown=(),
+        champion_id="candidate-a",
+    ):
+        self.sequence += 1
+        self.version += 1
+        self._positions = tuple(positions)
+        self._working = tuple(working)
+        self._unknown = tuple(unknown)
+        all_ids = self._positions + self._working + self._unknown
+        self._lineage = tuple((item, champion_id) for item in all_ids)
+
+    def read(self):
+        self.read_count += 1
+        if self.mutate_on_read == self.read_count:
+            self.set_obligations(positions=("position-raced",))
+        return OpenObligationSnapshotRef.create(
+            snapshot_id=f"obligations-{self.sequence}-{self.version}",
+            authority_scope_id=self.scope,
+            account_id="paper-account",
+            environment="PAPER",
+            journal_sequence=self.sequence,
+            state_version=self.version,
+            open_position_ids=self._positions,
+            working_order_ids=self._working,
+            unknown_attempt_ids=self._unknown,
+            originating_champion_ids=self._lineage,
+        )
+
+    @contextmanager
+    def commit_guard(self, expected):
+        if not isinstance(expected, OpenObligationSnapshotRef):
+            raise TypeError("expected must be OpenObligationSnapshotRef")
+        self.guard_count += 1
+        if self.mutate_on_guard == self.guard_count:
+            self.set_obligations(positions=("position-guard-raced",))
+        current = self.read()
+        self.guard_active = True
+        try:
+            yield current
+        finally:
+            self.guard_active = False
+
+    def register_policy(self, policy):
+        self.registered_policy_digests.add(policy.policy_digest)
+        return policy
+
+    def verify_policy(self, policy, snapshot):
+        return (
+            policy.policy_digest in self.registered_policy_digests
+            and policy.authority_scope_id == snapshot.authority_scope_id
+        )
+
+
+def management_policy(
+    authority,
+    *,
+    policy_id="existing-obligation-policy",
+    kinds=("POSITION", "WORKING_ORDER", "UNKNOWN_ATTEMPT"),
+):
+    return authority.register_policy(
+        ManagementPolicyRef.create(
+            policy_id=policy_id,
+            artifact_hash=digest(policy_id),
+            authority_scope_id=authority.scope,
+            compatible_obligation_kinds=kinds,
+        )
+    )
+
+
+def champion_registry(
+    path,
+    *,
+    scientific_registry,
+    artifact_store=None,
+    obligation_authority=None,
+):
+    authority = obligation_authority or FakeObligationAuthority()
+    registry = ChampionRegistry(
+        path,
+        scientific_registry=scientific_registry,
+        artifact_store=artifact_store,
+        obligation_snapshot_reader=authority.read,
+        obligation_commit_guard=authority.commit_guard,
+        management_policy_verifier=authority.verify_policy,
+    )
+    registry._test_obligation_authority = authority
+    return registry
 
 
 def holdout_identity(seed: str) -> dict[str, str]:
@@ -328,7 +441,7 @@ class ChampionRegistryTests(unittest.TestCase):
                 evaluation_id=locked["evaluation_id"],
                 evaluation_result_hash=locked["result_hash"],
             )
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -400,7 +513,7 @@ class ChampionRegistryTests(unittest.TestCase):
                 evaluation_id=locked["evaluation_id"],
                 evaluation_result_hash=locked["result_hash"],
             )
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -490,7 +603,7 @@ class ChampionRegistryTests(unittest.TestCase):
                 evaluation_id=locked["evaluation_id"],
                 evaluation_result_hash=locked["result_hash"],
             )
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -597,7 +710,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_atomic_initial_promotion_changes_future_pointer(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -611,7 +724,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_stale_generation_cannot_overwrite_new_champion(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -622,7 +735,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_expired_evidence_blocks_promotion(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -636,7 +749,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_evidence_expires_at_the_exact_deadline(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -673,7 +786,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_failed_evaluation_blocks_promotion(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -686,7 +799,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_fabricated_result_hash_cannot_promote(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -717,7 +830,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_contaminated_holdout_cannot_promote_even_with_pass_text(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -734,7 +847,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_holdout_peek_after_locked_evaluation_invalidates_promotion(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -761,7 +874,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_self_asserted_trial_log_without_registered_trial_cannot_promote(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -824,7 +937,7 @@ class ChampionRegistryTests(unittest.TestCase):
                 evaluation_id=locked["evaluation_id"],
                 evaluation_result_hash=locked["result_hash"],
             )
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -837,23 +950,212 @@ class ChampionRegistryTests(unittest.TestCase):
                     existing_position_policy=None,
                 )
 
-    def test_open_positions_require_explicit_policy(self):
+    def test_open_positions_require_authority_snapshot_and_registered_policy(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            authority = FakeObligationAuthority()
+            authority.set_obligations(positions=("position-1", "position-2"))
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
+                obligation_authority=authority,
             )
-            with self.assertRaises(ValueError):
+            candidate = approval(science)
+            with self.assertRaisesRegex(ValueError, "registered immutable management policy"):
                 registry.promote(
-                    approval(science), expected_generation=0, now=BASE,
-                    open_position_count=2, existing_position_policy=None,
+                    candidate,
+                    expected_generation=0,
+                    now=BASE,
+                    open_position_count=0,
+                    existing_position_policy=None,
                 )
+            self.assertEqual(registry.state().generation, 0)
+
+            policy = management_policy(authority)
+            state = registry.promote(
+                candidate,
+                expected_generation=0,
+                now=BASE,
+                management_policy=policy,
+            )
+            self.assertEqual(state.generation, 1)
+            self.assertEqual(state.existing_position_policy, policy.token)
+
+    def test_caller_zero_cannot_hide_authority_open_obligation(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            authority = FakeObligationAuthority()
+            authority.set_obligations(positions=("position-hidden",))
+            registry = champion_registry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+                obligation_authority=authority,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "registered immutable management policy",
+            ):
+                registry.promote(
+                    approval(science),
+                    expected_generation=0,
+                    now=BASE,
+                    open_position_count=0,
+                    existing_position_policy=None,
+                )
+            self.assertEqual(registry.state().generation, 0)
+
+    def test_free_text_policy_cannot_authorize_open_obligation(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            authority = FakeObligationAuthority()
+            authority.set_obligations(positions=("position-text",))
+            registry = champion_registry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+                obligation_authority=authority,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "free-text existing_position_policy",
+            ):
+                registry.promote(
+                    approval(science),
+                    expected_generation=0,
+                    now=BASE,
+                    open_position_count=0,
+                    existing_position_policy="trust-me",
+                )
+            self.assertEqual(registry.state().generation, 0)
+
+    def test_concurrent_obligation_change_invalidates_promotion(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            authority = FakeObligationAuthority()
+            authority.mutate_on_read = 2
+            registry = champion_registry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+                obligation_authority=authority,
+            )
+            with self.assertRaisesRegex(
+                PromotionConflict,
+                "open obligations changed before guarded routing commit",
+            ):
+                registry.promote(
+                    approval(science),
+                    expected_generation=0,
+                    now=BASE,
+                )
+            self.assertEqual(registry.state().generation, 0)
+
+    def test_authority_commit_guard_catches_last_moment_obligation_change(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            authority = FakeObligationAuthority()
+            authority.mutate_on_guard = 1
+            registry = champion_registry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+                obligation_authority=authority,
+            )
+            with self.assertRaisesRegex(
+                PromotionConflict,
+                "open obligations changed before guarded routing commit",
+            ):
+                registry.promote(
+                    approval(science),
+                    expected_generation=0,
+                    now=BASE,
+                )
+            self.assertEqual(authority.guard_count, 1)
+            self.assertFalse(authority.guard_active)
+            self.assertEqual(registry.state().generation, 0)
+
+    def test_working_and_unknown_obligations_require_compatible_policy(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            authority = FakeObligationAuthority()
+            authority.set_obligations(
+                working=("working-1",),
+                unknown=("unknown-1",),
+            )
+            registry = champion_registry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+                obligation_authority=authority,
+            )
+            candidate = approval(science)
+            position_only = management_policy(
+                authority,
+                policy_id="position-only",
+                kinds=("POSITION",),
+            )
+            with self.assertRaisesRegex(ValueError, "not compatible"):
+                registry.promote(
+                    candidate,
+                    expected_generation=0,
+                    now=BASE,
+                    management_policy=position_only,
+                )
+            complete = management_policy(
+                authority,
+                policy_id="working-unknown",
+                kinds=("WORKING_ORDER", "UNKNOWN_ATTEMPT"),
+            )
+            state = registry.promote(
+                candidate,
+                expected_generation=0,
+                now=BASE,
+                management_policy=complete,
+            )
+            self.assertEqual(state.generation, 1)
+            self.assertEqual(state.existing_position_policy, complete.token)
+
+    def test_restart_preserves_obligation_and_management_policy_identity(self):
+        with TemporaryDirectory() as directory:
+            science_path = Path(directory) / "science.sqlite3"
+            champion_path = Path(directory) / "champion.sqlite3"
+            science = ScientificRegistry(science_path)
+            authority = FakeObligationAuthority()
+            authority.set_obligations(positions=("position-restart",))
+            policy = management_policy(authority, policy_id="restart-policy")
+            registry = champion_registry(
+                champion_path,
+                scientific_registry=science,
+                obligation_authority=authority,
+            )
+            state = registry.promote(
+                approval(science),
+                expected_generation=0,
+                now=BASE,
+                management_policy=policy,
+            )
+            first_history = registry.history()
+            self.assertEqual(
+                first_history[-1]["obligation_snapshot_digest"],
+                authority.read().snapshot_digest,
+            )
+            self.assertEqual(
+                first_history[-1]["management_policy_digest"],
+                policy.policy_digest,
+            )
+
+            restarted_science = ScientificRegistry(science_path)
+            restarted = champion_registry(
+                champion_path,
+                scientific_registry=restarted_science,
+                obligation_authority=authority,
+            )
+            self.assertEqual(restarted.state(), state)
+            self.assertEqual(
+                restarted.history()[-1]["management_policy_digest"],
+                policy.policy_digest,
+            )
 
     def test_rollback_rejects_boolean_or_invalid_generation_inputs(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -881,7 +1183,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_rollback_changes_future_pointer_without_erasing_history(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -893,17 +1195,21 @@ class ChampionRegistryTests(unittest.TestCase):
                 approval(science, "candidate-b"), expected_generation=1, now=BASE,
                 open_position_count=0, existing_position_policy=None,
             )
+            authority = registry._test_obligation_authority
+            authority.set_obligations(positions=("position-existing",))
+            policy = management_policy(
+                authority,
+                policy_id="manage-under-original-exit-owner",
+            )
             state = registry.rollback(
-                target_generation=1, expected_generation=2, now=BASE,
-                open_position_count=1,
-                existing_position_policy="manage-under-original-exit-owner",
+                target_generation=1,
+                expected_generation=2,
+                now=BASE,
+                management_policy=policy,
             )
             self.assertEqual(state.generation, 3)
             self.assertEqual(state.champion_candidate_id, "candidate-a")
-            self.assertEqual(
-                state.existing_position_policy,
-                "manage-under-original-exit-owner",
-            )
+            self.assertEqual(state.existing_position_policy, policy.token)
             self.assertEqual(
                 [row["action"] for row in registry.history()],
                 ["PROMOTE", "PROMOTE", "ROLLBACK"],
@@ -912,10 +1218,14 @@ class ChampionRegistryTests(unittest.TestCase):
 
     def test_promotion_retry_after_response_loss_is_idempotent(self):
         with TemporaryDirectory() as directory:
-            science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
-                Path(directory) / "champion.sqlite3",
+            science_path = Path(directory) / "science.sqlite3"
+            champion_path = Path(directory) / "champion.sqlite3"
+            science = ScientificRegistry(science_path)
+            authority = FakeObligationAuthority()
+            registry = champion_registry(
+                champion_path,
                 scientific_registry=science,
+                obligation_authority=authority,
             )
             candidate = approval(science)
             first = registry.promote(
@@ -925,20 +1235,38 @@ class ChampionRegistryTests(unittest.TestCase):
                 open_position_count=0,
                 existing_position_policy=None,
             )
-            retry = registry.promote(
+
+            # The commit succeeded but its response is presumed lost.  Later
+            # provider activity changes the live obligation set and the process
+            # restarts.  The retry must replay durable history before consulting
+            # the now-incompatible live obligation authority.
+            authority.set_obligations(
+                positions=("position-after-promotion",),
+                working=("working-after-promotion",),
+                unknown=("unknown-after-promotion",),
+            )
+            restarted_science = ScientificRegistry(science_path)
+            restarted = champion_registry(
+                champion_path,
+                scientific_registry=restarted_science,
+                obligation_authority=authority,
+            )
+            reads_before_retry = authority.read_count
+            retry = restarted.promote(
                 candidate,
                 expected_generation=0,
-                now=BASE + timedelta(seconds=1),
+                now=BASE + timedelta(days=2),
                 open_position_count=0,
                 existing_position_policy=None,
             )
             self.assertEqual(retry, first)
-            self.assertEqual(len(registry.history()), 1)
+            self.assertEqual(authority.read_count, reads_before_retry)
+            self.assertEqual(len(restarted.history()), 1)
 
     def test_same_generation_retry_with_changed_request_conflicts(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -950,21 +1278,28 @@ class ChampionRegistryTests(unittest.TestCase):
                 open_position_count=0,
                 existing_position_policy=None,
             )
+            changed_policy = management_policy(
+                registry._test_obligation_authority,
+                policy_id="changed-policy",
+            )
             with self.assertRaises(PromotionConflict):
                 registry.promote(
                     candidate,
                     expected_generation=0,
                     now=BASE + timedelta(seconds=1),
-                    open_position_count=0,
-                    existing_position_policy="changed-policy",
+                    management_policy=changed_policy,
                 )
 
     def test_rollback_retry_after_response_loss_is_idempotent(self):
         with TemporaryDirectory() as directory:
-            science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
-                Path(directory) / "champion.sqlite3",
+            science_path = Path(directory) / "science.sqlite3"
+            champion_path = Path(directory) / "champion.sqlite3"
+            science = ScientificRegistry(science_path)
+            authority = FakeObligationAuthority()
+            registry = champion_registry(
+                champion_path,
                 scientific_registry=science,
+                obligation_authority=authority,
             )
             registry.promote(
                 approval(science, "candidate-a"),
@@ -980,30 +1315,46 @@ class ChampionRegistryTests(unittest.TestCase):
                 open_position_count=0,
                 existing_position_policy=None,
             )
+            authority.set_obligations(positions=("position-retry",))
+            policy = management_policy(
+                authority,
+                policy_id="manage-under-original-exit-owner",
+            )
             first = registry.rollback(
                 target_generation=1,
                 expected_generation=2,
                 now=BASE,
-                open_position_count=1,
-                existing_position_policy="manage-under-original-exit-owner",
+                management_policy=policy,
             )
-            retry = registry.rollback(
+
+            authority.set_obligations(
+                working=("working-after-rollback",),
+                unknown=("unknown-after-rollback",),
+            )
+            restarted_science = ScientificRegistry(science_path)
+            restarted = champion_registry(
+                champion_path,
+                scientific_registry=restarted_science,
+                obligation_authority=authority,
+            )
+            reads_before_retry = authority.read_count
+            retry = restarted.rollback(
                 target_generation=1,
                 expected_generation=2,
-                now=BASE + timedelta(seconds=1),
-                open_position_count=1,
-                existing_position_policy="manage-under-original-exit-owner",
+                now=BASE + timedelta(days=2),
+                management_policy=policy,
             )
             self.assertEqual(retry, first)
+            self.assertEqual(authority.read_count, reads_before_retry)
             self.assertEqual(
-                [row["action"] for row in registry.history()],
+                [row["action"] for row in restarted.history()],
                 ["PROMOTE", "PROMOTE", "ROLLBACK"],
             )
 
     def test_online_update_inside_envelope_is_recorded_without_route_change(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -1032,7 +1383,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_online_update_outside_parameter_range_requires_new_candidate(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -1060,7 +1411,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_record_online_update_revalidates_direct_envelope_and_bounds(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -1082,7 +1433,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_record_online_update_ignores_forged_envelope_hash_and_uses_canonical_content(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -1116,7 +1467,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_online_update_respects_label_and_resource_envelope(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -1157,7 +1508,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_online_update_drift_and_stop_gates_fail_closed(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -1195,7 +1546,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_online_update_frequency_is_serialized_and_enforced(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -1228,7 +1579,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_online_update_retry_is_idempotent_but_changed_payload_conflicts(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -1276,7 +1627,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_online_envelope_is_bound_to_exact_active_champion_generation(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -1312,7 +1663,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_same_envelope_id_cannot_change_immutable_content(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -1367,7 +1718,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_duplicate_label_or_evidence_refs_fail_closed(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -1409,7 +1760,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_online_update_cannot_use_naked_unverifiable_evidence(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -1444,7 +1795,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_online_update_rejects_future_or_pending_label_evidence(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -1487,7 +1838,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_online_update_evidence_is_bound_to_exact_generation(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
@@ -1515,7 +1866,7 @@ class ChampionRegistryTests(unittest.TestCase):
     def test_online_update_retry_with_changed_evidence_identity_conflicts(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registry = ChampionRegistry(
+            registry = champion_registry(
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )

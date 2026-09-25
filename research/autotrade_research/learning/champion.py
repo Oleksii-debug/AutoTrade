@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from hashlib import sha256
-from typing import Mapping
+from typing import Callable, Mapping
 from uuid import UUID
 import json
 import re
@@ -395,6 +395,238 @@ class OnlineEnvelope:
 
 
 @dataclass(frozen=True)
+class OpenObligationSnapshotRef:
+    """Immutable authority-issued cut of obligations that survive route changes."""
+
+    snapshot_id: str
+    authority_scope_id: str
+    account_id: str
+    environment: str
+    journal_sequence: int
+    state_version: int
+    open_position_ids: tuple[str, ...]
+    working_order_ids: tuple[str, ...]
+    unknown_attempt_ids: tuple[str, ...]
+    originating_champion_ids: tuple[tuple[str, str], ...]
+    snapshot_digest: str
+
+    def __post_init__(self) -> None:
+        snapshot_id = _text(self.snapshot_id, name="snapshot_id")
+        authority_scope_id = _text(
+            self.authority_scope_id, name="authority_scope_id"
+        )
+        account_id = _text(self.account_id, name="account_id")
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"LIVE", "PAPER", "REPLAY", "SIMULATION"}:
+            raise ValueError("environment must be LIVE, PAPER, REPLAY or SIMULATION")
+        if (
+            type(self.journal_sequence) is not int
+            or self.journal_sequence < 0
+            or type(self.state_version) is not int
+            or self.state_version < 0
+        ):
+            raise ValueError("journal_sequence and state_version must be non-negative integers")
+
+        def normalized_ids(values, *, name):
+            if isinstance(values, (str, bytes)):
+                raise TypeError(f"{name} must be a collection")
+            result = tuple(sorted(_text(value, name=name) for value in values))
+            if len(result) != len(set(result)):
+                raise ValueError(f"{name} must be unique")
+            return result
+
+        positions = normalized_ids(self.open_position_ids, name="open_position_id")
+        working = normalized_ids(self.working_order_ids, name="working_order_id")
+        unknown = normalized_ids(self.unknown_attempt_ids, name="unknown_attempt_id")
+        all_ids = set(positions) | set(working) | set(unknown)
+
+        if isinstance(self.originating_champion_ids, (str, bytes)):
+            raise TypeError("originating_champion_ids must be a collection")
+        lineage = tuple(
+            sorted(
+                (
+                    _text(obligation_id, name="obligation_id"),
+                    _text(champion_id, name="originating_champion_id"),
+                )
+                for obligation_id, champion_id in self.originating_champion_ids
+            )
+        )
+        if len(lineage) != len({item[0] for item in lineage}):
+            raise ValueError("originating champion lineage must be unique per obligation")
+        if any(obligation_id not in all_ids for obligation_id, _ in lineage):
+            raise ValueError("originating champion lineage references an unknown obligation")
+        if all_ids and {item[0] for item in lineage} != all_ids:
+            raise ValueError(
+                "every open obligation requires explicit originating champion lineage"
+            )
+
+        body = {
+            "snapshot_id": snapshot_id,
+            "authority_scope_id": authority_scope_id,
+            "account_id": account_id,
+            "environment": environment,
+            "journal_sequence": self.journal_sequence,
+            "state_version": self.state_version,
+            "open_position_ids": list(positions),
+            "working_order_ids": list(working),
+            "unknown_attempt_ids": list(unknown),
+            "originating_champion_ids": [list(item) for item in lineage],
+        }
+        expected = _request_fingerprint(body)
+        provided = _digest(self.snapshot_digest, name="snapshot_digest")
+        if expected != provided:
+            raise ValueError("snapshot_digest does not match canonical obligation snapshot")
+        object.__setattr__(self, "snapshot_id", snapshot_id)
+        object.__setattr__(self, "authority_scope_id", authority_scope_id)
+        object.__setattr__(self, "account_id", account_id)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "open_position_ids", positions)
+        object.__setattr__(self, "working_order_ids", working)
+        object.__setattr__(self, "unknown_attempt_ids", unknown)
+        object.__setattr__(self, "originating_champion_ids", lineage)
+        object.__setattr__(self, "snapshot_digest", provided)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        snapshot_id: str,
+        authority_scope_id: str,
+        account_id: str,
+        environment: str,
+        journal_sequence: int,
+        state_version: int,
+        open_position_ids=(),
+        working_order_ids=(),
+        unknown_attempt_ids=(),
+        originating_champion_ids=(),
+    ) -> "OpenObligationSnapshotRef":
+        body = {
+            "snapshot_id": _text(snapshot_id, name="snapshot_id"),
+            "authority_scope_id": _text(authority_scope_id, name="authority_scope_id"),
+            "account_id": _text(account_id, name="account_id"),
+            "environment": _text(environment, name="environment").upper(),
+            "journal_sequence": journal_sequence,
+            "state_version": state_version,
+            "open_position_ids": sorted(
+                _text(value, name="open_position_id") for value in open_position_ids
+            ),
+            "working_order_ids": sorted(
+                _text(value, name="working_order_id") for value in working_order_ids
+            ),
+            "unknown_attempt_ids": sorted(
+                _text(value, name="unknown_attempt_id") for value in unknown_attempt_ids
+            ),
+            "originating_champion_ids": sorted(
+                [
+                    _text(obligation_id, name="obligation_id"),
+                    _text(champion_id, name="originating_champion_id"),
+                ]
+                for obligation_id, champion_id in originating_champion_ids
+            ),
+        }
+        return cls(
+            snapshot_id=body["snapshot_id"],
+            authority_scope_id=body["authority_scope_id"],
+            account_id=body["account_id"],
+            environment=body["environment"],
+            journal_sequence=journal_sequence,
+            state_version=state_version,
+            open_position_ids=tuple(body["open_position_ids"]),
+            working_order_ids=tuple(body["working_order_ids"]),
+            unknown_attempt_ids=tuple(body["unknown_attempt_ids"]),
+            originating_champion_ids=tuple(tuple(item) for item in body["originating_champion_ids"]),
+            snapshot_digest=_request_fingerprint(body),
+        )
+
+    @property
+    def obligation_count(self) -> int:
+        return (
+            len(self.open_position_ids)
+            + len(self.working_order_ids)
+            + len(self.unknown_attempt_ids)
+        )
+
+
+@dataclass(frozen=True)
+class ManagementPolicyRef:
+    """Immutable registered policy reference for pre-existing obligations."""
+
+    policy_id: str
+    artifact_hash: str
+    authority_scope_id: str
+    compatible_obligation_kinds: tuple[str, ...]
+    policy_digest: str
+
+    def __post_init__(self) -> None:
+        policy_id = _text(self.policy_id, name="policy_id")
+        artifact_hash = _digest(self.artifact_hash, name="policy artifact_hash")
+        authority_scope_id = _text(
+            self.authority_scope_id, name="authority_scope_id"
+        )
+        kinds = tuple(
+            sorted(
+                _text(value, name="compatible_obligation_kind").upper()
+                for value in self.compatible_obligation_kinds
+            )
+        )
+        allowed = {"POSITION", "WORKING_ORDER", "UNKNOWN_ATTEMPT"}
+        if not kinds or any(kind not in allowed for kind in kinds):
+            raise ValueError("management policy has unsupported obligation kinds")
+        if len(kinds) != len(set(kinds)):
+            raise ValueError("compatible obligation kinds must be unique")
+        body = {
+            "policy_id": policy_id,
+            "artifact_hash": artifact_hash,
+            "authority_scope_id": authority_scope_id,
+            "compatible_obligation_kinds": list(kinds),
+        }
+        provided = _digest(self.policy_digest, name="policy_digest")
+        if provided != _request_fingerprint(body):
+            raise ValueError("policy_digest does not match canonical management policy")
+        object.__setattr__(self, "policy_id", policy_id)
+        object.__setattr__(self, "artifact_hash", artifact_hash)
+        object.__setattr__(self, "authority_scope_id", authority_scope_id)
+        object.__setattr__(self, "compatible_obligation_kinds", kinds)
+        object.__setattr__(self, "policy_digest", provided)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        policy_id: str,
+        artifact_hash: str,
+        authority_scope_id: str,
+        compatible_obligation_kinds,
+    ) -> "ManagementPolicyRef":
+        kinds = tuple(
+            sorted(
+                _text(value, name="compatible_obligation_kind").upper()
+                for value in compatible_obligation_kinds
+            )
+        )
+        body = {
+            "policy_id": _text(policy_id, name="policy_id"),
+            "artifact_hash": _digest(artifact_hash, name="policy artifact_hash"),
+            "authority_scope_id": _text(
+                authority_scope_id, name="authority_scope_id"
+            ),
+            "compatible_obligation_kinds": list(kinds),
+        }
+        return cls(
+            policy_id=body["policy_id"],
+            artifact_hash=body["artifact_hash"],
+            authority_scope_id=body["authority_scope_id"],
+            compatible_obligation_kinds=kinds,
+            policy_digest=_request_fingerprint(body),
+        )
+
+    @property
+    def token(self) -> str:
+        return f"{self.policy_id}@{self.policy_digest}"
+
+
+@dataclass(frozen=True)
 class RoutingState:
     generation: int
     champion_candidate_id: str | None
@@ -413,15 +645,29 @@ class ChampionRegistry:
         path: str | Path,
         *,
         scientific_registry: ScientificRegistry,
+        obligation_snapshot_reader: Callable[[], OpenObligationSnapshotRef],
+        obligation_commit_guard: Callable[[OpenObligationSnapshotRef], object],
+        management_policy_verifier: Callable[
+            [ManagementPolicyRef, OpenObligationSnapshotRef], bool
+        ],
         artifact_store: ArtifactStore | None = None,
     ):
         if not isinstance(scientific_registry, ScientificRegistry):
             raise TypeError("scientific_registry must be ScientificRegistry")
         if artifact_store is not None and not isinstance(artifact_store, ArtifactStore):
             raise TypeError("artifact_store must be ArtifactStore or None")
+        if not callable(obligation_snapshot_reader):
+            raise TypeError("obligation_snapshot_reader must be callable")
+        if not callable(obligation_commit_guard):
+            raise TypeError("obligation_commit_guard must be callable")
+        if not callable(management_policy_verifier):
+            raise TypeError("management_policy_verifier must be callable")
         self.path = Path(path)
         self.scientific_registry = scientific_registry
         self.artifact_store = artifact_store
+        self.obligation_snapshot_reader = obligation_snapshot_reader
+        self.obligation_commit_guard = obligation_commit_guard
+        self.management_policy_verifier = management_policy_verifier
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as con:
             con.executescript(
@@ -433,6 +679,8 @@ class ChampionRegistry:
                     champion_artifact_hash TEXT,
                     authority_scope_id TEXT,
                     existing_position_policy TEXT,
+                    obligation_snapshot_digest TEXT,
+                    management_policy_digest TEXT,
                     updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS online_updates(
@@ -460,13 +708,16 @@ class ChampionRegistry:
                     evidence_id TEXT NOT NULL,
                     authority_scope_id TEXT NOT NULL,
                     existing_position_policy TEXT,
+                    obligation_snapshot_digest TEXT,
+                    management_policy_digest TEXT,
                     request_fingerprint TEXT,
                     created_at TEXT NOT NULL
                 );
                 INSERT OR IGNORE INTO routing_state(
                     singleton,generation,champion_candidate_id,champion_artifact_hash,
-                    authority_scope_id,existing_position_policy,updated_at
-                ) VALUES(1,0,NULL,NULL,NULL,NULL,'1970-01-01T00:00:00+00:00');
+                    authority_scope_id,existing_position_policy,obligation_snapshot_digest,
+                    management_policy_digest,updated_at
+                ) VALUES(1,0,NULL,NULL,NULL,NULL,NULL,NULL,'1970-01-01T00:00:00+00:00');
                 """
             )
             columns = {
@@ -477,6 +728,22 @@ class ChampionRegistry:
                 con.execute(
                     "ALTER TABLE promotion_history ADD COLUMN request_fingerprint TEXT"
                 )
+            history_columns = {
+                row[1]
+                for row in con.execute("PRAGMA table_info(promotion_history)").fetchall()
+            }
+            routing_columns = {
+                row[1]
+                for row in con.execute("PRAGMA table_info(routing_state)").fetchall()
+            }
+            for table, columns, name in (
+                ("promotion_history", history_columns, "obligation_snapshot_digest"),
+                ("promotion_history", history_columns, "management_policy_digest"),
+                ("routing_state", routing_columns, "obligation_snapshot_digest"),
+                ("routing_state", routing_columns, "management_policy_digest"),
+            ):
+                if name not in columns:
+                    con.execute(f"ALTER TABLE {table} ADD COLUMN {name} TEXT")
 
     @contextmanager
     def _connect(self):
@@ -503,6 +770,96 @@ class ChampionRegistry:
             existing_position_policy=row["existing_position_policy"],
         )
 
+    def _current_obligation_snapshot(
+        self,
+        *,
+        authority_scope_id: str,
+    ) -> OpenObligationSnapshotRef:
+        snapshot = self.obligation_snapshot_reader()
+        if not isinstance(snapshot, OpenObligationSnapshotRef):
+            raise PromotionConflict(
+                "obligation authority did not return OpenObligationSnapshotRef"
+            )
+        if snapshot.authority_scope_id != authority_scope_id:
+            raise PromotionConflict(
+                "obligation snapshot authority scope does not match promotion scope"
+            )
+        return snapshot
+
+    @contextmanager
+    def _obligation_commit_window(
+        self,
+        expected: OpenObligationSnapshotRef,
+        *,
+        authority_scope_id: str,
+    ):
+        """Hold canonical obligation authority stable across the routing commit."""
+        if not isinstance(expected, OpenObligationSnapshotRef):
+            raise TypeError(
+                "expected obligation snapshot must be OpenObligationSnapshotRef"
+            )
+        try:
+            guard = self.obligation_commit_guard(expected)
+        except Exception as error:
+            raise PromotionConflict(
+                "obligation authority commit guard could not be acquired"
+            ) from error
+        if not hasattr(guard, "__enter__") or not hasattr(guard, "__exit__"):
+            raise PromotionConflict(
+                "obligation authority commit guard must be a context manager"
+            )
+        try:
+            with guard as current:
+                if not isinstance(current, OpenObligationSnapshotRef):
+                    raise PromotionConflict(
+                        "obligation commit guard did not return OpenObligationSnapshotRef"
+                    )
+                if current.authority_scope_id != authority_scope_id:
+                    raise PromotionConflict(
+                        "guarded obligation scope does not match routing scope"
+                    )
+                if current.snapshot_digest != expected.snapshot_digest:
+                    raise PromotionConflict(
+                        "open obligations changed before guarded routing commit"
+                    )
+                yield current
+        except PromotionConflict:
+            raise
+        except Exception as error:
+            raise PromotionConflict(
+                "obligation authority commit guard failed"
+            ) from error
+
+    def _management_policy(
+        self,
+        snapshot: OpenObligationSnapshotRef,
+        policy: ManagementPolicyRef | None,
+    ) -> ManagementPolicyRef | None:
+        if snapshot.obligation_count == 0 and policy is None:
+            return None
+        if not isinstance(policy, ManagementPolicyRef):
+            raise ValueError(
+                "open obligations require a registered immutable management policy"
+            )
+        if policy.authority_scope_id != snapshot.authority_scope_id:
+            raise ValueError("management policy authority scope does not match obligations")
+        required = set()
+        if snapshot.open_position_ids:
+            required.add("POSITION")
+        if snapshot.working_order_ids:
+            required.add("WORKING_ORDER")
+        if snapshot.unknown_attempt_ids:
+            required.add("UNKNOWN_ATTEMPT")
+        if not required.issubset(set(policy.compatible_obligation_kinds)):
+            raise ValueError(
+                "management policy is not compatible with every open obligation kind"
+            )
+        if self.management_policy_verifier(policy, snapshot) is not True:
+            raise ValueError(
+                "management policy is not registered/compatible with current obligations"
+            )
+        return policy
+
     def _validate_approval(self, approval: CandidateApproval, now: datetime) -> None:
         current = _time(now, name="now")
         if approval.evaluation_status != "PASS":
@@ -527,17 +884,108 @@ class ChampionRegistry:
             evidence_valid_until=approval.evidence_valid_until.isoformat(),
         )
 
-    def promote(self, approval: CandidateApproval, *, expected_generation: int, now: datetime,
-                open_position_count: int, existing_position_policy: str | None) -> RoutingState:
-        self._validate_approval(approval, now)
-        if not isinstance(expected_generation, int) or isinstance(expected_generation, bool) or expected_generation < 0:
+    @staticmethod
+    def _requested_policy_digest(
+        policy: ManagementPolicyRef | None,
+    ) -> str | None:
+        """Return immutable caller request identity without consulting live obligations."""
+
+        if policy is None:
+            return None
+        if not isinstance(policy, ManagementPolicyRef):
+            raise ValueError(
+                "management_policy must be an immutable ManagementPolicyRef"
+            )
+        return policy.policy_digest
+
+    def _committed_routing_retry(
+        self,
+        *,
+        expected_generation: int,
+        action: str,
+        request_fingerprint: str,
+    ) -> RoutingState | None:
+        """Recover an already committed route change before reading live obligations.
+
+        The history row is the durable response authority.  Current obligations,
+        policy compatibility and evidence expiry are intentionally irrelevant to
+        replaying a response for a commit that already happened.
+        """
+
+        committed_generation = expected_generation + 1
+        with self._connect() as con:
+            state = con.execute(
+                "SELECT * FROM routing_state WHERE singleton=1"
+            ).fetchone()
+            current_generation = int(state["generation"])
+            history = con.execute(
+                "SELECT * FROM promotion_history WHERE generation=?",
+                (committed_generation,),
+            ).fetchone()
+
+        if (
+            history is not None
+            and history["action"] == action
+            and history["request_fingerprint"] == request_fingerprint
+        ):
+            return RoutingState(
+                generation=committed_generation,
+                champion_candidate_id=history["candidate_id"],
+                champion_artifact_hash=history["artifact_hash"],
+                authority_scope_id=history["authority_scope_id"],
+                existing_position_policy=history["existing_position_policy"],
+            )
+
+        if current_generation != expected_generation:
+            if history is not None and history["action"] == action:
+                raise PromotionConflict(
+                    "routing request conflicts with durable committed request"
+                )
+            raise PromotionConflict(
+                f"routing generation changed before {action.lower()}"
+            )
+        return None
+
+    def promote(
+        self,
+        approval: CandidateApproval,
+        *,
+        expected_generation: int,
+        now: datetime,
+        management_policy: ManagementPolicyRef | None = None,
+        open_position_count: int | None = None,
+        existing_position_policy: str | None = None,
+    ) -> RoutingState:
+        """Atomically switch future routing against authority-issued obligations.
+
+        Response-loss retries are recovered from durable promotion history before
+        any fresh obligation read.  Live obligation snapshots remain commit-time
+        authority and are deliberately excluded from request identity.
+
+        open_position_count/existing_position_policy remain only as rejection
+        shims for older callers. They never contribute authority.
+        """
+
+        if not isinstance(approval, CandidateApproval):
+            raise TypeError("approval must be CandidateApproval")
+        if (
+            not isinstance(expected_generation, int)
+            or isinstance(expected_generation, bool)
+            or expected_generation < 0
+        ):
             raise ValueError("expected_generation must be non-negative")
-        if not isinstance(open_position_count, int) or isinstance(open_position_count, bool) or open_position_count < 0:
-            raise ValueError("open_position_count must be non-negative")
-        policy = existing_position_policy.strip() if isinstance(existing_position_policy, str) else None
-        if open_position_count > 0 and not policy:
-            raise ValueError("open positions require an explicit compatible management/exit policy")
-        current_time = _time(now, name="now").isoformat()
+        if open_position_count not in (None, 0):
+            raise ValueError(
+                "caller-authored open_position_count is not promotion authority"
+            )
+        if existing_position_policy is not None:
+            raise ValueError(
+                "free-text existing_position_policy is not promotion authority"
+            )
+
+        requested_policy_digest = self._requested_policy_digest(
+            management_policy
+        )
         request_fingerprint = _request_fingerprint(
             {
                 "action": "PROMOTE",
@@ -554,133 +1002,263 @@ class ChampionRegistry:
                 "protocol_hash": approval.protocol_hash,
                 "evaluation_id": approval.evaluation_id,
                 "evaluation_result_hash": approval.evaluation_result_hash,
-                "open_position_count": open_position_count,
-                "existing_position_policy": policy,
+                "management_policy_digest": requested_policy_digest,
             }
         )
+        retry = self._committed_routing_retry(
+            expected_generation=expected_generation,
+            action="PROMOTE",
+            request_fingerprint=request_fingerprint,
+        )
+        if retry is not None:
+            return retry
+
+        # Only a genuinely new activation consumes current scientific and
+        # obligation authority.  A committed retry above must not be invalidated
+        # by later evidence expiry or later fills/orders/UNKNOWN attempts.
+        self._validate_approval(approval, now)
+        snapshot = self._current_obligation_snapshot(
+            authority_scope_id=approval.authority_scope_id
+        )
+        policy = self._management_policy(snapshot, management_policy)
+        policy_token = policy.token if policy is not None else None
+        policy_digest = policy.policy_digest if policy is not None else None
+        if policy_digest != requested_policy_digest:
+            raise PromotionConflict(
+                "management policy identity changed during promotion"
+            )
+        current_time = _time(now, name="now").isoformat()
+
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
-            row = con.execute("SELECT * FROM routing_state WHERE singleton=1").fetchone()
+            row = con.execute(
+                "SELECT * FROM routing_state WHERE singleton=1"
+            ).fetchone()
             current_generation = int(row["generation"])
             if current_generation != expected_generation:
-                if current_generation == expected_generation + 1:
-                    latest = con.execute(
-                        "SELECT * FROM promotion_history WHERE generation=?",
-                        (current_generation,),
-                    ).fetchone()
-                    if (
-                        latest is not None
-                        and latest["action"] == "PROMOTE"
-                        and latest["request_fingerprint"] == request_fingerprint
-                    ):
-                        return RoutingState(
-                            generation=current_generation,
-                            champion_candidate_id=row["champion_candidate_id"],
-                            champion_artifact_hash=row["champion_artifact_hash"],
-                            authority_scope_id=row["authority_scope_id"],
-                            existing_position_policy=row["existing_position_policy"],
-                        )
-                raise PromotionConflict("routing generation changed before promotion")
-            generation = expected_generation + 1
-            con.execute(
-                """UPDATE routing_state SET generation=?,champion_candidate_id=?,champion_artifact_hash=?,
-                    authority_scope_id=?,existing_position_policy=?,updated_at=? WHERE singleton=1""",
-                (generation, approval.candidate_id, approval.artifact_hash,
-                 approval.authority_scope_id, policy, current_time),
-            )
-            con.execute(
-                """INSERT INTO promotion_history(
-                    generation,action,candidate_id,artifact_hash,evidence_id,authority_scope_id,
-                    existing_position_policy,request_fingerprint,created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?)""",
-                (generation,"PROMOTE",approval.candidate_id,approval.artifact_hash,
-                 approval.evidence_id,approval.authority_scope_id,policy,
-                 request_fingerprint,current_time),
-            )
-            con.commit()
+                latest = con.execute(
+                    "SELECT * FROM promotion_history WHERE generation=?",
+                    (expected_generation + 1,),
+                ).fetchone()
+                if (
+                    latest is not None
+                    and latest["action"] == "PROMOTE"
+                    and latest["request_fingerprint"] == request_fingerprint
+                ):
+                    return RoutingState(
+                        generation=expected_generation + 1,
+                        champion_candidate_id=latest["candidate_id"],
+                        champion_artifact_hash=latest["artifact_hash"],
+                        authority_scope_id=latest["authority_scope_id"],
+                        existing_position_policy=latest[
+                            "existing_position_policy"
+                        ],
+                    )
+                raise PromotionConflict(
+                    "routing generation changed before promotion"
+                )
+
+            with self._obligation_commit_window(
+                snapshot,
+                authority_scope_id=approval.authority_scope_id,
+            ) as commit_snapshot:
+                self._management_policy(commit_snapshot, policy)
+                generation = expected_generation + 1
+                con.execute(
+                    """UPDATE routing_state SET generation=?,champion_candidate_id=?,
+                        champion_artifact_hash=?,authority_scope_id=?,
+                        existing_position_policy=?,obligation_snapshot_digest=?,
+                        management_policy_digest=?,updated_at=? WHERE singleton=1""",
+                    (
+                        generation,
+                        approval.candidate_id,
+                        approval.artifact_hash,
+                        approval.authority_scope_id,
+                        policy_token,
+                        snapshot.snapshot_digest,
+                        policy_digest,
+                        current_time,
+                    ),
+                )
+                con.execute(
+                    """INSERT INTO promotion_history(
+                        generation,action,candidate_id,artifact_hash,evidence_id,
+                        authority_scope_id,existing_position_policy,
+                        obligation_snapshot_digest,management_policy_digest,
+                        request_fingerprint,created_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        generation,
+                        "PROMOTE",
+                        approval.candidate_id,
+                        approval.artifact_hash,
+                        approval.evidence_id,
+                        approval.authority_scope_id,
+                        policy_token,
+                        snapshot.snapshot_digest,
+                        policy_digest,
+                        request_fingerprint,
+                        current_time,
+                    ),
+                )
+                con.commit()
         return self.state()
 
-    def rollback(self, *, target_generation: int, expected_generation: int, now: datetime,
-                 open_position_count: int, existing_position_policy: str | None) -> RoutingState:
+    def rollback(
+        self,
+        *,
+        target_generation: int,
+        expected_generation: int,
+        now: datetime,
+        management_policy: ManagementPolicyRef | None = None,
+        open_position_count: int | None = None,
+        existing_position_policy: str | None = None,
+    ) -> RoutingState:
         if (
             not isinstance(target_generation, int)
             or isinstance(target_generation, bool)
             or target_generation < 1
         ):
-            raise ValueError("target_generation must reference a prior promoted generation")
+            raise ValueError(
+                "target_generation must reference a prior promoted generation"
+            )
         if (
             not isinstance(expected_generation, int)
             or isinstance(expected_generation, bool)
             or expected_generation < 0
         ):
             raise ValueError("expected_generation must be non-negative")
-        if (
-            not isinstance(open_position_count, int)
-            or isinstance(open_position_count, bool)
-            or open_position_count < 0
-        ):
-            raise ValueError("open_position_count must be non-negative")
-        policy = existing_position_policy.strip() if isinstance(existing_position_policy, str) else None
-        if open_position_count > 0 and not policy:
-            raise ValueError("rollback with open positions requires an explicit management/exit policy")
-        current_time = _time(now, name="now").isoformat()
+        if open_position_count not in (None, 0):
+            raise ValueError(
+                "caller-authored open_position_count is not rollback authority"
+            )
+        if existing_position_policy is not None:
+            raise ValueError(
+                "free-text existing_position_policy is not rollback authority"
+            )
+
+        requested_policy_digest = self._requested_policy_digest(
+            management_policy
+        )
         request_fingerprint = _request_fingerprint(
             {
                 "action": "ROLLBACK",
                 "target_generation": target_generation,
                 "expected_generation": expected_generation,
-                "open_position_count": open_position_count,
-                "existing_position_policy": policy,
+                "management_policy_digest": requested_policy_digest,
             }
         )
+        retry = self._committed_routing_retry(
+            expected_generation=expected_generation,
+            action="ROLLBACK",
+            request_fingerprint=request_fingerprint,
+        )
+        if retry is not None:
+            return retry
+
         with self._connect() as con:
-            con.execute("BEGIN IMMEDIATE")
-            current = con.execute("SELECT * FROM routing_state WHERE singleton=1").fetchone()
-            current_generation = int(current["generation"])
-            if current_generation != expected_generation:
-                if current_generation == expected_generation + 1:
-                    latest = con.execute(
-                        "SELECT * FROM promotion_history WHERE generation=?",
-                        (current_generation,),
-                    ).fetchone()
-                    if (
-                        latest is not None
-                        and latest["action"] == "ROLLBACK"
-                        and latest["request_fingerprint"] == request_fingerprint
-                    ):
-                        return RoutingState(
-                            generation=current_generation,
-                            champion_candidate_id=current["champion_candidate_id"],
-                            champion_artifact_hash=current["champion_artifact_hash"],
-                            authority_scope_id=current["authority_scope_id"],
-                            existing_position_policy=current["existing_position_policy"],
-                        )
-                raise PromotionConflict("routing generation changed before rollback")
             target = con.execute(
-                "SELECT * FROM promotion_history WHERE generation=? AND action='PROMOTE'",
+                "SELECT * FROM promotion_history "
+                "WHERE generation=? AND action='PROMOTE'",
                 (target_generation,),
             ).fetchone()
             if target is None:
                 raise KeyError(target_generation)
-            generation = expected_generation + 1
-            con.execute(
-                """UPDATE routing_state SET generation=?,champion_candidate_id=?,champion_artifact_hash=?,
-                    authority_scope_id=?,existing_position_policy=?,updated_at=? WHERE singleton=1""",
-                (generation,target["candidate_id"],target["artifact_hash"],
-                 target["authority_scope_id"],policy,current_time),
-            )
-            con.execute(
-                """INSERT INTO promotion_history(
-                    generation,action,candidate_id,artifact_hash,evidence_id,authority_scope_id,
-                    existing_position_policy,request_fingerprint,created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?)""",
-                (generation,"ROLLBACK",target["candidate_id"],target["artifact_hash"],
-                 target["evidence_id"],target["authority_scope_id"],policy,
-                 request_fingerprint,current_time),
-            )
-            con.commit()
-        return self.state()
+            target_scope = target["authority_scope_id"]
 
+        snapshot = self._current_obligation_snapshot(
+            authority_scope_id=target_scope
+        )
+        policy = self._management_policy(snapshot, management_policy)
+        policy_token = policy.token if policy is not None else None
+        policy_digest = policy.policy_digest if policy is not None else None
+        if policy_digest != requested_policy_digest:
+            raise PromotionConflict(
+                "management policy identity changed during rollback"
+            )
+        current_time = _time(now, name="now").isoformat()
+
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            current = con.execute(
+                "SELECT * FROM routing_state WHERE singleton=1"
+            ).fetchone()
+            current_generation = int(current["generation"])
+            if current_generation != expected_generation:
+                latest = con.execute(
+                    "SELECT * FROM promotion_history WHERE generation=?",
+                    (expected_generation + 1,),
+                ).fetchone()
+                if (
+                    latest is not None
+                    and latest["action"] == "ROLLBACK"
+                    and latest["request_fingerprint"] == request_fingerprint
+                ):
+                    return RoutingState(
+                        generation=expected_generation + 1,
+                        champion_candidate_id=latest["candidate_id"],
+                        champion_artifact_hash=latest["artifact_hash"],
+                        authority_scope_id=latest["authority_scope_id"],
+                        existing_position_policy=latest[
+                            "existing_position_policy"
+                        ],
+                    )
+                raise PromotionConflict(
+                    "routing generation changed before rollback"
+                )
+            target = con.execute(
+                "SELECT * FROM promotion_history "
+                "WHERE generation=? AND action='PROMOTE'",
+                (target_generation,),
+            ).fetchone()
+            if target is None:
+                raise KeyError(target_generation)
+
+            with self._obligation_commit_window(
+                snapshot,
+                authority_scope_id=target["authority_scope_id"],
+            ) as commit_snapshot:
+                self._management_policy(commit_snapshot, policy)
+                generation = expected_generation + 1
+                con.execute(
+                    """UPDATE routing_state SET generation=?,champion_candidate_id=?,
+                        champion_artifact_hash=?,authority_scope_id=?,
+                        existing_position_policy=?,obligation_snapshot_digest=?,
+                        management_policy_digest=?,updated_at=? WHERE singleton=1""",
+                    (
+                        generation,
+                        target["candidate_id"],
+                        target["artifact_hash"],
+                        target["authority_scope_id"],
+                        policy_token,
+                        snapshot.snapshot_digest,
+                        policy_digest,
+                        current_time,
+                    ),
+                )
+                con.execute(
+                    """INSERT INTO promotion_history(
+                        generation,action,candidate_id,artifact_hash,evidence_id,
+                        authority_scope_id,existing_position_policy,
+                        obligation_snapshot_digest,management_policy_digest,
+                        request_fingerprint,created_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        generation,
+                        "ROLLBACK",
+                        target["candidate_id"],
+                        target["artifact_hash"],
+                        target["evidence_id"],
+                        target["authority_scope_id"],
+                        policy_token,
+                        snapshot.snapshot_digest,
+                        policy_digest,
+                        request_fingerprint,
+                        current_time,
+                    ),
+                )
+                con.commit()
+        return self.state()
 
 
     def _verified_artifact(self, ref: OnlineEvidenceRef) -> tuple[dict, bytes]:

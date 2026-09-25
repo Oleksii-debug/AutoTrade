@@ -106,6 +106,26 @@ def bound_activity_response(
     )
 
 
+def prepared_submission_request(client_order_id: str) -> AlpacaPreparedRequest:
+    intent = AlpacaOrderIntent.create(
+        instrument_version="AAPL:v1",
+        asset_class="EQUITY",
+        symbol="AAPL",
+        side="BUY",
+        order_type="MARKET",
+        time_in_force="DAY",
+        quantity="1",
+    )
+    return prepare_order_request(
+        intent,
+        client_order_id=client_order_id,
+        account_id="paper-account",
+        environment="PAPER",
+        capability=capability(),
+        at=NOW,
+    )
+
+
 class AlpacaAdapterTests(unittest.TestCase):
     def test_direct_prepared_request_cannot_bypass_scope_or_provenance(self):
         with self.assertRaisesRegex(
@@ -465,29 +485,37 @@ class AlpacaAdapterTests(unittest.TestCase):
 
     def test_success_order_response_is_ack_only_not_fill(self):
         order_id = str(uuid4())
-        result = parse_submission_response(
-            attempt_id=str(uuid4()),
-            client_order_id="at-ack-1",
-            response={
+        request = prepared_submission_request("at-ack-1")
+        raw = json.dumps(
+            {
                 "id": order_id,
                 "client_order_id": "at-ack-1",
                 "status": "filled",
                 "filled_qty": "1",
             },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        result = parse_submission_response(
+            attempt_id=str(uuid4()),
+            prepared_request=request,
+            response_bytes=raw,
             observed_at="2026-09-24T20:00:00Z",
-            environment="PAPER",
         )
         self.assertEqual(result["outcome"], "ACKNOWLEDGED")
         self.assertEqual(result["retry_disposition"], "NEVER")
         self.assertEqual(result["provider_order_id"], order_id)
+        self.assertRegex(
+            result["evidence"][0]["sha256"],
+            r"^sha256:[0-9a-f]{64}$",
+        )
+        self.assertNotIn("fill", result["outcome"].lower())
 
     def test_transport_ambiguity_is_unknown_and_reconcile_first(self):
         result = parse_submission_response(
             attempt_id=str(uuid4()),
-            client_order_id="at-unknown-1",
-            response=None,
+            prepared_request=prepared_submission_request("at-unknown-1"),
+            response_bytes=None,
             observed_at="2026-09-24T20:00:00Z",
-            environment="PAPER",
             transport_ambiguous=True,
         )
         self.assertEqual(result["outcome"], "UNKNOWN")
@@ -497,18 +525,80 @@ class AlpacaAdapterTests(unittest.TestCase):
         self.assertNotIn("provider_environment", result)
         self.assertEqual(result["evidence"], [])
 
-    def test_transport_ambiguity_cannot_claim_provider_response(self):
-        with self.assertRaisesRegex(AlpacaAdapterError, "must not fabricate"):
+    def test_transport_ambiguity_cannot_claim_provider_response_bytes(self):
+        request = prepared_submission_request("at-unknown-2")
+        raw = json.dumps(
+            {
+                "id": str(uuid4()),
+                "client_order_id": "at-unknown-2",
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        with self.assertRaisesRegex(
+            AlpacaAdapterError,
+            "must not claim authoritative response bytes",
+        ):
             parse_submission_response(
                 attempt_id=str(uuid4()),
-                client_order_id="at-unknown-2",
-                response={
-                    "id": str(uuid4()),
-                    "client_order_id": "at-unknown-2",
-                },
+                prepared_request=request,
+                response_bytes=raw,
                 observed_at="2026-09-24T20:00:00Z",
-                environment="PAPER",
                 transport_ambiguous=True,
+            )
+
+    def test_submission_evidence_binds_exact_response_bytes_and_attempt(self):
+        order_id = str(uuid4())
+        request = prepared_submission_request("at-bind-1")
+        raw_a = (
+            '{"id":"' + order_id + '","client_order_id":"at-bind-1"}'
+        ).encode("utf-8")
+        raw_b = (
+            '{ "id":"' + order_id + '","client_order_id":"at-bind-1" }'
+        ).encode("utf-8")
+        attempt_a = str(uuid4())
+        result_a = parse_submission_response(
+            attempt_id=attempt_a,
+            prepared_request=request,
+            response_bytes=raw_a,
+            observed_at="2026-09-24T20:00:00Z",
+        )
+        result_b = parse_submission_response(
+            attempt_id=attempt_a,
+            prepared_request=request,
+            response_bytes=raw_b,
+            observed_at="2026-09-24T20:00:00Z",
+        )
+        result_other_attempt = parse_submission_response(
+            attempt_id=str(uuid4()),
+            prepared_request=request,
+            response_bytes=raw_a,
+            observed_at="2026-09-24T20:00:00Z",
+        )
+        self.assertNotEqual(
+            result_a["evidence"][0]["sha256"],
+            result_b["evidence"][0]["sha256"],
+        )
+        self.assertNotEqual(
+            result_a["evidence"][0]["artifact_id"],
+            result_b["evidence"][0]["artifact_id"],
+        )
+        self.assertNotEqual(
+            result_a["evidence"][0]["artifact_id"],
+            result_other_attempt["evidence"][0]["artifact_id"],
+        )
+
+    def test_submission_response_cannot_relabel_guarded_client_identity(self):
+        request = prepared_submission_request("at-expected")
+        raw = json.dumps(
+            {"id": str(uuid4()), "client_order_id": "at-other"},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        with self.assertRaisesRegex(AlpacaAdapterError, "guarded request"):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=request,
+                response_bytes=raw,
+                observed_at="2026-09-24T20:00:00Z",
             )
 
     def test_trade_activity_requires_order_and_fee_evidence(self):

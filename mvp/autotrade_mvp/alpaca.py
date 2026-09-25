@@ -19,7 +19,7 @@ from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .capabilities import CapabilitySnapshot
-from .provider_core import ProviderResponseObservation, Surface
+from .provider_core import ProviderResponseObservation, Surface, _decode_exact_json
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
@@ -478,36 +478,52 @@ def _uuid_text(value: object, *, name: str) -> str:
 
 
 def _response_evidence(
-    response: Mapping[str, object],
     *,
+    prepared_request: AlpacaPreparedRequest,
+    attempt_id: str,
+    response_bytes: bytes,
     observed_at: str,
-    environment: str,
 ) -> dict[str, str]:
-    encoded = json.dumps(
-        response,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
-    digest = sha256(encoded).hexdigest()
-    env = _text(environment, name="environment").upper()
-    if env == "PAPER":
-        host = "paper-api.alpaca.markets"
-    elif env == "LIVE":
-        host = "api.alpaca.markets"
-    else:
-        raise AlpacaAdapterError("response environment must be PAPER or LIVE")
+    """Bind provider evidence to the exact guarded request and response bytes."""
+
+    if not isinstance(prepared_request, AlpacaPreparedRequest):
+        raise TypeError("prepared_request must be AlpacaPreparedRequest")
+    aid = _uuid_text(attempt_id, name="attempt_id")
+    if type(response_bytes) is not bytes or not response_bytes:
+        raise AlpacaAdapterError("authoritative response_bytes must be non-empty bytes")
+    digest = sha256(response_bytes).hexdigest()
+    env = prepared_request.environment
+    host = (
+        "paper-api.alpaca.markets"
+        if env == "PAPER"
+        else "api.alpaca.markets"
+        if env == "LIVE"
+        else None
+    )
+    if host is None:
+        raise AlpacaAdapterError("prepared response environment must be PAPER or LIVE")
+    when = _utc_text(observed_at, name="observed_at")
+    source_uri = f"https://{host}{prepared_request.endpoint}"
+    request_identity = "\n".join(
+        (
+            "ALPACA",
+            aid,
+            prepared_request.account_id,
+            prepared_request.environment,
+            prepared_request.capability_snapshot_id,
+            ",".join(prepared_request.capability_snapshot_ids),
+            ",".join(prepared_request.instrument_versions),
+            prepared_request.endpoint,
+            prepared_request.body_sha256,
+            f"sha256:{digest}",
+            when,
+        )
+    )
     return {
-        "artifact_id": str(
-            uuid5(
-                NAMESPACE_URL,
-                f"https://{host}/v2/orders#sha256:{digest}",
-            )
-        ),
+        "artifact_id": str(uuid5(NAMESPACE_URL, request_identity)),
         "sha256": "sha256:" + digest,
-        "source_uri": f"https://{host}/v2/orders",
-        "observed_at": _utc_text(observed_at, name="observed_at"),
+        "source_uri": source_uri,
+        "observed_at": when,
         "rights_id": "provider-observation-alpaca",
     }
 
@@ -515,33 +531,36 @@ def _response_evidence(
 def parse_submission_response(
     *,
     attempt_id: str,
-    client_order_id: str,
-    response: Mapping[str, object] | None,
+    prepared_request: AlpacaPreparedRequest,
+    response_bytes: bytes | None,
     observed_at: str,
-    environment: str,
     transport_ambiguous: bool = False,
 ) -> dict[str, object]:
-    """Map a recorded successful create-order response to SubmissionResult.
+    """Map one exact guarded create-order attempt into SubmissionResult.
 
-    A returned Order object is acknowledgement only. Even if its status says
-    filled, unique execution economics must come from activity evidence.
+    Account/environment/client identity come exclusively from the canonical
+    prepared request. ACK/REJECT authority requires the exact provider response
+    bytes; a transport-ambiguous attempt remains UNKNOWN and evidence-free.
+    A create-order acknowledgement is never fill authority.
     """
 
     aid = _uuid_text(attempt_id, name="attempt_id")
-    cid = validate_client_order_id(client_order_id)
-    when = _utc_text(observed_at, name="observed_at")
-    env = _text(environment, name="environment").upper()
-    if env not in {"PAPER", "LIVE"}:
-        raise AlpacaAdapterError("response environment must be PAPER or LIVE")
+    if not isinstance(prepared_request, AlpacaPreparedRequest):
+        raise TypeError("prepared_request must be AlpacaPreparedRequest")
+    cid = validate_client_order_id(
+        _text(
+            prepared_request.body.get("client_order_id"),
+            name="prepared_request.client_order_id",
+        )
+    )
+    _utc_text(observed_at, name="observed_at")
     if type(transport_ambiguous) is not bool:
         raise TypeError("transport_ambiguous must be boolean")
     if transport_ambiguous:
-        if response is not None:
+        if response_bytes is not None:
             raise AlpacaAdapterError(
-                "ambiguous transport must not fabricate a provider response"
+                "ambiguous transport must not claim authoritative response bytes"
             )
-        # Scope/time remain on the durable SubmissionAttempt. Transport
-        # ambiguity has no authoritative provider receive timestamp.
         return {
             "attempt_id": aid,
             "outcome": "UNKNOWN",
@@ -550,15 +569,24 @@ def parse_submission_response(
             "evidence": [],
             "retry_disposition": "RECONCILE_FIRST",
         }
-    if not isinstance(response, Mapping):
-        raise TypeError("response must be a mapping")
-    provider_order_id = _uuid_text(response.get("id"), name="response.id")
+
+    if response_bytes is None:
+        raise AlpacaAdapterError(
+            "authoritative response_bytes are required for provider acknowledgement"
+        )
+    try:
+        decoded = _decode_exact_json(response_bytes)
+    except ValueError as error:
+        raise AlpacaAdapterError(str(error)) from error
+    if not isinstance(decoded, Mapping):
+        raise AlpacaAdapterError("Alpaca create-order response must be an object")
+    provider_order_id = _uuid_text(decoded.get("id"), name="response.id")
     echoed = validate_client_order_id(
-        _text(response.get("client_order_id"), name="response.client_order_id")
+        _text(decoded.get("client_order_id"), name="response.client_order_id")
     )
     if echoed != cid:
         raise AlpacaAdapterError(
-            "Alpaca client_order_id response does not match request"
+            "Alpaca client_order_id response does not match guarded request"
         )
     return {
         "attempt_id": aid,
@@ -567,14 +595,14 @@ def parse_submission_response(
         "client_order_id": cid,
         "evidence": [
             _response_evidence(
-                response,
-                observed_at=when,
-                environment=env,
+                prepared_request=prepared_request,
+                attempt_id=aid,
+                response_bytes=response_bytes,
+                observed_at=observed_at,
             )
         ],
         "retry_disposition": "NEVER",
     }
-
 
 def parse_trade_activities(
     observation: ProviderResponseObservation,

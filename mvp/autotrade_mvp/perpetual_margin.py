@@ -14,6 +14,7 @@ from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
 from typing import Literal, Sequence
+from uuid import UUID
 
 from .capabilities import CapabilitySnapshot
 
@@ -63,6 +64,14 @@ def _instant(value: str, *, name: str) -> datetime:
     except ValueError as error:
         raise PerpetualMarginError(f"{name} must be an ISO-8601 instant") from error
     return parsed.astimezone(timezone.utc)
+
+
+def _artifact_id(value: object, *, name: str) -> str:
+    text = _text(value, name=name)
+    try:
+        return str(UUID(text))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise PerpetualMarginError(f"{name} must be an artifact UUID") from error
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -198,14 +207,25 @@ class PerpetualMarginEvidence:
             "collateral_currency",
             "settlement_currency",
             "risk_tier_revision",
-            "evidence_bundle_ref",
-            "tier_table_evidence_ref",
         ):
             object.__setattr__(
                 self,
                 name,
                 _text(getattr(self, name), name=name),
             )
+        object.__setattr__(
+            self,
+            "evidence_bundle_ref",
+            _artifact_id(self.evidence_bundle_ref, name="evidence_bundle_ref"),
+        )
+        object.__setattr__(
+            self,
+            "tier_table_evidence_ref",
+            _artifact_id(
+                self.tier_table_evidence_ref,
+                name="tier_table_evidence_ref",
+            ),
+        )
         # Provider/account capability identity must use the exact canonical
         # representation owned by CapabilitySnapshot. Do not introduce a second
         # case-normalization rule inside margin evidence.

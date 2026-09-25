@@ -900,6 +900,69 @@ class IndependentRiskTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             policy(min_futures_delivery_headroom_seconds=3600.0)
 
+    def test_configured_stress_regimes_require_explicit_labeled_coverage(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        configured = policy(
+            required_stress_scenario_labels=(
+                "price_gap",
+                "correlation_one",
+                "venue_loss",
+            )
+        )
+        decision = evaluate_risk(
+            intent,
+            context(
+                stress_scenarios=(
+                    {"ABC": "-0.10"},
+                    {"ABC": "-0.20"},
+                    {"ABC": "-0.30"},
+                ),
+                stress_scenario_labels=(
+                    "price_gap",
+                    "correlation_one",
+                    "venue_loss",
+                ),
+            ),
+            configured,
+        )
+        rule = next(x for x in decision.rules if x.rule == "stress_regime_coverage")
+        self.assertTrue(rule.passed)
+
+        missing = evaluate_risk(
+            intent,
+            context(
+                stress_scenarios=(
+                    {"ABC": "-0.10"},
+                    {"ABC": "-0.20"},
+                ),
+                stress_scenario_labels=("price_gap", "correlation_one"),
+            ),
+            configured,
+        )
+        missing_rule = next(
+            x for x in missing.rules if x.rule == "stress_regime_coverage"
+        )
+        self.assertFalse(missing_rule.passed)
+        self.assertEqual(missing_rule.observed, "MISSING:venue_loss")
+        self.assertFalse(missing.admitted)
+
+    def test_stress_scenario_labels_are_unique_and_align_with_scenarios(self):
+        with self.assertRaisesRegex(ValueError, "unique"):
+            context(
+                stress_scenarios=({"ABC": "-0.10"}, {"ABC": "-0.20"}),
+                stress_scenario_labels=("gap", "gap"),
+            )
+        with self.assertRaisesRegex(ValueError, "one-to-one"):
+            context(
+                stress_scenarios=({"ABC": "-0.10"}, {"ABC": "-0.20"}),
+                stress_scenario_labels=("gap",),
+            )
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            policy(required_stress_scenario_labels=())
+
     def test_expected_shortfall_uses_complete_projected_tail_distribution(self):
         intent = RiskIntent.create(
             symbol="ABC", side="BUY", quantity="1", price="100",

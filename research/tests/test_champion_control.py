@@ -299,6 +299,10 @@ class ChampionRegistryTests(unittest.TestCase):
                 "artifact_hash": digest(promoted_candidate),
             }
             with science._connect() as con:
+                # Bypass the SQL append-only guard deliberately: this test
+                # models corruption below that first line of defense and proves
+                # promotion still fails on canonical payload/hash integrity.
+                con.execute("DROP TRIGGER trials_no_update")
                 con.execute(
                     "UPDATE trials SET payload_json=? WHERE protocol_id=?",
                     (
@@ -462,6 +466,9 @@ class ChampionRegistryTests(unittest.TestCase):
             # Simulate storage corruption/tampering that keeps trial count and
             # statuses unchanged. Promotion must still detect the changed log.
             with science._connect() as con:
+                # Bypass the SQL append-only guard deliberately so the
+                # independent trial-log integrity check is exercised.
+                con.execute("DROP TRIGGER trials_no_update")
                 con.execute(
                     "UPDATE trials SET payload_hash=? WHERE trial_id=?",
                     (

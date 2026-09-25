@@ -1,7 +1,10 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
+from pathlib import Path
 from tempfile import TemporaryDirectory
+from uuid import NAMESPACE_URL, uuid5
 import sqlite3
 import unittest
 
@@ -18,12 +21,15 @@ from mvp.autotrade_mvp.futures_journal import (
     commit_inverse_variation_margin,
     commit_linear_variation_margin,
     rebuild_variation_margin_book,
+    provider_settlement_evidence_metadata,
+    provider_settlement_evidence_receipt,
     restore_inverse_variation_margin,
     restore_linear_variation_margin,
     variation_margin_aggregate_id,
 )
 from mvp.autotrade_mvp.instruments import InstrumentVersion
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 
 def utc(day: int, hour: int = 0):
@@ -103,6 +109,26 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             settlement_price=Decimal(str(price)),
             price_currency=contract.quote_currency,
             settlement_currency=contract.settlement_currency,
+        )
+
+    def _bind_provider_evidence(self, artifacts, settlement):
+        receipt = provider_settlement_evidence_receipt(settlement)
+        artifact_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                "autotrade-futures-settlement:" + canonical_json(receipt),
+            )
+        )
+        manifest = artifacts.publish_bytes(
+            artifact_id=artifact_id,
+            data=canonical_json(receipt).encode("utf-8"),
+            media_type="application/vnd.autotrade.futures-settlement-evidence+json",
+            rights={"storage": True, "export": False},
+            metadata=provider_settlement_evidence_metadata(settlement),
+        )
+        return replace(
+            settlement,
+            evidence_ref=f"artifact:{artifact_id}@{manifest['sha256']}",
         )
 
     def test_linear_commit_restart_retry_and_correction_are_exactly_once(self):

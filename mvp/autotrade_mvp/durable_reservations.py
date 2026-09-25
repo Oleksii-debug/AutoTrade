@@ -486,7 +486,7 @@ class DurableReservationBook:
             "event_type": _EVENT_TYPE,
             "aggregate_type": _AGGREGATE_TYPE,
             "aggregate_id": self.scope_id,
-            "aggregate_version": next_version,
+            "aggregate_version": str(next_version),
             "payload": payload,
             "payload_hash": payload_digest(payload),
             "committed_at": _now(),

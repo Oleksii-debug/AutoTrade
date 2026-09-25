@@ -7,11 +7,12 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
-from typing import Any, Callable, FrozenSet
+from typing import Any, Callable, FrozenSet, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .durable_reservations import DurableReservationBook
 from .persistence import JournalStore, canonical_json, payload_digest
+from .reconciliation_journal import load_account_resource_availability_evidence
 from .risk import (
     RiskContext,
     RiskDecision,
@@ -826,6 +827,58 @@ class AuthorityService:
             raise AuthorityConflict(
                 "risk decision reservation delta does not match durable reservation"
             )
+
+        availability_evidence = risk_payload.get(
+            "reservation_availability_evidence"
+        )
+        if not isinstance(availability_evidence, Mapping):
+            raise AuthorityConflict(
+                "durable admission lacks reservation availability evidence"
+            )
+        try:
+            regenerated_availability = (
+                load_account_resource_availability_evidence(
+                    self.store,
+                    checkpoint_event_id=_text(
+                        availability_evidence.get("checkpoint_event_id"),
+                        name="checkpoint_event_id",
+                    ),
+                    provider_id=_text(
+                        availability_evidence.get("provider_id"),
+                        name="provider_id",
+                    ),
+                    account_id=record.account_id,
+                    environment=record.environment,
+                    resources=tuple(sorted(risk_requirements)),
+                    now=record.admitted_at,
+                    max_age_seconds=availability_evidence.get(
+                        "max_age_seconds"
+                    ),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise AuthorityConflict(
+                "durable reservation availability evidence is invalid"
+            ) from error
+        expected_availability_evidence = {
+            **regenerated_availability,
+            "max_age_seconds": str(
+                _decimal(
+                    availability_evidence.get("max_age_seconds"),
+                    name="reservation_max_age_seconds",
+                )
+            ),
+        }
+        if dict(availability_evidence) != expected_availability_evidence:
+            raise AuthorityConflict(
+                "durable reservation availability evidence is inconsistent"
+            )
+        if reservation_request.get("available") != expected_availability_evidence.get(
+            "availability"
+        ):
+            raise AuthorityConflict(
+                "durable reservation exceeds authoritative account availability"
+            )
         reservation_version = risk_payload.get("reservation_version")
         if (
             not isinstance(reservation_version, int)
@@ -856,6 +909,7 @@ class AuthorityService:
             "risk_decision_fingerprint": risk_payload.get("fingerprint"),
             "reservation_id": record.reservation_id,
             "reservation": reservation_event["payload"].get("request"),
+            "reservation_availability_evidence": availability_evidence,
             "confirmation_id": record.confirmation_id,
             "risk_reducing": record.risk_reducing,
         }
@@ -1129,6 +1183,9 @@ class AuthorityService:
         reservation_id: str,
         reservation_requirements,
         reservation_available,
+        reservation_checkpoint_event_id: str,
+        reservation_provider_id: str,
+        reservation_max_age_seconds,
         now: str,
         confirmation_id: str | None = None,
         risk_reducing: bool = False,
@@ -1223,6 +1280,121 @@ class AuthorityService:
             evaluated_at=evaluated_at,
             valid_until=valid_until,
         )
+
+        availability_evidence: Mapping[str, Any] | None = None
+        authoritative_available = reservation_available
+        if decision.admitted:
+            checkpoint_event_id = _text(
+                reservation_checkpoint_event_id,
+                name="reservation_checkpoint_event_id",
+            )
+            provider_id = _text(
+                reservation_provider_id,
+                name="reservation_provider_id",
+            ).upper()
+            max_age = _decimal(
+                reservation_max_age_seconds,
+                name="reservation_max_age_seconds",
+            )
+            if max_age < 0:
+                raise ValueError(
+                    "reservation_max_age_seconds must be non-negative"
+                )
+            normalized_max_age = str(max_age)
+
+            if existing is not None:
+                durable_risk_events = self.store.load_events(
+                    "risk_decision", existing.risk_decision_id
+                )
+                if (
+                    len(durable_risk_events) != 1
+                    or not isinstance(
+                        durable_risk_events[0].get("payload"), Mapping
+                    )
+                ):
+                    raise AuthorityConflict(
+                        "existing admission availability evidence is missing"
+                    )
+                durable_evidence = durable_risk_events[0]["payload"].get(
+                    "reservation_availability_evidence"
+                )
+                if not isinstance(durable_evidence, Mapping):
+                    raise AuthorityConflict(
+                        "existing admission availability evidence is missing"
+                    )
+                if (
+                    durable_evidence.get("checkpoint_event_id")
+                    != checkpoint_event_id
+                    or durable_evidence.get("provider_id") != provider_id
+                    or durable_evidence.get("max_age_seconds")
+                    != normalized_max_age
+                ):
+                    raise AuthorityConflict(
+                        "reservation availability evidence changed for an existing financial command"
+                    )
+                availability_evidence = dict(durable_evidence)
+            else:
+                normalized_requirements = normalize_reservation_requirements(
+                    reservation_requirements
+                )
+                loaded = load_account_resource_availability_evidence(
+                    self.store,
+                    checkpoint_event_id=checkpoint_event_id,
+                    provider_id=provider_id,
+                    account_id=account_id,
+                    environment=environment,
+                    resources=tuple(sorted(normalized_requirements)),
+                    now=now,
+                    max_age_seconds=normalized_max_age,
+                )
+                availability_evidence = {
+                    **loaded,
+                    "max_age_seconds": normalized_max_age,
+                }
+
+            raw_authoritative = availability_evidence.get("availability")
+            if not isinstance(raw_authoritative, Mapping):
+                raise AuthorityConflict(
+                    "authoritative reservation availability is malformed"
+                )
+            authoritative_available = dict(raw_authoritative)
+
+            if not isinstance(reservation_available, Mapping):
+                raise TypeError("reservation_available must be a mapping")
+            caller_available: dict[str, Decimal] = {}
+            for raw_resource, raw_amount in reservation_available.items():
+                resource = _text(
+                    raw_resource,
+                    name="reservation_available resource",
+                )
+                if resource in caller_available:
+                    raise ValueError(
+                        "reservation_available resources must be unique after normalization"
+                    )
+                amount = _decimal(
+                    raw_amount,
+                    name=f"reservation_available[{resource}]",
+                )
+                if amount < 0:
+                    raise ValueError(
+                        "reservation_available amounts must be non-negative"
+                    )
+                caller_available[resource] = amount
+            canonical_available = {
+                _text(
+                    resource,
+                    name="authoritative availability resource",
+                ): _decimal(
+                    amount,
+                    name=f"authoritative availability[{resource}]",
+                )
+                for resource, amount in authoritative_available.items()
+            }
+            if caller_available != canonical_available:
+                raise AuthorityConflict(
+                    "reservation_available does not match authoritative reconciliation checkpoint"
+                )
+
         return self._admit_bound_risk(
             command_id=command_id,
             idempotency_key=idempotency_key,
@@ -1242,8 +1414,9 @@ class AuthorityService:
             reservation_book=reservation_book,
             reservation_id=reservation_id,
             reservation_requirements=reservation_requirements,
-            reservation_available=reservation_available,
+            reservation_available=authoritative_available,
             now=now,
+            reservation_availability_evidence=availability_evidence,
             confirmation_id=confirmation_id,
             risk_reducing=risk_reducing,
         )
@@ -1271,6 +1444,7 @@ class AuthorityService:
         reservation_requirements,
         reservation_available,
         now: str,
+        reservation_availability_evidence: Mapping[str, Any] | None = None,
         confirmation_id: str | None = None,
         risk_reducing: bool = False,
     ) -> AdmissionRecord:
@@ -1381,6 +1555,23 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "admission_id already belongs to another financial command"
                 )
+            if reservation_availability_evidence is not None:
+                durable_risk_events = self.store.load_events(
+                    "risk_decision", existing.risk_decision_id
+                )
+                if (
+                    len(durable_risk_events) != 1
+                    or not isinstance(
+                        durable_risk_events[0].get("payload"), Mapping
+                    )
+                    or durable_risk_events[0]["payload"].get(
+                        "reservation_availability_evidence"
+                    )
+                    != reservation_availability_evidence
+                ):
+                    raise AuthorityConflict(
+                        "reservation availability evidence changed for an existing financial command"
+                    )
             return existing
 
         validate_bound_risk_decision(risk_decision, now=now)
@@ -1455,6 +1646,7 @@ class AuthorityService:
             "reservation": (
                 reservation_plan.request if reservation_plan is not None else None
             ),
+            "reservation_availability_evidence": reservation_availability_evidence,
             "confirmation_id": candidate.confirmation_id,
             "risk_reducing": risk_reducing,
         }
@@ -1483,6 +1675,7 @@ class AuthorityService:
             "reservation_requirements": reservation_requirements_payload(
                 risk_decision.reservation_requirements
             ),
+            "reservation_availability_evidence": reservation_availability_evidence,
             "capability_snapshot_id": risk_decision.capability_snapshot_id,
             "evaluated_at": risk_decision.evaluated_at,
             "valid_until": risk_decision.valid_until,

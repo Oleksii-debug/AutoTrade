@@ -64,14 +64,28 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.assertEqual(attempt.phase, SendPhase.PROVEN_ABSENT)
         self.assertEqual(attempt.retry_disposition, "SAFE_WITH_NEW_ADMISSION")
 
-    def test_full_disk_blocks_new_financial_admission(self):
+    def test_full_disk_blocks_new_financial_admission_until_reconciled_after_restore(self):
         controller, owner = self._ready()
         controller.set_storage_writable(False)
         self.assertEqual(controller.state, HostState.BLOCKED)
         with self.assertRaisesRegex(PermissionError, "ready"):
             controller.validate_admission(owner.epoch)
+        with self.assertRaisesRegex(PermissionError, "durable journal"):
+            controller.record_reconciliation(consistent=True)
+
         controller.set_storage_writable(True)
+        self.assertEqual(controller.state, HostState.RECOVERING)
+        with self.assertRaisesRegex(PermissionError, "ready"):
+            controller.validate_admission(owner.epoch)
+
+        controller.record_reconciliation(consistent=True)
         self.assertEqual(controller.state, HostState.READY)
+        controller.validate_admission(owner.epoch)
+
+    def test_storage_writable_flag_requires_real_boolean(self):
+        controller, _ = self._ready()
+        with self.assertRaises(TypeError):
+            controller.set_storage_writable("true")
 
     def test_clock_jump_blocks_until_clock_is_requalified(self):
         controller, owner = self._ready()

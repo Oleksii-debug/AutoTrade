@@ -203,8 +203,29 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
         self.assertEqual(observation.provider_id, "BYBIT")
         self.assertEqual(observation.account_id, "paper-1")
         self.assertEqual(observation.environment, "PAPER")
+        self.assertEqual(observation.provider_environment, "TESTNET")
         self.assertEqual(observation.query_binding.endpoint, "/v5/execution/list")
         self.assertEqual(observation.payload["retCode"], 0)
+        observation.require_scope(
+            provider_id="BYBIT",
+            surface=Surface.AUTHENTICATED_READ,
+            endpoint="/v5/execution/list",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        with self.assertRaisesRegex(
+            Exception,
+            "provider-environment mismatch",
+        ):
+            observation.require_scope(
+                provider_id="BYBIT",
+                surface=Surface.AUTHENTICATED_READ,
+                endpoint="/v5/execution/list",
+                account_id="paper-1",
+                environment="PAPER",
+                provider_environment="DEMO",
+            )
         self.assertEqual(len(wire.requests), 1)
 
     def test_read_capability_expiry_after_secret_resolution_blocks_wire_send(self):

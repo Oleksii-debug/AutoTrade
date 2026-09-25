@@ -1,7 +1,7 @@
 {
-  "contract_version": "2.0.0",
+  "contract_version": "3.0.0",
   "json_schema_draft": "https://json-schema.org/draft/2020-12/schema",
-  "schema_base_uri": "https://schemas.autotrade.local/2.0.0/",
+  "schema_base_uri": "https://schemas.autotrade.local/3.0.0/",
   "schemas": [
     "authority.schema.json",
     "common.schema.json",
@@ -18,7 +18,7 @@
   ],
   "openapi": {
     "path": "contracts/openapi/host-api.yaml",
-    "version": "2.0.0"
+    "version": "3.0.0"
   },
   "language_anchors": {
     "csharp": "src/AutoTrade.Contracts/ContractBaseline.cs",

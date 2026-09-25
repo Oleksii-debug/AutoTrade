@@ -1,7 +1,14 @@
 from tempfile import TemporaryDirectory
 import unittest
 
-from mvp.autotrade_mvp.dispatch import DispatchBlocked, GuardedDispatcher, stable_client_order_id
+from mvp.autotrade_mvp.dispatch import (
+    DispatchBlocked,
+    ExactJsonTransportResponse,
+    GuardedDispatcher,
+    SubmissionResponseBinding,
+    load_submission_response_binding,
+    stable_client_order_id,
+)
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.recovery import RecoveryController
 
@@ -609,6 +616,171 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(
                 [event["event_type"] for event in events],
                 ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+
+    def test_exact_provider_response_bytes_are_durable_and_restart_stable(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            raw = b'{ "provider_order_id" : "p-1", "ok" : true }'
+
+            result = dispatcher.dispatch(
+                attempt_id="exact-response-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(raw),
+                )[1],
+                submission_scope={
+                    "endpoint": "/orders",
+                    "capability_snapshot_ids": ["cap-1"],
+                    "instrument_versions": ["BTCUSD:v1"],
+                },
+            )
+            self.assertEqual(result.status, "SENT")
+            self.assertEqual(result.response["provider_order_id"], "p-1")
+
+            binding = load_submission_response_binding(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="exact-response-a1",
+            )
+            self.assertIsInstance(binding, SubmissionResponseBinding)
+            self.assertEqual(binding.response_bytes, raw)
+            self.assertEqual(
+                binding.response_sha256,
+                "sha256:" + __import__("hashlib").sha256(raw).hexdigest(),
+            )
+            self.assertEqual(binding.payload["provider_order_id"], "p-1")
+            self.assertEqual(binding.submission_scope["endpoint"], "/orders")
+
+            reopened = JournalStore(f"{directory}/journal.sqlite3")
+            after_restart = load_submission_response_binding(
+                reopened,
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="exact-response-a1",
+            )
+            self.assertEqual(after_restart.response_bytes, binding.response_bytes)
+            self.assertEqual(after_restart.response_sha256, binding.response_sha256)
+            self.assertEqual(
+                after_restart.submission_scope_hash,
+                binding.submission_scope_hash,
+            )
+
+    def test_mapping_response_cannot_mint_exact_durable_response_provenance(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            result = dispatcher.dispatch(
+                attempt_id="legacy-response-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="provider",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    {"provider_order_id": "p-1"},
+                )[1],
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(result.status, "SENT")
+            with self.assertRaisesRegex(
+                ValueError,
+                "exact provider response bytes are unavailable",
+            ):
+                load_submission_response_binding(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    attempt_id="legacy-response-a1",
+                )
+
+    def test_exact_response_identity_preserves_wire_whitespace(self):
+        first = ExactJsonTransportResponse(b'{"ok":true}')
+        second = ExactJsonTransportResponse(b'{ "ok" : true }')
+        self.assertEqual(first.payload, second.payload)
+        self.assertNotEqual(first.response_sha256, second.response_sha256)
+
+    def test_exact_transport_response_rejects_duplicate_keys_and_non_json(self):
+        for raw in (
+            b'{"ok":true,"ok":false}',
+            b'{"value":NaN}',
+            b'not-json',
+            b"",
+        ):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                ExactJsonTransportResponse(raw)
+
+    def test_submission_scope_is_part_of_attempt_idempotency_contract(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+
+            def transport(_cid, _request, guard):
+                guard()
+                return ExactJsonTransportResponse(b'{"ok":true}')
+
+            common = dict(
+                attempt_id="scope-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="provider",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=transport,
+            )
+            first = dispatcher.dispatch(
+                **common,
+                submission_scope={"capability_snapshot_ids": ["cap-1"]},
+            )
+            self.assertEqual(first.status, "SENT")
+            with self.assertRaisesRegex(ValueError, "conflicts"):
+                dispatcher.dispatch(
+                    **common,
+                    submission_scope={"capability_snapshot_ids": ["cap-2"]},
+                )
+
+    def test_exact_binding_cannot_be_forged_or_relabelled_to_other_scope(self):
+        with self.assertRaisesRegex(ValueError, "loaded from the durable journal"):
+            SubmissionResponseBinding(
+                attempt_id="a",
+                aggregate_id="agg",
+                provider="provider",
+                request_hash="sha256:" + "1" * 64,
+                client_order_id="client",
+                environment="SIMULATION",
+                account_id="acct",
+                prepared_at="2026-09-24T18:00:00Z",
+                sent_at="2026-09-24T18:00:01Z",
+                submission_scope={},
+                submission_scope_hash="sha256:" + "2" * 64,
+                response_bytes=b'{"ok":true}',
+                response_sha256="sha256:" + "3" * 64,
             )
 
     def test_unserializable_provider_response_after_send_becomes_unknown(self):

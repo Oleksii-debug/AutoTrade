@@ -120,6 +120,92 @@ public partial class MainWindow : Window
         }
     }
 
+    private static string DescribeInFlightActions(InFlightActionState value) =>
+        value switch
+        {
+            InFlightActionState.None => "none reported",
+            InFlightActionState.Present => "present",
+            _ => "unknown",
+        };
+
+    private void ApplyEmergencyCommandResult(EmergencyCommandResult result)
+    {
+        EmergencyOperationValue.Text = result.OperationId;
+        string inFlight = DescribeInFlightActions(result.InFlightActions);
+        EmergencyResult.Text = result switch
+        {
+            { Accepted: false } =>
+                result.Message
+                + " No durable block has been confirmed. Outstanding in-flight actions: "
+                + inFlight + ".",
+            { DurableBlockConfirmed: true } =>
+                result.Message
+                + " Durable block confirmed by the host. Outstanding in-flight actions: "
+                + inFlight + ".",
+            _ =>
+                result.Message
+                + " Request accepted, but the durable block is not yet confirmed. "
+                + "Outstanding in-flight actions: " + inFlight
+                + ". The same operation identity will be used for recovery; do not resubmit with a new idempotency identity.",
+        };
+    }
+
+    private async Task RecoverEmergencyOperationAsync(string operationId)
+    {
+        try
+        {
+            EmergencyOperationStatus recovered =
+                await _hostClient.GetOperationAsync(operationId, _lifetime.Token);
+
+            if (!string.Equals(
+                    recovered.OperationId,
+                    operationId,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Recovered emergency operation identity does not match the accepted operation.");
+            }
+
+            EmergencyOperationValue.Text = recovered.OperationId;
+            string inFlight = DescribeInFlightActions(recovered.InFlightActions);
+            string suffix =
+                " Outstanding in-flight actions: " + inFlight
+                + ". Remaining uncertainty: " + recovered.RemainingUncertainty + ".";
+
+            EmergencyResult.Text = recovered.State switch
+            {
+                EmergencyOperationState.Succeeded =>
+                    recovered.Message + " Durable block confirmed by the host." + suffix,
+                EmergencyOperationState.Failed =>
+                    recovered.Message + " The accepted operation failed; no durable block is confirmed." + suffix,
+                EmergencyOperationState.Unknown =>
+                    recovered.Message
+                    + " The accepted operation outcome is unknown; no durable block is confirmed."
+                    + suffix
+                    + " Do not resubmit with a new idempotency identity; recover this same operation.",
+                _ =>
+                    recovered.Message
+                    + " The accepted operation is still in progress; the durable block is not yet confirmed."
+                    + suffix
+                    + " Recover this same operation identity rather than creating a new command.",
+            };
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            EmergencyOperationValue.Text = operationId;
+            EmergencyResult.Text =
+                "The emergency request was accepted as operation "
+                + operationId
+                + ", but the same operation could not be recovered. "
+                + "Its durable block outcome and outstanding in-flight actions are unknown. "
+                + "Do not resubmit with a new idempotency identity; recover this same operation.";
+        }
+    }
+
     private async void BlockNewExposure_Click(object sender, RoutedEventArgs e)
     {
         BlockNewExposureButton.IsEnabled = false;
@@ -130,22 +216,12 @@ public partial class MainWindow : Window
         {
             EmergencyCommandResult result =
                 await _hostClient.BlockNewExposureAsync(_lifetime.Token);
-            EmergencyOperationValue.Text = result.OperationId;
-            string inFlight = result.InFlightActions switch
+            ApplyEmergencyCommandResult(result);
+
+            if (result.Accepted && !result.DurableBlockConfirmed)
             {
-                InFlightActionState.None => "none reported",
-                InFlightActionState.Present => "present",
-                _ => "unknown",
-            };
-            EmergencyResult.Text = result switch
-            {
-                { Accepted: false } =>
-                    result.Message + " No durable block has been confirmed. Outstanding in-flight actions: " + inFlight + ".",
-                { DurableBlockConfirmed: true } =>
-                    result.Message + " Durable block confirmed by the host. Outstanding in-flight actions: " + inFlight + ".",
-                _ =>
-                    result.Message + " Request accepted, but the durable block is not yet confirmed. Outstanding in-flight actions: " + inFlight + ".",
-            };
+                await RecoverEmergencyOperationAsync(result.OperationId);
+            }
 
             await RefreshHostStatusAsync(announce: false, returnFocus: false);
         }

@@ -513,7 +513,9 @@ def parse_cancel_response(
 
 
 def _reply_id(value: object) -> str:
-    reply_id = _text(str(value), name="reply id")
+    if not isinstance(value, str):
+        raise IbkrWebAdapterError("reply id must be a string")
+    reply_id = _text(value, name="reply id")
     if re.fullmatch(r"[A-Za-z0-9._~-]+", reply_id) is None:
         raise IbkrWebAdapterError("reply id must be a canonical URI path segment")
     return reply_id

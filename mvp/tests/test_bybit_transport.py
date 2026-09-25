@@ -177,7 +177,7 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
         self.assertEqual(observation.provider_id, "BYBIT")
         self.assertEqual(observation.account_id, "paper-1")
         self.assertEqual(observation.environment, "PAPER")
-        self.assertEqual(observation.endpoint, "/v5/execution/list")
+        self.assertEqual(observation.query_binding.endpoint, "/v5/execution/list")
         self.assertEqual(observation.payload["retCode"], 0)
         self.assertEqual(len(wire.requests), 1)
 

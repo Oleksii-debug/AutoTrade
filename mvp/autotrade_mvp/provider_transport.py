@@ -243,6 +243,32 @@ WHITEBIT_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
 )
 
 
+BYBIT_V5_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
+    MappingProxyType(
+        {
+            "MAINNET": ProviderEndpointPolicy(
+                provider_id="BYBIT",
+                environment="LIVE",
+                base_url="https://api.bybit.com",
+                allowed_hosts=frozenset({"api.bybit.com"}),
+            ),
+            "TESTNET": ProviderEndpointPolicy(
+                provider_id="BYBIT",
+                environment="PAPER",
+                base_url="https://api-testnet.bybit.com",
+                allowed_hosts=frozenset({"api-testnet.bybit.com"}),
+            ),
+            "DEMO": ProviderEndpointPolicy(
+                provider_id="BYBIT",
+                environment="PAPER",
+                base_url="https://api-demo.bybit.com",
+                allowed_hosts=frozenset({"api-demo.bybit.com"}),
+            ),
+        }
+    )
+)
+
+
 ALPACA_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
     MappingProxyType(
         {
@@ -1208,6 +1234,385 @@ class AlpacaTradingHttpTransport:
         if not isinstance(raw, bytes):
             raise ProviderTransportError(
                 "Alpaca order wire client must return exact response bytes"
+            )
+        return ExactJsonTransportResponse(raw)
+
+
+@dataclass(frozen=True)
+class BybitV5Credential:
+    api_key: str
+    api_secret: str
+
+    @classmethod
+    def parse(cls, plaintext: object) -> "BybitV5Credential":
+        if not isinstance(plaintext, str) or not plaintext:
+            raise ProviderTransportScopeError(
+                "Bybit credential material is unavailable"
+            )
+        try:
+            value = json.loads(plaintext)
+        except json.JSONDecodeError as error:
+            raise ProviderTransportScopeError(
+                "Bybit credential material has invalid format"
+            ) from error
+        if not isinstance(value, dict) or set(value) != {
+            "api_key",
+            "api_secret",
+        }:
+            raise ProviderTransportScopeError(
+                "Bybit credential material must contain exact api_key/api_secret fields"
+            )
+        return cls(
+            api_key=_canonical_text(value["api_key"], name="api_key"),
+            api_secret=_canonical_text(value["api_secret"], name="api_secret"),
+        )
+
+
+class BybitV5Signer:
+    """Pure Bybit V5 HMAC signer over exact canonical order bytes."""
+
+    PLACE_ORDER_ENDPOINT = "/v5/order/create"
+
+    @staticmethod
+    def sign(
+        *,
+        policy: ProviderEndpointPolicy,
+        endpoint: object,
+        body: object,
+        credential_plaintext: object,
+        timestamp_ms: object,
+        recv_window_ms: int = 5000,
+    ) -> SignedHttpRequest:
+        if policy.provider_id != "BYBIT":
+            raise ProviderTransportScopeError(
+                "Bybit signer requires a BYBIT endpoint policy"
+            )
+        path = _canonical_text(endpoint, name="endpoint")
+        if path != BybitV5Signer.PLACE_ORDER_ENDPOINT:
+            raise ProviderTransportScopeError(
+                "Bybit V5 trade signer received an unsupported endpoint"
+            )
+        if not isinstance(body, Mapping) or not body:
+            raise ProviderTransportScopeError(
+                "Bybit order body must be a non-empty mapping"
+            )
+        _reject_binary_float(body)
+        if (
+            isinstance(timestamp_ms, bool)
+            or not isinstance(timestamp_ms, int)
+            or timestamp_ms < 0
+        ):
+            raise ProviderTransportScopeError(
+                "timestamp_ms must be a non-negative integer"
+            )
+        if (
+            isinstance(recv_window_ms, bool)
+            or not isinstance(recv_window_ms, int)
+            or recv_window_ms < 1
+            or recv_window_ms > 60000
+        ):
+            raise ProviderTransportScopeError(
+                "recv_window_ms must be an integer from 1 through 60000"
+            )
+        credential = BybitV5Credential.parse(credential_plaintext)
+        exact_body = json.dumps(
+            dict(body),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        signing_material = (
+            str(timestamp_ms)
+            + credential.api_key
+            + str(recv_window_ms)
+        ).encode("utf-8") + exact_body
+        signature = hmac.new(
+            credential.api_secret.encode("utf-8"),
+            signing_material,
+            sha256,
+        ).hexdigest()
+        return SignedHttpRequest(
+            method="POST",
+            url=policy.absolute_url(path),
+            headers=MappingProxyType(
+                {
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "X-BAPI-API-KEY": credential.api_key,
+                    "X-BAPI-TIMESTAMP": str(timestamp_ms),
+                    "X-BAPI-RECV-WINDOW": str(recv_window_ms),
+                    "X-BAPI-SIGN": signature,
+                }
+            ),
+            body=exact_body,
+            timeout_seconds=policy.timeout_seconds,
+        )
+
+
+class BybitV5HttpTransport:
+    """GuardedDispatcher-compatible Bybit V5 MAINNET/TESTNET/DEMO transport."""
+
+    def __init__(
+        self,
+        *,
+        policy: ProviderEndpointPolicy,
+        provider_environment: str,
+        account_id: str,
+        capability_snapshot_id: str,
+        secret_resolver: ProviderSecretResolver,
+        credential_handle: PersistentCredentialHandle,
+        session_token: str,
+        origin: str,
+        execution_identity: str,
+        clock_millis: ClockMillis,
+        quota_gate: QuotaGate | None = None,
+        wire_client: ProviderWireClient | None = None,
+        recv_window_ms: int = 5000,
+    ) -> None:
+        if not isinstance(policy, ProviderEndpointPolicy):
+            raise TypeError("policy must be ProviderEndpointPolicy")
+        provider_env = _canonical_text(
+            provider_environment, name="provider_environment"
+        ).upper()
+        canonical_policy = BYBIT_V5_ENDPOINT_POLICIES.get(provider_env)
+        if canonical_policy is None:
+            raise ProviderTransportScopeError(
+                "Bybit provider_environment must be MAINNET, TESTNET or DEMO"
+            )
+        if policy != canonical_policy:
+            raise ProviderTransportScopeError(
+                "Bybit policy does not match exact provider environment"
+            )
+        if not isinstance(credential_handle, PersistentCredentialHandle):
+            raise TypeError(
+                "credential_handle must be PersistentCredentialHandle"
+            )
+        if (
+            credential_handle.provider != "BYBIT"
+            or credential_handle.environment != policy.environment
+            or credential_handle.purpose != "TRADE"
+        ):
+            raise ProviderTransportScopeError(
+                "credential handle provider/environment/purpose mismatch"
+            )
+        account = _canonical_text(account_id, name="account_id")
+        if credential_handle.account_id != account:
+            raise ProviderTransportScopeError(
+                "credential handle account mismatch"
+            )
+        if not hasattr(secret_resolver, "resolve_for_execution"):
+            raise TypeError(
+                "secret_resolver must implement resolve_for_execution"
+            )
+        if not callable(clock_millis):
+            raise TypeError("clock_millis must be callable")
+        if quota_gate is not None and not callable(quota_gate):
+            raise TypeError("quota_gate must be callable or None")
+        if wire_client is not None and not hasattr(wire_client, "send"):
+            raise TypeError("wire_client must implement send")
+        if (
+            isinstance(recv_window_ms, bool)
+            or not isinstance(recv_window_ms, int)
+            or recv_window_ms < 1
+            or recv_window_ms > 60000
+        ):
+            raise ProviderTransportScopeError(
+                "recv_window_ms must be an integer from 1 through 60000"
+            )
+
+        self.policy = policy
+        self.provider_environment = provider_env
+        self.account_id = account
+        self.capability_snapshot_id = _canonical_text(
+            capability_snapshot_id, name="capability_snapshot_id"
+        )
+        self.secret_resolver = secret_resolver
+        self.credential_handle = credential_handle
+        self.session_token = _canonical_text(
+            session_token, name="session_token"
+        )
+        self.origin = _canonical_text(origin, name="origin")
+        self.execution_identity = _canonical_text(
+            execution_identity, name="execution_identity"
+        )
+        self.clock_millis = clock_millis
+        self.quota_gate = quota_gate
+        self.wire_client = wire_client or UrllibJsonWireClient()
+        self.recv_window_ms = recv_window_ms
+
+    @staticmethod
+    def _prepared_fields(
+        request: Mapping[str, Any],
+    ) -> tuple[
+        str,
+        Mapping[str, object],
+        str,
+        str,
+        str,
+        str,
+        str,
+    ]:
+        if not isinstance(request, Mapping):
+            raise ProviderTransportScopeError(
+                "prepared provider request must be a mapping"
+            )
+        expected = {
+            "endpoint",
+            "body",
+            "account_id",
+            "environment",
+            "provider_environment",
+            "capability_snapshot_id",
+            "capability_snapshot_ids",
+            "instrument_versions",
+            "body_sha256",
+        }
+        if set(request) != expected:
+            raise ProviderTransportScopeError(
+                "prepared Bybit request fields are not canonical"
+            )
+        endpoint = _canonical_text(request["endpoint"], name="endpoint")
+        if endpoint != BybitV5Signer.PLACE_ORDER_ENDPOINT:
+            raise ProviderTransportScopeError(
+                "Bybit transport received an unsupported endpoint"
+            )
+        body = request["body"]
+        if not isinstance(body, Mapping) or not body:
+            raise ProviderTransportScopeError(
+                "prepared Bybit request body must be a non-empty mapping"
+            )
+        _reject_binary_float(body)
+        account = _canonical_text(request["account_id"], name="account_id")
+        environment = _canonical_environment(request["environment"])
+        provider_environment = _canonical_text(
+            request["provider_environment"], name="provider_environment"
+        ).upper()
+        capability = _canonical_text(
+            request["capability_snapshot_id"],
+            name="capability_snapshot_id",
+        )
+        raw_capabilities = request["capability_snapshot_ids"]
+        raw_instruments = request["instrument_versions"]
+        if (
+            not isinstance(raw_capabilities, (list, tuple))
+            or len(raw_capabilities) != 1
+            or not isinstance(raw_instruments, (list, tuple))
+            or len(raw_instruments) != 1
+        ):
+            raise ProviderTransportScopeError(
+                "Bybit capability and instrument bindings must contain exactly one identity"
+            )
+        if (
+            _canonical_text(
+                raw_capabilities[0], name="capability_snapshot_id"
+            )
+            != capability
+        ):
+            raise ProviderTransportScopeError(
+                "Bybit capability snapshot binding is inconsistent"
+            )
+        _canonical_text(raw_instruments[0], name="instrument_version")
+
+        exact_body = json.dumps(
+            dict(body),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        digest = _canonical_text(request["body_sha256"], name="body_sha256")
+        actual_digest = "sha256:" + sha256(exact_body).hexdigest()
+        if digest != actual_digest:
+            raise ProviderTransportScopeError(
+                "prepared Bybit request body digest mismatch"
+            )
+        return (
+            endpoint,
+            MappingProxyType(dict(body)),
+            account,
+            environment,
+            provider_environment,
+            capability,
+            actual_digest,
+        )
+
+    def __call__(
+        self,
+        client_order_id: str,
+        request: Mapping[str, Any],
+        final_guard: Callable[[], None],
+    ) -> ExactJsonTransportResponse:
+        if not callable(final_guard):
+            raise TypeError("final_guard must be callable")
+        client_id = _canonical_text(
+            client_order_id, name="client_order_id"
+        )
+        (
+            endpoint,
+            body,
+            account,
+            environment,
+            provider_environment,
+            capability,
+            _digest,
+        ) = self._prepared_fields(request)
+        if account != self.account_id:
+            raise ProviderTransportScopeError(
+                "prepared request account mismatch"
+            )
+        if environment != self.policy.environment:
+            raise ProviderTransportScopeError(
+                "prepared request environment mismatch"
+            )
+        if provider_environment != self.provider_environment:
+            raise ProviderTransportScopeError(
+                "prepared request provider environment mismatch"
+            )
+        if capability != self.capability_snapshot_id:
+            raise ProviderTransportScopeError(
+                "prepared request capability snapshot mismatch"
+            )
+        if body.get("orderLinkId") != client_id:
+            raise ProviderTransportScopeError(
+                "prepared request client order identity mismatch"
+            )
+
+        if self.quota_gate is not None:
+            self.quota_gate(
+                "BYBIT",
+                self.account_id,
+                self.policy.environment,
+                "ORDER_WRITE",
+            )
+
+        credential_plaintext = self.secret_resolver.resolve_for_execution(
+            self.session_token,
+            origin=self.origin,
+            handle=self.credential_handle,
+            execution_identity=self.execution_identity,
+            account_id=self.account_id,
+            provider="BYBIT",
+            environment=self.policy.environment,
+            purpose="TRADE",
+        )
+        try:
+            signed = BybitV5Signer.sign(
+                policy=self.policy,
+                endpoint=endpoint,
+                body=body,
+                credential_plaintext=credential_plaintext,
+                timestamp_ms=self.clock_millis(),
+                recv_window_ms=self.recv_window_ms,
+            )
+        finally:
+            credential_plaintext = None
+
+        final_guard()
+        raw = self.wire_client.send(signed)
+        if not isinstance(raw, bytes):
+            raise ProviderTransportError(
+                "Bybit order wire client must return exact response bytes"
             )
         return ExactJsonTransportResponse(raw)
 

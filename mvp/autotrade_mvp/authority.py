@@ -1177,6 +1177,141 @@ class AuthorityService:
                 "risk decision was not bound to the reservation journal cut"
             )
 
+        allocation_binding = risk_payload.get("allocation_binding")
+        financial_risk_fingerprint = risk_payload.get(
+            "financial_risk_fingerprint"
+        )
+        if allocation_binding is None:
+            if financial_risk_fingerprint is not None:
+                raise AuthorityConflict(
+                    "durable financial fingerprint has no allocation binding"
+                )
+        else:
+            if not isinstance(allocation_binding, Mapping):
+                raise AuthorityConflict(
+                    "durable allocation binding is malformed"
+                )
+            if (
+                not isinstance(financial_risk_fingerprint, str)
+                or financial_risk_fingerprint
+                != _financial_risk_fingerprint(
+                    risk_payload.get("fingerprint"),
+                    allocation_binding,
+                )
+            ):
+                raise AuthorityConflict(
+                    "durable allocation financial fingerprint is inconsistent"
+                )
+            if (
+                allocation_binding.get("environment") != record.environment
+                or allocation_binding.get("account_id") != record.account_id
+                or allocation_binding.get("account_state_version")
+                != record.state_version
+                or allocation_binding.get("reservation_state_version")
+                != reservation_version
+                or allocation_binding.get("account_snapshot_id")
+                != availability_evidence.get("resource_snapshot_id")
+                or allocation_binding.get("reconciliation_run_id")
+                != availability_evidence.get("checkpoint_event_id")
+                or allocation_binding.get("provider_id")
+                != availability_evidence.get("provider_id")
+            ):
+                raise AuthorityConflict(
+                    "durable allocation binding disagrees with admitted financial state"
+                )
+
+            evidence_refs = allocation_binding.get("evidence_refs")
+            if not isinstance(evidence_refs, list) or not evidence_refs:
+                raise AuthorityConflict(
+                    "durable allocation binding lacks evidence references"
+                )
+            seen_evidence_ids: set[str] = set()
+            for reference in evidence_refs:
+                if not isinstance(reference, Mapping):
+                    raise AuthorityConflict(
+                        "durable allocation evidence reference is malformed"
+                    )
+                evidence_id = _text(
+                    reference.get("evidence_id"),
+                    name="allocation evidence_id",
+                )
+                digest = _text(
+                    reference.get("digest"),
+                    name="allocation evidence digest",
+                )
+                if evidence_id in seen_evidence_ids:
+                    raise AuthorityConflict(
+                        "durable allocation evidence references are duplicated"
+                    )
+                seen_evidence_ids.add(evidence_id)
+                events = self.store.load_events(
+                    _ALLOCATION_EVIDENCE_AGGREGATE,
+                    evidence_id,
+                )
+                if (
+                    len(events) != 1
+                    or events[0].get("event_type")
+                    != _ALLOCATION_EVIDENCE_EVENT
+                    or not isinstance(events[0].get("payload"), Mapping)
+                ):
+                    raise AuthorityConflict(
+                        "durable allocation evidence is missing or ambiguous"
+                    )
+                payload = events[0]["payload"]
+                try:
+                    evidence = ImmutableAllocationEvidence(
+                        evidence_id=payload.get("evidence_id"),
+                        kind=payload.get("kind"),
+                        environment=payload.get("environment"),
+                        schema_version=payload.get("schema_version"),
+                        observed_at=payload.get("observed_at"),
+                        valid_until=payload.get("valid_until"),
+                        payload=payload.get("payload"),
+                        digest=payload.get("digest"),
+                    )
+                except (TypeError, ValueError) as error:
+                    raise AuthorityConflict(
+                        "durable allocation evidence content is invalid"
+                    ) from error
+                if (
+                    evidence.evidence_id != evidence_id
+                    or evidence.digest != digest
+                ):
+                    raise AuthorityConflict(
+                        "durable allocation evidence identity is inconsistent"
+                    )
+
+            pre_reservation_events = [
+                event
+                for event in reservation_events
+                if int(event["aggregate_version"]) <= reservation_version
+            ]
+            expected_pre_reservation_digest = payload_digest(
+                {
+                    "environment": reservation_book.environment,
+                    "account_id": reservation_book.account_id,
+                    "scope_id": reservation_book.scope_id,
+                    "version": reservation_version,
+                    "events": [
+                        {
+                            "event_id": event["event_id"],
+                            "aggregate_version": int(
+                                event["aggregate_version"]
+                            ),
+                            "payload_hash": event["payload_hash"],
+                        }
+                        for event in pre_reservation_events
+                    ],
+                }
+            ).removeprefix("sha256:")
+            if (
+                allocation_binding.get("reservation_state_digest")
+                != expected_pre_reservation_digest
+            ):
+                raise AuthorityConflict(
+                    "durable allocation binding reservation digest is stale or inconsistent"
+                )
+
         request = {
             "command_id": record.financial_command_id,
             "admission_id": record.admission_id,
@@ -1200,6 +1335,13 @@ class AuthorityService:
             "confirmation_id": record.confirmation_id,
             "risk_reducing": record.risk_reducing,
         }
+        if allocation_binding is not None:
+            request["allocation_binding"] = _canonical_financial_value(
+                allocation_binding
+            )
+            request["financial_risk_fingerprint"] = (
+                financial_risk_fingerprint
+            )
         expected_request_fingerprint = sha256(
             json.dumps(request, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()

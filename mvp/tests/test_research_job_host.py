@@ -53,6 +53,11 @@ class ResearchJobHostServiceTests(unittest.TestCase):
             role="RESEARCHER",
             origin=ORIGIN,
         )
+        self.researcher_two = self.security.create_session(
+            subject="researcher-two",
+            role="RESEARCHER",
+            origin=ORIGIN,
+        )
         self.observer = self.security.create_session(
             subject="observer",
             role="OBSERVER",
@@ -90,7 +95,31 @@ class ResearchJobHostServiceTests(unittest.TestCase):
         self.assertEqual(observed["state"], "QUEUED")
 
         reopened = ResearchJobStore(Path(self.directory.name) / "jobs.sqlite3")
-        self.assertEqual(reopened.get(created["job_id"])["dedupe_key"], "replay-1")
+        durable = reopened.get(created["job_id"])
+        self.assertTrue(durable["dedupe_key"].startswith("host-subject:sha256:"))
+        self.assertNotEqual(durable["dedupe_key"], "replay-1")
+
+    def test_researcher_idempotency_namespace_cannot_collide_with_another_subject(self):
+        first, first_inserted = self.enqueue()
+        self.assertTrue(first_inserted)
+
+        second, second_inserted = self.host.enqueue(
+            session=self.researcher_two.token,
+            actor="researcher-two",
+            kind="research.replay",
+            dedupe_key="replay-1",
+            input_hashes=[digest("dataset")],
+            resource_budget={"wall_seconds": 60, "memory_bytes": 1024},
+            lease_requeueable=True,
+        )
+
+        self.assertTrue(second_inserted)
+        self.assertNotEqual(first["job_id"], second["job_id"])
+        self.assertNotEqual(first["dedupe_key"], second["dedupe_key"])
+
+        replayed, replayed_inserted = self.enqueue()
+        self.assertFalse(replayed_inserted)
+        self.assertEqual(replayed["job_id"], first["job_id"])
 
     def test_host_service_does_not_turn_generic_jobs_into_financial_send_authority(self):
         with self.assertRaisesRegex(ValueError, "research"):

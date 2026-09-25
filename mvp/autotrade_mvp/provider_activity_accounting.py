@@ -359,6 +359,7 @@ def _prepare_provider_fill_binding(
         "projected_fill_digest": payload_digest(projected_payload),
         "provider_fill": provider_payload,
         "provider_fill_digest": payload_digest(provider_payload),
+        "reservation_cut_digest": plan.reservation_cut_digest,
         "plan_digest": plan.plan_digest,
         "transaction_id": plan.transaction.transaction_id,
         "transaction_digest": payload_digest(
@@ -762,6 +763,7 @@ def commit_economic_batch_with_reservation_consumption(
     reservation_id: str,
     usage: Mapping[str, object],
     transactions: Iterable[JournalTransaction],
+    reservation_expected_snapshot_digest: str | None = None,
     committed_at: str | None = None,
     settlement_book: DurableSettlementBook | None = None,
     settlement_obligations: Iterable[SettlementObligation] = (),
@@ -864,6 +866,7 @@ def commit_economic_batch_with_reservation_consumption(
         reservation_id=rid,
         usage=usage,
         committed_at=when,
+        expected_snapshot_digest=reservation_expected_snapshot_digest,
     )
     economic_plan = economic_book.prepare_batch_mutation(
         transactions,
@@ -1135,6 +1138,7 @@ def commit_provider_fill_with_reservation_consumption(
         reservation_id=rid,
         usage=plan.usage,
         transactions=(plan.transaction,),
+        reservation_expected_snapshot_digest=plan.reservation_cut_digest,
         committed_at=when,
         settlement_book=settlement_book,
         settlement_obligations=settlement_obligations,

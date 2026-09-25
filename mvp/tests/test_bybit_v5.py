@@ -232,7 +232,9 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "UNKNOWN")
         self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
         self.assertEqual(result["reason_code"], "BYBIT_TRANSPORT_AMBIGUOUS")
-        self.assertIsNone(result["provider_received_at"])
+        self.assertNotIn("provider_received_at", result)
+        self.assertNotIn("observed_at", result)
+        self.assertNotIn("environment", result)
         self.assertEqual(result["evidence"], [])
 
     def test_transport_ambiguity_cannot_coexist_with_provider_response(self):

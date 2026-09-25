@@ -354,6 +354,8 @@ class OrderProjection:
                 return "OVERFILLED_DURING_CANCEL"
             return "OVERFILLED"
         if self.cancelled:
+            if filled == self.requested_quantity:
+                return "FILLED_AFTER_CANCEL"
             return "PARTIALLY_FILLED_CANCELLED" if filled > 0 else "CANCELLED"
         if self.rejected:
             return "FILLED_AFTER_REJECT" if filled > 0 else "REJECTED"

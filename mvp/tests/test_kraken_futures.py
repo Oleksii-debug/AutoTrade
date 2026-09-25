@@ -1,3 +1,4 @@
+from functools import partial
 from datetime import datetime, timezone
 from decimal import Decimal
 import unittest
@@ -15,6 +16,11 @@ from mvp.autotrade_mvp.provider_core import ProviderCoreError
 
 NOW = "2026-09-24T20:00:00Z"
 
+
+
+# Bind only test fixtures; production APIs require explicit account/environment scope.
+parse_position_executions = partial(parse_position_executions, account_id="acct-kraken-futures", environment="PAPER")
+coverage_evidence = partial(coverage_evidence, account_id="acct-kraken-futures", environment="PAPER")
 
 class KrakenFuturesAdapterTests(unittest.TestCase):
     def test_live_and_demo_services_are_explicit(self):

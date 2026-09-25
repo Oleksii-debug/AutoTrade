@@ -1632,6 +1632,14 @@ class AuthorityService:
                 "risk intent quantity exceeds remaining allocation target"
             )
 
+        allocation_valid_until = min(
+            (item.valid_until for item in current.resolved_evidence.values()),
+            key=lambda value: _instant(
+                value,
+                name="allocation evidence valid_until",
+            ),
+        )
+
         return {
             "decision_digest": allocation_result.decision_digest,
             "evidence_refs": [
@@ -1642,6 +1650,7 @@ class AuthorityService:
             "provider_id": allocation_result.provider_id,
             "account_id": allocation_result.account_id,
             "policy_version": allocation_result.policy_version,
+            "valid_until": allocation_valid_until,
             "account_snapshot_id": allocation_result.account_snapshot_id,
             "reconciliation_run_id": allocation_result.reconciliation_run_id,
             "account_state_version": current.account_state_version,
@@ -2485,6 +2494,21 @@ class AuthorityService:
                     "risk_decision", record.risk_decision_id
                 )[0]
                 risk_payload = risk_event["payload"]
+                allocation_evidence = risk_payload.get("allocation_evidence")
+                if allocation_evidence is not None:
+                    if not isinstance(allocation_evidence, Mapping):
+                        raise AuthorityConflict(
+                            "durable allocation evidence binding is malformed"
+                        )
+                    allocation_valid_until = _text(
+                        allocation_evidence.get("valid_until"),
+                        name="allocation evidence valid_until",
+                    )
+                    if _instant(now, name="now") > _instant(
+                        allocation_valid_until,
+                        name="allocation evidence valid_until",
+                    ):
+                        return False, "allocation_evidence_expired"
                 admission_reservation_version = (
                     int(risk_payload["reservation_version"]) + 1
                 )

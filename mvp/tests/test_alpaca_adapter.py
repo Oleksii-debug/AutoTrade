@@ -7,6 +7,7 @@ from mvp.autotrade_mvp.alpaca import (
     AlpacaAbsenceEvidence,
     AlpacaAdapterError,
     AlpacaOrderIntent,
+    AlpacaPreparedRequest,
     paper_evidence_proves_live_execution_realism,
     coverage_evidence,
     parse_order_observation,
@@ -56,6 +57,26 @@ def capability(
 
 
 class AlpacaAdapterTests(unittest.TestCase):
+    def test_direct_prepared_request_cannot_bypass_scope_or_provenance(self):
+        base = {
+            "endpoint": "/v2/orders",
+            "body": {"symbol": "AAPL", "client_order_id": "at-direct"},
+            "account_id": "paper-account",
+            "environment": "PAPER",
+            "capability_snapshot_id": "cap-1",
+            "documentation_refs": ("https://docs.alpaca.markets/orders",),
+        }
+        request = AlpacaPreparedRequest(**base)
+        self.assertEqual(request.environment, "PAPER")
+        with self.assertRaisesRegex(AlpacaAdapterError, "endpoint"):
+            AlpacaPreparedRequest(**{**base, "endpoint": "/v2/account"})
+        with self.assertRaisesRegex(AlpacaAdapterError, "environment"):
+            AlpacaPreparedRequest(**{**base, "environment": "SIMULATION"})
+        with self.assertRaisesRegex(AlpacaAdapterError, "capability_snapshot_id"):
+            AlpacaPreparedRequest(**{**base, "capability_snapshot_id": " "})
+        with self.assertRaisesRegex(AlpacaAdapterError, "documentation_refs"):
+            AlpacaPreparedRequest(**{**base, "documentation_refs": ()})
+
     def test_equity_limit_request_preserves_decimal_strings(self):
         intent = AlpacaOrderIntent.create(
             instrument_version="AAPL:v1",

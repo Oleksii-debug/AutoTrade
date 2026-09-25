@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 from mvp.autotrade_mvp.model_gateway import (
     BudgetLedger,
@@ -45,6 +45,34 @@ def _environment(value: str) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _reservation_context(
+    values: Mapping[str, str] | None,
+) -> dict[str, str] | None:
+    """Canonical immutable context that becomes part of route reservation identity.
+
+    Omitted context preserves the exact pre-WP-39 durable payload shape for
+    backward-compatible retries of existing reservations.
+    """
+    if values is None:
+        return None
+    if not isinstance(values, Mapping):
+        raise TypeError("reservation_context must be a mapping")
+    normalized: dict[str, str] = {}
+    for raw_key, raw_value in values.items():
+        key = _text(raw_key, name="reservation_context key")
+        if raw_key != key:
+            raise ValueError("reservation_context keys must be canonical text")
+        if not isinstance(raw_value, str):
+            raise TypeError("reservation_context values must be text")
+        value = _text(raw_value, name=f"reservation_context[{key}]")
+        if raw_value != value:
+            raise ValueError("reservation_context values must be canonical text")
+        if key in normalized:
+            raise ValueError("reservation_context keys must be unique")
+        normalized[key] = value
+    return dict(sorted(normalized.items()))
 
 
 def _identity_digest(*parts: str) -> str:
@@ -320,6 +348,7 @@ class DurableModelBudget:
         policy: RoutingPolicy,
         request: ModelRequest,
         descriptors: tuple[ModelDescriptor, ...],
+        reservation_context: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         if not isinstance(policy, RoutingPolicy):
             raise TypeError("policy must be RoutingPolicy")
@@ -327,7 +356,7 @@ class DurableModelBudget:
             raise TypeError("request must be ModelRequest")
         if not all(isinstance(item, ModelDescriptor) for item in descriptors):
             raise TypeError("descriptors must contain ModelDescriptor values")
-        return {
+        material = {
             "policy": {
                 "mode": policy.mode.value,
                 "allowed_model_ids": list(policy.allowed_model_ids),
@@ -357,6 +386,10 @@ class DurableModelBudget:
                 for item in sorted(descriptors, key=lambda value: value.model_id)
             ],
         }
+        context = _reservation_context(reservation_context)
+        if context is not None:
+            material["reservation_context"] = context
+        return material
 
     @staticmethod
     def _decision_from_route_payload(payload: dict[str, Any]) -> RouteDecision:
@@ -387,6 +420,7 @@ class DurableModelBudget:
         descriptors: Iterable[ModelDescriptor],
         *,
         now_utc: datetime | None = None,
+        reservation_context: Mapping[str, str] | None = None,
     ) -> RouteDecision:
         """Route and durably reserve worst-case model cost before call authority.
 
@@ -396,7 +430,12 @@ class DurableModelBudget:
         """
 
         materialized = tuple(descriptors)
-        routing_input = self._routing_input(policy, request, materialized)
+        routing_input = self._routing_input(
+            policy,
+            request,
+            materialized,
+            reservation_context=reservation_context,
+        )
         now = now_utc or datetime.now(timezone.utc)
         if now.tzinfo is None:
             raise ValueError("now_utc must be timezone-aware")

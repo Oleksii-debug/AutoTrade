@@ -187,14 +187,14 @@ class ReconciliationJournalTests(unittest.TestCase):
                 "850",
             )
 
-    def test_scope_latest_crosses_reconciliation_ids_and_ties_fail_closed(self):
+    def test_scope_latest_uses_durable_journal_order_not_provider_clock(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             older = record_reconciliation_checkpoint(
                 store,
                 reconciliation_id="scope-head-a",
                 result=reconciliation(resource_availability=availability()),
-                observed_at="2026-09-24T19:00:00Z",
+                observed_at="2026-09-24T19:02:00Z",
                 host_id="host-a",
                 owner_epoch="epoch-a",
             )
@@ -205,6 +205,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                     provider_cash={"USD": "901"},
                     resource_availability=availability(),
                 ),
+                # The provider clock regresses, but this fact is durably recorded later.
                 observed_at="2026-09-24T19:01:00Z",
                 host_id="host-b",
                 owner_epoch="epoch-b",
@@ -216,26 +217,29 @@ class ReconciliationJournalTests(unittest.TestCase):
                 environment="PAPER",
             )
             self.assertNotEqual(older["aggregate_id"], newer["aggregate_id"])
+            self.assertGreater(newer["journal_sequence"], older["journal_sequence"])
             self.assertEqual(latest["event_id"], newer["event_id"])
 
-            record_reconciliation_checkpoint(
+            newest = record_reconciliation_checkpoint(
                 store,
                 reconciliation_id="scope-head-c",
                 result=reconciliation(
                     provider_cash={"USD": "902"},
                     resource_availability=availability(),
                 ),
+                # Equal provider timestamps are not ambiguous: durable order is unique.
                 observed_at="2026-09-24T19:01:00Z",
                 host_id="host-c",
                 owner_epoch="epoch-c",
             )
-            with self.assertRaisesRegex(ValueError, "ambiguous"):
-                load_latest_reconciliation_checkpoint_for_scope(
-                    store,
-                    provider_id="TEST_PROVIDER",
-                    account_id="test-account",
-                    environment="PAPER",
-                )
+            latest = load_latest_reconciliation_checkpoint_for_scope(
+                store,
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+            )
+            self.assertGreater(newest["journal_sequence"], newer["journal_sequence"])
+            self.assertEqual(latest["event_id"], newest["event_id"])
 
     def test_owner_transfer_requires_new_readiness_checkpoint(self):
         with TemporaryDirectory() as directory:

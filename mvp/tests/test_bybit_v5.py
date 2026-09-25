@@ -211,6 +211,37 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertNotIn("environment", result)
         self.assertEqual(result["evidence"], [])
 
+    def test_transport_ambiguity_requires_boolean_flag_and_valid_timestamp(self):
+        with self.assertRaisesRegex(ProviderCoreError, "must be boolean"):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                client_order_id="client-ambiguous-bool",
+                environment="MAINNET",
+                response=None,
+                observed_at="2026-09-24T20:00:00Z",
+                transport_ambiguous=1,
+            )
+
+        with self.assertRaisesRegex(ProviderCoreError, "ISO timestamp"):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                client_order_id="client-ambiguous-time",
+                environment="MAINNET",
+                response=None,
+                observed_at="not-a-timestamp",
+                transport_ambiguous=True,
+            )
+
+        with self.assertRaisesRegex(ProviderCoreError, "timezone"):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                client_order_id="client-ambiguous-naive-time",
+                environment="MAINNET",
+                response=None,
+                observed_at="2026-09-24T20:00:00",
+                transport_ambiguous=True,
+            )
+
     def test_transport_ambiguity_cannot_coexist_with_provider_response(self):
         with self.assertRaisesRegex(ProviderCoreError, "authoritative response"):
             parse_submission_response(

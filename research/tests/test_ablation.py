@@ -7,8 +7,10 @@ from autotrade_research.evaluation.ablation import (
     AblationOutcome,
     AblationPair,
     CausalInputEvidence,
+    build_ablation_evidence_bundle,
     evaluate_incremental_value,
     summarize_ablation,
+    verify_ablation_evidence_bundle,
 )
 
 
@@ -659,6 +661,130 @@ class AblationTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "FAIL")
         self.assertLess(result.lower_bound, Decimal("0.5"))
+
+
+    def test_locked_evidence_bundle_is_order_stable_and_self_verifying(self):
+        cases = [
+            pair("locked-a", "2", full_cost="0.25"),
+            pair("locked-b", "1.5", full_cost="0.10"),
+        ]
+        first = build_ablation_evidence_bundle(
+            "agent",
+            cases,
+            source_revision="1" * 40,
+            protocol_digest=FINGERPRINT_C,
+            dataset_digest=FINGERPRINT_D,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        second = build_ablation_evidence_bundle(
+            "agent",
+            list(reversed(cases)),
+            source_revision="1" * 40,
+            protocol_digest=FINGERPRINT_C,
+            dataset_digest=FINGERPRINT_D,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0.000"),
+        )
+        self.assertEqual(first.payload, second.payload)
+        self.assertEqual(first.content_digest, second.content_digest)
+        self.assertTrue(verify_ablation_evidence_bundle(first, cases))
+
+    def test_locked_evidence_digest_changes_when_causal_result_changes(self):
+        baseline = [
+            pair("locked-a", "2", full_cost="0.25"),
+            pair("locked-b", "1.5", full_cost="0.10"),
+        ]
+        changed = [
+            pair("locked-a", "2.1", full_cost="0.25"),
+            pair("locked-b", "1.5", full_cost="0.10"),
+        ]
+        first = build_ablation_evidence_bundle(
+            "agent",
+            baseline,
+            source_revision="2" * 40,
+            protocol_digest=FINGERPRINT_C,
+            dataset_digest=FINGERPRINT_D,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        second = build_ablation_evidence_bundle(
+            "agent",
+            changed,
+            source_revision="2" * 40,
+            protocol_digest=FINGERPRINT_C,
+            dataset_digest=FINGERPRINT_D,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertNotEqual(first.content_digest, second.content_digest)
+        with self.assertRaisesRegex(ValueError, "locked ablation evidence"):
+            verify_ablation_evidence_bundle(first, changed)
+
+    def test_locked_evidence_binds_source_protocol_and_dataset_identity(self):
+        cases = [
+            pair("identity-a", "1"),
+            pair("identity-b", "1"),
+        ]
+        base = build_ablation_evidence_bundle(
+            "agent",
+            cases,
+            source_revision="3" * 40,
+            protocol_digest=FINGERPRINT_C,
+            dataset_digest=FINGERPRINT_D,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        changed_source = build_ablation_evidence_bundle(
+            "agent",
+            cases,
+            source_revision="4" * 40,
+            protocol_digest=FINGERPRINT_C,
+            dataset_digest=FINGERPRINT_D,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        changed_protocol = build_ablation_evidence_bundle(
+            "agent",
+            cases,
+            source_revision="3" * 40,
+            protocol_digest=FINGERPRINT_B,
+            dataset_digest=FINGERPRINT_D,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertNotEqual(base.content_digest, changed_source.content_digest)
+        self.assertNotEqual(base.content_digest, changed_protocol.content_digest)
+
+    def test_locked_evidence_preserves_inconclusive_negative_result(self):
+        locked = build_ablation_evidence_bundle(
+            "agent",
+            [pair("only-one", "1")],
+            source_revision="5" * 40,
+            protocol_digest=FINGERPRINT_C,
+            dataset_digest=FINGERPRINT_D,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(locked.pair_count, 1)
+        self.assertEqual(locked.evaluation.status, "INCONCLUSIVE")
+        self.assertEqual(
+            locked.evaluation.reason,
+            "insufficient_comparable_matched_pairs",
+        )
+        self.assertIn('"status":"INCONCLUSIVE"', locked.payload)
+
+    def test_locked_evidence_rejects_non_exact_source_revision(self):
+        with self.assertRaisesRegex(ValueError, "exact 40-character lowercase git SHA"):
+            build_ablation_evidence_bundle(
+                "agent",
+                [pair("bad-source-a", "1"), pair("bad-source-b", "1")],
+                source_revision="main",
+                protocol_digest=FINGERPRINT_C,
+                dataset_digest=FINGERPRINT_D,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
 
 
 if __name__ == "__main__":

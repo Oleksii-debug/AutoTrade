@@ -9,11 +9,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from hashlib import sha256
+import json
 import re
 from typing import Iterable
 
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _decimal(value: Decimal | int | str, field: str) -> Decimal:
@@ -474,3 +477,253 @@ def evaluate_incremental_value(
         status="PASS" if lower >= required else "FAIL",
         reason="matched_causal_ablation_net_of_cost",
     )
+
+
+
+@dataclass(frozen=True)
+class AblationEvidenceBundle:
+    """Deterministic, self-describing evidence artifact for one ablation evaluation."""
+
+    target_component: str
+    source_revision: str
+    protocol_digest: str
+    dataset_digest: str
+    minimum_pairs: int
+    required_lower_bound: Decimal
+    uncertainty_multiplier: Decimal
+    pair_count: int
+    evaluation: AblationEvaluation
+    payload: str
+    content_digest: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target_component, str) or not self.target_component.strip():
+            raise ValueError("target_component is required")
+        object.__setattr__(self, "target_component", self.target_component.strip())
+        if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
+            raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
+        object.__setattr__(
+            self,
+            "protocol_digest",
+            _digest(self.protocol_digest, "protocol_digest"),
+        )
+        object.__setattr__(
+            self,
+            "dataset_digest",
+            _digest(self.dataset_digest, "dataset_digest"),
+        )
+        if (
+            not isinstance(self.minimum_pairs, int)
+            or isinstance(self.minimum_pairs, bool)
+            or self.minimum_pairs < 2
+        ):
+            raise ValueError("minimum_pairs must be an integer >= 2")
+        required = _decimal(self.required_lower_bound, "required_lower_bound")
+        multiplier = _decimal(self.uncertainty_multiplier, "uncertainty_multiplier")
+        if multiplier < 0:
+            raise ValueError("uncertainty_multiplier must be non-negative")
+        object.__setattr__(self, "required_lower_bound", required)
+        object.__setattr__(self, "uncertainty_multiplier", multiplier)
+        if (
+            not isinstance(self.pair_count, int)
+            or isinstance(self.pair_count, bool)
+            or self.pair_count < 0
+        ):
+            raise ValueError("pair_count must be a non-negative integer")
+        if not isinstance(self.evaluation, AblationEvaluation):
+            raise TypeError("evaluation must be AblationEvaluation")
+        if self.evaluation.target_component != self.target_component:
+            raise ValueError("evaluation target_component must match the bundle")
+        if self.evaluation.required_lower_bound != required:
+            raise ValueError("evaluation required_lower_bound must match the bundle")
+        if self.evaluation.uncertainty_multiplier != multiplier:
+            raise ValueError("evaluation uncertainty_multiplier must match the bundle")
+        if self.evaluation.pair_count > self.pair_count:
+            raise ValueError("evaluation pair_count cannot exceed locked pair_count")
+        if not isinstance(self.payload, str) or not self.payload:
+            raise ValueError("payload must be non-empty canonical JSON")
+        object.__setattr__(
+            self,
+            "content_digest",
+            _digest(self.content_digest, "content_digest"),
+        )
+        actual = "sha256:" + sha256(self.payload.encode("utf-8")).hexdigest()
+        if actual != self.content_digest:
+            raise ValueError("content_digest does not match payload bytes")
+        try:
+            decoded = json.loads(self.payload)
+        except json.JSONDecodeError as error:
+            raise ValueError("payload must be valid canonical JSON") from error
+        policy = decoded.get("evaluation_policy", {})
+        if (
+            decoded.get("schema_version") != "1.0.0"
+            or decoded.get("target_component") != self.target_component
+            or decoded.get("source_revision") != self.source_revision
+            or decoded.get("protocol_digest") != self.protocol_digest
+            or decoded.get("dataset_digest") != self.dataset_digest
+            or decoded.get("pair_count") != self.pair_count
+            or policy.get("minimum_pairs") != self.minimum_pairs
+            or policy.get("required_lower_bound") != _canonical_decimal_text(required)
+            or policy.get("uncertainty_multiplier") != _canonical_decimal_text(multiplier)
+        ):
+            raise ValueError("payload metadata does not match bundle metadata")
+
+
+def _canonical_decimal_text(value: Decimal | None) -> str | None:
+    if value is None:
+        return None
+    rendered = format(value, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return "0" if rendered in {"", "-0"} else rendered
+
+
+def _canonical_utc_text(value: datetime) -> str:
+    return _utc(value, "timestamp").isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _causal_input_payload(item: CausalInputEvidence) -> dict[str, object]:
+    return {
+        "available_utc": _canonical_utc_text(item.available_utc),
+        "component_id": item.component_id,
+        "content_digest": item.content_digest,
+        "evidence_id": item.evidence_id,
+        "syndication_group": item.syndication_group,
+    }
+
+
+def _outcome_payload(item: AblationOutcome) -> dict[str, object]:
+    return {
+        "case_id": item.case_id,
+        "components": sorted(item.components),
+        "cost": _canonical_decimal_text(item.cost),
+        "deadline_ms": item.deadline_ms,
+        "decision_utc": _canonical_utc_text(item.decision_utc),
+        "elapsed_ms": item.elapsed_ms,
+        "input_cutoff_utc": _canonical_utc_text(item.input_cutoff_utc),
+        "input_evidence": [
+            _causal_input_payload(evidence)
+            for evidence in sorted(item.input_evidence, key=lambda evidence: evidence.evidence_id)
+        ],
+        "input_fingerprint": item.input_fingerprint,
+        "outcome_available_utc": _canonical_utc_text(item.outcome_available_utc),
+        "population_unit_id": item.population_unit_id,
+        "utility": _canonical_decimal_text(item.utility),
+        "variant": item.variant,
+    }
+
+
+def _evaluation_payload(item: AblationEvaluation) -> dict[str, object]:
+    return {
+        "lower_bound": _canonical_decimal_text(item.lower_bound),
+        "mean_net_incremental_value": _canonical_decimal_text(
+            item.mean_net_incremental_value
+        ),
+        "pair_count": item.pair_count,
+        "reason": item.reason,
+        "required_lower_bound": _canonical_decimal_text(item.required_lower_bound),
+        "sample_stddev": _canonical_decimal_text(item.sample_stddev),
+        "status": item.status,
+        "target_component": item.target_component,
+        "uncertainty_multiplier": _canonical_decimal_text(
+            item.uncertainty_multiplier
+        ),
+    }
+
+
+def build_ablation_evidence_bundle(
+    target_component: str,
+    pairs: Iterable[AblationPair],
+    *,
+    source_revision: str,
+    protocol_digest: str,
+    dataset_digest: str,
+    minimum_pairs: int,
+    required_lower_bound: Decimal,
+    uncertainty_multiplier: Decimal = Decimal("2"),
+) -> AblationEvidenceBundle:
+    """Lock the exact causal population and result into deterministic artifact bytes."""
+
+    if not isinstance(source_revision, str) or _GIT_SHA.fullmatch(source_revision) is None:
+        raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
+    protocol = _digest(protocol_digest, "protocol_digest")
+    dataset = _digest(dataset_digest, "dataset_digest")
+    target = target_component.strip() if isinstance(target_component, str) else target_component
+    selected = sorted(
+        _validate_pairs(target, pairs),
+        key=lambda pair: (pair.full.case_id, pair.full.input_fingerprint),
+    )
+    evaluation = evaluate_incremental_value(
+        target,
+        selected,
+        minimum_pairs=minimum_pairs,
+        required_lower_bound=required_lower_bound,
+        uncertainty_multiplier=uncertainty_multiplier,
+    )
+    required = evaluation.required_lower_bound
+    multiplier = evaluation.uncertainty_multiplier
+    payload_object = {
+        "dataset_digest": dataset,
+        "evaluation": _evaluation_payload(evaluation),
+        "evaluation_policy": {
+            "minimum_pairs": minimum_pairs,
+            "required_lower_bound": _canonical_decimal_text(required),
+            "uncertainty_multiplier": _canonical_decimal_text(multiplier),
+        },
+        "pair_count": len(selected),
+        "pairs": [
+            {
+                "ablated": _outcome_payload(pair.ablated),
+                "full": _outcome_payload(pair.full),
+                "target_component": pair.target_component,
+            }
+            for pair in selected
+        ],
+        "protocol_digest": protocol,
+        "schema_version": "1.0.0",
+        "source_revision": source_revision,
+        "target_component": target,
+    }
+    payload = json.dumps(
+        payload_object,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    content_digest = "sha256:" + sha256(payload.encode("utf-8")).hexdigest()
+    return AblationEvidenceBundle(
+        target_component=target,
+        source_revision=source_revision,
+        protocol_digest=protocol,
+        dataset_digest=dataset,
+        minimum_pairs=minimum_pairs,
+        required_lower_bound=required,
+        uncertainty_multiplier=multiplier,
+        pair_count=len(selected),
+        evaluation=evaluation,
+        payload=payload,
+        content_digest=content_digest,
+    )
+
+
+def verify_ablation_evidence_bundle(
+    bundle: AblationEvidenceBundle,
+    pairs: Iterable[AblationPair],
+) -> bool:
+    """Rebuild a locked bundle and fail closed on any source/population/result drift."""
+
+    if not isinstance(bundle, AblationEvidenceBundle):
+        raise TypeError("bundle must be AblationEvidenceBundle")
+    rebuilt = build_ablation_evidence_bundle(
+        bundle.target_component,
+        pairs,
+        source_revision=bundle.source_revision,
+        protocol_digest=bundle.protocol_digest,
+        dataset_digest=bundle.dataset_digest,
+        minimum_pairs=bundle.minimum_pairs,
+        required_lower_bound=bundle.required_lower_bound,
+        uncertainty_multiplier=bundle.uncertainty_multiplier,
+    )
+    if rebuilt != bundle:
+        raise ValueError("locked ablation evidence does not match the supplied causal population")
+    return True

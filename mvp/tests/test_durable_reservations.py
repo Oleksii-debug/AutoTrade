@@ -582,6 +582,35 @@ class DurableReservationBookTests(unittest.TestCase):
         )
         self.assertEqual(reader.get("r-external").state, "WORKING")
 
+    def test_commit_command_receives_canonical_actor_and_environment(self):
+        book = self.book()
+        original = self.store.commit_command
+        observed = {}
+
+        def capture(**kwargs):
+            observed.update(kwargs)
+            return original(**kwargs)
+
+        with patch.object(self.store, "commit_command", side_effect=capture):
+            self.reserve(book)
+
+        self.assertEqual(observed["actor"], "autotrade-reservation-authority")
+        self.assertEqual(observed["environment"], "PAPER")
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("70"))
+
+    def test_scoped_command_contract_survives_restart_after_reserve(self):
+        first = self.book()
+        self.reserve(first)
+        restarted = DurableReservationBook(
+            JournalStore(self.path),
+            environment="PAPER",
+            account_id="paper-account",
+            resolution_evidence_verifier=lambda reference: reference == EVIDENCE,
+        )
+        self.assertEqual(restarted.version, 1)
+        self.assertEqual(restarted.total_reserved("CASH:USD"), Decimal("70"))
+        self.assertEqual(restarted.get("r1").state, "WORKING")
+
 
 if __name__ == "__main__":
     unittest.main()

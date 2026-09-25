@@ -348,6 +348,143 @@ class ReconciliationJournalTests(unittest.TestCase):
                     max_age_seconds="60",
                 )
 
+    def test_financial_truth_timestamp_equality_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            settlement_payload = {
+                "schema_version": "1.0.0",
+                "scope": {
+                    "provider_id": "TEST_PROVIDER",
+                    "account_id": "test-account",
+                    "environment": "PAPER",
+                },
+                "obligations": [{"obligation_id": "trade-cash-equality"}],
+            }
+            store.append_event(
+                {
+                    "event_id": "settlement-equality-boundary",
+                    "event_type": "SettlementObligationsRegistered",
+                    "aggregate_type": "settlement_book",
+                    "aggregate_id": "settlement-equality-scope",
+                    "aggregate_version": "1",
+                    "payload": settlement_payload,
+                    "payload_hash": payload_digest(settlement_payload),
+                    "committed_at": "2026-09-24T19:00:10Z",
+                }
+            )
+            equal_snapshot = SnapshotConsistencyEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                mode="ATOMIC",
+                query_started_at="2026-09-24T19:00:10Z",
+                query_completed_at="2026-09-24T19:00:20Z",
+            )
+            equal_availability = ResourceAvailabilityEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                snapshot_id="snapshot-equality",
+                query_started_at="2026-09-24T19:00:10Z",
+                query_completed_at="2026-09-24T19:00:20Z",
+                provider_as_of="2026-09-24T19:00:19Z",
+                valid_until="2026-09-24T19:05:00Z",
+                available_resources={"CASH:USD": "850"},
+                evidence_refs=("provider:snapshot-equality",),
+            )
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="settlement-equality-checkpoint",
+                result=reconciliation(
+                    snapshot_consistency=equal_snapshot,
+                    resource_availability=equal_availability,
+                    coverage_end="2026-09-24T19:00:20Z",
+                ),
+                observed_at="2026-09-24T19:00:20Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "resource availability snapshot predates settlement financial truth",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                )
+
+            lifecycle_payload = {
+                "provider_id": "TEST_PROVIDER",
+                "account_id": "test-account",
+                "environment": "PAPER",
+                "external_event_id": "exercise-equality",
+                "event_kind": "EXERCISE",
+            }
+            store.append_event(
+                {
+                    "event_id": "option-lifecycle-equality-boundary",
+                    "event_type": "OptionLifecycleApplied",
+                    "aggregate_type": "option_lifecycle",
+                    "aggregate_id": "option-lifecycle-equality-scope",
+                    "aggregate_version": "1",
+                    "payload": lifecycle_payload,
+                    "payload_hash": payload_digest(lifecycle_payload),
+                    "committed_at": "2026-09-24T19:00:30Z",
+                }
+            )
+            lifecycle_snapshot = SnapshotConsistencyEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                mode="ATOMIC",
+                query_started_at="2026-09-24T19:00:30Z",
+                query_completed_at="2026-09-24T19:00:40Z",
+            )
+            lifecycle_availability = ResourceAvailabilityEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                snapshot_id="snapshot-lifecycle-equality",
+                query_started_at="2026-09-24T19:00:30Z",
+                query_completed_at="2026-09-24T19:00:40Z",
+                provider_as_of="2026-09-24T19:00:39Z",
+                valid_until="2026-09-24T19:05:00Z",
+                available_resources={"CASH:USD": "850"},
+                evidence_refs=("provider:snapshot-lifecycle-equality",),
+            )
+            lifecycle_checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="lifecycle-equality-checkpoint",
+                result=reconciliation(
+                    snapshot_consistency=lifecycle_snapshot,
+                    resource_availability=lifecycle_availability,
+                    coverage_end="2026-09-24T19:00:40Z",
+                ),
+                observed_at="2026-09-24T19:00:40Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "resource availability snapshot predates option lifecycle financial truth",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=lifecycle_checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:45Z",
+                    max_age_seconds="60",
+                )
+
     def test_settlement_freshness_barrier_is_scoped_to_financial_account(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

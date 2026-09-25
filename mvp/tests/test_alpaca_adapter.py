@@ -410,13 +410,17 @@ class AlpacaAdapterTests(unittest.TestCase):
                 instrument_versions={"AAPL": "AAPL:v1"},
                 client_ids_by_order_id={order_id: "at-ack-1"},
                 fees_by_activity_id={},
-            )
+            
+                account_id="paper-1",
+                environment="PAPER",)
         fills = parse_trade_activities(
             [row, row],
             instrument_versions={"AAPL": "AAPL:v1"},
             client_ids_by_order_id={order_id: "at-ack-1"},
             fees_by_activity_id={row["id"]: ("0.01", "USD")},
-        )
+        
+            account_id="paper-1",
+            environment="PAPER",)
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].fee_amount, Decimal("0.01"))
 
@@ -427,7 +431,9 @@ class AlpacaAdapterTests(unittest.TestCase):
             coverage_end="2026-09-24T21:00:00Z",
             pagination_complete=True,
             consistency_horizon_satisfied=True,
-        )
+        
+            account_id="paper-1",
+            environment="PAPER",)
         self.assertFalse(evidence.provider_semantics_exclude_execution)
 
     def test_paper_is_not_live_execution_realism_proof(self):

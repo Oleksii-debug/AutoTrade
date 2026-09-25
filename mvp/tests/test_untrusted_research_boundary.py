@@ -179,6 +179,23 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
                 evidence_refs=("evidence:1",),
             )
 
+    def test_invalid_unicode_text_is_rejected_as_boundary_error(self):
+        invalid = "\ud800"
+        with self.assertRaisesRegex(ResearchBoundaryError, "valid UTF-8 text"):
+            ResearchToolRequest(
+                request_id="invalid-unicode-value",
+                tool_name="statistics",
+                requested_capabilities=("COMPUTE_STATISTICS",),
+                arguments={"value": invalid},
+            )
+        with self.assertRaisesRegex(ResearchBoundaryError, "valid UTF-8 text"):
+            ResearchToolRequest(
+                request_id="invalid-unicode-key",
+                tool_name="statistics",
+                requested_capabilities=("COMPUTE_STATISTICS",),
+                arguments={invalid: "value"},
+            )
+
     def test_hostile_total_node_budget_is_rejected_even_when_each_container_is_narrow(self):
         payload = {
             f"group-{group}": list(range(1000))

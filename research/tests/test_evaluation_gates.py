@@ -69,6 +69,7 @@ EVIDENCE_KINDS = (
     "financial_invariants",
     "retention",
     "metrics",
+    "independent_review",
 )
 
 
@@ -180,6 +181,38 @@ class EvaluationGateTests(unittest.TestCase):
             decision = evaluate_gates(
                 gate_profile,
                 bound,
+                artifact_store=store,
+            )
+            self.assertEqual(decision.status, "FAIL")
+            self.assertEqual(decision.checks["evidence_bundle"], "FAIL")
+
+    def test_verified_bundle_requires_independent_review_artifact(self):
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            refs = {}
+            for kind in EVIDENCE_KINDS:
+                if kind == "independent_review":
+                    continue
+                artifact_id = str(uuid4())
+                manifest = store.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=kind.encode("utf-8"),
+                    media_type="application/octet-stream",
+                    rights={"storage": True, "export": False},
+                    metadata={
+                        "evidence_kind": kind,
+                        "profile_id": gate_profile.profile_id,
+                    },
+                )
+                refs[kind] = GateEvidenceRef(
+                    artifact_id=artifact_id,
+                    sha256=manifest["sha256"],
+                )
+
+            decision = evaluate_gates(
+                gate_profile,
+                replace(evidence(), evidence_refs=refs),
                 artifact_store=store,
             )
             self.assertEqual(decision.status, "FAIL")

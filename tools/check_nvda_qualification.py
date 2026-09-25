@@ -78,7 +78,11 @@ def validate_evidence(
     )
     if environment.get("input_mode") != required_input:
         raise NvdaQualificationError(f"qualification must be {required_input}")
-    if not str(environment.get("windows_version")).startswith(required_os):
+    windows_version = _required_text(
+        environment.get("windows_version"),
+        name="environment.windows_version",
+    )
+    if windows_version != required_os and not windows_version.startswith(required_os + " "):
         raise NvdaQualificationError(f"qualification must run on {required_os}")
     if environment.get("assistive_technology") != required_at:
         raise NvdaQualificationError(

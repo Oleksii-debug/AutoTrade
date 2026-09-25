@@ -857,7 +857,7 @@ def load_account_resource_availability_evidence(
     aggregate_version = checkpoint.get("aggregate_version")
     if type(aggregate_version) is not int or aggregate_version <= 0:
         raise ValueError("checkpoint aggregate_version must be a positive integer")
-    return {
+    evidence = {
         "checkpoint_event_id": event_id,
         "checkpoint_payload_hash": _text(
             checkpoint.get("payload_hash"),

@@ -331,9 +331,26 @@ class AuthenticatedHostApplication:
             raise ValueError("JSON request content type is required")
         if not body or len(body) > _MAX_BODY_BYTES:
             raise ValueError("Request body size is invalid")
+        def reject_duplicate_keys(
+            pairs: list[tuple[str, object]],
+        ) -> dict[str, object]:
+            result: dict[str, object] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("Duplicate JSON key")
+                result[key] = value
+            return result
+
+        def reject_non_finite(constant: str) -> object:
+            raise ValueError(f"Non-finite JSON constant is forbidden: {constant}")
+
         try:
-            value = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            value = json.loads(
+                body.decode("utf-8"),
+                object_pairs_hook=reject_duplicate_keys,
+                parse_constant=reject_non_finite,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
             raise ValueError("Request body is not canonical JSON") from error
         if not isinstance(value, dict):
             raise ValueError("Command request must be a JSON object")
@@ -493,13 +510,26 @@ class _HostRequestHandler(BaseHTTPRequestHandler):
             self.send_error(500)
             return
         try:
-            length_text = self.headers.get("Content-Length", "0")
+            raw_headers = tuple(self.headers.raw_items())
+            normalized_names = [
+                str(key).strip().lower()
+                for key, _value in raw_headers
+            ]
+            if (
+                any(not name for name in normalized_names)
+                or len(normalized_names) != len(set(normalized_names))
+            ):
+                raise ValueError("Duplicate or invalid wire request header")
+            header_map = {
+                str(key): str(value)
+                for key, value in raw_headers
+            }
+            length_text = header_map.get("Content-Length", "0")
             length = int(length_text)
             if length < 0 or length > _MAX_BODY_BYTES:
                 response = _error(413, "REQUEST_TOO_LARGE")
             else:
                 body = self.rfile.read(length) if length else b""
-                header_map = {key: value for key, value in self.headers.items()}
                 response = server.application.dispatch(
                     method=self.command,
                     target=self.path,

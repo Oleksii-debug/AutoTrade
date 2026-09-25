@@ -1,11 +1,18 @@
 """Fail-closed bridge from reconciliable provider fills to canonical accounting.
 
 This module owns no ledger, provider transport, order state, or reconciliation
-authority. It only requires independent order-projection and provider-fill
-evidence to agree before delegating to the canonical accounting book.
+authority. It consumes a small immutable projection-evidence DTO plus independent
+provider-fill evidence before delegating to the canonical accounting book.
+
+The DTO deliberately does not import either order projection implementation.
+That keeps accounting downstream of the single WP-19 lifecycle authority without
+turning a particular in-memory projection module into an accounting dependency.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 from .accounting import (
     AccountingConflict,
@@ -13,7 +20,6 @@ from .accounting import (
     ScopedEconomicBook,
     book_equity_fill,
 )
-from .orders import FillObservation
 from .persistence import payload_digest
 from .reconciliation import ProviderFillEvidence
 
@@ -24,19 +30,108 @@ def _text(value: str, *, name: str) -> str:
     return value.strip()
 
 
+def _decimal(value, *, name: str) -> Decimal:
+    if isinstance(value, bool) or isinstance(value, float):
+        raise TypeError(f"{name} must use Decimal, string or integer input")
+    try:
+        result = value if isinstance(value, Decimal) else Decimal(value)
+    except (InvalidOperation, ValueError, TypeError) as error:
+        raise ValueError(f"{name} must be a finite decimal") from error
+    if not result.is_finite():
+        raise ValueError(f"{name} must be a finite decimal")
+    return result
+
+
+@dataclass(frozen=True)
+class ProjectedFillEvidence:
+    """Immutable economic fact emitted by the canonical order projection boundary."""
+
+    fill_id: str
+    provider_execution_id: str
+    intent_id: str
+    side: str
+    quantity: Decimal
+    price: Decimal
+    provider_revision: str | None = None
+    correction_of: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "fill_id", _text(self.fill_id, name="fill_id"))
+        object.__setattr__(
+            self,
+            "provider_execution_id",
+            _text(self.provider_execution_id, name="provider_execution_id"),
+        )
+        object.__setattr__(self, "intent_id", _text(self.intent_id, name="intent_id"))
+        normalized_side = _text(self.side, name="side").upper()
+        if normalized_side not in {"BUY", "SELL"}:
+            raise ValueError("side must be BUY or SELL")
+        object.__setattr__(self, "side", normalized_side)
+        quantity = _decimal(self.quantity, name="quantity")
+        price = _decimal(self.price, name="price")
+        if quantity <= 0 or price <= 0:
+            raise ValueError("quantity and price must be positive")
+        object.__setattr__(self, "quantity", quantity)
+        object.__setattr__(self, "price", price)
+        object.__setattr__(
+            self,
+            "provider_revision",
+            (
+                _text(self.provider_revision, name="provider_revision")
+                if self.provider_revision is not None
+                else None
+            ),
+        )
+        object.__setattr__(
+            self,
+            "correction_of",
+            (
+                _text(self.correction_of, name="correction_of")
+                if self.correction_of is not None
+                else None
+            ),
+        )
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        fill_id: str,
+        provider_execution_id: str,
+        intent_id: str,
+        side: str,
+        quantity,
+        price,
+        provider_revision: str | None = None,
+        correction_of: str | None = None,
+    ) -> "ProjectedFillEvidence":
+        return cls(
+            fill_id=fill_id,
+            provider_execution_id=provider_execution_id,
+            intent_id=intent_id,
+            side=side,
+            quantity=_decimal(quantity, name="quantity"),
+            price=_decimal(price, name="price"),
+            provider_revision=provider_revision,
+            correction_of=correction_of,
+        )
+
+
 def build_provider_fill_transaction(
     *,
     book: ScopedEconomicBook,
     provider_id: str,
-    projected_fill: FillObservation,
+    projected_fill: ProjectedFillEvidence,
     provider_fill: ProviderFillEvidence,
     expected_instrument: str,
     settlement_currency: str,
 ) -> JournalTransaction:
     if not isinstance(book, ScopedEconomicBook):
         raise TypeError("book must be ScopedEconomicBook")
-    if not isinstance(projected_fill, FillObservation):
-        raise TypeError("projected_fill must be FillObservation, not an acknowledgement")
+    if not isinstance(projected_fill, ProjectedFillEvidence):
+        raise TypeError(
+            "projected_fill must be ProjectedFillEvidence, not an acknowledgement"
+        )
     if not isinstance(provider_fill, ProviderFillEvidence):
         raise TypeError("provider_fill must be ProviderFillEvidence")
 
@@ -98,7 +193,7 @@ def book_provider_fill(
     *,
     book: ScopedEconomicBook,
     provider_id: str,
-    projected_fill: FillObservation,
+    projected_fill: ProjectedFillEvidence,
     provider_fill: ProviderFillEvidence,
     expected_instrument: str,
     settlement_currency: str,

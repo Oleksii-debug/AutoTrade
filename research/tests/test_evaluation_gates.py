@@ -2,6 +2,7 @@ import unittest
 
 from research.autotrade_research.evaluation.gates import (
     EvaluationEvidence,
+    GateDecision,
     GateProfile,
     evaluate_gates,
 )
@@ -242,6 +243,37 @@ class EvaluationGateTests(unittest.TestCase):
         )
         self.assertEqual(decision.status, "FAIL")
         self.assertEqual(decision.checks["primary_baseline"], "FAIL")
+
+    def test_gate_decision_checks_are_immutable_after_evaluation(self):
+        decision = evaluate_gates(profile(), evidence())
+        self.assertEqual(decision.status, "PASS")
+        with self.assertRaises(TypeError):
+            decision.checks["net_advantage"] = "FAIL"
+        self.assertEqual(decision.checks["net_advantage"], "PASS")
+
+    def test_gate_decision_defensively_copies_mutable_checks(self):
+        checks = {"net_advantage": "PASS"}
+        decision = GateDecision(
+            status="PASS",
+            reasons=("registered gate passed",),
+            checks=checks,
+        )
+        checks["net_advantage"] = "FAIL"
+        self.assertEqual(decision.checks["net_advantage"], "PASS")
+
+    def test_forged_gate_decision_statuses_fail_closed(self):
+        with self.assertRaisesRegex(ValueError, "status"):
+            GateDecision(
+                status="APPROVED",
+                reasons=("forged",),
+                checks={"net_advantage": "PASS"},
+            )
+        with self.assertRaisesRegex(ValueError, "check status"):
+            GateDecision(
+                status="PASS",
+                reasons=("forged",),
+                checks={"net_advantage": "APPROVED"},
+            )
 
     def test_empty_selection_controls_are_invalid_protocol(self):
         with self.assertRaises(ValueError):

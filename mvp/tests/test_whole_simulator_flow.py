@@ -114,6 +114,16 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                     amount="1000",
                 )
             )
+            bootstrap_outbox = journal.pending_outbox()
+            self.assertEqual(
+                len(bootstrap_outbox),
+                1,
+                "durable seed cash flow must publish exactly one bootstrap event",
+            )
+            journal.mark_outbox_delivered(
+                bootstrap_outbox[0]["outbox_id"],
+                expected_envelope_hash=bootstrap_outbox[0]["envelope_hash"],
+            )
 
             authority = authority_service(journal)
             artifacts = ArtifactStore(Path(directory) / "artifacts")

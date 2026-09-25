@@ -536,6 +536,32 @@ class DurableReservationBook:
         events = self._events()
         return 0 if not events else int(events[-1]["aggregate_version"])
 
+    @property
+    def state_digest(self) -> str:
+        """Content identity for the exact durable reservation journal cut.
+
+        The digest is derived from the canonical account/environment scope and
+        the ordered immutable event identities/hashes. It is evidence of this
+        projection cut only; it does not create a second reservation authority.
+        """
+
+        events = self._events()
+        version = 0 if not events else int(events[-1]["aggregate_version"])
+        material = {
+            "environment": self.environment,
+            "account_id": self.account_id,
+            "version": version,
+            "events": [
+                {
+                    "event_id": event["event_id"],
+                    "aggregate_version": str(event["aggregate_version"]),
+                    "payload_hash": event["payload_hash"],
+                }
+                for event in events
+            ],
+        }
+        return payload_digest(material).removeprefix("sha256:")
+
     def reserve(
         self,
         *,

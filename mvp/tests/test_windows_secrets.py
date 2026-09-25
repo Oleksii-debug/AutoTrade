@@ -51,6 +51,7 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
             owner_identity="windows-user-1",
             account_id="paper-1",
             provider="simulated",
+            environment="PAPER",
             purpose="trade",
             secret_value=secret,
         )
@@ -71,6 +72,7 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
                 execution_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             ),
             "top-secret",
@@ -86,25 +88,36 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
                 execution_identity="windows-user-2",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             ),
             dict(
                 execution_identity="windows-user-1",
                 account_id="paper-2",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             ),
             dict(
                 execution_identity="windows-user-1",
                 account_id="paper-1",
                 provider="OTHER",
+                environment="PAPER",
                 purpose="TRADE",
             ),
             dict(
                 execution_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="READ",
+            ),
+            dict(
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="LIVE",
+                purpose="TRADE",
             ),
         )
         for values in cases:
@@ -125,6 +138,7 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
                 execution_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             )
 
@@ -138,6 +152,7 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
                 execution_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             ),
             "rotated-value",
@@ -166,6 +181,7 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
                 execution_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             ),
             "original-secret",
@@ -192,6 +208,7 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
                 execution_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             ),
             "original-secret",
@@ -217,6 +234,7 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
                 execution_identity="windows-user-1",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             )
 
@@ -235,6 +253,7 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
                     owner_identity="windows-user-1",
                     account_id="paper-1",
                     provider="SIMULATED",
+                    environment="PAPER",
                     purpose=purpose,
                     secret_value="must-not-store",
                 )
@@ -244,6 +263,7 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
             owner_identity="windows-user-1",
             account_id="paper-1",
             provider="SIMULATED",
+            environment="PAPER",
             purpose="read",
             secret_value="read-secret",
         )
@@ -260,6 +280,7 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
                 owner_identity="windows-user-1",
                 account_id=f"paper-{index}",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
                 secret_value=f"secret-{index}",
             )
@@ -279,9 +300,19 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
                     execution_identity="windows-user-1",
                     account_id=f"paper-{index}",
                     provider="SIMULATED",
+                    environment="PAPER",
                     purpose="TRADE",
                 ),
                 f"secret-{index}",
+            )
+
+    def test_legacy_v1_vault_requires_explicit_reattachment(self):
+        legacy = {"version": 1, "records": {}}
+        self.path.write_text(json.dumps(legacy), encoding="utf-8")
+        with self.assertRaisesRegex(SecretVaultError, "reattachment"):
+            ProtectedCredentialVault(
+                self.path,
+                protector=DeterministicProtector(),
             )
 
     def test_duplicate_handle_and_corrupt_vault_fail_closed(self):
@@ -304,6 +335,7 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
             ("purpose", "WITHDRAWAL"),
             ("account_id", "   "),
             ("provider", ""),
+            ("environment", "PRODUCTION"),
         ):
             with self.subTest(field=field):
                 tampered = json.loads(json.dumps(original))
@@ -335,6 +367,7 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
                 handle_id="cred-bad",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="WITHDRAWAL",
                 generation=1,
             )
@@ -343,6 +376,7 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
                 handle_id="cred-bad",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
                 generation=0,
             )
@@ -353,6 +387,7 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
                 owner_identity="",
                 account_id="paper-1",
                 provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
                 secret_value="x",
             )

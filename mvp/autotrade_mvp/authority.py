@@ -1522,6 +1522,15 @@ class AuthorityService:
                     ),
                     account_id=record.account_id,
                     environment=record.environment,
+                    provider_environment=(
+                        _text(
+                            availability_evidence.get("provider_environment"),
+                            name="provider_environment",
+                        )
+                        if availability_evidence.get("provider_environment")
+                        is not None
+                        else None
+                    ),
                     resources=tuple(sorted(risk_requirements)),
                     now=record.admitted_at,
                     max_age_seconds=availability_evidence.get(
@@ -2299,6 +2308,7 @@ class AuthorityService:
         reservation_provider_id: str,
         reservation_max_age_seconds,
         now: str,
+        reservation_provider_environment: str | None = None,
         confirmation_id: str | None = None,
         risk_reducing: bool = False,
         allocation_result: EvidenceBoundObjectiveAllocationResult | None = None,
@@ -2341,6 +2351,29 @@ class AuthorityService:
             reservation_provider_id,
             name="reservation_provider_id",
         ).upper()
+        snapshot_provider_environment = (
+            _text(environment, name="environment").upper()
+            if reservation_provider_environment is None
+            else _text(
+                reservation_provider_environment,
+                name="reservation_provider_environment",
+            ).upper()
+        )
+        if (
+            snapshot_provider_id == "BYBIT"
+            and reservation_provider_environment is None
+        ):
+            raise ValueError(
+                "BYBIT admission requires explicit reservation_provider_environment"
+            )
+        if (
+            snapshot_provider_id == "BYBIT"
+            and snapshot_provider_environment
+            not in {"MAINNET", "TESTNET", "DEMO"}
+        ):
+            raise ValueError(
+                "BYBIT reservation_provider_environment must be MAINNET, TESTNET or DEMO"
+            )
         snapshot_checkpoint_event_id = _text(
             reservation_checkpoint_event_id,
             name="reservation_checkpoint_event_id",
@@ -2617,6 +2650,8 @@ class AuthorityService:
                     durable_evidence.get("checkpoint_event_id")
                     != checkpoint_event_id
                     or durable_evidence.get("provider_id") != provider_id
+                    or durable_evidence.get("provider_environment")
+                    != snapshot_provider_environment
                     or durable_evidence.get("max_age_seconds")
                     != normalized_max_age
                 ):
@@ -2632,6 +2667,7 @@ class AuthorityService:
                         provider_id=provider_id,
                         account_id=account_id,
                         environment=environment,
+                        provider_environment=snapshot_provider_environment,
                         resources=tuple(
                             resource
                             for resource, _amount in normalized_requirements
@@ -3453,6 +3489,15 @@ class AuthorityService:
                     ),
                     account_id=record.account_id,
                     environment=record.environment,
+                    provider_environment=(
+                        _text(
+                            availability_evidence.get("provider_environment"),
+                            name="provider_environment",
+                        )
+                        if availability_evidence.get("provider_environment")
+                        is not None
+                        else None
+                    ),
                     resources=tuple(sorted(risk_requirements)),
                     now=now,
                     max_age_seconds=availability_evidence.get(

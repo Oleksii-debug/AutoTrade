@@ -1,51 +1,107 @@
-# WP-12 causal feeder foundation — 2026-09-24
+# WP-12 causal feeder foundation — 2026-09-25
 
-Status: **implementation foundation only; WP-12 is not complete.**
+Status: **FOUNDATION_ONLY / NOT_FULLY_QUALIFIED**
 
-This change implements a deterministic causal publication boundary under
-`research/autotrade_research/evaluation/replay/`.
+This evidence is limited to the canonical WP-12 `REPLAY / causal-feeder`
+responsibility. It does not grant trading, provider, release, or model authority.
 
-## Implemented invariants
+## Exact implementation evidence
 
-- Every observation preserves separate event time, evidenced historical availability
-  time, and ingest provenance time.
-- Ingest time never substitutes for historical availability; delayed archive ingestion
-  does not delay or advance the historical information cutoff.
-- Availability cannot precede event time, and ingest provenance cannot precede the
-  evidenced availability it claims to preserve.
-- The event schema is explicitly versioned and its version participates in the
-  immutable event digest.
-- Strategy-facing views contain only events whose evidenced availability is at or
-  before the simulation clock.
+- canonical PR: #450
+- reconverged base: `main@92ca4e0cfd8949645663eeaf092ac2db156ec75a`
+- implementation evidence head: `628af69730bc8c96099f55ae56492257ebd1a2e3`
+- `research/autotrade_research/evaluation/replay/feeder.py` blob:
+  `c91d347372216e209a9491e41bbbdacfb38da7d1`
+- `research/autotrade_research/evaluation/replay/__init__.py` blob:
+  `ac4b61b3e37b590b0d3a93ab0e8053cb16530c06`
+- `research/tests/test_causal_feeder.py` blob:
+  `ea5a8785f5d9ed82cac80ae6f69c2f0a66c69dbf`
+
+This document is an evidence-only update after the implementation head above; the
+current PR head may therefore be newer while the cited implementation blobs remain exact.
+
+## Implemented causal/replay invariants
+
+- Every privileged source event preserves separate event time, evidenced historical
+  availability time, and archive-ingest provenance time.
+- Historical `ingested_at` is provenance, not a substitute for historical
+  `available_at`; delayed archive ingestion does not move the historical causal cutoff.
+- `available_at >= event_time` and `ingested_at >= available_at`.
+- Strategy-facing `CausalObservation` deliberately omits archive `ingested_at`,
+  manifest digest and dataset digest so future curation metadata is not leaked into the
+  blinded strategy input.
+- Strategy-facing views contain only observations available at or before the
+  simulation clock and reject duplicate identities, future observations, and
+  non-canonical ordering even when directly constructed.
+- Privileged `CausalInputEvidence` separately commits simulation cutoff, exact
+  manifest digest, exact dataset digest, and exact published-prefix digest.
+- Resume at the same checkpoint reproduces both the strategy-visible view and the
+  privileged input-evidence digest.
 - Same-time ordering is deterministic by availability, source priority, source
   sequence and immutable event identity.
-- The ordering-policy version, external manifest digest and all ordered event digests
-  participate in the dataset identity.
-- Direct construction of a dataset cannot forge its digest, hide duplicate event
-  identities or supply a non-canonical order.
-- Checkpoints bind exact manifest, exact dataset, causal published prefix, simulation
-  time, cursor and a versioned strict record schema.
-- Restore rejects a changed dataset, tampered prefix, cursor that consumed future
-  data, cursor that skipped already-available data, malformed record, or unsupported
+- The ordering-policy version, external manifest digest and every ordered event digest
+  participate in the frozen dataset identity.
+- Event payloads are recursively immutable and binary floating point is rejected.
+- Direct dataset construction cannot forge its digest, hide duplicate event IDs, or
+  supply a non-canonical event order.
+- Checkpoints bind schema version, exact manifest, exact dataset, simulation time,
+  cursor, and exact published-prefix digest.
+- Restore rejects changed datasets, tampered prefixes, consumed-future cursors,
+  skipped-already-available cursors, malformed checkpoint records, and unsupported
   checkpoint schema.
 - The simulation clock cannot move backwards.
-- Payloads are recursively immutable and reject binary floating-point values.
+- Finalized bar observations cannot become visible before evidenced final availability.
 
-Focused local verification after hardening: **17/17 tests passed**. Additional
-determinism checks exercised all permutations of the same-time fixture, every replay
-publication boundary, and multiple Python hash seeds.
+## Exact-head GitHub evidence
 
-## Deliberate boundary
+At implementation head `628af69730bc8c96099f55ae56492257ebd1a2e3`:
 
-This is an **in-process causal API**, not hostile-code isolation. The canonical replay
-architecture requires process/filesystem/network restrictions before untrusted
-generated strategies can be described as isolated. No such claim is made here.
+### Focused research-primitives workflow
 
-This foundation also does not claim completed LEAN replay integration, production
-DatasetManifest loading, full market/history integration, ExperienceEpisode
-checkpointing, RNG/strategy/account/journal checkpoint state, provider qualification,
-release readiness, or economic-edge evidence. Those remain downstream WP-12
-integration and qualification work.
+Run `36104528541`:
 
-No provider network call, live trading authority or real-money operation is
-introduced.
+- Ubuntu / Python 3.12: **SUCCESS**
+- Windows / Python 3.12: **SUCCESS**
+- workflow conclusion: **SUCCESS**
+
+The Ubuntu job executed 205 research-primitives tests and reported `OK`.
+The WP-12 module contained 20 focused causal-feeder tests in that run, including:
+future availability, stable same-time ordering, checkpoint/resume, bar timing,
+payload immutability, direct-constructor integrity, every publication-boundary resume,
+future-view rejection, duplicate/reordered-view rejection, archive-ingest isolation,
+content-addressed privileged input evidence, dataset identity, and backwards-clock
+rejection.
+
+### Baseline
+
+Run `36104528626`: **SUCCESS**.
+
+### Whole-product Verify
+
+Run `36104528552`: **FAILURE** because the repository-wide contract phase still
+contains the known Bybit/Kraken provider-contract incompatibilities already present on
+canonical main. The focused WP-12 workflow is independently green; this document does
+not relabel the whole-product Verify as passing.
+
+## Deliberate remaining boundaries
+
+This remains an **in-process feeder foundation**, not hostile-code isolation.
+The canonical replay architecture requires process/filesystem/network restrictions for
+untrusted generated strategies. No such claim is made here.
+
+This foundation still does not establish:
+
+- filesystem/process/network future-file isolation;
+- production DatasetManifest loading and rights verification;
+- accepted WP-02/LEAN replay integration;
+- complete replay checkpoints containing RNG state, strategy/model state, positions,
+  orders, pending venue events, journal digest, and all model/data/config versions;
+- ledger/decision equality after restart end-to-end;
+- latency-aware venue processing or impossible-fill prevention;
+- causal universe/feature fitting guarantees outside the feeder boundary;
+- execution-simulator fidelity qualification;
+- full scientific protocol/holdout/forward-paper qualification;
+- economic edge.
+
+WP-12 must therefore remain NOT_FULLY_QUALIFIED until those integration and
+qualification requirements have exact-head evidence.

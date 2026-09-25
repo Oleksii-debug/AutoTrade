@@ -13,7 +13,11 @@ from mvp.autotrade_mvp.authority import AuthorityPolicy, AuthorityService
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
-from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence, reconcile_account
+from mvp.autotrade_mvp.reconciliation import (
+    ProviderFillEvidence,
+    SnapshotConsistencyEvidence,
+    reconcile_account,
+)
 from mvp.autotrade_mvp.reservations import ReservationBook
 from mvp.autotrade_mvp.risk import RiskContext, RiskIntent, RiskPolicy
 from mvp.autotrade_mvp.simulated_provider import SimulatedProvider
@@ -263,6 +267,11 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 },
                 local_execution_ids=[fill["provider_execution_id"]],
                 provider_fills=[provider_fill],
+                snapshot_consistency=SnapshotConsistencyEvidence(
+                    mode="ATOMIC",
+                    query_started_at=LATER,
+                    query_completed_at=LATER,
+                ),
                 coverage_start="2026-09-24T17:00:00Z",
                 coverage_end="2026-09-24T19:00:00Z",
                 pagination_complete=True,

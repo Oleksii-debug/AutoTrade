@@ -77,8 +77,12 @@ class OutboundAttempt:
     def prove_absent(self, evidence_refs: Iterable[str]) -> None:
         if self.phase is not SendPhase.SENT_UNKNOWN:
             raise ValueError("Absence proof requires an uncertain sent attempt")
-        refs = [item for item in evidence_refs if item]
-        if len(refs) < 2:
+        refs: list[str] = []
+        for item in evidence_refs:
+            if not isinstance(item, str) or not item:
+                raise ValueError("Absence proof evidence refs must be non-empty strings")
+            refs.append(item)
+        if len(refs) < 2 or len(set(refs)) != len(refs):
             raise ValueError("Absence proof requires independent evidence")
         self.phase = SendPhase.PROVEN_ABSENT
         self.evidence.extend(refs)
@@ -124,11 +128,15 @@ class RecoveryController:
             raise PermissionError(
                 "Reconciliation cannot establish readiness without durable journal"
             )
-        unresolved = {item for item in uncertainty if item}
-        self.unresolved_attempts = unresolved
-        self.provider_reconciled = bool(consistent and not unresolved)
+        reported_unresolved = {item for item in uncertainty if item}
+        # A generic account reconciliation cannot erase a previously recorded
+        # SENT_UNKNOWN attempt.  That identity leaves this set only through
+        # resolve_attempt(), which requires an evidence-bound terminal phase.
+        self.unresolved_attempts.update(reported_unresolved)
+        self.provider_reconciled = bool(consistent and not self.unresolved_attempts)
         if self.provider_reconciled:
             self.reason_codes.discard("startup_reconciliation_required")
+            self.reason_codes.discard("clock_requalification_required")
             self.reason_codes.discard("provider_uncertainty")
         else:
             self.reason_codes.add("provider_uncertainty")
@@ -153,7 +161,13 @@ class RecoveryController:
         if trusted:
             self.reason_codes.discard("clock_untrusted")
         else:
+            # A clock incident invalidates time-bound reconciliation/freshness
+            # evidence. Restoring clock health alone cannot reuse pre-incident
+            # readiness evidence.
+            self.provider_reconciled = False
             self.reason_codes.add("clock_untrusted")
+            self.reason_codes.add("clock_requalification_required")
+            self.reason_codes.add("startup_reconciliation_required")
         self._recompute_state()
 
     def note_unknown_send(self, attempt: OutboundAttempt) -> None:

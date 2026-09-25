@@ -36,6 +36,65 @@ def _decimal_map(values: Mapping[str, Decimal]) -> dict[str, str]:
     return {key: str(value) for key, value in sorted(values.items())}
 
 
+def _scope(
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+) -> tuple[str, str, str]:
+    return (
+        _text(provider_id, name="provider_id").upper(),
+        _text(account_id, name="account_id"),
+        _text(environment, name="environment").upper(),
+    )
+
+
+def _reconciliation_aggregate_id(
+    *,
+    reconciliation_id: str,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+) -> str:
+    rid = _text(reconciliation_id, name="reconciliation_id")
+    provider, account, scope = _scope(
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
+    return "account-reconciliation:" + str(
+        uuid5(
+            NAMESPACE_URL,
+            "https://events.autotrade.local/reconciliation-scope/"
+            f"{provider}/{account}/{scope}/{rid}",
+        )
+    )
+
+
+def _require_checkpoint_scope(
+    checkpoint: Mapping[str, Any],
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+) -> Mapping[str, Any]:
+    payload = checkpoint.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ValueError("checkpoint payload is required")
+    provider, account, scope = _scope(
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
+    if (
+        payload.get("provider_id") != provider
+        or payload.get("account_id") != account
+        or payload.get("environment") != scope
+    ):
+        raise ValueError("checkpoint reconciliation scope mismatch")
+    return payload
+
+
 def reconciliation_payload(
     result: ReconciliationResult,
     *,
@@ -45,6 +104,9 @@ def reconciliation_payload(
         raise TypeError("result must be ReconciliationResult")
     timestamp = _instant(observed_at, name="observed_at")
     return {
+        "provider_id": result.provider_id,
+        "account_id": result.account_id,
+        "environment": result.environment,
         "observed_at": timestamp,
         "complete": result.complete,
         "snapshot_consistent": result.snapshot_consistent,
@@ -65,6 +127,7 @@ def reconciliation_payload(
         "submission_resolutions": [
             {
                 "attempt_id": item.attempt_id,
+                "intent_id": item.intent_id,
                 "client_order_id": item.client_order_id,
                 "outcome": item.outcome,
                 "evidence_reason": item.evidence_reason,
@@ -96,23 +159,35 @@ def record_reconciliation_checkpoint(
     reconciliation_id: str,
     result: ReconciliationResult,
     observed_at: str,
+    host_id: str,
+    owner_epoch: str,
 ) -> dict[str, Any]:
     """Persist one exact reconciliation outcome, idempotently for retries."""
 
     if not isinstance(store, JournalStore):
         raise TypeError("store must be JournalStore")
     rid = _text(reconciliation_id, name="reconciliation_id")
+    host = _text(host_id, name="host_id")
+    epoch = _text(owner_epoch, name="owner_epoch")
     payload = reconciliation_payload(result, observed_at=observed_at)
-    existing = store.load_events("account_reconciliation", rid)
+    aggregate_id = _reconciliation_aggregate_id(
+        reconciliation_id=rid,
+        provider_id=result.provider_id,
+        account_id=result.account_id,
+        environment=result.environment,
+    )
+    existing = store.load_events("account_reconciliation", aggregate_id)
     if existing and existing[-1]["payload"] == payload:
         return existing[-1]
 
-    version = store.next_aggregate_version("account_reconciliation", rid)
+    version = store.next_aggregate_version(
+        "account_reconciliation", aggregate_id
+    )
     event_id = str(
         uuid5(
             NAMESPACE_URL,
             "https://events.autotrade.local/reconciliation/"
-            f"{rid}/{version}/{payload_digest(payload)}",
+            f"{aggregate_id}/{version}/{payload_digest(payload)}",
         )
     )
     envelope = {
@@ -120,11 +195,11 @@ def record_reconciliation_checkpoint(
         "event_type": "AccountReconciled",
         "schema_version": "1.0.0",
         "aggregate_type": "account_reconciliation",
-        "aggregate_id": rid,
+        "aggregate_id": aggregate_id,
         "aggregate_version": str(version),
-        "host_id": "local-mvp",
-        "owner_epoch": "1",
-        "environment": "SIMULATION",
+        "host_id": host,
+        "owner_epoch": epoch,
+        "environment": result.environment,
         "occurred_at": payload["observed_at"],
         "observed_at": payload["observed_at"],
         "committed_at": payload["observed_at"],
@@ -148,22 +223,47 @@ def load_latest_reconciliation_checkpoint(
     store: JournalStore,
     *,
     reconciliation_id: str,
+    provider_id: str,
+    account_id: str,
+    environment: str,
 ) -> dict[str, Any] | None:
     if not isinstance(store, JournalStore):
         raise TypeError("store must be JournalStore")
     rid = _text(reconciliation_id, name="reconciliation_id")
-    events = store.load_events("account_reconciliation", rid)
-    return events[-1] if events else None
+    aggregate_id = _reconciliation_aggregate_id(
+        reconciliation_id=rid,
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
+    events = store.load_events("account_reconciliation", aggregate_id)
+    if not events:
+        return None
+    event = events[-1]
+    _require_checkpoint_scope(
+        event,
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
+    return event
 
 
 def unresolved_attempt_ids_from_checkpoint(
     checkpoint: Mapping[str, Any] | None,
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
 ) -> tuple[str, ...]:
     if checkpoint is None:
         return ()
-    payload = checkpoint.get("payload")
-    if not isinstance(payload, Mapping):
-        raise ValueError("checkpoint payload is required")
+    payload = _require_checkpoint_scope(
+        checkpoint,
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
     resolutions = payload.get("submission_resolutions")
     if not isinstance(resolutions, list):
         raise ValueError("checkpoint submission_resolutions must be a list")
@@ -180,12 +280,19 @@ def unresolved_attempt_ids_from_checkpoint(
 
 def unresolved_provider_activity_ids_from_checkpoint(
     checkpoint: Mapping[str, Any] | None,
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
 ) -> tuple[str, ...]:
     if checkpoint is None:
         return ()
-    payload = checkpoint.get("payload")
-    if not isinstance(payload, Mapping):
-        raise ValueError("checkpoint payload is required")
+    payload = _require_checkpoint_scope(
+        checkpoint,
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
     unexpected = payload.get("unexpected_provider_activity_ids", [])
     missing = payload.get("missing_local_provider_activity_ids", [])
     for values, name in (
@@ -248,6 +355,24 @@ def unknown_submissions_from_dispatch(
                 f"submission attempt {attempt_id} does not start with SubmissionPrepared"
             )
         payload = first["payload"]
+        if not isinstance(payload, Mapping):
+            raise ValueError("SubmissionPrepared payload must be an object")
+        provider_id = _text(
+            payload.get("provider"), name="provider"
+        ).upper()
+        account_id = _text(
+            payload.get("account_id"), name="account_id"
+        )
+        environment = _text(
+            payload.get("environment"), name="environment"
+        ).upper()
+        intent_id = _text(
+            payload.get("intent_id"), name="intent_id"
+        )
+        if _text(first.get("environment"), name="event.environment").upper() != environment:
+            raise ValueError(
+                "SubmissionPrepared envelope environment does not match payload"
+            )
         client_order_id = _text(
             payload.get("client_order_id"),
             name="client_order_id",
@@ -261,7 +386,11 @@ def unknown_submissions_from_dispatch(
             recovered.append(
                 UnknownSubmission.create(
                     attempt_id=attempt_id,
+                    intent_id=intent_id,
                     client_order_id=client_order_id,
+                    provider_id=provider_id,
+                    account_id=account_id,
+                    environment=environment,
                     started_at=started_at,
                 )
             )

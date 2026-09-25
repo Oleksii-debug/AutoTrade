@@ -23,6 +23,7 @@ from mvp.autotrade_mvp.reservations import InsufficientAvailable
 from mvp.autotrade_mvp.risk import RiskContext, RiskIntent, RiskPolicy
 from mvp.autotrade_mvp.securities_borrow import (
     BorrowAvailabilityEvidence,
+    DurableBorrowRecallProjection,
     BorrowRecallEvidence,
     BorrowRecallResolutionEvidence,
     borrow_resource_key,
@@ -430,6 +431,20 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                     effective_at="2026-09-25T05:01:40Z",
                     evidence_ref="provider:dispatch-recall-r2",
                 )
+            )
+            reloaded_projection = DurableBorrowRecallProjection(
+                store,
+                provider_id=PROVIDER_ID,
+                account_id=ACCOUNT_ID,
+                environment=ENVIRONMENT,
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                evidence_artifact_store=authority.evidence_artifact_store,
+            )
+            self.assertEqual(reloaded_projection.active_quantity, Decimal("0"))
+            authority._validate_durable_financial_evidence(
+                admitted,
+                authority._policies[admitted.policy_id],
             )
             self.assertEqual(
                 authority.dispatch_allowed(

@@ -7,6 +7,7 @@ from uuid import uuid4
 from mvp.autotrade_mvp.binance_spot import (
     BinanceSpotAdapterError,
     BinanceSpotOrderIntent,
+    BinanceSpotSymbolRules,
     coverage_evidence,
     parse_account_trades,
     parse_order_ack,
@@ -83,7 +84,7 @@ def capability(
             account_id=account_id,
             entity_id="global",
             environment=environment,
-            instrument_version="BTCUSDT:v1",
+            instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=NOW + timedelta(hours=1),
             supported_order_types=frozenset(order_types),
@@ -110,6 +111,53 @@ def capability(
     )
 
 
+def symbol_rules(
+    *,
+    instrument_version="BTCUSDT:v1",
+    symbol="BTCUSDT",
+    min_qty="0.001",
+    max_qty="100",
+    step_size="0.001",
+    min_price="0.01",
+    max_price="1000000",
+    tick_size="0.01",
+    min_notional="5",
+    apply_to_market=True,
+):
+    return BinanceSpotSymbolRules.from_exchange_info(
+        instrument_version=instrument_version,
+        symbol_payload={
+            "symbol": symbol,
+            "filters": [
+                {
+                    "filterType": "PRICE_FILTER",
+                    "minPrice": min_price,
+                    "maxPrice": max_price,
+                    "tickSize": tick_size,
+                },
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": min_qty,
+                    "maxQty": max_qty,
+                    "stepSize": step_size,
+                },
+                {
+                    "filterType": "MARKET_LOT_SIZE",
+                    "minQty": min_qty,
+                    "maxQty": max_qty,
+                    "stepSize": step_size,
+                },
+                {
+                    "filterType": "MIN_NOTIONAL",
+                    "minNotional": min_notional,
+                    "applyToMarket": apply_to_market,
+                    "avgPriceMins": 5,
+                },
+            ],
+        },
+    )
+
+
 class BinanceSpotFoundationTests(unittest.TestCase):
     def test_limit_request_preserves_exact_strings_and_requests_ack_only(self):
         intent = BinanceSpotOrderIntent.create(
@@ -125,6 +173,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             intent,
             client_order_id="at-order-1",
             capability=capability(),
+            symbol_rules=symbol_rules(),
             at=NOW,
         )
         self.assertEqual(request.endpoint, "/api/v3/order")
@@ -185,8 +234,77 @@ class BinanceSpotFoundationTests(unittest.TestCase):
                 intent,
                 client_order_id="at-order-2",
                 capability=capability(order_types=("MARKET",)),
+                symbol_rules=symbol_rules(),
                 at=NOW,
             )
+
+    def test_exchange_info_filters_reject_invalid_limit_before_send(self):
+        intent = BinanceSpotOrderIntent.create(
+            instrument_version="BTCUSDT:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="0.0105",
+            price="40000.255",
+            time_in_force="GTC",
+        )
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "quantity"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-filter-1",
+                capability=capability(),
+                symbol_rules=symbol_rules(),
+                at=NOW,
+            )
+
+    def test_market_notional_filter_requires_causal_reference_price(self):
+        intent = BinanceSpotOrderIntent.create(
+            instrument_version="BTCUSDT:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity="0.001",
+        )
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "reference price"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-filter-2",
+                capability=capability(),
+                symbol_rules=symbol_rules(min_notional="50"),
+                at=NOW,
+            )
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "notional"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-filter-3",
+                capability=capability(),
+                symbol_rules=symbol_rules(min_notional="50"),
+                at=NOW,
+                market_reference_price="40000",
+            )
+
+    def test_exchange_info_rules_are_bound_to_exact_instrument(self):
+        intent = BinanceSpotOrderIntent.create(
+            instrument_version="BTCUSDT:v2",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="0.01",
+            price="40000.25",
+            time_in_force="GTC",
+        )
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "instrument version"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-filter-4",
+                capability=capability(instrument_version="BTCUSDT:v2"),
+                symbol_rules=symbol_rules(instrument_version="BTCUSDT:v1"),
+                at=NOW,
+            )
+
+    def test_exchange_info_market_flags_must_be_real_booleans(self):
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "boolean"):
+            symbol_rules(apply_to_market="false")
 
     def test_ack_is_never_promoted_to_fill(self):
         result = parse_order_ack(

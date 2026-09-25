@@ -1117,7 +1117,8 @@ class BybitV5AdapterTests(unittest.TestCase):
             consistency_horizon_satisfied=True,
         
             account_id="paper-1",
-            environment="PAPER",)
+            environment="PAPER",
+            provider_environment="TESTNET",)
         self.assertFalse(evidence.provider_semantics_exclude_execution)
         self.assertFalse(
             evidence.proves_absence_for(
@@ -1134,7 +1135,8 @@ class BybitV5AdapterTests(unittest.TestCase):
             qualified_exclusion_semantics=True,
         
             account_id="paper-1",
-            environment="PAPER",)
+            environment="PAPER",
+            provider_environment="TESTNET",)
         self.assertTrue(
             qualified.proves_absence_for(
                 datetime(2026, 9, 24, 20, tzinfo=timezone.utc)

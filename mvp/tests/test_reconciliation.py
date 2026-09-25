@@ -1139,6 +1139,160 @@ class ReconciliationTests(unittest.TestCase):
                 pagination_complete=True,
             )
 
+    def test_bybit_reconciliation_rejects_cross_provider_environment_evidence(self):
+        common = dict(
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            environment="PAPER",
+        )
+        testnet_fill = ProviderFillEvidence.create(
+            **common,
+            provider_environment="TESTNET",
+            provider_execution_id="exec-1",
+            client_order_id="client-1",
+            instrument="BTCUSDT@v1",
+            quantity="1",
+            price="100",
+            fee_currency="USDT",
+            trade_time="2026-09-24T18:00:00Z",
+        )
+        base = dict(
+            **common,
+            provider_environment="TESTNET",
+            local_cash={},
+            provider_cash={},
+            local_positions={},
+            provider_positions={},
+            local_execution_ids=("exec-1",),
+            provider_fills=(testnet_fill,),
+            coverage_start="2026-09-24T17:00:00Z",
+            coverage_end="2026-09-24T19:00:00Z",
+            pagination_complete=True,
+        )
+        cases = (
+            (
+                "working-order",
+                "provider_working_orders",
+                (
+                    ProviderWorkingOrderEvidence.create(
+                        **common,
+                        provider_environment="DEMO",
+                        provider_order_id="order-1",
+                        client_order_id="client-1",
+                        instrument="BTCUSDT@v1",
+                        remaining_quantity="1",
+                    ),
+                ),
+                "provider_environment mismatch",
+            ),
+            (
+                "snapshot",
+                "snapshot_consistency",
+                SnapshotConsistencyEvidence(
+                    **common,
+                    provider_environment="DEMO",
+                    mode="ATOMIC",
+                    query_started_at="2026-09-24T17:00:00Z",
+                    query_completed_at="2026-09-24T19:00:00Z",
+                ),
+                "scope mismatch",
+            ),
+            (
+                "availability",
+                "resource_availability",
+                ResourceAvailabilityEvidence(
+                    **common,
+                    provider_environment="DEMO",
+                    snapshot_id="demo-capacity",
+                    query_started_at="2026-09-24T17:00:00Z",
+                    query_completed_at="2026-09-24T19:00:00Z",
+                    valid_until="2026-09-24T19:05:00Z",
+                    available_resources={"CASH:USDT": "100"},
+                    evidence_refs=("provider:demo-capacity",),
+                ),
+                "scope mismatch",
+            ),
+            (
+                "activity",
+                "provider_activities",
+                (
+                    ProviderActivityEvidence.create(
+                        **common,
+                        provider_environment="DEMO",
+                        activity_id="activity-1",
+                        activity_type="DEPOSIT",
+                        origin="EXTERNAL",
+                        occurred_at="2026-09-24T18:00:00Z",
+                        currency="USDT",
+                        signed_amount="1",
+                    ),
+                ),
+                "provider_environment mismatch",
+            ),
+            (
+                "activity-coverage",
+                "activity_coverage",
+                CoverageSurfaceEvidence(
+                    **common,
+                    provider_environment="DEMO",
+                    surface="ACTIVITIES",
+                    coverage_start="2026-09-24T17:00:00Z",
+                    coverage_end="2026-09-24T19:00:00Z",
+                    pagination_complete=True,
+                    consistency_horizon_satisfied=True,
+                    provider_semantics_exclude_execution=False,
+                ),
+                "coverage scope mismatch",
+            ),
+            (
+                "unknown-submission",
+                "unknown_submissions",
+                (
+                    UnknownSubmission.create(
+                        **common,
+                        provider_environment="DEMO",
+                        attempt_id="attempt-1",
+                        intent_id="intent-1",
+                        client_order_id="client-1",
+                        started_at="2026-09-24T18:00:00Z",
+                    ),
+                ),
+                "unknown submission scope mismatch",
+            ),
+        )
+        for label, field, value, error in cases:
+            kwargs = dict(base)
+            kwargs[field] = value
+            if field == "resource_availability":
+                kwargs["snapshot_consistency"] = SnapshotConsistencyEvidence(
+                    **common,
+                    provider_environment="TESTNET",
+                    mode="ATOMIC",
+                    query_started_at="2026-09-24T17:00:00Z",
+                    query_completed_at="2026-09-24T19:00:00Z",
+                )
+            with self.subTest(label=label), self.assertRaisesRegex(
+                ValueError,
+                error,
+            ):
+                reconcile_account(**kwargs)
+
+        demo_coverage = CoverageSurfaceEvidence(
+            **common,
+            provider_environment="DEMO",
+            surface="EXECUTIONS",
+            coverage_start="2026-09-24T17:00:00Z",
+            coverage_end="2026-09-24T19:00:00Z",
+            pagination_complete=True,
+            consistency_horizon_satisfied=True,
+            provider_semantics_exclude_execution=True,
+        )
+        with self.assertRaisesRegex(ValueError, "absence coverage scope mismatch"):
+            reconcile_account(
+                **base,
+                absence_coverage=(demo_coverage,),
+            )
+
     def test_environment_scope_is_enforced_before_reconciliation(self):
         with self.assertRaisesRegex(ValueError, "fill evidence environment mismatch"):
             self.base(provider_fills=[fill(environment="LIVE")])

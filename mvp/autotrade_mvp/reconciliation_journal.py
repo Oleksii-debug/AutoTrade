@@ -245,6 +245,15 @@ def reconciliation_payload(
                 "provider_id": result.resource_availability.provider_id,
                 "account_id": result.resource_availability.account_id,
                 "environment": result.resource_availability.environment,
+                **(
+                    {
+                        "provider_environment":
+                            result.resource_availability.provider_environment
+                    }
+                    if result.resource_availability.provider_environment
+                    != result.resource_availability.environment
+                    else {}
+                ),
                 "snapshot_id": result.resource_availability.snapshot_id,
                 "query_started_at": result.resource_availability.query_started_at,
                 "query_completed_at": result.resource_availability.query_completed_at,
@@ -1275,6 +1284,22 @@ def unknown_submissions_from_dispatch(
                 "SubmissionPrepared durable scope does not match requested scope"
             )
         environment = durable_environment
+        submission_scope = payload.get("submission_scope")
+        provider_environment = None
+        if isinstance(submission_scope, Mapping):
+            raw_provider_environment = submission_scope.get(
+                "provider_environment"
+            )
+            if raw_provider_environment is not None:
+                provider_environment = _text(
+                    raw_provider_environment,
+                    name="submission_scope.provider_environment",
+                ).upper()
+        if provider_id == "BYBIT" and provider_environment is None:
+            raise ValueError(
+                "BYBIT SubmissionPrepared scope requires explicit "
+                "provider_environment"
+            )
         intent_id = _text(
             payload.get("intent_id"), name="intent_id"
         )
@@ -1301,6 +1326,7 @@ def unknown_submissions_from_dispatch(
                     account_id=account_id,
                     environment=environment,
                     started_at=started_at,
+                    provider_environment=provider_environment,
                 )
             )
     return tuple(recovered)

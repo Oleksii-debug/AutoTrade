@@ -93,6 +93,7 @@ class ForwardPaperProtocol:
     campaign_id: str
     exact_build_sha: str
     protocol_hash: str
+    registered_at: str
     starts_at: str
     ends_at: str
     minimum_predictions: int
@@ -102,8 +103,13 @@ class ForwardPaperProtocol:
 
     def __post_init__(self) -> None:
         build = _git_sha(self.exact_build_sha, name="exact_build_sha")
+        registered = _instant(self.registered_at, name="registered_at")
         start = _instant(self.starts_at, name="starts_at")
         end = _instant(self.ends_at, name="ends_at")
+        if registered > start:
+            raise ForwardPaperError(
+                "registered_at must not be after campaign starts_at"
+            )
         if end <= start:
             raise ForwardPaperError("ends_at must be after starts_at")
         capabilities = _unique_text(
@@ -165,6 +171,7 @@ class ForwardPaperProtocol:
         campaign_id: str,
         exact_build_sha: str,
         protocol_hash: str,
+        registered_at: str,
         starts_at: str,
         ends_at: str,
         minimum_predictions: int,
@@ -173,8 +180,13 @@ class ForwardPaperProtocol:
         required_operational_cases: Sequence[str],
     ) -> "ForwardPaperProtocol":
         build = _git_sha(exact_build_sha, name="exact_build_sha")
+        registered = _instant(registered_at, name="registered_at")
         start = _instant(starts_at, name="starts_at")
         end = _instant(ends_at, name="ends_at")
+        if registered > start:
+            raise ForwardPaperError(
+                "registered_at must not be after campaign starts_at"
+            )
         if end <= start:
             raise ForwardPaperError("ends_at must be after starts_at")
         capabilities = _unique_text(
@@ -196,6 +208,7 @@ class ForwardPaperProtocol:
             campaign_id=_text(campaign_id, name="campaign_id"),
             exact_build_sha=build,
             protocol_hash=_hash(protocol_hash, name="protocol_hash"),
+            registered_at=registered_at,
             starts_at=starts_at,
             ends_at=ends_at,
             minimum_predictions=_positive_int(

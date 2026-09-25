@@ -50,6 +50,11 @@ _TIME_IN_FORCE = {
 
 _AMBIGUOUS_RESPONSE_CODES = frozenset({429, 10000, 10014, 10016})
 _CLIENT_ID = re.compile(r"^[A-Za-z0-9_-]{1,36}$")
+_REST_BASE_BY_ENVIRONMENT: Mapping[str, str] = {
+    "MAINNET": "https://api.bybit.com",
+    "TESTNET": "https://api-testnet.bybit.com",
+    "DEMO": "https://api-demo.bybit.com",
+}
 
 
 def _text(value: object, *, name: str) -> str:
@@ -145,7 +150,16 @@ def _response_evidence(
     response: Mapping[str, Any],
     *,
     observed_at: str,
+    environment: str,
 ) -> dict[str, str]:
+    normalized_environment = _text(environment, name="environment").upper()
+    try:
+        rest_base = _REST_BASE_BY_ENVIRONMENT[normalized_environment]
+    except KeyError as error:
+        raise ProviderCoreError(
+            "Bybit evidence environment must be MAINNET, TESTNET or DEMO"
+        ) from error
+    source_uri = f"{rest_base}{endpoint}"
     encoded = json.dumps(
         response,
         sort_keys=True,
@@ -158,11 +172,12 @@ def _response_evidence(
         "artifact_id": str(
             uuid5(
                 NAMESPACE_URL,
-                f"https://api.bybit.com{endpoint}#sha256:{digest}",
+                f"{source_uri}#sha256:{digest}",
             )
         ),
         "sha256": f"sha256:{digest}",
-        "source_uri": f"https://api.bybit.com{endpoint}",
+        "source_uri": source_uri,
+        "provider_environment": normalized_environment,
         "observed_at": observed_at,
         "rights_id": "provider-observation-bybit",
     }
@@ -291,6 +306,7 @@ def parse_submission_response(
     attempt_id: str,
     client_order_id: str,
     response: Mapping[str, Any],
+    environment: str,
     observed_at: str | None = None,
 ) -> dict[str, Any]:
     """Map a recorded Bybit create-order response to SubmissionResult.
@@ -314,6 +330,7 @@ def parse_submission_response(
             BYBIT_DOCUMENTED_ENDPOINTS["PLACE_ORDER"],
             envelope,
             observed_at=when,
+            environment=environment,
         )
     ]
 

@@ -323,7 +323,7 @@ class WhiteBitPreparedRequest:
         return MappingProxyType(
             {
                 "endpoint": self.endpoint,
-                "body": MappingProxyType(dict(self.body)),
+                "body": dict(self.body),
                 "capability_snapshot_id": self.capability_snapshot_id,
             }
         )

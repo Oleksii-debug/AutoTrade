@@ -14,6 +14,8 @@ from hashlib import sha256
 import json
 from typing import Mapping, Sequence
 
+from ..memory.episodes import CoveragePopulationSnapshot
+
 
 _OUTCOME_CLASSES = ("POSITIVE", "NEGATIVE", "NULL", "UNKNOWN", "PENDING")
 
@@ -355,11 +357,11 @@ class PopulationCoverageManifest:
 
 
 def build_population_coverage(
-    population: Sequence[Mapping[str, object]],
+    population: CoveragePopulationSnapshot,
     *,
     candidate_hash: str,
     frozen_protocol_hash: str,
-    input_snapshot_hash: str,
+    input_snapshot_hash: str | None = None,
     causal_cutoff,
     permission_classes: Sequence[str],
     included_episode_ids: Sequence[str],
@@ -374,9 +376,22 @@ def build_population_coverage(
     be either included or explicitly excluded with a non-empty protocol reason.
     """
 
+    if not isinstance(population, CoveragePopulationSnapshot):
+        raise TypeError(
+            "population must be a canonical CoveragePopulationSnapshot from ExperienceMemory"
+        )
     candidate = _sha_identity(candidate_hash, name="candidate_hash")
     protocol = _sha_identity(frozen_protocol_hash, name="frozen_protocol_hash")
-    snapshot = _sha_identity(input_snapshot_hash, name="input_snapshot_hash")
+    snapshot = _sha_identity(population.root_hash, name="population root_hash")
+    if input_snapshot_hash is not None:
+        supplied_snapshot = _sha_identity(
+            input_snapshot_hash,
+            name="input_snapshot_hash",
+        )
+        if supplied_snapshot != snapshot:
+            raise ValueError(
+                "input_snapshot_hash must equal canonical ExperienceMemory population root"
+            )
     cutoff = _time(causal_cutoff, name="causal_cutoff")
 
     if isinstance(permission_classes, (str, bytes)):
@@ -392,6 +407,20 @@ def build_population_coverage(
         if instrument_family is None
         else _text(instrument_family, name="instrument_family")
     )
+    if cutoff != population.causal_cutoff:
+        raise ValueError("population snapshot causal_cutoff does not match frozen scope")
+    if permissions != population.permission_classes:
+        raise ValueError("population snapshot permissions do not match frozen scope")
+    if normalized_task != population.task:
+        raise ValueError("population snapshot task does not match frozen scope")
+    if normalized_family != population.instrument_family:
+        raise ValueError(
+            "population snapshot instrument_family does not match frozen scope"
+        )
+
+    population_rows = population.rows
+    if population.eligible_count != len(population_rows):
+        raise ValueError("population snapshot eligible_count does not match rows")
 
     if isinstance(included_episode_ids, (str, bytes)):
         raise TypeError("included_episode_ids must be a collection")
@@ -417,7 +446,7 @@ def build_population_coverage(
     regime_labels_complete: dict[str, bool] = {}
     episode_digests: list[tuple[str, str]] = []
 
-    for raw in population:
+    for raw in population_rows:
         if not isinstance(raw, Mapping):
             raise TypeError("population entries must be mappings")
         episode_id = _text(raw.get("episode_id"), name="episode_id")

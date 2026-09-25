@@ -421,6 +421,43 @@ class ReconciliationTests(unittest.TestCase):
                 started_at="2026-09-24T18:00:00",
             )
 
+    def test_pre_submission_working_snapshot_cannot_resolve_unknown_send(self):
+        unknown = UnknownSubmission.create(
+            attempt_id="attempt-working-pre-snapshot",
+            intent_id="intent-working-pre-snapshot",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            client_order_id="client-working-pre-snapshot",
+            started_at="2026-09-24T18:00:00Z",
+        )
+        order = ProviderWorkingOrderEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            provider_order_id="provider-working-pre-snapshot",
+            client_order_id="client-working-pre-snapshot",
+            instrument="ABC",
+            remaining_quantity="1",
+        )
+        # Base snapshot starts at 17:00, before the 18:00 submission. With no
+        # per-order observation timestamp, that snapshot cannot prove the
+        # working order was observed after this send.
+        result = self.base(
+            local_working_client_order_ids=["client-working-pre-snapshot"],
+            provider_working_orders=[order],
+            unknown_submissions=[unknown],
+            searched_client_order_ids=["client-working-pre-snapshot"],
+        )
+        resolution = result.submission_resolutions[0]
+        self.assertEqual(resolution.outcome, "UNKNOWN")
+        self.assertEqual(
+            resolution.evidence_reason,
+            "provider_working_order_snapshot_not_causal_for_submission",
+        )
+        self.assertFalse(result.complete)
+        self.assertIn("ACCOUNT", result.blocking_resources)
+
     def test_unknown_send_resolves_to_observed_working_order_without_retry(self):
         unknown = UnknownSubmission.create(
             attempt_id="attempt-working",
@@ -445,6 +482,14 @@ class ReconciliationTests(unittest.TestCase):
             provider_working_orders=[order],
             unknown_submissions=[unknown],
             searched_client_order_ids=["client-working"],
+            snapshot_consistency=SnapshotConsistencyEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                mode="ATOMIC",
+                query_started_at="2026-09-24T18:01:00Z",
+                query_completed_at="2026-09-24T19:00:00Z",
+            ),
         )
         resolution = result.submission_resolutions[0]
         self.assertEqual(resolution.outcome, "OBSERVED_WORKING_ORDER")

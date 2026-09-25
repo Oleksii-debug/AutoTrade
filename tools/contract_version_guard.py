@@ -96,12 +96,19 @@ def export_ref(ref: str) -> Path:
     return temporary
 
 
+def evaluate_refs(base_ref: str, current_ref: str = "HEAD") -> list[str]:
+    """Compare committed contract trees, never test-mutated working-tree bytes."""
+    base = export_ref(base_ref)
+    current = export_ref(current_ref)
+    return evaluate(base, current)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-ref", required=True)
+    parser.add_argument("--current-ref", default="HEAD")
     args = parser.parse_args()
-    base = export_ref(args.base_ref)
-    errors = evaluate(base, Path.cwd())
+    errors = evaluate_refs(args.base_ref, args.current_ref)
     if errors:
         for error in errors:
             print(f"ERROR: {error}")

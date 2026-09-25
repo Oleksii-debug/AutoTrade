@@ -64,7 +64,7 @@ def write_openapi(root: Path, version: str, operations: list[tuple[str, str, str
             "              schema:",
             f"                $ref: {schema_ref}",
         ])
-    path.write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 class ContractVersionGuardTests(unittest.TestCase):

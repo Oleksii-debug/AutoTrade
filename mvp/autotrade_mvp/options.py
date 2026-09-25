@@ -9,7 +9,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+import json
 from typing import Iterable, Literal, Mapping
+from uuid import UUID
+
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .accounting import JournalTransaction, posting, validate_transaction
 
@@ -382,6 +386,51 @@ def _input_digest(value: str) -> str:
     return value
 
 
+def _decimal_text(value: Decimal) -> str:
+    normalized = _decimal(value, "decimal evidence")
+    if normalized == 0:
+        return "0"
+    return format(normalized.normalize(), "f")
+
+
+def _instant_text(value: datetime) -> str:
+    return _utc(value, "evidence instant").isoformat().replace("+00:00", "Z")
+
+
+def _duration_microseconds(value: timedelta) -> int:
+    if not isinstance(value, timedelta) or value <= timedelta(0):
+        raise OptionError("evidence duration must be a positive timedelta")
+    return (
+        value.days * 86_400_000_000
+        + value.seconds * 1_000_000
+        + value.microseconds
+    )
+
+
+def _immutable_option_evidence_ref(value: object) -> tuple[str, str, str]:
+    if not isinstance(value, str) or not value.strip():
+        raise OptionError("option risk evidence requires immutable artifact evidence_ref")
+    reference = value.strip()
+    marker = "@sha256:"
+    if not reference.startswith("artifact:") or marker not in reference:
+        raise OptionError(
+            "option risk evidence_ref must bind artifact UUID and SHA-256 digest"
+        )
+    artifact_id, digest = reference[len("artifact:"):].split(marker, 1)
+    try:
+        artifact_id = str(UUID(artifact_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise OptionError("option risk evidence artifact identity must be a UUID") from error
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        raise OptionError(
+            "option risk evidence_ref must use canonical lowercase SHA-256"
+        )
+    canonical = f"artifact:{artifact_id}@sha256:{digest}"
+    if reference != canonical:
+        raise OptionError("option risk evidence_ref must be canonical")
+    return artifact_id, digest, canonical
+
+
 @dataclass(frozen=True)
 class OptionScenarioResult:
     """One deterministic stress evaluation, not a probability forecast."""
@@ -430,6 +479,7 @@ class OptionRiskEvidence:
     scenarios: tuple[OptionScenarioResult, ...]
     tests_run: tuple[str, ...]
     unresolved_limits: tuple[str, ...]
+    evidence_ref: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "instrument", _text(self.instrument, "instrument"))
@@ -488,12 +538,120 @@ class OptionRiskEvidence:
                 allow_empty=True,
             ),
         )
+        if self.evidence_ref is not None:
+            _, _, canonical_ref = _immutable_option_evidence_ref(self.evidence_ref)
+            object.__setattr__(self, "evidence_ref", canonical_ref)
 
     @property
     def worst_scenario_loss(self) -> Decimal:
         return max(
             (max(-scenario.pnl, Decimal("0")) for scenario in self.scenarios),
             default=Decimal("0"),
+        )
+
+
+def option_risk_evidence_payload(
+    evidence: OptionRiskEvidence,
+) -> dict[str, object]:
+    if not isinstance(evidence, OptionRiskEvidence):
+        raise TypeError("evidence must be OptionRiskEvidence")
+    _verify_option_risk_evidence(evidence, artifact_store)
+    return {
+        "schema_version": evidence.schema_version,
+        "instrument": evidence.instrument,
+        "model_id": evidence.model_id,
+        "model_version": evidence.model_version,
+        "source_sha": evidence.source_sha,
+        "input_digest": evidence.input_digest,
+        "market_as_of": _instant_text(evidence.market_as_of),
+        "calculated_at": _instant_text(evidence.calculated_at),
+        "expires_at": _instant_text(evidence.expires_at),
+        "maximum_market_age_microseconds": _duration_microseconds(
+            evidence.maximum_market_age
+        ),
+        "greeks": {
+            "delta": _decimal_text(evidence.delta),
+            "gamma": _decimal_text(evidence.gamma),
+            "vega": _decimal_text(evidence.vega),
+            "theta": _decimal_text(evidence.theta),
+            "rho": _decimal_text(evidence.rho),
+        },
+        "scenarios": [
+            {
+                "scenario_id": item.scenario_id,
+                "underlying_price": _decimal_text(item.underlying_price),
+                "implied_volatility": _decimal_text(item.implied_volatility),
+                "pnl": _decimal_text(item.pnl),
+            }
+            for item in evidence.scenarios
+        ],
+        "tests_run": list(evidence.tests_run),
+        "unresolved_limits": list(evidence.unresolved_limits),
+    }
+
+
+def option_risk_evidence_metadata(
+    evidence: OptionRiskEvidence,
+) -> dict[str, object]:
+    if not isinstance(evidence, OptionRiskEvidence):
+        raise TypeError("evidence must be OptionRiskEvidence")
+    return {
+        "artifact_kind": "OPTION_RISK_EVIDENCE",
+        "schema_version": evidence.schema_version,
+        "instrument": evidence.instrument,
+        "model_id": evidence.model_id,
+        "model_version": evidence.model_version,
+        "source_sha": evidence.source_sha,
+        "input_digest": evidence.input_digest,
+        "calculated_at": _instant_text(evidence.calculated_at),
+    }
+
+
+def _verify_option_risk_evidence(
+    evidence: OptionRiskEvidence,
+    artifact_store: ArtifactStore,
+) -> None:
+    if not isinstance(artifact_store, ArtifactStore):
+        raise OptionError(
+            "canonical ArtifactStore is required for option risk evidence"
+        )
+    artifact_id, digest, _ = _immutable_option_evidence_ref(evidence.evidence_ref)
+    try:
+        manifest = artifact_store.load_manifest(artifact_id)
+        raw = artifact_store.read_bytes(artifact_id)
+    except Exception as error:
+        raise OptionError("option risk evidence artifact is missing or corrupt") from error
+    if not isinstance(manifest, dict) or not isinstance(raw, bytes):
+        raise OptionError("option risk evidence artifact representation is invalid")
+    if manifest.get("artifact_id") != artifact_id:
+        raise OptionError("option risk evidence artifact identity mismatch")
+    if manifest.get("sha256") != f"sha256:{digest}":
+        raise OptionError("option risk evidence artifact digest mismatch")
+    manifest_hash = manifest.get("manifest_hash")
+    if (
+        not isinstance(manifest_hash, str)
+        or len(manifest_hash) != 71
+        or not manifest_hash.startswith("sha256:")
+        or any(ch not in "0123456789abcdef" for ch in manifest_hash[7:])
+    ):
+        raise OptionError("option risk evidence manifest integrity binding is required")
+    rights = manifest.get("rights")
+    if not isinstance(rights, dict) or rights.get("storage") is not True:
+        raise OptionError("option risk evidence must preserve storage provenance")
+    if manifest.get("media_type") != "application/json":
+        raise OptionError("option risk evidence artifact media type mismatch")
+    if manifest.get("metadata") != option_risk_evidence_metadata(evidence):
+        raise OptionError("option risk evidence artifact metadata mismatch")
+    expected = json.dumps(
+        option_risk_evidence_payload(evidence),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    if raw != expected:
+        raise OptionError(
+            "option risk evidence artifact content does not match supplied economics"
         )
 
 
@@ -504,6 +662,7 @@ def require_current_option_risk(
     at: datetime,
     maximum_calculation_age: timedelta,
     maximum_market_age: timedelta,
+    artifact_store: ArtifactStore,
 ) -> None:
     if not isinstance(evidence, OptionRiskEvidence):
         raise TypeError("evidence must be OptionRiskEvidence")

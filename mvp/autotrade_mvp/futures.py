@@ -10,6 +10,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
+from hashlib import sha256
+import json
 from typing import Literal
 
 from .accounting import JournalTransaction, posting, validate_transaction
@@ -114,13 +116,181 @@ class FuturesContract:
 
 
 @dataclass(frozen=True)
+class FuturesSettlementScope:
+    """Immutable authority/source scope for one settlement stream."""
+
+    source_id: str
+    provider_id: str | None = None
+    account_id: str | None = None
+    environment: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source_id", _text(self.source_id, "source_id"))
+        provider_fields = (self.provider_id, self.account_id, self.environment)
+        if any(value is not None for value in provider_fields):
+            if not all(value is not None for value in provider_fields):
+                raise FuturesError(
+                    "provider settlement scope requires provider_id, account_id and environment together"
+                )
+            object.__setattr__(
+                self, "provider_id", _text(self.provider_id, "provider_id").upper()
+            )
+            object.__setattr__(self, "account_id", _text(self.account_id, "account_id"))
+            object.__setattr__(
+                self, "environment", _text(self.environment, "environment").upper()
+            )
+
+
+@dataclass(frozen=True)
+class FuturesSettlementEvidence:
+    """Immutable economic identity for one futures settlement observation."""
+
+    settlement_id: str
+    instrument: str
+    scope: FuturesSettlementScope
+    effective_at: datetime
+    sequence: int
+    revision: int
+    settlement_price: Decimal
+    price_currency: str
+    settlement_currency: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "settlement_id", _text(self.settlement_id, "settlement_id")
+        )
+        object.__setattr__(self, "instrument", _text(self.instrument, "instrument"))
+        if not isinstance(self.scope, FuturesSettlementScope):
+            raise FuturesError("settlement scope is required")
+        object.__setattr__(
+            self, "effective_at", _utc(self.effective_at, "effective_at")
+        )
+        for name in ("sequence", "revision"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise FuturesError(f"{name} must be a non-negative integer")
+        object.__setattr__(
+            self,
+            "settlement_price",
+            _decimal(self.settlement_price, "settlement_price", positive=True),
+        )
+        object.__setattr__(
+            self, "price_currency", _text(self.price_currency, "price_currency")
+        )
+        object.__setattr__(
+            self,
+            "settlement_currency",
+            _text(self.settlement_currency, "settlement_currency"),
+        )
+
+    @property
+    def order_key(self) -> tuple[datetime, int]:
+        return self.effective_at, self.sequence
+
+
+def _require_settlement_contract(
+    contract: FuturesContract,
+    scope: FuturesSettlementScope,
+    evidence: FuturesSettlementEvidence,
+) -> None:
+    if not isinstance(evidence, FuturesSettlementEvidence):
+        raise FuturesError("immutable FuturesSettlementEvidence is required")
+    if evidence.instrument != contract.instrument:
+        raise FuturesError("settlement instrument/version does not match state")
+    if evidence.scope != scope:
+        raise FuturesError("settlement provider/account/environment/source scope mismatch")
+    if evidence.price_currency != contract.quote_currency:
+        raise FuturesError("settlement price currency does not match contract")
+    if evidence.settlement_currency != contract.settlement_currency:
+        raise FuturesError("settlement currency does not match contract")
+
+
+def _validate_settlement_history(
+    contract: FuturesContract,
+    scope: FuturesSettlementScope,
+    history: tuple[FuturesSettlementEvidence, ...],
+    last_price: Decimal,
+) -> None:
+    if not isinstance(scope, FuturesSettlementScope):
+        raise FuturesError("settlement_scope is required")
+    if not isinstance(history, tuple):
+        raise FuturesError("settlement_history must be an immutable tuple")
+    seen: dict[str, FuturesSettlementEvidence] = {}
+    previous: FuturesSettlementEvidence | None = None
+    for evidence in history:
+        _require_settlement_contract(contract, scope, evidence)
+        old = seen.get(evidence.settlement_id)
+        if old is not None:
+            raise FuturesError("settlement history contains duplicate identity")
+        if previous is not None and evidence.order_key <= previous.order_key:
+            raise FuturesError("settlement history is not strictly ordered")
+        seen[evidence.settlement_id] = evidence
+        previous = evidence
+    if history and history[-1].settlement_price != last_price:
+        raise FuturesError("last settlement price does not match settlement history")
+
+
+def _settlement_duplicate_or_require_new(
+    *,
+    contract: FuturesContract,
+    scope: FuturesSettlementScope,
+    history: tuple[FuturesSettlementEvidence, ...],
+    evidence: FuturesSettlementEvidence,
+) -> bool:
+    _require_settlement_contract(contract, scope, evidence)
+    for accepted in history:
+        if accepted.settlement_id == evidence.settlement_id:
+            if accepted != evidence:
+                raise FuturesError(
+                    "settlement identity conflicts with previously accepted economics"
+                )
+            return True
+    if history:
+        last = history[-1]
+        if evidence.order_key <= last.order_key:
+            raise FuturesError(
+                "out-of-order settlement cannot rewind variation-margin state"
+            )
+    return False
+
+
+def settlement_identity_digest(evidence: FuturesSettlementEvidence) -> str:
+    if not isinstance(evidence, FuturesSettlementEvidence):
+        raise FuturesError("immutable FuturesSettlementEvidence is required")
+    material = {
+        "settlement_id": evidence.settlement_id,
+        "instrument": evidence.instrument,
+        "source_id": evidence.scope.source_id,
+        "provider_id": evidence.scope.provider_id,
+        "account_id": evidence.scope.account_id,
+        "environment": evidence.scope.environment,
+        "effective_at": evidence.effective_at.isoformat(),
+        "sequence": evidence.sequence,
+        "revision": evidence.revision,
+        "settlement_price": format(evidence.settlement_price, "f"),
+        "price_currency": evidence.price_currency,
+        "settlement_currency": evidence.settlement_currency,
+    }
+    encoded = json.dumps(
+        material,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True)
 class InverseVariationMarginState:
     """Exact inverse-futures state between explicit settlement boundaries."""
 
     contract: FuturesContract
     signed_contracts: Decimal
     last_settlement_price: Decimal
+    settlement_scope: FuturesSettlementScope
     cumulative_variation_margin: Fraction = Fraction(0, 1)
+    settlement_history: tuple[FuturesSettlementEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         if self.contract.payoff != "INVERSE":
@@ -136,6 +306,12 @@ class InverseVariationMarginState:
         )
         if not isinstance(self.cumulative_variation_margin, Fraction):
             raise FuturesError("cumulative inverse variation margin must be an exact Fraction")
+        _validate_settlement_history(
+            self.contract,
+            self.settlement_scope,
+            self.settlement_history,
+            self.last_settlement_price,
+        )
 
 
 @dataclass(frozen=True)
@@ -143,7 +319,9 @@ class VariationMarginState:
     contract: FuturesContract
     signed_contracts: Decimal
     last_settlement_price: Decimal
+    settlement_scope: FuturesSettlementScope
     cumulative_variation_margin: Decimal = Decimal("0")
+    settlement_history: tuple[FuturesSettlementEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         contracts = _decimal(self.signed_contracts, "signed_contracts")
@@ -162,6 +340,12 @@ class VariationMarginState:
         )
         if self.contract.payoff != "LINEAR":
             raise FuturesError("decimal variation-margin state currently supports LINEAR futures only")
+        _validate_settlement_history(
+            self.contract,
+            self.settlement_scope,
+            self.settlement_history,
+            self.last_settlement_price,
+        )
 
 
 def linear_futures_pnl(
@@ -233,20 +417,32 @@ def settle_fraction(
 
 def apply_variation_margin(
     state: VariationMarginState,
-    settlement_price: Decimal | str | int,
+    settlement: FuturesSettlementEvidence,
 ) -> tuple[VariationMarginState, Decimal]:
-    price = _decimal(settlement_price, "settlement_price", positive=True)
+    """Apply one identity-bound linear settlement exactly once."""
+
+    if not isinstance(state, VariationMarginState):
+        raise FuturesError("linear variation-margin state is required")
+    duplicate = _settlement_duplicate_or_require_new(
+        contract=state.contract,
+        scope=state.settlement_scope,
+        history=state.settlement_history,
+        evidence=settlement,
+    )
+    if duplicate:
+        return state, Decimal("0")
     amount = linear_futures_pnl(
         signed_contracts=state.signed_contracts,
         multiplier=state.contract.multiplier,
         entry_price=state.last_settlement_price,
-        exit_price=price,
+        exit_price=settlement.settlement_price,
     )
     return (
         replace(
             state,
-            last_settlement_price=price,
+            last_settlement_price=settlement.settlement_price,
             cumulative_variation_margin=state.cumulative_variation_margin + amount,
+            settlement_history=state.settlement_history + (settlement,),
         ),
         amount,
     )
@@ -254,31 +450,68 @@ def apply_variation_margin(
 
 def apply_inverse_variation_margin(
     state: InverseVariationMarginState,
-    settlement_price: Decimal | str | int,
+    settlement: FuturesSettlementEvidence,
 ) -> tuple[InverseVariationMarginState, Fraction]:
-    """Apply one inverse settlement step without premature decimal rounding."""
+    """Apply one identity-bound inverse settlement without premature rounding."""
 
-    price = _decimal(settlement_price, "settlement_price", positive=True)
+    if not isinstance(state, InverseVariationMarginState):
+        raise FuturesError("inverse variation-margin state is required")
+    duplicate = _settlement_duplicate_or_require_new(
+        contract=state.contract,
+        scope=state.settlement_scope,
+        history=state.settlement_history,
+        evidence=settlement,
+    )
+    if duplicate:
+        return state, Fraction(0, 1)
     amount = inverse_futures_pnl_exact(
         signed_contracts=state.signed_contracts,
         contract_quote_value=state.contract.multiplier,
         entry_price=state.last_settlement_price,
-        exit_price=price,
+        exit_price=settlement.settlement_price,
     )
     return (
         replace(
             state,
-            last_settlement_price=price,
+            last_settlement_price=settlement.settlement_price,
             cumulative_variation_margin=state.cumulative_variation_margin + amount,
+            settlement_history=state.settlement_history + (settlement,),
         ),
         amount,
     )
 
 
+def replay_variation_margin(
+    opening_state: VariationMarginState,
+    settlements: tuple[FuturesSettlementEvidence, ...],
+) -> VariationMarginState:
+    """Deterministically rebuild linear VM state from immutable settlements."""
+
+    if opening_state.settlement_history:
+        raise FuturesError("replay opening state must have empty settlement history")
+    state = opening_state
+    for evidence in settlements:
+        state, _ = apply_variation_margin(state, evidence)
+    return state
+
+
+def replay_inverse_variation_margin(
+    opening_state: InverseVariationMarginState,
+    settlements: tuple[FuturesSettlementEvidence, ...],
+) -> InverseVariationMarginState:
+    """Deterministically rebuild inverse VM state from immutable settlements."""
+
+    if opening_state.settlement_history:
+        raise FuturesError("replay opening state must have empty settlement history")
+    state = opening_state
+    for evidence in settlements:
+        state, _ = apply_inverse_variation_margin(state, evidence)
+    return state
+
+
 def settle_and_book_inverse_variation_margin(
     *,
-    transaction_id: str,
-    cause_event_id: str,
+    settlement: FuturesSettlementEvidence,
     contract: FuturesContract,
     exact_amount: Fraction,
     settlement_quantum: Decimal | str,
@@ -293,6 +526,14 @@ def settle_and_book_inverse_variation_margin(
 
     if not isinstance(contract, FuturesContract) or contract.payoff != "INVERSE":
         raise FuturesError("inverse settlement booking requires an INVERSE futures contract")
+    if not isinstance(settlement, FuturesSettlementEvidence):
+        raise FuturesError("immutable FuturesSettlementEvidence is required")
+    if settlement.instrument != contract.instrument:
+        raise FuturesError("settlement instrument/version does not match contract")
+    if settlement.price_currency != contract.quote_currency:
+        raise FuturesError("settlement price currency does not match contract")
+    if settlement.settlement_currency != contract.settlement_currency:
+        raise FuturesError("settlement currency does not match contract")
     settled = settle_fraction(
         exact_amount,
         quantum=settlement_quantum,
@@ -303,9 +544,7 @@ def settle_and_book_inverse_variation_margin(
     return (
         settled,
         book_variation_margin(
-            transaction_id=transaction_id,
-            cause_event_id=cause_event_id,
-            settlement_currency=contract.settlement_currency,
+            settlement=settlement,
             amount=settled,
         ),
     )
@@ -341,18 +580,21 @@ def unrealized_after_variation(
 
 def book_variation_margin(
     *,
-    transaction_id: str,
-    cause_event_id: str,
-    settlement_currency: str,
+    settlement: FuturesSettlementEvidence,
     amount: Decimal | str | int,
 ) -> JournalTransaction:
+    """Create one deterministic journal identity from accepted settlement evidence."""
+
+    if not isinstance(settlement, FuturesSettlementEvidence):
+        raise FuturesError("immutable FuturesSettlementEvidence is required")
     value = _decimal(amount, "amount")
     if value == 0:
         raise FuturesError("variation margin posting must be non-zero")
-    currency = _text(settlement_currency, "settlement_currency")
+    currency = settlement.settlement_currency
+    digest = settlement_identity_digest(settlement)
     transaction = JournalTransaction(
-        transaction_id=_text(transaction_id, "transaction_id"),
-        cause_event_id=_text(cause_event_id, "cause_event_id"),
+        transaction_id=f"FUTURES_VM:{digest}",
+        cause_event_id=f"FUTURES_SETTLEMENT:{digest}",
         postings=(
             posting(f"CASH:{currency}", currency, value),
             posting(f"FUTURES_VARIATION_PNL:{currency}", currency, -value),

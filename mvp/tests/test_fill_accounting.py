@@ -28,6 +28,9 @@ def matched_fill(*, price="100", fee="1", revision=None):
         provider_revision=revision,
     )
     provider = ProviderFillEvidence.create(
+        provider_id="TEST_PROVIDER",
+        account_id="acct-1",
+        environment="PAPER",
         provider_execution_id="exec-1",
         client_order_id="client-1",
         instrument="ABC",
@@ -83,6 +86,9 @@ class FillAccountingTests(unittest.TestCase):
             settlement_currency="USD",
         ))
         changed_provider = ProviderFillEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="acct-1",
+            environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",
@@ -125,6 +131,9 @@ class FillAccountingTests(unittest.TestCase):
         book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
 
         wrong_execution = ProviderFillEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="acct-1",
+            environment="PAPER",
             provider_execution_id="exec-other",
             client_order_id="client-1",
             instrument="ABC",
@@ -145,6 +154,9 @@ class FillAccountingTests(unittest.TestCase):
             )
 
         wrong_client = ProviderFillEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="acct-1",
+            environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-other",
             instrument="ABC",
@@ -165,6 +177,9 @@ class FillAccountingTests(unittest.TestCase):
             )
 
         wrong_quantity = ProviderFillEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="acct-1",
+            environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",
@@ -208,6 +223,9 @@ class FillAccountingTests(unittest.TestCase):
             correction_of="fill-1",
         )
         corrected_provider = ProviderFillEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="acct-1",
+            environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",
@@ -303,6 +321,9 @@ class FillAccountingTests(unittest.TestCase):
             correction_of="fill-1",
         )
         corrected_provider = ProviderFillEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="acct-1",
+            environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",
@@ -386,6 +407,9 @@ class FillAccountingTests(unittest.TestCase):
             correction_of="fill-1",
         )
         corrected_provider = ProviderFillEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="acct-1",
+            environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",
@@ -441,6 +465,9 @@ class FillAccountingTests(unittest.TestCase):
             correction_of="fill-1",
         )
         corrected_provider = ProviderFillEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="acct-1",
+            environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",
@@ -481,6 +508,9 @@ class FillAccountingTests(unittest.TestCase):
             correction_of="fill-1",
         )
         corrected_provider = ProviderFillEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="acct-1",
+            environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",
@@ -502,6 +532,9 @@ class FillAccountingTests(unittest.TestCase):
                 "instrument",
                 base,
                 ProviderFillEvidence.create(
+                    provider_id="TEST_PROVIDER",
+                    account_id="acct-1",
+                    environment="PAPER",
                     provider_execution_id="exec-1",
                     client_order_id="client-1",
                     instrument="XYZ",
@@ -554,6 +587,9 @@ class FillAccountingTests(unittest.TestCase):
             correction_of="fill-1",
         )
         first_provider = ProviderFillEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="acct-1",
+            environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",
@@ -575,6 +611,9 @@ class FillAccountingTests(unittest.TestCase):
             correction_of="fill-1-r2",
         )
         second_provider = ProviderFillEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="acct-1",
+            environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",
@@ -646,6 +685,9 @@ class FillAccountingTests(unittest.TestCase):
             correction_of="fill-1",
         )
         corrected_provider = ProviderFillEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="acct-1",
+            environment="PAPER",
             provider_execution_id="exec-1",
             client_order_id="client-1",
             instrument="ABC",

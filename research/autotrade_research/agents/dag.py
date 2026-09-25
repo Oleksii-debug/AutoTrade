@@ -121,6 +121,8 @@ class DagPlan:
     scheduled_roles: tuple[str, ...]
     skipped_roles: tuple[tuple[str, str], ...]
     reserved_cost: Decimal
+    available_inputs: tuple[str, ...]
+    total_budget: Decimal
 
 
 @dataclass(frozen=True)
@@ -185,7 +187,13 @@ def plan_specialists(
         if not progressed:
             raise SpecialistDagError("specialist dependency graph contains a cycle")
 
-    return DagPlan(tuple(scheduled), tuple(skipped), reserved)
+    return DagPlan(
+        tuple(scheduled),
+        tuple(skipped),
+        reserved,
+        tuple(sorted(available)),
+        budget,
+    )
 
 
 def aggregate_specialists(
@@ -196,35 +204,42 @@ def aggregate_specialists(
     decision_deadline: datetime,
     blocking_critique_terms: Iterable[str] = (),
 ) -> AggregatedProposal:
-    """Aggregate only outputs admitted by the exact specialist plan.
-
-    The plan is an authority boundary for research compute: a known role that was
-    skipped for budget, missing inputs, dependencies, or non-positive measured
-    value cannot inject a result directly into aggregation.
-    """
+    """Aggregate by correlation group so cloned/correlated roles cannot outvote evidence."""
 
     deadline = _utc(decision_deadline, "decision_deadline")
-    spec_items = tuple(specs)
-    by_id = {spec.role_id: spec for spec in spec_items}
+    by_id = {spec.role_id: spec for spec in specs}
     if not by_id:
         raise SpecialistDagError("at least one specialist specification is required")
-    if len(by_id) != len(spec_items):
-        raise SpecialistDagError("specialist role ids must be unique")
     if not isinstance(plan, DagPlan):
-        raise SpecialistDagError("plan must be a DagPlan")
-
-    scheduled = tuple(plan.scheduled_roles)
-    skipped_ids = tuple(role_id for role_id, _ in plan.skipped_roles)
-    if len(set(scheduled)) != len(scheduled) or len(set(skipped_ids)) != len(skipped_ids):
-        raise SpecialistDagError("plan role ids must be unique")
-    if set(scheduled) & set(skipped_ids):
-        raise SpecialistDagError("plan cannot both schedule and skip the same role")
-    if set(scheduled) | set(skipped_ids) != set(by_id):
-        raise SpecialistDagError("plan must cover exactly the supplied specialist specifications")
-    expected_reserved = sum((by_id[role_id].max_cost for role_id in scheduled), Decimal("0"))
-    if expected_reserved != plan.reserved_cost:
-        raise SpecialistDagError("plan reserved cost does not match scheduled roles")
-    scheduled_set = set(scheduled)
+        raise SpecialistDagError("aggregation requires the exact DagPlan")
+    # Re-run the canonical planner from the context embedded in the plan.
+    # Merely checking reserved_cost is insufficient: a forged DagPlan could
+    # otherwise schedule a role whose required inputs or dependencies were
+    # never eligible.  Aggregation accepts only a plan that is exactly the
+    # deterministic output for the current specs, inputs and hard budget.
+    canonical_plan = plan_specialists(
+        by_id.values(),
+        available_inputs=plan.available_inputs,
+        total_budget=plan.total_budget,
+    )
+    if plan != canonical_plan:
+        raise SpecialistDagError(
+            "DagPlan does not match canonical planner output for this context"
+        )
+    scheduled_roles = set(plan.scheduled_roles)
+    if len(scheduled_roles) != len(plan.scheduled_roles):
+        raise SpecialistDagError("DagPlan scheduled roles must be unique")
+    unknown_scheduled = scheduled_roles - set(by_id)
+    if unknown_scheduled:
+        raise SpecialistDagError(
+            f"DagPlan contains unknown scheduled roles: {sorted(unknown_scheduled)}"
+        )
+    expected_reserved = sum(
+        (by_id[role_id].max_cost for role_id in scheduled_roles),
+        Decimal("0"),
+    )
+    if plan.reserved_cost != expected_reserved:
+        raise SpecialistDagError("DagPlan reserved cost does not match scheduled roles")
 
     seen: set[str] = set()
     accepted: list[tuple[SpecialistSpec, SpecialistRun]] = []
@@ -239,7 +254,7 @@ def aggregate_specialists(
         if spec is None:
             rejected.append((run.role_id, "unknown_role"))
             continue
-        if run.role_id not in scheduled_set:
+        if run.role_id not in scheduled_roles:
             rejected.append((run.role_id, "not_scheduled"))
             continue
         if run.completed_at > deadline:
@@ -256,7 +271,7 @@ def aggregate_specialists(
             continue
         accepted.append((spec, run))
 
-    for role_id in scheduled:
+    for role_id in plan.scheduled_roles:
         if role_id not in seen:
             rejected.append((role_id, "missing_result"))
 

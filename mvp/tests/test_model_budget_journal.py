@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -5,6 +6,13 @@ import sqlite3
 import unittest
 
 from mvp.autotrade_mvp.model_budget_journal import DurableModelBudget
+from mvp.autotrade_mvp.model_gateway import (
+    ModelDescriptor,
+    ModelRequest,
+    RouteStatus,
+    RoutingMode,
+    RoutingPolicy,
+)
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 
 
@@ -23,7 +31,125 @@ def open_budget(root, *, ceiling="1", budget_id="policy-1", environment="SIMULAT
     return journal, budget
 
 
+ROUTE_NOW = datetime(2026, 9, 24, 21, 45, tzinfo=timezone.utc)
+
+
+def route_request(request_id, *, budget="100"):
+    return ModelRequest(
+        request_id=request_id,
+        allowed_model_ids=("local",),
+        privacy_remote_allowed=False,
+        budget_remaining=budget,
+        deadline_utc=ROUTE_NOW + timedelta(minutes=5),
+    )
+
+
+def route_policy():
+    return RoutingPolicy(
+        RoutingMode.ALLOWLIST,
+        allowed_model_ids=("local",),
+        maximum_cost="100",
+    )
+
+
+def route_model_descriptor(*, cost="0.6", revision="r1"):
+    return ModelDescriptor(
+        model_id="local",
+        provider_id="local-provider",
+        revision=revision,
+        remote=False,
+        estimated_cost=cost,
+        latency_ms=10,
+        quality_score="0.8",
+    )
+
+
 class DurableModelBudgetTests(unittest.TestCase):
+    def test_durable_route_ignores_inflated_caller_budget(self):
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory, ceiling="0")
+            decision = budget.admit_route(
+                route_policy(),
+                route_request("route-zero", budget="100"),
+                [route_model_descriptor(cost="0.1")],
+                now_utc=ROUTE_NOW,
+            )
+            self.assertEqual(decision.status, RouteStatus.NO_MODEL)
+            self.assertEqual(decision.reserved_cost, Decimal("0"))
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
+    def test_two_routes_cannot_overbook_one_durable_ceiling(self):
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory, ceiling="1")
+            first = budget.admit_route(
+                route_policy(),
+                route_request("route-a"),
+                [route_model_descriptor(cost="0.6")],
+                now_utc=ROUTE_NOW,
+            )
+            second = budget.admit_route(
+                route_policy(),
+                route_request("route-b"),
+                [route_model_descriptor(cost="0.6")],
+                now_utc=ROUTE_NOW,
+            )
+            self.assertEqual(first.status, RouteStatus.ADMITTED)
+            self.assertEqual(first.reason, "admitted_durable_budget")
+            self.assertEqual(second.status, RouteStatus.NO_MODEL)
+            self.assertEqual(budget.snapshot().reserved, Decimal("0.6"))
+
+    def test_durable_route_survives_restart_and_exact_retry_is_idempotent(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory, ceiling="1")
+            req = route_request("route-restart")
+            descriptor = route_model_descriptor(cost="0.6")
+            first = budget.admit_route(
+                route_policy(),
+                req,
+                [descriptor],
+                now_utc=ROUTE_NOW,
+            )
+            before = journal.load_events("model_budget", "policy-1")
+
+            _, restarted = open_budget(directory, ceiling="1")
+            second = restarted.admit_route(
+                route_policy(),
+                req,
+                [descriptor],
+                now_utc=ROUTE_NOW,
+            )
+            after = restarted.journal.load_events("model_budget", "policy-1")
+            self.assertEqual(first, second)
+            self.assertEqual(before, after)
+            self.assertEqual(restarted.snapshot().reserved, Decimal("0.6"))
+
+    def test_changed_model_revision_under_route_identity_conflicts(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory, ceiling="1")
+            req = route_request("route-conflict")
+            budget.admit_route(
+                route_policy(),
+                req,
+                [route_model_descriptor(cost="0.4", revision="r1")],
+                now_utc=ROUTE_NOW,
+            )
+            before = journal.load_events("model_budget", "policy-1")
+            with self.assertRaisesRegex(
+                ValueError,
+                "route identity conflicts",
+            ):
+                budget.admit_route(
+                    route_policy(),
+                    req,
+                    [route_model_descriptor(cost="0.4", revision="r2")],
+                    now_utc=ROUTE_NOW,
+                )
+            self.assertEqual(
+                journal.load_events("model_budget", "policy-1"),
+                before,
+            )
+            self.assertEqual(budget.snapshot().reserved, Decimal("0.4"))
+
     def test_delimiter_characters_cannot_alias_budget_idempotency_identity(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.db"

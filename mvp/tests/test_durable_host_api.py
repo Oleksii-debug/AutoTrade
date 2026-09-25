@@ -25,8 +25,9 @@ class JournalBackedHostApiTests(unittest.TestCase):
             JournalStore(self.path),
             account_id=account_id,
             environment=environment,
-            session_validator=lambda session, actor: (session, actor) in self.sessions,
+            session_validator=lambda session, actor, origin, action: (session, actor) in self.sessions,
             max_events=max_events,
+            request_origin_provider=lambda: "https://local.autotrade.invalid",
             now=lambda: "2026-09-24T18:00:00Z",
         )
 
@@ -86,7 +87,8 @@ class JournalBackedHostApiTests(unittest.TestCase):
         memory = HostCommandStore(
             account_id="paper-account-1",
             environment="PAPER",
-            session_validator=lambda session, actor: (session, actor) in self.sessions,
+            session_validator=lambda session, actor, origin, action: (session, actor) in self.sessions,
+            request_origin_provider=lambda: "https://local.autotrade.invalid",
             now=lambda: "2026-09-24T18:00:00Z",
         )
         self.assertEqual(memory.submit(command), self.store().submit(command))
@@ -276,10 +278,11 @@ class JournalBackedHostApiTests(unittest.TestCase):
                     journal,
                     account_id="paper-account-1",
                     environment="PAPER",
-                    session_validator=lambda session, actor: (
+                    session_validator=lambda session, actor, origin, action: (
                         session,
                         actor,
                     ) in self.sessions,
+                    request_origin_provider=lambda: "https://local.autotrade.invalid",
                     now=lambda: "2026-09-24T18:00:00Z",
                 )
                 accepted = store.submit(self.command())
@@ -307,10 +310,11 @@ class JournalBackedHostApiTests(unittest.TestCase):
                     JournalStore(path),
                     account_id="paper-account-1",
                     environment="PAPER",
-                    session_validator=lambda session, actor: (
+                    session_validator=lambda session, actor, origin, action: (
                         session,
                         actor,
                     ) in self.sessions,
+                    request_origin_provider=lambda: "https://local.autotrade.invalid",
                     now=lambda: "2026-09-24T18:00:02Z",
                 )
                 with self.assertRaisesRegex(ValueError, "Host journal"):

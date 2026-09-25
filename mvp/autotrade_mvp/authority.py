@@ -944,6 +944,288 @@ class AuthorityService:
             self._used_confirmations.add(used_confirmation)
         return record
 
+    def admit(
+        self,
+        *,
+        command_id: str,
+        idempotency_key: str,
+        admission_id: str,
+        policy_id: str,
+        intent_id: str,
+        intent_hash: str,
+        account_id: str,
+        environment: str,
+        instrument_id: str,
+        instrument_version: int,
+        action: str,
+        notional,
+        current_state_version: int,
+        capability_snapshot_id: str,
+        risk_decision: RiskDecision,
+        reservation_book: DurableReservationBook,
+        reservation_id: str,
+        reservation_requirements,
+        reservation_available,
+        now: str,
+        confirmation_id: str | None = None,
+        risk_reducing: bool = False,
+    ) -> AdmissionRecord:
+        """Atomically admit verified risk evidence and its worst-case reservation.
+
+        This is the public financial admission boundary. A boolean risk assertion
+        is intentionally not accepted. The risk decision, reservation mutation,
+        confirmation consumption encoded by the admission record, admission
+        event, and execution outbox intent share one JournalStore transaction.
+        """
+
+        if self.store is None:
+            raise AuthorityConflict(
+                "durable financial admission requires a JournalStore"
+            )
+        if not isinstance(reservation_book, DurableReservationBook):
+            raise TypeError("reservation_book must be DurableReservationBook")
+        if reservation_book.store is not self.store:
+            raise AuthorityConflict(
+                "authority and reservation book must share one JournalStore"
+            )
+
+        cid = _text(command_id, name="command_id")
+        idem = _text(idempotency_key, name="idempotency_key")
+        aid = _text(admission_id, name="admission_id")
+        pid = _text(policy_id, name="policy_id")
+        iid = _text(intent_id, name="intent_id")
+        ihash = _text(intent_hash, name="intent_hash")
+        account = _text(account_id, name="account_id")
+        env = _text(environment, name="environment").upper()
+        capability = _text(
+            capability_snapshot_id, name="capability_snapshot_id"
+        )
+        rid = _text(reservation_id, name="reservation_id")
+        if (
+            not isinstance(current_state_version, int)
+            or isinstance(current_state_version, bool)
+            or current_state_version < 0
+        ):
+            raise ValueError(
+                "current_state_version must be a non-negative integer"
+            )
+        if reservation_book.environment != env or reservation_book.account_id != account:
+            raise AuthorityConflict(
+                "reservation book scope does not match admission account/environment"
+            )
+        if not self._durable_authority_state_current():
+            raise AuthorityConflict(
+                "durable authority journal advanced; reload required"
+            )
+
+        policy = self._policies.get(pid)
+        if policy is None:
+            raise KeyError(pid)
+        validate_bound_risk_decision(risk_decision, now=now)
+        if risk_decision.intent_hash != ihash:
+            raise AuthorityConflict("risk decision intent_hash mismatch")
+        if risk_decision.state_version != current_state_version:
+            raise AuthorityConflict("risk decision state_version is stale")
+        if risk_decision.policy_version != policy.version:
+            raise AuthorityConflict("risk decision policy_version is stale")
+        current_reservation_version = reservation_book.version
+        if risk_decision.reservation_version != current_reservation_version:
+            raise AuthorityConflict("risk decision reservation_version is stale")
+        if risk_decision.capability_snapshot_id != capability:
+            raise AuthorityConflict("risk decision capability snapshot is stale")
+
+        existing = self._admissions.get(aid)
+        if existing is not None:
+            same_command = (
+                existing.financial_command_id == cid
+                and existing.risk_decision_id == risk_decision.decision_id
+                and existing.reservation_id == (
+                    rid if existing.outcome == "ADMITTED" else None
+                )
+                and existing.intent_id == iid
+            )
+            if not same_command:
+                raise AuthorityConflict(
+                    "admission_id already belongs to another financial command"
+                )
+            return existing
+
+        reservation_plan = None
+        if risk_decision.admitted:
+            reservation_plan = reservation_book.prepare_reserve_mutation(
+                event_key=cid,
+                idempotency_key=idem,
+                reservation_id=rid,
+                intent_id=iid,
+                requirements=reservation_requirements,
+                available=reservation_available,
+                committed_at=now,
+            )
+
+        # Evaluate authority/confirmation semantics against an isolated copy.
+        # The copy has no JournalStore, so it cannot persist or consume durable
+        # confirmation state before the multi-aggregate transaction commits.
+        probe = AuthorityService.restore(self.export_state())
+        candidate = probe._admit_unverified(
+            admission_id=aid,
+            policy_id=pid,
+            intent_hash=ihash,
+            account_id=account,
+            environment=env,
+            instrument_id=instrument_id,
+            instrument_version=instrument_version,
+            action=action,
+            notional=notional,
+            state_version=current_state_version,
+            risk_admitted=risk_decision.admitted,
+            now=now,
+            confirmation_id=confirmation_id,
+            risk_reducing=risk_reducing,
+        )
+
+        if candidate.outcome == "ADMITTED" and reservation_plan is None:
+            raise AuthorityConflict(
+                "admitted command is missing an atomic reservation plan"
+            )
+
+        request = {
+            "command_id": cid,
+            "admission_id": aid,
+            "policy_id": pid,
+            "policy_version": policy.version,
+            "intent_id": iid,
+            "intent_hash": ihash,
+            "account_id": account,
+            "environment": env,
+            "instrument_id": candidate.instrument_version.instrument_id,
+            "instrument_version": candidate.instrument_version.version,
+            "action": candidate.action,
+            "notional": str(candidate.notional),
+            "current_state_version": current_state_version,
+            "capability_snapshot_id": capability,
+            "risk_decision_id": risk_decision.decision_id,
+            "risk_decision_fingerprint": risk_decision_fingerprint(risk_decision),
+            "reservation_id": rid,
+            "reservation": (
+                reservation_plan.request if reservation_plan is not None else None
+            ),
+            "confirmation_id": confirmation_id,
+            "risk_reducing": risk_reducing,
+        }
+        request_fingerprint = payload_digest(request)
+        record = replace(
+            candidate,
+            request_fingerprint=request_fingerprint,
+            intent_id=iid,
+            risk_decision_id=risk_decision.decision_id,
+            reservation_id=(rid if candidate.outcome == "ADMITTED" else None),
+            capability_snapshot_id=capability,
+            risk_valid_until=risk_decision.valid_until,
+            policy_version=policy.version,
+            financial_command_id=cid,
+        )
+
+        risk_payload = {
+            "decision_id": risk_decision.decision_id,
+            "fingerprint": risk_decision_fingerprint(risk_decision),
+            "intent_hash": risk_decision.intent_hash,
+            "state_version": risk_decision.state_version,
+            "policy_version": risk_decision.policy_version,
+            "reservation_version": risk_decision.reservation_version,
+            "capability_snapshot_id": risk_decision.capability_snapshot_id,
+            "evaluated_at": risk_decision.evaluated_at,
+            "valid_until": risk_decision.valid_until,
+            "verdict": "ALLOW" if risk_decision.admitted else "REJECT",
+            "resulting_position": str(risk_decision.resulting_position),
+            "gross_leverage": str(risk_decision.gross_leverage),
+            "net_leverage": str(risk_decision.net_leverage),
+            "worst_stress_loss": str(risk_decision.worst_stress_loss),
+            "checks": [
+                {
+                    "rule_id": item.rule,
+                    "passed": item.passed,
+                    "measured": item.observed,
+                    "limit": item.limit,
+                    "evidence": item.reason,
+                }
+                for item in risk_decision.rules
+            ],
+        }
+        risk_event = {
+            "event_id": _authority_event_id(
+                "RiskDecisionRecorded", risk_decision.decision_id
+            ),
+            "event_type": "RiskDecisionRecorded",
+            "aggregate_type": "risk_decision",
+            "aggregate_id": risk_decision.decision_id,
+            "aggregate_version": "1",
+            "payload": risk_payload,
+            "payload_hash": payload_digest(risk_payload),
+            "committed_at": now,
+        }
+        admission_payload = self._admission_payload(record)
+        admission_event = {
+            "event_id": _authority_event_id(
+                "AuthorityAdmissionRecorded", aid
+            ),
+            "event_type": "AuthorityAdmissionRecorded",
+            "aggregate_type": "authority_state",
+            "aggregate_id": "canonical",
+            "aggregate_version": str(self._journal_version + 1),
+            "payload": admission_payload,
+            "payload_hash": payload_digest(admission_payload),
+            "committed_at": now,
+        }
+
+        events = [(risk_event, None)]
+        if reservation_plan is not None and candidate.outcome == "ADMITTED":
+            events.append((reservation_plan.envelope, None))
+        events.append(
+            (
+                admission_event,
+                "financial.admission.ready"
+                if candidate.outcome == "ADMITTED"
+                else None,
+            )
+        )
+        result_payload = {
+            "admission": admission_payload,
+            "reservation": (
+                reservation_plan.snapshot_payload
+                if reservation_plan is not None
+                and candidate.outcome == "ADMITTED"
+                else None
+            ),
+        }
+        scoped_command_id = _authority_event_id(
+            "FinancialAdmissionCommand", f"{env}:{account}:{cid}"
+        )
+        scoped_idempotency_key = _authority_event_id(
+            "FinancialAdmissionIdempotency", f"{env}:{account}:{idem}"
+        )
+
+        try:
+            self.store.commit_command(
+                command_id=scoped_command_id,
+                actor="autotrade-financial-writer",
+                environment=env,
+                idempotency_key=scoped_idempotency_key,
+                request=request,
+                result=result_payload,
+                state_version=current_state_version,
+                events=events,
+            )
+        except Exception:
+            reservation_book.refresh()
+            raise
+
+        self._journal_version += 1
+        self._admissions[aid] = record
+        if record.outcome == "ADMITTED" and record.confirmation_id is not None:
+            self._used_confirmations.add(record.confirmation_id)
+        reservation_book.refresh()
+        return record
+
     def _durable_authority_state_current(self) -> bool:
         if self.store is None:
             return True

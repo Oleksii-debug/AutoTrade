@@ -885,7 +885,7 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
     missing_stress_symbols: set[str] = set()
     missing_stress_labels: set[str] = set()
     stress_regime_coverage_complete = True
-    if policy.required_stress_scenario_labels is not None:
+    if policy.required_stress_scenario_labels is not None and stress_symbols:
         observed_labels = set(context.stress_scenario_labels)
         missing_stress_labels = (
             set(policy.required_stress_scenario_labels) - observed_labels
@@ -1224,9 +1224,13 @@ def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) 
             "stress_regime_coverage",
             stress_regime_coverage_complete,
             (
-                "MISSING:" + ",".join(sorted(missing_stress_labels))
-                if missing_stress_labels
-                else ",".join(context.stress_scenario_labels)
+                "NO_PROJECTED_RISK"
+                if not stress_symbols
+                else (
+                    "MISSING:" + ",".join(sorted(missing_stress_labels))
+                    if missing_stress_labels
+                    else ",".join(context.stress_scenario_labels)
+                )
             ),
             ",".join(policy.required_stress_scenario_labels),
             "configured frozen stress regimes must all be evidenced by labeled scenarios",

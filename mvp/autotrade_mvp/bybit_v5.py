@@ -17,7 +17,11 @@ import re
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from .provider_core import ProviderCoreError
+from .provider_core import (
+    ProviderCoreError,
+    ProviderResponseObservation,
+    Surface,
+)
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
@@ -419,21 +423,29 @@ def parse_submission_response(
 
 
 def parse_executions(
-    response: Mapping[str, Any],
+    observation: ProviderResponseObservation,
     *,
-    account_id: str,
-    environment: str,
     instrument_versions: Mapping[str, str],
     qualified_fee_currencies: Mapping[str, str] | None = None,
 ) -> tuple[ProviderFillEvidence, ...]:
-    """Map recorded /v5/execution/list rows to reconciliation fill evidence."""
+    """Map one authenticated, exact-byte Bybit execution read into fills."""
 
+    if not isinstance(observation, ProviderResponseObservation):
+        raise TypeError("observation must be ProviderResponseObservation")
+    observation.require_scope(
+        provider_id="BYBIT",
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint=BYBIT_DOCUMENTED_ENDPOINTS["EXECUTIONS"],
+    )
+    response = observation.payload
+    account_id = observation.account_id
+    environment = observation.environment
     envelope = _mapping(response, name="response")
     if _integer(envelope.get("retCode"), name="retCode") != 0:
         raise ProviderCoreError("Bybit execution response was not successful")
     result = _mapping(envelope.get("result"), name="result")
     rows = result.get("list")
-    if not isinstance(rows, list):
+    if not isinstance(rows, (list, tuple)):
         raise ProviderCoreError("result.list must be an array")
     if not isinstance(instrument_versions, Mapping):
         raise ProviderCoreError("instrument_versions must be a mapping")

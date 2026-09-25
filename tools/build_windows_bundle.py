@@ -37,7 +37,8 @@ FORBIDDEN_PREFIXES = (
 )
 PRIVATE_KEY_MARKERS = (
     b"-----BEGIN PRIVATE KEY-----",
-    b"-----BEGIN RSA PRIVATE KEY-----",
+    b"-----BEGIN ENCRYPTED PRIVATE KEY-----",
+    b"-----BEGIN RSA PRIVATE KEY-----"
     b"-----BEGIN EC PRIVATE KEY-----",
     b"-----BEGIN OPENSSH PRIVATE KEY-----",
 )
@@ -107,12 +108,6 @@ def _looks_like_credential_vault(data: bytes) -> bool:
     JSON documents as secrets.
     """
 
-    if (
-        b'"records"' not in data
-        or b'"owner_identity"' not in data
-        or b'"ciphertext"' not in data
-    ):
-        return False
     try:
         value = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):

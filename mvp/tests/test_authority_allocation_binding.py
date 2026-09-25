@@ -48,7 +48,7 @@ def _authority_policy():
         expires_at="2026-09-25T00:00:00Z",
         autonomous=True,
         protection_only=False,
-        version=1,
+        version=7,
     )
 
 
@@ -242,17 +242,30 @@ def _allocation_bundle(reservations, *, environment=ENVIRONMENT):
         resolved_evidence=resolved,
         environment=environment,
         decision_time=DECISION_TIME,
-        policy_version="1",
+        policy_version="allocation-policy:v1",
     )
     return result, resolved
 
 
-def _snapshot(result, resolved, *, account_state_version=7):
+def _snapshot(
+    result,
+    resolved,
+    *,
+    account_state_version=7,
+    policy_version=None,
+    financial_instruments=None,
+):
     return AllocationAuthoritySnapshot(
         resolved_evidence=resolved,
         provider_id=PROVIDER_ID,
         account_id=ACCOUNT_ID,
+        policy_version=result.policy_version if policy_version is None else policy_version,
         instrument_versions=dict(result.instrument_versions),
+        financial_instruments=(
+            {"ABC": (INSTRUMENT_ID, 1)}
+            if financial_instruments is None
+            else financial_instruments
+        ),
         capability_snapshot_ids=dict(result.capability_snapshot_ids),
         account_snapshot_id="account-snapshot:v7",
         reconciliation_run_id="reconciliation:v7",
@@ -376,7 +389,9 @@ class AuthorityAllocationBindingTests(unittest.TestCase):
                     resolved_evidence={},
                     provider_id=PROVIDER_ID,
                     account_id=ACCOUNT_ID,
+                    policy_version=result.policy_version,
                     instrument_versions=dict(result.instrument_versions),
+                    financial_instruments={"ABC": (INSTRUMENT_ID, 1)},
                     capability_snapshot_ids=dict(result.capability_snapshot_ids),
                     account_snapshot_id="account-snapshot:v7",
                     reconciliation_run_id="reconciliation:v7",
@@ -442,6 +457,97 @@ class AuthorityAllocationBindingTests(unittest.TestCase):
             ):
                 _admit(authority, reservations, checkpoint, result)
             self.assertEqual(reservations.version, 1)
+
+    def test_trusted_allocation_policy_version_is_independent_of_financial_policy(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            result, resolved = _allocation_bundle(reservations)
+            authority = AuthorityService(
+                store,
+                allocation_authority_resolver=lambda _result: _snapshot(
+                    result,
+                    resolved,
+                ),
+            )
+            authority.register_policy(_authority_policy())
+            checkpoint = _checkpoint(store)
+
+            admitted = _admit(
+                authority,
+                reservations,
+                checkpoint,
+                result,
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+            self.assertEqual(
+                store.load_events("risk_decision", admitted.risk_decision_id)[0][
+                    "payload"
+                ]["allocation_evidence"]["policy_version"],
+                "allocation-policy:v1",
+            )
+
+    def test_stale_allocation_policy_version_rejects_before_transaction_a(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            result, resolved = _allocation_bundle(reservations)
+            authority = AuthorityService(
+                store,
+                allocation_authority_resolver=lambda _result: _snapshot(
+                    result,
+                    resolved,
+                    policy_version="allocation-policy:v2",
+                ),
+            )
+            authority.register_policy(_authority_policy())
+            checkpoint = _checkpoint(store)
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "stale, mismatched, or non-authoritative",
+            ):
+                _admit(authority, reservations, checkpoint, result)
+            self.assertEqual(reservations.version, 0)
+            self.assertEqual(store.pending_outbox(), [])
+
+    def test_allocation_symbol_must_resolve_to_admitted_canonical_instrument(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            result, resolved = _allocation_bundle(reservations)
+            other_instrument = "22222222-2222-4222-8222-222222222222"
+            authority = AuthorityService(
+                store,
+                allocation_authority_resolver=lambda _result: _snapshot(
+                    result,
+                    resolved,
+                    financial_instruments={"ABC": (other_instrument, 1)},
+                ),
+            )
+            authority.register_policy(_authority_policy())
+            checkpoint = _checkpoint(store)
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "allocation instrument does not match admitted instrument version",
+            ):
+                _admit(authority, reservations, checkpoint, result)
+            self.assertEqual(reservations.version, 0)
+            self.assertEqual(store.pending_outbox(), [])
+
 
     def test_order_cannot_exceed_or_move_away_from_bound_target(self):
         with TemporaryDirectory() as directory:

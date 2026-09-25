@@ -352,6 +352,156 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
                 with self.assertRaisesRegex(InstallerManifestError, expected):
                     verify_release_bundle(tampered)
 
+    def test_installer_manifest_retains_exact_release_composition_identity(self):
+        bundle = self.release_bundle()
+        built = build_installer_input_manifest(
+            bundle=bundle,
+            output=self.root / "composition-bound.json",
+            target_framework="net10.0-windows",
+            runtime_mode="FRAMEWORK_DEPENDENT",
+            runtime_prerequisite=".NET 10 Windows Desktop Runtime",
+        )
+        manifest = built["manifest"]
+        composition = self.composition()
+        raw = json.loads(composition.read_text(encoding="utf-8"))
+        self.assertEqual(
+            manifest["dependency_lock_sha256"],
+            raw["dependency_lock_sha256"],
+        )
+        self.assertEqual(manifest["sbom_sha256"], raw["sbom_sha256"])
+        self.assertEqual(
+            manifest["schema_compatibility"],
+            raw["schema_compatibility"],
+        )
+        self.assertEqual(manifest["platform"], raw["runtime"])
+        self.assertEqual(
+            {item["path"]: item["sha256"] for item in manifest["components"]},
+            {item["path"]: item["sha256"] for item in raw["components"]},
+        )
+        self.assertTrue(manifest["composition_sha256"].startswith("sha256:"))
+
+    def test_tampered_composition_dependency_or_sbom_binding_is_rejected(self):
+        source = self.release_bundle()
+        for field, kind in (
+            ("dependency_lock_sha256", "dependency-lock"),
+            ("sbom_sha256", "sbom"),
+        ):
+            with self.subTest(field=field):
+                tampered = self.root / f"tampered-{field}.zip"
+
+                def mutate(entries, field=field):
+                    result = []
+                    for name, payload in entries:
+                        if name != "bundle-manifest.json":
+                            result.append((name, payload))
+                            continue
+                        manifest = json.loads(payload)
+                        manifest["composition"][field] = "sha256:" + "f" * 64
+                        result.append(
+                            (
+                                name,
+                                json.dumps(manifest, sort_keys=True).encode("utf-8"),
+                            )
+                        )
+                    return result
+
+                self.rewrite_zip(source, tampered, mutate)
+                with self.assertRaisesRegex(
+                    InstallerManifestError,
+                    f"composition {kind} identity",
+                ):
+                    verify_release_bundle(tampered)
+
+    def test_tampered_composition_runtime_identity_is_rejected(self):
+        source = self.release_bundle()
+        cases = (
+            ("rid", "win-arm64", "runtime_identifier"),
+            ("architecture", "mips64", "architecture"),
+            ("minimum", "Windows 11", "major.minor.build"),
+        )
+        for name, value, pattern in cases:
+            with self.subTest(name=name):
+                tampered = self.root / f"runtime-{name}.zip"
+
+                def mutate(entries, name=name, value=value):
+                    result = []
+                    for entry, payload in entries:
+                        if entry != "bundle-manifest.json":
+                            result.append((entry, payload))
+                            continue
+                        manifest = json.loads(payload)
+                        if name == "rid":
+                            manifest["composition"]["runtime"]["runtime_identifier"] = value
+                        elif name == "architecture":
+                            manifest["composition"]["runtime"]["architecture"] = value
+                        else:
+                            manifest["composition"]["runtime"]["minimum_windows_version"] = value
+                        result.append(
+                            (
+                                entry,
+                                json.dumps(manifest, sort_keys=True).encode("utf-8"),
+                            )
+                        )
+                    return result
+
+                self.rewrite_zip(source, tampered, mutate)
+                with self.assertRaisesRegex(InstallerManifestError, pattern):
+                    verify_release_bundle(tampered)
+
+    def test_composition_component_inventory_must_equal_verified_payload(self):
+        source = self.release_bundle()
+        tampered = self.root / "component-inventory-mismatch.zip"
+
+        def mutate(entries):
+            result = []
+            for name, payload in entries:
+                if name != "bundle-manifest.json":
+                    result.append((name, payload))
+                    continue
+                manifest = json.loads(payload)
+                manifest["composition"]["components"] = manifest["composition"]["components"][:-1]
+                result.append(
+                    (
+                        name,
+                        json.dumps(manifest, sort_keys=True).encode("utf-8"),
+                    )
+                )
+            return result
+
+        self.rewrite_zip(source, tampered, mutate)
+        with self.assertRaisesRegex(
+            InstallerManifestError,
+            "component inventory does not match",
+        ):
+            verify_release_bundle(tampered)
+
+    def test_composition_unknown_fields_fail_closed_at_installer_boundary(self):
+        source = self.release_bundle()
+        tampered = self.root / "composition-extra-field.zip"
+
+        def mutate(entries):
+            result = []
+            for name, payload in entries:
+                if name != "bundle-manifest.json":
+                    result.append((name, payload))
+                    continue
+                manifest = json.loads(payload)
+                manifest["composition"]["installer_hint"] = "trust-me"
+                result.append(
+                    (
+                        name,
+                        json.dumps(manifest, sort_keys=True).encode("utf-8"),
+                    )
+                )
+            return result
+
+        self.rewrite_zip(source, tampered, mutate)
+        with self.assertRaisesRegex(
+            InstallerManifestError,
+            "composition structure is not canonical",
+        ):
+            verify_release_bundle(tampered)
+
     def test_manifest_inventory_binds_exact_bundle_bytes(self):
         bundle = self.release_bundle()
         verified = verify_release_bundle(bundle)

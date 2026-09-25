@@ -514,7 +514,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
                 owner_scope="PAPER:acct",
             )
             owner = controller.start("host-a")
-            controller.record_reconciliation(consistent=True)
+            self._record_durable_ready(controller)
 
             connection = sqlite3.connect(path)
             try:

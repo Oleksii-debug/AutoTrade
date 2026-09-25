@@ -145,6 +145,15 @@ class ExperienceMemoryTests(unittest.TestCase):
             invalid_payloads = (
                 {"supersedes_fields": [], "evidence_ref": "artifact:none"},
                 {
+                    "supersedes_fields": ["outcome"],
+                    "outcome": {"label": "missing-evidence"},
+                },
+                {
+                    "supersedes_fields": ["outcome"],
+                    "outcome": {"label": "blank-evidence"},
+                    "evidence_ref": "   ",
+                },
+                {
                     "supersedes_fields": ["outcome", "outcome"],
                     "outcome": {"label": "duplicate"},
                     "evidence_ref": "artifact:duplicate",

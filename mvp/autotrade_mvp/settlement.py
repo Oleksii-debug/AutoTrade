@@ -127,6 +127,59 @@ class SettlementBook:
     def obligations(self) -> tuple[SettlementObligation, ...]:
         return tuple(self._obligations.values())
 
+    @property
+    def settled_obligation_evidence(self) -> dict[str, str]:
+        """Copy of durable settlement evidence bound to settled obligations."""
+
+        return dict(self._settlement_evidence)
+
+    @classmethod
+    def from_history(
+        cls,
+        *,
+        initial_settled_cash: dict[str, Decimal | str | int] | None = None,
+        obligations: Iterable[SettlementObligation] = (),
+        settled_obligation_evidence: Mapping[str, str] | None = None,
+    ) -> "SettlementBook":
+        """Replay settlement evidence from pre-settlement cash.
+
+        Unlike snapshot restoration through the constructor, this path derives
+        the settled-cash projection by applying each evidenced obligation once.
+        """
+
+        book = cls(
+            settled_cash=initial_settled_cash,
+            obligations=obligations,
+        )
+        normalized: dict[str, str] = {}
+        for raw_id, raw_ref in (settled_obligation_evidence or {}).items():
+            obligation_id = _text(raw_id, name="settled_obligation_id")
+            evidence_ref = _text(raw_ref, name="settlement_evidence_ref")
+            if obligation_id in normalized:
+                raise SettlementConflict(
+                    "settled obligation evidence contains duplicate normalized obligation ids"
+                )
+            if obligation_id not in book._obligations:
+                raise SettlementConflict(
+                    "settled obligation evidence cannot reference an unknown obligation"
+                )
+            normalized[obligation_id] = evidence_ref
+
+        for obligation_id in sorted(
+            normalized,
+            key=lambda key: (
+                book._obligations[key].settlement_date,
+                key,
+            ),
+        ):
+            obligation = book._obligations[obligation_id]
+            book.settle(
+                obligation_id,
+                as_of=obligation.settlement_date,
+                settlement_evidence_ref=normalized[obligation_id],
+            )
+        return book
+
     def add(self, obligation: SettlementObligation) -> bool:
         if not isinstance(obligation, SettlementObligation):
             raise TypeError("obligation must be SettlementObligation")
@@ -159,6 +212,8 @@ class SettlementBook:
     ) -> bool:
         key = _text(obligation_id, name="obligation_id")
         evidence = _text(settlement_evidence_ref, name="settlement_evidence_ref")
+        if type(as_of) is not date:
+            raise TypeError("as_of must be a date value")
         obligation = self._obligations.get(key)
         if obligation is None:
             raise SettlementConflict("Cannot settle an unknown obligation")
@@ -186,6 +241,8 @@ class SettlementBook:
 
         Contractual due date alone never makes a receivable spendable.
         """
+        if type(as_of) is not date:
+            raise TypeError("as_of must be a date value")
         if not isinstance(settlement_evidence, Mapping):
             raise TypeError("settlement_evidence must be a mapping")
         normalized_evidence: dict[str, str] = {}

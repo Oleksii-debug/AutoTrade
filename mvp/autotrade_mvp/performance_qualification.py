@@ -169,6 +169,8 @@ class RuntimeLoadObservation:
     financial_staleness_us: tuple[int, ...]
     research_interference_us: tuple[int, ...]
     reconnect_backlog_remaining: int
+    declared_duration_us: int | None = None
+    observed_duration_us: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.scenario_id, str) or not self.scenario_id.strip():
@@ -240,6 +242,21 @@ class RuntimeLoadObservation:
                 allow_zero=True,
             ),
         )
+        if (self.declared_duration_us is None) != (self.observed_duration_us is None):
+            raise RuntimeBudgetError(
+                "declared_duration_us and observed_duration_us must be supplied together"
+            )
+        if self.declared_duration_us is not None:
+            object.__setattr__(
+                self,
+                "declared_duration_us",
+                _positive_int(self.declared_duration_us, name="declared_duration_us"),
+            )
+            object.__setattr__(
+                self,
+                "observed_duration_us",
+                _positive_int(self.observed_duration_us, name="observed_duration_us"),
+            )
 
     @classmethod
     def create(
@@ -256,6 +273,8 @@ class RuntimeLoadObservation:
         financial_staleness_us: Sequence[int],
         research_interference_us: Sequence[int],
         reconnect_backlog_remaining: int,
+        declared_duration_us: int | None = None,
+        observed_duration_us: int | None = None,
     ) -> "RuntimeLoadObservation":
         if not isinstance(scenario_id, str) or not scenario_id.strip():
             raise RuntimeBudgetError("scenario_id is required")
@@ -287,6 +306,8 @@ class RuntimeLoadObservation:
                 name="reconnect_backlog_remaining",
                 allow_zero=True,
             ),
+            declared_duration_us=declared_duration_us,
+            observed_duration_us=observed_duration_us,
         )
 
 
@@ -339,6 +360,32 @@ def evaluate_runtime_budget(
         reasons.append("reconnect_backlog_not_drained")
 
     insufficient: list[str] = []
+    if observation.expected_financial_events <= 0:
+        insufficient.append("no_declared_financial_events_for_throughput")
+    elif (
+        observation.declared_duration_us is None
+        or observation.observed_duration_us is None
+    ):
+        insufficient.append("missing_throughput_measurement")
+    else:
+        declared_duration = observation.declared_duration_us
+        observed_duration = observation.observed_duration_us
+        metrics["declared_duration_us"] = declared_duration
+        metrics["observed_duration_us"] = observed_duration
+        metrics["declared_financial_throughput_milli_eps"] = (
+            observation.expected_financial_events * 1_000_000_000
+            // declared_duration
+        )
+        metrics["observed_financial_throughput_milli_eps"] = (
+            observation.recovered_financial_events * 1_000_000_000
+            // observed_duration
+        )
+        if (
+            observation.recovered_financial_events * declared_duration
+            < observation.expected_financial_events * observed_duration
+        ):
+            reasons.append("declared_throughput_not_met")
+
     if len(observation.financial_latency_us) < spec.min_financial_samples:
         insufficient.append("insufficient_financial_latency_samples")
     if len(observation.financial_staleness_us) < spec.min_financial_samples:

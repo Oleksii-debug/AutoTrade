@@ -118,6 +118,8 @@ class RuntimePerformanceQualificationTests(unittest.TestCase):
             financial_staleness_us=(100, 200),
             research_interference_us=(50,),
             reconnect_backlog_remaining=0,
+            declared_duration_us=1_000_000,
+            observed_duration_us=900_000,
         )
         decision = evaluate_runtime_budget(current, observation)
         self.assertEqual(decision.status, "PASS")

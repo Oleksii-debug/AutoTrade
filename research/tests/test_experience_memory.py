@@ -1269,6 +1269,53 @@ class ExperienceMemoryTests(unittest.TestCase):
             )
             self.assertEqual(len(allowed), 1)
 
+    def test_late_appended_historical_episode_is_not_visible_before_append_time(self):
+        with TemporaryDirectory() as directory:
+            store = memory(Path(directory) / "memory.sqlite3")
+            appended_at = BASE + timedelta(days=2)
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=appended_at,
+            ):
+                episode, _ = store.append_episode(
+                    decision_time=BASE,
+                    information_cutoff=BASE,
+                    task="research",
+                    regime="calm",
+                    instrument_family="equity",
+                    permission_class="research",
+                    payload=payload(),
+                )
+
+            historical_cutoff = BASE + timedelta(days=1)
+            self.assertEqual(
+                store.retrieve(
+                    information_cutoff=historical_cutoff,
+                    granted_permissions={"research"},
+                ),
+                (),
+            )
+            with self.assertRaisesRegex(PermissionError, "causally available"):
+                store.source_episode(
+                    episode,
+                    information_cutoff=historical_cutoff,
+                    granted_permissions={"research"},
+                )
+
+            visible = store.retrieve(
+                information_cutoff=appended_at,
+                granted_permissions={"research"},
+            )
+            self.assertEqual([item["episode_id"] for item in visible], [episode])
+            self.assertEqual(
+                store.source_episode(
+                    episode,
+                    information_cutoff=appended_at,
+                    granted_permissions={"research"},
+                )["episode_id"],
+                episode,
+            )
+
     def test_information_cutoff_prevents_future_memory_leakage(self):
         with TemporaryDirectory() as directory:
             store = memory(Path(directory) / "memory.sqlite3")

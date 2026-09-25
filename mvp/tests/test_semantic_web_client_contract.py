@@ -153,6 +153,46 @@ class SemanticWebClientContractTests(unittest.TestCase):
         )
         self.assertIn('id="submit-command" type="submit" disabled', html)
 
+    def test_v2_command_copies_exact_scope_from_fresh_host_snapshot(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("accountId: null", js)
+        self.assertIn("environment: null", js)
+        self.assertIn("state.accountId = parsed.accountId", js)
+        self.assertIn("state.environment = parsed.environment", js)
+        self.assertIn("account_id: state.accountId", js)
+        self.assertIn("environment: state.environment", js)
+        render = js.index("function renderSnapshot(snapshot")
+        ready = js.index("state.snapshotReady = true", render)
+        account = js.index("state.accountId = parsed.accountId", render)
+        environment = js.index("state.environment = parsed.environment", render)
+        self.assertLess(account, ready)
+        self.assertLess(environment, ready)
+
+    def test_unresolved_command_cannot_be_retargeted_after_scope_or_session_change(self):
+        js = APP.read_text(encoding="utf-8")
+        submit = js.index("async function submitCommand(event)")
+        build = js.index("const payload = commandForSubmission(action)", submit)
+        fence = js.index("if (recovering && (", submit)
+        self.assertLess(fence, build)
+        for required in (
+            "state.pendingCommand.actor !== state.sessionIdentity.actor",
+            "state.pendingCommand.session !== state.sessionIdentity.session",
+            "state.pendingCommand.account_id !== state.accountId",
+            "state.pendingCommand.environment !== state.environment",
+            "The original command identity is preserved and will not be retargeted.",
+        ):
+            self.assertIn(required, js[fence:build])
+        self.assertIn("setCommandAvailability(false)", js[fence:build])
+
+    def test_snapshot_trust_invalidation_clears_account_and_environment_scope(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertGreaterEqual(js.count("state.accountId = null"), 4)
+        self.assertGreaterEqual(js.count("state.environment = null"), 4)
+        pagehide = js.index('window.addEventListener("pagehide"')
+        pageshow = js.index('window.addEventListener("pageshow"')
+        self.assertIn("state.accountId = null", js[pagehide:pageshow])
+        self.assertIn("state.environment = null", js[pagehide:pageshow])
+
     def test_snapshot_uses_only_canonical_ui_snapshot_fields(self):
         js = APP.read_text(encoding="utf-8")
         for required in (

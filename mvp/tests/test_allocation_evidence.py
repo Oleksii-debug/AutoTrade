@@ -85,6 +85,12 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 "account_id": "acct:paper:1",
                 "capability_snapshot_id": "capability:1",
                 "source_as_of": "2026-09-25T18:15:00Z",
+                "asset_class": "CASH_EQUITY",
+                "payoff": "LINEAR",
+                "quantity_unit": "SHARE",
+                "contract_multiplier": "1",
+                "quote_currency": "USD",
+                "settlement_currency": "USD",
                 "price": "10",
                 "lot_size": "1",
                 "cost_rate": "0.001",
@@ -92,6 +98,42 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 "min_notional": "10",
                 "fee_floor": "0",
                 "max_executable_notional": "500",
+            },
+        )
+        valuation = self.evidence(
+            evidence_id="valuation:aaa:v1",
+            kind="VALUATION",
+            environment=environment,
+            payload={
+                "symbol": "AAA",
+                "instrument_version": "instrument:aaa:v3",
+                "capability_snapshot_id": "capability:1",
+                "asset_class": "CASH_EQUITY",
+                "payoff": "LINEAR",
+                "quantity_unit": "SHARE",
+                "contract_multiplier": "1",
+                "quote_currency": "USD",
+                "settlement_currency": "USD",
+                "source_price": "10",
+                "portfolio_base_currency": "USD",
+                "fx_rate": "1",
+                "fx_source_id": "IDENTITY",
+                "unit_base_notional": "10",
+                "capital_requirement_rate": "1",
+                "min_notional_base": "10",
+                "fee_floor_base": "0",
+                "max_executable_notional_base": "500",
+                "payoff_identity": "linear:cash-equity:v1",
+                "cost_rate_components": {
+                    "execution": "0.001", "financing": "0", "funding": "0", "borrow": "0", "fx": "0"
+                },
+                "cost_evidence_refs": {
+                    "execution": "execution-cost:aaa:v1",
+                    "financing": "financing:none:aaa:v1",
+                    "funding": "funding:none:aaa:v1",
+                    "borrow": "borrow:none:aaa:v1",
+                    "fx": "fx:identity:usd:v1",
+                },
             },
         )
         capital = self.evidence(
@@ -107,6 +149,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 "reservation_state_version": 9,
                 "reservation_state_digest": "3" * 64,
                 "cash_available": capital_cash,
+                "base_currency": "USD",
             },
         )
         stress = self.evidence(
@@ -121,7 +164,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
         )
         resolved = {
             item.evidence_id: item
-            for item in (objective, market, capital, stress)
+            for item in (objective, market, valuation, capital, stress)
         }
         return objective, market, capital, stress, resolved
 
@@ -136,6 +179,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             policy,
             objective_evidence={"AAA": objective},
             market_evidence={"AAA": market},
+            valuation_evidence={"AAA": resolved["valuation:aaa:v1"]},
             capital_evidence=capital,
             stress_source_evidence=(stress,),
             resolved_evidence=resolved,
@@ -223,6 +267,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 self.policy(),
                 objective_evidence={"AAA": objective},
                 market_evidence={"AAA": market},
+            valuation_evidence={"AAA": resolved["valuation:aaa:v1"]},
                 capital_evidence=capital,
                 stress_source_evidence=(stress,),
                 resolved_evidence=resolved,
@@ -249,6 +294,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 self.policy(),
                 objective_evidence={"AAA": objective},
                 market_evidence={"AAA": market},
+            valuation_evidence={"AAA": resolved["valuation:aaa:v1"]},
                 capital_evidence=capital,
                 stress_source_evidence=(stress,),
                 resolved_evidence=resolved,

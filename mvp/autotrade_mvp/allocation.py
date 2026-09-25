@@ -1545,42 +1545,46 @@ def allocate_evidence_bound_objective_targets(
             "quote_currency",
         ).upper()
         valuation_fx_rate = _payload_decimal(valuation, "fx_rate")
-        if quote_currency == base_currency:
-            monetary_rate = Decimal("1")
-        else:
-            constraint_currency = _payload_text(
-                resolved_market[symbol],
-                "monetary_constraint_currency",
-            ).upper()
-            desired_currency = _payload_text(
-                resolved_objective[symbol],
-                "desired_notional_currency",
-            ).upper()
-            valuation_constraint_currency = _payload_text(
-                valuation,
-                "source_monetary_currency",
-            ).upper()
-            valuation_desired_currency = _payload_text(
-                valuation,
-                "desired_notional_currency",
-            ).upper()
-            if constraint_currency != quote_currency:
-                raise ValueError(
-                    f"market monetary constraints for {symbol} must declare quote-currency units"
-                )
-            if desired_currency != quote_currency:
-                raise ValueError(
-                    f"objective desired_notional for {symbol} must declare quote-currency units"
-                )
-            if valuation_constraint_currency != constraint_currency:
-                raise ValueError(
-                    f"valuation source monetary currency mismatch for {symbol}"
-                )
-            if valuation_desired_currency != desired_currency:
-                raise ValueError(
-                    f"valuation desired_notional currency mismatch for {symbol}"
-                )
-            monetary_rate = valuation_fx_rate
+        # Monetary units are authority even when quote currency equals portfolio
+        # base currency.  Missing or mismatched declarations must not make raw
+        # desired/minimum/fee/cap amounts silently become base-currency values.
+        constraint_currency = _payload_text(
+            resolved_market[symbol],
+            "monetary_constraint_currency",
+        ).upper()
+        desired_currency = _payload_text(
+            resolved_objective[symbol],
+            "desired_notional_currency",
+        ).upper()
+        valuation_constraint_currency = _payload_text(
+            valuation,
+            "source_monetary_currency",
+        ).upper()
+        valuation_desired_currency = _payload_text(
+            valuation,
+            "desired_notional_currency",
+        ).upper()
+        if constraint_currency != quote_currency:
+            raise ValueError(
+                f"market monetary constraints for {symbol} must declare quote-currency units"
+            )
+        if desired_currency != quote_currency:
+            raise ValueError(
+                f"objective desired_notional for {symbol} must declare quote-currency units"
+            )
+        if valuation_constraint_currency != constraint_currency:
+            raise ValueError(
+                f"valuation source monetary currency mismatch for {symbol}"
+            )
+        if valuation_desired_currency != desired_currency:
+            raise ValueError(
+                f"valuation desired_notional currency mismatch for {symbol}"
+            )
+        monetary_rate = (
+            Decimal("1")
+            if quote_currency == base_currency
+            else valuation_fx_rate
+        )
 
         desired_notional_base = item.candidate.desired_notional * monetary_rate
         min_notional_base = item.candidate.min_notional * monetary_rate

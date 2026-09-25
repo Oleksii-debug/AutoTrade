@@ -173,6 +173,12 @@ def _allocation_bundle(reservations, *, environment=ENVIRONMENT):
             "account_id": ACCOUNT_ID,
             "capability_snapshot_id": CAPABILITY_ID,
             "source_as_of": "2026-09-24T18:00:30Z",
+            "asset_class": "CASH_EQUITY",
+            "payoff": "LINEAR",
+            "quantity_unit": "SHARE",
+            "contract_multiplier": "1",
+            "quote_currency": "USD",
+            "settlement_currency": "USD",
             "price": "100",
             "lot_size": "1",
             "cost_rate": "0",
@@ -180,6 +186,42 @@ def _allocation_bundle(reservations, *, environment=ENVIRONMENT):
             "min_notional": "0",
             "fee_floor": "0",
             "max_executable_notional": "100",
+        },
+    )
+    valuation = _evidence(
+        evidence_id="valuation:abc:v1",
+        kind="VALUATION",
+        environment=environment,
+        payload={
+            "symbol": "ABC",
+            "instrument_version": "instrument:abc:v1",
+            "capability_snapshot_id": CAPABILITY_ID,
+            "asset_class": "CASH_EQUITY",
+            "payoff": "LINEAR",
+            "quantity_unit": "SHARE",
+            "contract_multiplier": "1",
+            "quote_currency": "USD",
+            "settlement_currency": "USD",
+            "source_price": "100",
+            "portfolio_base_currency": "USD",
+            "fx_rate": "1",
+            "fx_source_id": "IDENTITY",
+            "unit_base_notional": "100",
+            "capital_requirement_rate": "1",
+            "min_notional_base": "0",
+            "fee_floor_base": "0",
+            "max_executable_notional_base": "100",
+            "payoff_identity": "linear:cash-equity:v1",
+            "cost_rate_components": {
+                "execution": "0", "financing": "0", "funding": "0", "borrow": "0", "fx": "0"
+            },
+            "cost_evidence_refs": {
+                "execution": "execution:none:abc:v1",
+                "financing": "financing:none:abc:v1",
+                "funding": "funding:none:abc:v1",
+                "borrow": "borrow:none:abc:v1",
+                "fx": "fx:identity:usd:v1",
+            },
         },
     )
     capital = _evidence(
@@ -195,6 +237,7 @@ def _allocation_bundle(reservations, *, environment=ENVIRONMENT):
             "reservation_state_version": reservations.version,
             "reservation_state_digest": reservations.state_digest,
             "cash_available": "1000",
+            "base_currency": "USD",
         },
     )
     stress = _evidence(
@@ -209,7 +252,7 @@ def _allocation_bundle(reservations, *, environment=ENVIRONMENT):
     )
     resolved = {
         item.evidence_id: item
-        for item in (objective, market, capital, stress)
+        for item in (objective, market, valuation, capital, stress)
     }
     result = allocate_evidence_bound_objective_targets(
         (
@@ -237,6 +280,7 @@ def _allocation_bundle(reservations, *, environment=ENVIRONMENT):
         ),
         objective_evidence={"ABC": objective},
         market_evidence={"ABC": market},
+        valuation_evidence={"ABC": valuation},
         capital_evidence=capital,
         stress_source_evidence=(stress,),
         resolved_evidence=resolved,

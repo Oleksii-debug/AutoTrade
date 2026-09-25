@@ -206,8 +206,43 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertEqual(prepared.exact_quantity_text, "1.25")
         self.assertEqual(prepared.exact_limit_price_text, "220.10")
         self.assertFalse(prepared.provider_serialization_qualified)
+        self.assertRegex(
+            prepared.brokerage_session_fingerprint,
+            r"^sha256:[0-9a-f]{64}$",
+        )
         self.assertNotIn("quantity", prepared.fields)
         self.assertNotIn("price", prepared.fields)
+
+    def test_prepared_order_fingerprint_binds_exact_session_observation(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        first = prepare_normalized_order(
+            intent,
+            client_order_id="at-session-fingerprint-1",
+            capability=capability(),
+            session=ready_session(observed_at=NOW - timedelta(seconds=1)),
+            at=NOW,
+            maximum_session_age_seconds=30,
+        )
+        second = prepare_normalized_order(
+            intent,
+            client_order_id="at-session-fingerprint-2",
+            capability=capability(),
+            session=ready_session(observed_at=NOW - timedelta(seconds=2)),
+            at=NOW,
+            maximum_session_age_seconds=30,
+        )
+        self.assertNotEqual(
+            first.brokerage_session_fingerprint,
+            second.brokerage_session_fingerprint,
+        )
 
     def test_crypto_like_routed_contract_uses_conidex(self):
         intent = IbkrWebOrderIntent.create(

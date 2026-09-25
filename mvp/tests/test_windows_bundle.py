@@ -536,6 +536,44 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             )
         self.assertFalse((self.root / "embedded-private-key.zip").exists())
 
+    def test_encrypted_private_key_material_is_rejected_under_innocent_name(self):
+        disguised = self.staging / "runtime-encrypted-notes.txt"
+        disguised.write_bytes(
+            b"ordinary prefix\n"
+            b"-----BEGIN ENCRYPTED PRIVATE KEY-----\n"
+            b"must-not-ship-even-when-encrypted\n"
+            b"-----END ENCRYPTED PRIVATE KEY-----\n"
+        )
+        with self.assertRaisesRegex(BundleError, "private-key material"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "embedded-encrypted-private-key.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+        self.assertFalse(
+            (self.root / "embedded-encrypted-private-key.zip").exists()
+        )
+
+    def test_escaped_json_vault_keys_cannot_bypass_semantic_content_gate(self):
+        disguised = self.staging / "runtime-escaped-state.json"
+        disguised.write_text(
+            """{"version":2,"records":{"cred-live":{"handle":{"handle_id":"cred-live"},"owner_ident\\u0069ty":"windows-user","ciphertext":"AAECAwQ=","active":true}}}""",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(BundleError, "credential-vault content"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "escaped-vault.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+        self.assertFalse((self.root / "escaped-vault.zip").exists())
+
     def test_unrelated_json_with_ciphertext_word_is_not_misclassified_as_vault(self):
         ordinary = self.staging / "protocol-sample.json"
         ordinary.write_text(

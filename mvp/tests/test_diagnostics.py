@@ -90,5 +90,20 @@ class DiagnosticTraceTests(unittest.TestCase):
         self.assertEqual(redacted["rows"][0]["password"], "[REDACTED]")
 
 
+    def test_embedded_secret_text_is_redacted_even_under_safe_keys(self):
+        payload = {
+            "url": "https://provider.test/path?access_token=token123&mode=read",
+            "message": "proxy-authorization=Basic c2VjcmV0",
+            "connection": "server=db;client_secret=client123;database=main",
+            "pem": "-----BEGIN OPENSSH PRIVATE KEY-----\\nprivate-bytes",
+            "safe": "latency=12ms",
+        }
+        redacted = redact_diagnostic_value(payload)
+        self.assertNotIn("token123", redacted["url"])
+        self.assertNotIn("c2VjcmV0", redacted["message"])
+        self.assertNotIn("client123", redacted["connection"])
+        self.assertEqual(redacted["pem"], "[REDACTED]")
+        self.assertEqual(redacted["safe"], "latency=12ms")
+
 if __name__ == "__main__":
     unittest.main()

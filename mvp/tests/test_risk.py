@@ -1,7 +1,13 @@
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
+import json
 import unittest
+from uuid import NAMESPACE_URL, uuid5
 
 from mvp.autotrade_mvp.risk import (
+    LiquidationHeadroomEvidence,
+    LiquidationScope,
     RiskContext,
     RiskIntent,
     RiskPolicy,
@@ -10,6 +16,103 @@ from mvp.autotrade_mvp.risk import (
     stress_scenario_digest,
     tail_scenario_set_digest,
 )
+
+
+LIQUIDATION_BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+class _LiquidationEvidenceStore:
+    def __init__(self):
+        self._manifests = {}
+        self._objects = {}
+
+    def add(self, evidence, payload):
+        raw = json.dumps(
+            payload,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        actual = "sha256:" + sha256(raw).hexdigest()
+        if actual != evidence.sha256:
+            raise AssertionError("test evidence digest mismatch")
+        self._objects[evidence.artifact_id] = raw
+        self._manifests[evidence.artifact_id] = {
+            "artifact_id": evidence.artifact_id,
+            "sha256": evidence.sha256,
+            "manifest_hash": "sha256:" + "f" * 64,
+            "metadata": dict(payload),
+        }
+
+    def load_manifest(self, artifact_id):
+        return dict(self._manifests[artifact_id])
+
+    def read_bytes(self, artifact_id):
+        return self._objects[artifact_id]
+
+
+def liquidation_evidence(
+    store,
+    *,
+    headroom="0.25",
+    provider_id="BYBIT",
+    account_id="acct-1",
+    environment="PAPER",
+    margin_mode="CROSS",
+    risk_tier_version="tier-v1",
+    state_version=7,
+    observed_at=LIQUIDATION_BASE,
+    expires_at=None,
+):
+    expires = expires_at or (observed_at + timedelta(hours=1))
+    payload = {
+        "artifact_kind": "LIQUIDATION_HEADROOM_EVIDENCE",
+        "schema_version": 1,
+        "provider_id": provider_id,
+        "account_id": account_id,
+        "environment": environment,
+        "margin_mode": margin_mode,
+        "risk_tier_version": risk_tier_version,
+        "state_version": state_version,
+        "observed_at": observed_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "expires_at": expires.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "headroom": str(Decimal(headroom).normalize()),
+    }
+    raw = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    digest = "sha256:" + sha256(raw).hexdigest()
+    artifact_id = str(uuid5(NAMESPACE_URL, digest))
+    evidence = LiquidationHeadroomEvidence.create(
+        headroom=headroom,
+        state_version=state_version,
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+        margin_mode=margin_mode,
+        risk_tier_version=risk_tier_version,
+        observed_at=observed_at,
+        expires_at=expires,
+        artifact_id=artifact_id,
+        sha256=digest,
+    )
+    store.add(evidence, payload)
+    scope = LiquidationScope(
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+        margin_mode=margin_mode,
+        risk_tier_version=risk_tier_version,
+    )
+    return {
+        "liquidation_headroom": headroom,
+        "liquidation_scope": scope,
+        "liquidation_headroom_evidence": evidence,
+        "decision_time": observed_at + timedelta(minutes=1),
+    }
 
 
 def policy(**overrides):

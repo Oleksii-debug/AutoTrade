@@ -75,8 +75,15 @@ class GateProfile:
 
         if not isinstance(self.selection_correction, str) or not self.selection_correction.strip():
             raise ValueError("selection_correction is required")
+        correction = self.selection_correction.strip()
         if type(self.max_trials) is not int or self.max_trials <= 0:
             raise ValueError("max_trials must be a positive integer")
+        if self.max_trials > 1 and correction.lower() in {
+            "none", "no", "unadjusted", "disabled", "n/a", "na"
+        }:
+            raise ValueError(
+                "multi-trial protocols require an explicit multiplicity treatment"
+            )
         if isinstance(self.required_regimes, (str, bytes)):
             raise TypeError("required_regimes must be a collection")
         regimes_raw = tuple(self.required_regimes)
@@ -103,7 +110,7 @@ class GateProfile:
         object.__setattr__(self, "min_power", power)
         object.__setattr__(self, "primary_baseline_id", primary_baseline)
         object.__setattr__(self, "baseline_ids", baselines)
-        object.__setattr__(self, "selection_correction", self.selection_correction.strip())
+        object.__setattr__(self, "selection_correction", correction)
         object.__setattr__(self, "required_regimes", regimes)
 
     @classmethod
@@ -169,6 +176,12 @@ class GateProfile:
         correction = selection_correction.strip()
         if type(max_trials) is not int or max_trials <= 0:
             raise ValueError("max_trials must be a positive integer")
+        if max_trials > 1 and correction.lower() in {
+            "none", "no", "unadjusted", "disabled", "n/a", "na"
+        }:
+            raise ValueError(
+                "multi-trial protocols require an explicit multiplicity treatment"
+            )
         if isinstance(required_regimes, (str, bytes)):
             raise TypeError("required_regimes must be a collection")
         materialized_regimes = tuple(required_regimes)

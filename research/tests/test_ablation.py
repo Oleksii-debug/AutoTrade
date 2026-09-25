@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 import unittest
 
@@ -11,6 +11,14 @@ from autotrade_research.evaluation.ablation import (
 
 
 CUT = datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc)
+
+
+class _NoOffsetTZ(tzinfo):
+    def utcoffset(self, dt):
+        return None
+
+    def dst(self, dt):
+        return None
 
 
 def outcome(
@@ -287,6 +295,18 @@ class AblationTests(unittest.TestCase):
                 cost="-0.01",
                 elapsed=10,
                 components=("base",),
+            )
+
+    def test_causal_timestamp_requires_real_utc_offset(self):
+        invalid = datetime(2026, 9, 25, 0, 0, tzinfo=_NoOffsetTZ())
+        with self.assertRaisesRegex(ValueError, "timezone-aware"):
+            outcome(
+                variant="FULL",
+                utility=1,
+                cost=0,
+                elapsed=10,
+                components=("base",),
+                cutoff=invalid,
             )
 
     def test_future_leakage_is_rejected_when_cutoff_is_after_decision(self):

@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -518,7 +519,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                 "Host snapshot has no connection freshness evidence.");
         }
 
-        EmergencyHostStatus status = new(
+        EmergencyHostStatus status = new EmergencyHostStatus(
             Connected: true,
             HostId: hostId,
             AccountId: accountId,

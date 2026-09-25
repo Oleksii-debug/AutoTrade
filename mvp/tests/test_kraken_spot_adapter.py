@@ -76,6 +76,13 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             KrakenSpotPreparedRequest(
                 **{**base, "body": {"pair": "XBTUSD", "cl_ord_id": ""}}
             )
+        for field, value in (("cl_ord_id", None), ("cl_ord_id", 123), ("pair", True)):
+            with self.subTest(field=field, value=value), self.assertRaises(
+                KrakenSpotAdapterError
+            ):
+                KrakenSpotPreparedRequest(
+                    **{**base, "body": {**base["body"], field: value}}
+                )
 
     def test_limit_request_preserves_exact_decimal_and_has_no_nonce(self):
         intent = KrakenSpotOrderIntent.create(

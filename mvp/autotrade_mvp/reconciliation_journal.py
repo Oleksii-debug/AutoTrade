@@ -840,7 +840,7 @@ def load_account_resource_availability_evidence(
                     name="settlement.committed_at",
                 ).replace("Z", "+00:00")
             )
-            if resource_started < settlement_committed:
+            if resource_started <= settlement_committed:
                 raise ValueError(
                     "resource availability snapshot predates settlement financial truth"
                 )
@@ -876,7 +876,7 @@ def load_account_resource_availability_evidence(
                     name="option_lifecycle.committed_at",
                 ).replace("Z", "+00:00")
             )
-            if resource_started < lifecycle_committed:
+            if resource_started <= lifecycle_committed:
                 raise ValueError(
                     "resource availability snapshot predates option lifecycle financial truth"
                 )

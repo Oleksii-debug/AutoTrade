@@ -143,6 +143,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
             capability=capability(),
             session=ready_session(),
             at=NOW,
+            maximum_session_age_seconds=30,
         )
         self.assertEqual(prepared.endpoint, "/iserver/account/U1234567/orders")
         self.assertEqual(prepared.fields["conid"], 265598)
@@ -169,6 +170,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
             capability=capability(),
             session=ready_session(),
             at=NOW,
+            maximum_session_age_seconds=30,
         )
         self.assertEqual(prepared.fields["conidex"], "557335679@ZEROHASH")
         self.assertNotIn("conid", prepared.fields)
@@ -202,7 +204,49 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 capability=capability(),
                 session=ready_session(observed_at=NOW + timedelta(seconds=1)),
                 at=NOW,
+                maximum_session_age_seconds=30,
             )
+
+    def test_stale_session_observation_cannot_authorize(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "session evidence is stale"):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-stale-session",
+                capability=capability(),
+                session=ready_session(observed_at=NOW - timedelta(seconds=31)),
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+
+    def test_session_freshness_policy_must_be_explicit_and_valid(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "non-negative integer"):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-invalid-session-policy",
+                capability=capability(),
+                session=ready_session(),
+                at=NOW,
+                maximum_session_age_seconds=True,
+            )
+
 
     def test_account_capability_must_match_exact_account(self):
         intent = IbkrWebOrderIntent.create(
@@ -221,6 +265,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 capability=capability(account_id="OTHER"),
                 session=ready_session(),
                 at=NOW,
+                maximum_session_age_seconds=30,
             )
 
     def test_execution_identity_uses_exec_id_and_perm_id(self):
@@ -553,6 +598,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
             capability=capability(),
             session=ready_session(),
             at=NOW,
+            maximum_session_age_seconds=30,
         )
         self.assertIs(prepared.fields["manualIndicator"], False)
         self.assertEqual(prepared.fields["extOperator"], "autotrade")

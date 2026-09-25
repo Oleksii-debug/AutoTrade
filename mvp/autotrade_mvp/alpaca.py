@@ -19,6 +19,7 @@ from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .capabilities import CapabilitySnapshot
+from .provider_core import BoundReconciliationResponse, require_reconciliation_response
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
@@ -473,21 +474,25 @@ def parse_submission_response(
 
 
 def parse_trade_activities(
-    activities: object,
+    evidence: BoundReconciliationResponse,
     *,
-    account_id: str,
-    environment: str,
     instrument_versions: Mapping[str, str],
     client_ids_by_order_id: Mapping[str, str | None],
     fees_by_activity_id: Mapping[str, tuple[object, str]],
 ) -> tuple[ProviderFillEvidence, ...]:
-    """Map FILL activities only when separate fee evidence is bound.
+    """Map one provenance-bound FILL-activity read into unique fill evidence.
 
     The documented trade-activity row contains execution quantity/price and
     order identity but not canonical per-fill fee amount/currency. AutoTrade
-    refuses to invent zero fees.
+    refuses to invent zero fees or caller-authored account/environment labels.
     """
 
+    activities, account_id, environment = require_reconciliation_response(
+        evidence,
+        provider_id="ALPACA",
+        surface="ACTIVITIES",
+        endpoint="/v2/account/activities/FILL",
+    )
     if not isinstance(activities, list):
         raise AlpacaAdapterError("activities must be an array")
     for name, mapping in (

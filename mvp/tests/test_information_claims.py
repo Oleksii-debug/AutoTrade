@@ -40,6 +40,51 @@ class InformationClaimTests(unittest.TestCase):
         self.assertEqual(accepted.claim_id, first.claim_id)
         self.assertEqual(len(store.claims), 1)
 
+    def test_syndication_dedupe_ignores_outlet_publication_clock(self):
+        store = ClaimStore()
+        early_document = SourceDocument.create(
+            source_id="wire-a",
+            source_revision="r1",
+            source_kind="NEWS",
+            title="title",
+            passage="same syndicated passage",
+            published_at=BASE,
+            available_at=BASE,
+            rights_basis="quotation-and-hash-only",
+            locator="p1",
+        )
+        later_document = SourceDocument.create(
+            source_id="wire-b",
+            source_revision="r1",
+            source_kind="NEWS",
+            title="title",
+            passage="same syndicated passage",
+            published_at=BASE + timedelta(minutes=5),
+            available_at=BASE + timedelta(minutes=5),
+            rights_basis="quotation-and-hash-only",
+            locator="p1",
+        )
+        early = store.build_claim(
+            early_document,
+            subject="X",
+            predicate="state",
+            value="up",
+        )
+        later = store.build_claim(
+            later_document,
+            subject="X",
+            predicate="state",
+            value="up",
+        )
+
+        self.assertEqual(early.syndication_key, later.syndication_key)
+        store.add(later)
+        representative, inserted = store.add(early)
+        self.assertFalse(inserted)
+        self.assertEqual(representative.claim_id, early.claim_id)
+        self.assertEqual(store.claims, (early,))
+        self.assertEqual(store.revisions("wire-b"), (later,))
+
     def test_syndication_uses_earliest_causal_availability_independent_of_ingest_order(self):
         store = ClaimStore()
         later_visible = store.build_claim(

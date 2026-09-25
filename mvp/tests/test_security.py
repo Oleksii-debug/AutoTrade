@@ -200,6 +200,139 @@ class SecurityBoundaryTests(unittest.TestCase):
                 purpose="TRADE",
             )
 
+    def test_idle_timeout_expires_without_activity_and_successful_use_refreshes_it(self):
+        session = self.boundary.create_session(
+            subject="operator-idle",
+            role="OPERATOR",
+            origin=self.owner.origin,
+            ttl_seconds=60,
+            idle_timeout_seconds=10,
+        )
+        self.clock[0] = 1009.0
+        touched = self.boundary.validate_session(
+            session.token,
+            origin=session.origin,
+        )
+        self.assertEqual(touched.idle_expires_at, 1019.0)
+
+        self.clock[0] = 1018.0
+        touched_again = self.boundary.validate_session(
+            session.token,
+            origin=session.origin,
+        )
+        self.assertEqual(touched_again.idle_expires_at, 1028.0)
+
+        self.clock[0] = 1028.0
+        with self.assertRaisesRegex(PermissionError, "idle timeout"):
+            self.boundary.validate_session(session.token, origin=session.origin)
+        with self.assertRaisesRegex(PermissionError, "Unknown session"):
+            self.boundary.validate_session(session.token, origin=session.origin)
+
+    def test_failed_origin_replay_does_not_keep_idle_session_alive(self):
+        session = self.boundary.create_session(
+            subject="operator-idle-origin",
+            role="OPERATOR",
+            origin=self.owner.origin,
+            ttl_seconds=60,
+            idle_timeout_seconds=10,
+        )
+        self.clock[0] = 1008.0
+        with self.assertRaisesRegex(PermissionError, "origin"):
+            self.boundary.validate_session(
+                session.token,
+                origin="https://evil.invalid",
+            )
+        self.clock[0] = 1010.0
+        with self.assertRaisesRegex(PermissionError, "idle timeout"):
+            self.boundary.validate_session(session.token, origin=session.origin)
+
+    def test_refresh_reauthenticates_same_scope_rotates_token_and_revokes_old_token(self):
+        observed = []
+
+        def authorize(subject, role, origin):
+            observed.append((subject, role, origin))
+            return True
+
+        boundary = SecurityBoundary(
+            allowed_origins={self.owner.origin},
+            credential_vault=self.vault,
+            session_authorizer=authorize,
+            now=lambda: self.clock[0],
+        )
+        session = boundary.create_session(
+            subject="operator-refresh",
+            role="OPERATOR",
+            origin=self.owner.origin,
+            ttl_seconds=60,
+            idle_timeout_seconds=15,
+        )
+        self.clock[0] = 1005.0
+        refreshed = boundary.refresh_session(
+            session.token,
+            origin=session.origin,
+            ttl_seconds=120,
+            idle_timeout_seconds=20,
+        )
+        self.assertNotEqual(refreshed.token, session.token)
+        self.assertEqual(refreshed.subject, session.subject)
+        self.assertEqual(refreshed.role, session.role)
+        self.assertEqual(refreshed.origin, session.origin)
+        self.assertEqual(refreshed.expires_at, 1125.0)
+        self.assertEqual(refreshed.idle_expires_at, 1025.0)
+        self.assertEqual(
+            observed,
+            [
+                ("operator-refresh", "OPERATOR", self.owner.origin),
+                ("operator-refresh", "OPERATOR", self.owner.origin),
+            ],
+        )
+        with self.assertRaisesRegex(PermissionError, "Unknown session"):
+            boundary.validate_session(session.token, origin=session.origin)
+        self.assertEqual(
+            boundary.validate_session(
+                refreshed.token,
+                required_roles={"OPERATOR"},
+                origin=refreshed.origin,
+            ).role,
+            "OPERATOR",
+        )
+
+    def test_refresh_authentication_failure_keeps_existing_session_valid(self):
+        calls = [0]
+
+        def authorize(subject, role, origin):
+            calls[0] += 1
+            return calls[0] == 1
+
+        boundary = SecurityBoundary(
+            allowed_origins={self.owner.origin},
+            credential_vault=self.vault,
+            session_authorizer=authorize,
+            now=lambda: self.clock[0],
+        )
+        session = boundary.create_session(
+            subject="operator-refresh-fail",
+            role="OPERATOR",
+            origin=self.owner.origin,
+            ttl_seconds=60,
+            idle_timeout_seconds=20,
+        )
+        self.clock[0] = 1005.0
+        with self.assertRaisesRegex(PermissionError, "not authenticated"):
+            boundary.refresh_session(
+                session.token,
+                origin=session.origin,
+                ttl_seconds=60,
+            )
+        self.assertEqual(
+            boundary.validate_session(
+                session.token,
+                required_roles={"OPERATOR"},
+                origin=session.origin,
+            ).subject,
+            "operator-refresh-fail",
+        )
+
     def test_origin_binding_blocks_browser_replay(self):
         handle = self._credential()
         with self.assertRaisesRegex(PermissionError, "origin"):
@@ -292,6 +425,15 @@ class SecurityBoundaryTests(unittest.TestCase):
                     role="OBSERVER",
                     origin=self.owner.origin,
                     ttl_seconds=ttl,
+                )
+        for idle in (True, 1.5, "60", 0, 3601):
+            with self.subTest(idle=idle), self.assertRaises(ValueError):
+                self.boundary.create_session(
+                    subject="observer",
+                    role="OBSERVER",
+                    origin=self.owner.origin,
+                    ttl_seconds=60,
+                    idle_timeout_seconds=idle,
                 )
         bad = SecurityBoundary(
             allowed_origins={"https://local.autotrade.invalid"},

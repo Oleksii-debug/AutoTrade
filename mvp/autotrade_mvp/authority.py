@@ -1156,6 +1156,45 @@ class AuthorityService:
         policy = self._policies.get(pid)
         if policy is None:
             raise KeyError(pid)
+
+        # Exact retries must be replayable after the first transaction advances
+        # the reservation aggregate.  Otherwise the risk decision that was
+        # correctly bound to reservation version N would look stale at N+1 and
+        # a lost response could not be recovered idempotently.  Only an exact
+        # immutable admission identity is replayed; any changed scope fails
+        # closed before a new reservation or send can occur.
+        existing = self._admissions.get(aid)
+        if existing is not None:
+            expected_instrument = InstrumentVersionIdentity(
+                instrument_id, instrument_version
+            )
+            same_command = (
+                existing.financial_command_id == cid
+                and existing.policy_id == pid
+                and existing.intent_id == iid
+                and existing.intent_hash == ihash
+                and existing.account_id == account
+                and existing.environment == env
+                and existing.instrument_version == expected_instrument
+                and existing.action == _text(action, name="action").upper()
+                and existing.notional == _decimal(notional, name="notional")
+                and existing.state_version == current_state_version
+                and existing.risk_decision_id == risk_decision.decision_id
+                and existing.reservation_id == (
+                    rid if existing.outcome == "ADMITTED" else None
+                )
+                and existing.capability_snapshot_id == capability
+                and existing.risk_valid_until == risk_decision.valid_until
+                and existing.policy_version == policy.version
+                and existing.confirmation_id == confirmation_id
+                and existing.risk_reducing == risk_reducing
+            )
+            if not same_command:
+                raise AuthorityConflict(
+                    "admission_id already belongs to another financial command"
+                )
+            return existing
+
         validate_bound_risk_decision(risk_decision, now=now)
         if risk_decision.intent_hash != ihash:
             raise AuthorityConflict("risk decision intent_hash mismatch")
@@ -1168,22 +1207,6 @@ class AuthorityService:
             raise AuthorityConflict("risk decision reservation_version is stale")
         if risk_decision.capability_snapshot_id != capability:
             raise AuthorityConflict("risk decision capability snapshot is stale")
-
-        existing = self._admissions.get(aid)
-        if existing is not None:
-            same_command = (
-                existing.financial_command_id == cid
-                and existing.risk_decision_id == risk_decision.decision_id
-                and existing.reservation_id == (
-                    rid if existing.outcome == "ADMITTED" else None
-                )
-                and existing.intent_id == iid
-            )
-            if not same_command:
-                raise AuthorityConflict(
-                    "admission_id already belongs to another financial command"
-                )
-            return existing
 
         reservation_plan = None
         if risk_decision.admitted:

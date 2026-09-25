@@ -45,6 +45,7 @@ def evidence(**overrides):
         adverse_cost_loss="0.01",
         retention_passed=True,
         untouched_holdout_passed=True,
+        valid_sequential_evaluation_passed=False,
         walk_forward_passed=True,
         baseline_advantages={
             "cash": "0.04",
@@ -168,13 +169,26 @@ class EvaluationGateTests(unittest.TestCase):
         )
 
 
-    def test_locked_holdout_and_walk_forward_are_required_for_terminal_pass(self):
-        holdout = evaluate_with_verified_bundle(
+    def test_locked_evaluation_and_walk_forward_are_required_for_terminal_pass(self):
+        no_locked_path = evaluate_with_verified_bundle(
             profile(),
-            evidence(untouched_holdout_passed=False),
+            evidence(
+                untouched_holdout_passed=False,
+                valid_sequential_evaluation_passed=False,
+            ),
         )
-        self.assertEqual(holdout.status, "FAIL")
-        self.assertEqual(holdout.checks["untouched_holdout"], "FAIL")
+        self.assertEqual(no_locked_path.status, "FAIL")
+        self.assertEqual(no_locked_path.checks["locked_evaluation"], "FAIL")
+
+        sequential = evaluate_with_verified_bundle(
+            profile(),
+            evidence(
+                untouched_holdout_passed=False,
+                valid_sequential_evaluation_passed=True,
+            ),
+        )
+        self.assertEqual(sequential.status, "PASS")
+        self.assertEqual(sequential.checks["locked_evaluation"], "PASS")
 
         walk_forward = evaluate_with_verified_bundle(
             profile(),
@@ -187,11 +201,12 @@ class EvaluationGateTests(unittest.TestCase):
             profile(),
             evidence(
                 untouched_holdout_passed=None,
+                valid_sequential_evaluation_passed=None,
                 walk_forward_passed=None,
             ),
         )
         self.assertEqual(missing.status, "INCONCLUSIVE")
-        self.assertEqual(missing.checks["untouched_holdout"], "INCONCLUSIVE")
+        self.assertEqual(missing.checks["locked_evaluation"], "INCONCLUSIVE")
         self.assertEqual(missing.checks["walk_forward"], "INCONCLUSIVE")
 
     def test_locked_evaluation_artifact_cannot_forge_holdout_or_walk_forward_pass(self):
@@ -200,6 +215,7 @@ class EvaluationGateTests(unittest.TestCase):
 
         for forged_field in (
             "untouched_holdout_passed",
+            "valid_sequential_evaluation_passed",
             "walk_forward_passed",
         ):
             with self.subTest(forged_field=forged_field), TemporaryDirectory() as directory:

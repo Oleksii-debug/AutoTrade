@@ -344,6 +344,10 @@ class ReconciliationJournalTests(unittest.TestCase):
                 evidence["checkpoint_event_id"],
                 checkpoint["event_id"],
             )
+            self.assertEqual(
+                evidence["scope_latest_checkpoint_journal_sequence"],
+                checkpoint["journal_sequence"],
+            )
             self.assertEqual(evidence["snapshot_mode"], "ATOMIC")
             self.assertEqual(evidence["age_seconds"], "30")
 

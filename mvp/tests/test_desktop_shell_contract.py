@@ -48,6 +48,22 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("returnFocus: false", code)
         self.assertIn("_lifetime.Cancel()", code)
 
+    def test_live_regions_raise_automation_events_without_moving_focus(self):
+        text = XAML.read_text(encoding="utf-8")
+        code = CODE.read_text(encoding="utf-8")
+        self.assertEqual(text.count('TextChanged="LiveRegion_TextChanged"'), 2)
+        self.assertIn("UIElementAutomationPeer.FromElement(element)", code)
+        self.assertIn("UIElementAutomationPeer.CreatePeerForElement(element)", code)
+        self.assertIn(
+            "RaiseAutomationEvent(AutomationEvents.LiveRegionChanged)",
+            code,
+        )
+        handler = code.split("private void LiveRegion_TextChanged", 1)[1].split(
+            "private async void MainWindow_Loaded", 1
+        )[0]
+        self.assertNotIn(".Focus()", handler)
+        self.assertIn("if (!IsLoaded", handler)
+
     def test_failed_refresh_preserves_last_known_values_as_stale(self):
         code = CODE.read_text(encoding="utf-8")
         self.assertIn("_lastKnownConnectedStatus", code)

@@ -1096,6 +1096,7 @@ class RiskDecision:
     reservation_version: int | None = None
     reservation_requirements: tuple[tuple[str, Decimal], ...] | None = None
     capability_snapshot_id: str | None = None
+    authoritative_risk_snapshot_id: str | None = None
     evaluated_at: str | None = None
     valid_until: str | None = None
 
@@ -1186,6 +1187,17 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
             "evaluated_at": decision.evaluated_at,
             "valid_until": decision.valid_until,
         }
+    if decision.authoritative_risk_snapshot_id is not None:
+        if "binding" not in payload:
+            raise ValueError(
+                "authoritative risk snapshot requires complete risk decision binding"
+            )
+        payload["binding"]["authoritative_risk_snapshot_id"] = (
+            _risk_binding_text(
+                decision.authoritative_risk_snapshot_id,
+                name="authoritative_risk_snapshot_id",
+            )
+        )
     encoded = json.dumps(
         payload,
         ensure_ascii=True,
@@ -1224,6 +1236,7 @@ def bind_risk_decision(
     capability_snapshot_id: str,
     evaluated_at: str,
     valid_until: str,
+    authoritative_risk_snapshot_id: str | None = None,
 ) -> RiskDecision:
     """Bind a deterministic risk result to immutable admission evidence."""
 
@@ -1232,6 +1245,14 @@ def bind_risk_decision(
     ihash = _risk_binding_text(intent_hash, name="intent_hash")
     capability = _risk_binding_text(
         capability_snapshot_id, name="capability_snapshot_id"
+    )
+    authoritative_snapshot = (
+        None
+        if authoritative_risk_snapshot_id is None
+        else _risk_binding_text(
+            authoritative_risk_snapshot_id,
+            name="authoritative_risk_snapshot_id",
+        )
     )
     if (
         not isinstance(state_version, int)
@@ -1270,6 +1291,7 @@ def bind_risk_decision(
         reservation_version=reservation_version,
         reservation_requirements=requirements,
         capability_snapshot_id=capability,
+        authoritative_risk_snapshot_id=authoritative_snapshot,
         evaluated_at=evaluated,
         valid_until=valid,
     )
@@ -1307,6 +1329,7 @@ def evaluate_bound_risk(
     evaluated_at: str,
     valid_until: str,
     evidence_store: object | None = None,
+    authoritative_risk_snapshot_id: str | None = None,
 ) -> RiskDecision:
     decision = evaluate_risk(
         intent,
@@ -1324,6 +1347,7 @@ def evaluate_bound_risk(
         capability_snapshot_id=capability_snapshot_id,
         evaluated_at=evaluated_at,
         valid_until=valid_until,
+        authoritative_risk_snapshot_id=authoritative_risk_snapshot_id,
     )
 
 

@@ -23,6 +23,7 @@ from research.autotrade_research.artifacts.store import (
 from research.autotrade_research.io.strict_json import strict_json_loads
 
 from .dispatch import submission_attempt_aggregate_id
+from .durable_order_projection import DurableOrderBookProjection
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reservations import (
     ReservationBook,
@@ -952,12 +953,12 @@ class DurableReservationBook:
             matching[0].get("outcome"),
             name="reconciliation submission outcome",
         ).upper()
-        # Reconciliation can prove that at least one execution exists, but an
-        # execution observation alone does not prove that the order is fully
-        # filled.  Keep worst-case reservation capacity held until a canonical
-        # terminal order/fill projection can prove FILLED semantics.
+        # Reconciliation proves whether an unknown send was observed or absent.
+        # A FILLED reservation release additionally requires the single canonical
+        # durable order projection to prove full quantity for this exact attempt.
         required_outcome = {
             "PROVEN_ABSENT": "PROVEN_ABSENT",
+            "FILLED": "OBSERVED_EXECUTION",
         }.get(terminal_outcome)
         if required_outcome is None:
             raise ReservationConflict(
@@ -967,6 +968,29 @@ class DurableReservationBook:
             raise ReservationConflict(
                 "terminal outcome does not match durable reconciliation resolution"
             )
+        if terminal_outcome == "FILLED":
+            try:
+                projection = DurableOrderBookProjection(
+                    self.store,
+                    provider_id=provider_name,
+                    account_id=self.account_id,
+                    environment=self.environment,
+                    host_id="reservation-resolution-verifier",
+                    owner_epoch="read-only",
+                )
+                order = projection.order(client_order_id)
+            except (KeyError, ValueError, TypeError) as error:
+                raise ReservationConflict(
+                    "FILLED release requires canonical durable order projection"
+                ) from error
+            if order.submission_attempt_id != attempt:
+                raise ReservationConflict(
+                    "FILLED release order projection belongs to another submission attempt"
+                )
+            if order.state != "FILLED":
+                raise ReservationConflict(
+                    "FILLED release requires canonical order state FILLED"
+                )
         return evidence
 
     def mark_terminal(

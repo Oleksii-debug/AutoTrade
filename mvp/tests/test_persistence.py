@@ -742,6 +742,115 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(replayed, {"status": "ACCEPTED"})
             self.assertEqual(upgraded.pending_outbox()[0]["event_id"], "evt-1")
 
+    def test_v4_upgrade_rejects_malformed_command_result_before_hash_backfill(self):
+        class V4JournalStore(JournalStore):
+            SCHEMA_VERSION = 4
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            V4JournalStore(path)
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO command_dedupe(
+                        command_id, actor, environment, idempotency_key,
+                        request_hash, result_json, state_version, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "v4-corrupt-command",
+                        "alice",
+                        "PAPER",
+                        "v4-corrupt-key",
+                        payload_digest({"action": "A"}),
+                        '{"status":',
+                        1,
+                        "2026-09-24T16:00:00Z",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "legacy command result is not valid JSON"):
+                JournalStore(path)
+
+            connection = sqlite3.connect(path)
+            try:
+                versions = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT version FROM schema_migrations ORDER BY version"
+                    )
+                ]
+                columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(command_dedupe)")
+                }
+            finally:
+                connection.close()
+            self.assertEqual(versions, [1, 2, 3, 4])
+            self.assertNotIn("result_hash", columns)
+
+    def test_v4_upgrade_rejects_mismatched_hashless_outbox_before_backfill(self):
+        class V4JournalStore(JournalStore):
+            SCHEMA_VERSION = 4
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            legacy = V4JournalStore(path)
+            legacy.append_event(event(), outbox_topic="events")
+
+            connection = sqlite3.connect(path)
+            try:
+                payload = json.loads(
+                    connection.execute(
+                        "SELECT payload_json FROM outbox WHERE event_id = ?",
+                        ("evt-1",),
+                    ).fetchone()[0]
+                )
+                payload["aggregate_id"] = "tampered-account"
+                connection.execute(
+                    "UPDATE outbox SET payload_json = ?, envelope_hash = NULL "
+                    "WHERE event_id = ?",
+                    (
+                        json.dumps(
+                            payload,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        ),
+                        "evt-1",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "legacy outbox payload does not match authoritative journal event",
+            ):
+                JournalStore(path)
+
+            connection = sqlite3.connect(path)
+            try:
+                versions = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT version FROM schema_migrations ORDER BY version"
+                    )
+                ]
+                envelope_hash = connection.execute(
+                    "SELECT envelope_hash FROM outbox WHERE event_id = ?",
+                    ("evt-1",),
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(versions, [1, 2, 3, 4])
+            self.assertIsNone(envelope_hash)
+
     def test_command_result_tamper_fails_closed_on_replay(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

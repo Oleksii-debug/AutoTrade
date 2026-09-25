@@ -76,7 +76,7 @@ class HostNetworkTests(unittest.TestCase):
             "environment": durable["environment"],
             "permission_summary": {
                 "actor": principal.actor,
-                "session": principal.session,
+                "session_id": principal.session,
                 "role": "OWNER",
             },
             "connection_freshness": {
@@ -187,7 +187,7 @@ class HostNetworkTests(unittest.TestCase):
         self.assertEqual(payload["state_version"], "0")
         self.assertEqual(payload["permission_summary"]["actor"], "owner")
         self.assertEqual(
-            payload["permission_summary"]["session"],
+            payload["permission_summary"]["session_id"],
             public_session_reference(self.owner.token),
         )
         self.assertNotIn(self.owner.token, response.body.decode("utf-8"))

@@ -10,10 +10,26 @@ from mvp.autotrade_mvp.kraken_futures import (
     parse_position_executions,
     parse_submission_response,
 )
-from mvp.autotrade_mvp.provider_core import ProviderCoreError
+from mvp.autotrade_mvp.provider_core import (
+    BoundReconciliationResponse,
+    PreparedReconciliationRead,
+    ProviderCoreError,
+)
 
 
 NOW = "2026-09-24T20:00:00Z"
+
+def bound_position_history(payload, *, account_id="paper-1", environment="PAPER"):
+    read = PreparedReconciliationRead.create(
+        provider_id="KRAKEN",
+        account_id=account_id,
+        environment=environment,
+        surface="EXECUTIONS",
+        endpoint="/api/history/v3/positions",
+        request={"limit": 100},
+    )
+    return BoundReconciliationResponse.bind(read, payload)
+
 
 
 class KrakenFuturesAdapterTests(unittest.TestCase):
@@ -110,7 +126,7 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
 
     def test_position_history_maps_only_trade_execution_facts(self):
         fills = parse_position_executions(
-            {
+            bound_position_history({
                 "elements": [
                     {
                         "tradeable": "PI_XBTUSD",
@@ -130,12 +146,10 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                         "realizedFunding": "-0.10",
                     },
                 ]
-            },
+            }),
             instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
             execution_client_ids={"exec-1": "hedge-007"},
-        
-            account_id="paper-1",
-            environment="PAPER",)
+        )
         self.assertEqual(len(fills), 1)
         fill = fills[0]
         self.assertEqual(fill.provider_execution_id, "exec-1")
@@ -159,11 +173,9 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ProviderCoreError, "conflicting"):
             parse_position_executions(
-                {"elements": [base, {**base, "executionSize": "2"}]},
+                bound_position_history({"elements": [base, {**base, "executionSize": "2"}]}),
                 instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
-            
-                account_id="paper-1",
-                environment="PAPER",)
+            )
 
     def test_futures_foundation_cannot_self_assert_absence_semantics(self):
         with self.assertRaisesRegex(

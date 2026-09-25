@@ -474,7 +474,7 @@ class ChampionRegistryTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 ProtocolViolation,
-                "trial_log_hash",
+                "trial payload integrity mismatch",
             ):
                 registry.promote(
                     approval_value,
@@ -1047,34 +1047,13 @@ class ChampionRegistryTests(unittest.TestCase):
                 open_position_count=0,
                 existing_position_policy=None,
             )
-            forged_bound = ParameterBound(
-                name="threshold",
-                minimum=Decimal("0.9"),
-                maximum=Decimal("0.1"),
-            )
-            forged = OnlineEnvelope(
-                envelope_id="forged-envelope",
-                champion_artifact_hash=digest("candidate-a"),
-                authority_scope_id="paper-scope",
-                parameter_bounds=(forged_bound,),
-                minimum_update_interval_seconds=0,
-                maximum_update_cost=Decimal("2"),
-                eligible_label_refs=("label:reconciled-outcome",),
-                envelope_hash="sha256:" + "0" * 64,
-            )
             with self.assertRaisesRegex(ValueError, "minimum cannot exceed maximum"):
-                online_update(registry,
-                    envelope=forged,
-                    update_id="forged-update",
-                    expected_generation=state.generation,
-                    updates={"threshold": "0.5"},
-                    label_refs=("label:reconciled-outcome",),
-                    evidence_refs=("episode:forged",),
-                    actual_update_cost="1",
-                    now=BASE + timedelta(minutes=1),
-                    drift_gate_passed=True,
-                    stop_condition_triggered=False,
+                ParameterBound(
+                    name="threshold",
+                    minimum=Decimal("0.9"),
+                    maximum=Decimal("0.1"),
                 )
+            self.assertEqual(registry.state().generation, state.generation)
 
     def test_record_online_update_ignores_forged_envelope_hash_and_uses_canonical_content(self):
         with TemporaryDirectory() as directory:
@@ -1091,26 +1070,14 @@ class ChampionRegistryTests(unittest.TestCase):
                 existing_position_policy=None,
             )
             canonical = online_envelope()
-            forged = OnlineEnvelope(
-                **{
-                    **canonical.__dict__,
-                    "envelope_hash": "sha256:" + "0" * 64,
-                }
-            )
-            row = online_update(registry,
-                envelope=forged,
-                update_id="canonicalized-envelope-hash",
-                expected_generation=state.generation,
-                updates={"threshold": "0.4"},
-                label_refs=("label:reconciled-outcome",),
-                evidence_refs=("episode:canonicalized",),
-                actual_update_cost="1",
-                now=BASE + timedelta(minutes=1),
-                drift_gate_passed=True,
-                stop_condition_triggered=False,
-            )
-            self.assertEqual(row["envelope_hash"], canonical.envelope_hash)
-            self.assertNotEqual(row["envelope_hash"], forged.envelope_hash)
+            with self.assertRaisesRegex(ValueError, "envelope_hash"):
+                OnlineEnvelope(
+                    **{
+                        **canonical.__dict__,
+                        "envelope_hash": "sha256:" + "0" * 64,
+                    }
+                )
+            self.assertEqual(registry.state().generation, state.generation)
 
     def test_online_update_unknown_parameter_is_blocked(self):
         envelope = online_envelope()

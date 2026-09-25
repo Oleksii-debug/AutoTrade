@@ -813,7 +813,7 @@ class AllocationTests(unittest.TestCase):
             ],
             self.policy(
                 cash_available="3000",
-                max_gross_notional="1000",
+                max_gross_notional="3000",
                 max_net_notional="3000",
                 max_symbol_notional="3000",
                 max_total_cost="100",

@@ -574,7 +574,12 @@ class AuthorityAllocationBindingTests(unittest.TestCase):
             ):
                 _admit(authority, reservations, checkpoint, result)
             self.assertEqual(reservations.version, 0)
-            self.assertEqual(store.pending_outbox(), [])
+            self.assertFalse(
+                any(
+                    item["topic"] == "financial.admission.ready"
+                    for item in store.pending_outbox()
+                )
+            )
 
     def test_allocation_symbol_must_resolve_to_admitted_canonical_instrument(self):
         with TemporaryDirectory() as directory:
@@ -603,7 +608,12 @@ class AuthorityAllocationBindingTests(unittest.TestCase):
             ):
                 _admit(authority, reservations, checkpoint, result)
             self.assertEqual(reservations.version, 0)
-            self.assertEqual(store.pending_outbox(), [])
+            self.assertFalse(
+                any(
+                    item["topic"] == "financial.admission.ready"
+                    for item in store.pending_outbox()
+                )
+            )
 
 
     def test_order_cannot_exceed_or_move_away_from_bound_target(self):

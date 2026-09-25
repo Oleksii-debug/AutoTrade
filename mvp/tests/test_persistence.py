@@ -51,6 +51,119 @@ class JournalStoreTests(unittest.TestCase):
             )
             self.assertEqual(store.pending_outbox(), [])
 
+    def test_explicit_journal_sequence_survives_vacuum_backup_and_reopen(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            backup_path = f"{directory}/backup.sqlite3"
+            store = JournalStore(path)
+
+            first = event("evt-seq-a", 1)
+            first["aggregate_id"] = "paper-a"
+            second = event("evt-seq-b", 1)
+            second["aggregate_id"] = "paper-b"
+            third = event("evt-seq-c", 2)
+            third["aggregate_id"] = "paper-a"
+            store.append_event(first)
+            store.append_event(second)
+            store.append_event(third)
+
+            before = store.load_events_by_aggregate_type("account")
+            self.assertEqual(
+                [item["journal_sequence"] for item in before],
+                [1, 2, 3],
+            )
+            self.assertEqual(
+                [item["event_id"] for item in before],
+                ["evt-seq-a", "evt-seq-b", "evt-seq-c"],
+            )
+            self.assertEqual(store.current_journal_sequence(), 3)
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("VACUUM")
+                destination = sqlite3.connect(backup_path)
+                try:
+                    connection.backup(destination)
+                finally:
+                    destination.close()
+            finally:
+                connection.close()
+
+            for candidate_path in (path, backup_path):
+                reopened = JournalStore(candidate_path)
+                loaded = reopened.load_events_by_aggregate_type("account")
+                self.assertEqual(
+                    [item["journal_sequence"] for item in loaded],
+                    [1, 2, 3],
+                )
+                self.assertEqual(
+                    [item["event_id"] for item in loaded],
+                    ["evt-seq-a", "evt-seq-b", "evt-seq-c"],
+                )
+                self.assertEqual(reopened.current_journal_sequence(), 3)
+
+    def test_commit_command_rejects_stale_journal_cut_but_exact_replay_survives(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            initial_cut = store.current_journal_sequence()
+            first = event("evt-cut-a", 1)
+            saved, inserted, _appended = store.commit_command(
+                actor="alice",
+                environment="PAPER",
+                command_id="cmd-cut-a",
+                idempotency_key="key-cut-a",
+                request={"action": "ORDER.SUBMIT", "intent_id": "cut-a"},
+                result={"status": "ACCEPTED"},
+                state_version=1,
+                events=[(first, None)],
+                expected_journal_sequence=initial_cut,
+            )
+            self.assertTrue(inserted)
+            self.assertEqual(saved, {"status": "ACCEPTED"})
+
+            unrelated = event("evt-cut-b", 1)
+            unrelated["aggregate_id"] = "paper-b"
+            store.append_event(unrelated)
+
+            replayed, inserted, appended = store.commit_command(
+                actor="alice",
+                environment="PAPER",
+                command_id="cmd-cut-replay",
+                idempotency_key="key-cut-a",
+                request={"action": "ORDER.SUBMIT", "intent_id": "cut-a"},
+                result={"status": "MUST_NOT_REPLACE"},
+                state_version=999,
+                events=[(first, None)],
+                expected_journal_sequence=initial_cut,
+            )
+            self.assertFalse(inserted)
+            self.assertEqual(appended, ())
+            self.assertEqual(replayed, {"status": "ACCEPTED"})
+
+            stale_cut = store.current_journal_sequence()
+            newer = event("evt-cut-c", 1)
+            newer["aggregate_id"] = "paper-c"
+            store.append_event(newer)
+            candidate = event("evt-cut-d", 2)
+            with self.assertRaisesRegex(ValueError, "journal sequence changed"):
+                store.commit_command(
+                    actor="alice",
+                    environment="PAPER",
+                    command_id="cmd-cut-stale",
+                    idempotency_key="key-cut-stale",
+                    request={"action": "ORDER.SUBMIT", "intent_id": "cut-stale"},
+                    result={"status": "ACCEPTED"},
+                    state_version=2,
+                    events=[(candidate, None)],
+                    expected_journal_sequence=stale_cut,
+                )
+            self.assertEqual(
+                [item["event_id"] for item in store.load_events("account", "paper-1")],
+                ["evt-cut-a"],
+            )
+
+
     def test_load_events_preserves_verified_full_envelope_metadata(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
@@ -725,7 +838,7 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(legacy.current_schema_version(), 1)
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 5)
+            self.assertEqual(upgraded.current_schema_version(), 6)
             self.assertEqual(
                 upgraded.load_events("account", "paper-1")[0]["event_id"],
                 "evt-1",
@@ -762,7 +875,7 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 5)
+            self.assertEqual(upgraded.current_schema_version(), 6)
             with self.assertRaisesRegex(ValueError, "legacy unscoped"):
                 upgraded.record_command(
                     actor="alice",
@@ -826,7 +939,7 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 5)
+            self.assertEqual(upgraded.current_schema_version(), 6)
             replayed, inserted = upgraded.record_command(
                 actor="alice",
                 environment="PAPER",
@@ -1111,11 +1224,11 @@ class JournalStoreTests(unittest.TestCase):
 
     def test_failed_migration_rolls_back_schema_and_data_changes(self):
         class BrokenMigrationStore(JournalStore):
-            SCHEMA_VERSION = 6
+            SCHEMA_VERSION = 7
 
             @classmethod
             def _migration_statements(cls, version):
-                if version == 6:
+                if version == 7:
                     return (
                         "CREATE TABLE migration_probe(value TEXT NOT NULL)",
                         "CREATE TABL definitely_invalid(statement TEXT)",
@@ -1126,7 +1239,7 @@ class JournalStoreTests(unittest.TestCase):
             path = f"{directory}/journal.sqlite3"
             healthy = JournalStore(path)
             healthy.append_event(event())
-            self.assertEqual(healthy.current_schema_version(), 5)
+            self.assertEqual(healthy.current_schema_version(), 6)
 
             with self.assertRaises(sqlite3.OperationalError):
                 BrokenMigrationStore(path)
@@ -1149,7 +1262,7 @@ class JournalStoreTests(unittest.TestCase):
             finally:
                 connection.close()
 
-            self.assertEqual(versions, [1, 2, 3, 4, 5])
+            self.assertEqual(versions, [1, 2, 3, 4, 5, 6])
             self.assertIsNone(probe)
             self.assertEqual(event_count, 1)
 

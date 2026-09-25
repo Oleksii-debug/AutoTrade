@@ -267,7 +267,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
             ),
             provider_environment=provider_environment,
             account_id="bybit-account",
-            capability=capability,
+            capability_snapshot_id=capability.snapshot_id,
             capability_registry=registry,
             secret_resolver=resolver,
             credential_handle=trade_handle(),

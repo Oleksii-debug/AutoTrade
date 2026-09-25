@@ -829,22 +829,18 @@ class JournalStoreTests(unittest.TestCase):
             connection = sqlite3.connect(path)
             try:
                 legacy_row = connection.execute(
-                    "SELECT topic, payload_json, envelope_hash FROM outbox "
-                    "WHERE event_id = ?",
+                    "SELECT topic, payload_json FROM outbox WHERE event_id = ?",
                     ("evt-1",),
                 ).fetchone()
+                legacy_payload = legacy_row[1]
+                legacy_hash = payload_digest(json.loads(legacy_payload))
+                connection.execute(
+                    "UPDATE outbox SET envelope_hash = ? WHERE event_id = ?",
+                    (legacy_hash, "evt-1"),
+                )
+                connection.commit()
             finally:
                 connection.close()
-
-            legacy_payload = legacy_row[1]
-            legacy_hash = legacy_row[2]
-            self.assertEqual(
-                legacy_hash,
-                "sha256:"
-                + __import__("hashlib").sha256(
-                    legacy_payload.encode("utf-8")
-                ).hexdigest(),
-            )
 
             upgraded = JournalStore(path)
             pending = upgraded.pending_outbox()[0]

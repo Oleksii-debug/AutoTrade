@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
+from tempfile import TemporaryDirectory
 import unittest
 from uuid import uuid4
 
@@ -10,16 +11,26 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 from mvp.autotrade_mvp.kraken_futures import (
+    KrakenFuturesPreparedRequest,
     build_order_payload,
     coverage_evidence,
     futures_base_url,
     parse_position_executions,
     parse_submission_response,
+    prepare_order_request,
 )
+from mvp.autotrade_mvp.dispatch import (
+    ExactJsonTransportResponse,
+    GuardedDispatcher,
+    load_submission_response_binding,
+    stable_client_order_id,
+)
+from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
     Surface,
     observe_authenticated_json_response,
+    observe_submission_json_response,
     prepare_authenticated_read_query,
 )
 
@@ -82,6 +93,88 @@ def futures_position_observation(payload, *, account_id="paper-1", endpoint="/ap
     )
 
 
+def futures_write_capability(
+    *,
+    account_id="futures-account",
+    environment="PAPER",
+    instrument_version="PI_XBTUSD@v1",
+):
+    observed_at = NOW_DT - timedelta(hours=1)
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            provider_id="KRAKEN",
+            account_id=account_id,
+            entity_id="futures-trading",
+            environment=environment,
+            instrument_version=instrument_version,
+            observed_at=observed_at,
+            expires_at=NOW_DT + timedelta(hours=1),
+            supported_order_types=frozenset({"MARKET", "LIMIT"}),
+            time_in_force=frozenset({"GTC"}),
+            permission_scopes=frozenset({"ORDER_WRITE"}),
+            position_mode="NET",
+            native_protection=frozenset(),
+            rate_limit_policy_id="kraken-futures-write",
+            data_entitlements=frozenset(),
+            evidence_ref={
+                "artifact_id": str(uuid4()),
+                "sha256": "sha256:" + "f" * 64,
+                "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    return derive_capability_snapshot(
+        snapshot_id=str(uuid4()),
+        claims=claims,
+        observed_at=NOW_DT,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    )
+
+
+def prepared_futures_request(
+    intent_id: str,
+    *,
+    provider_environment="DEMO",
+    account_id="futures-account",
+) -> KrakenFuturesPreparedRequest:
+    runtime_environment = "PAPER" if provider_environment == "DEMO" else "LIVE"
+    client_order_id = stable_client_order_id(
+        "KRAKEN",
+        intent_id,
+        environment=runtime_environment,
+        account_id=account_id,
+        max_length=36,
+        client_id_format="UUID",
+    )
+    return prepare_order_request(
+        capability=futures_write_capability(
+            account_id=account_id,
+            environment=runtime_environment,
+        ),
+        account_id=account_id,
+        provider_environment=provider_environment,
+        instrument_version="PI_XBTUSD@v1",
+        at=NOW_DT,
+        symbol="PI_XBTUSD",
+        side="BUY",
+        order_type="MARKET",
+        size="1",
+        client_order_id=client_order_id,
+    )
+
+
+def futures_response_bytes(payload) -> bytes:
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
 class KrakenFuturesAdapterTests(unittest.TestCase):
     def test_live_and_demo_services_are_explicit(self):
         self.assertEqual(futures_base_url("LIVE"), "https://futures.kraken.com")
@@ -130,18 +223,104 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 client_order_id="this-client-identity-is-not-qualified",
             )
 
+    def _durable_submission_observation(
+        self,
+        payload,
+        *,
+        intent_id,
+        provider_environment="DEMO",
+        raw_bytes=None,
+        attempt_id=None,
+    ):
+        prepared = prepared_futures_request(
+            intent_id,
+            provider_environment=provider_environment,
+        )
+        raw = raw_bytes or futures_response_bytes(payload)
+        attempt = attempt_id or str(uuid4())
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment=prepared.environment,
+                account_id=prepared.account_id,
+                owner_token="owner",
+            )
+            outcome = dispatcher.dispatch(
+                attempt_id=attempt,
+                intent_id=intent_id,
+                intent_hash="kraken-futures-intent-hash",
+                provider="KRAKEN",
+                request=prepared.body,
+                now=NOW,
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(raw),
+                )[1],
+                client_id_max_length=36,
+                client_id_format="UUID",
+                sender_check=lambda _owner, _epoch: None,
+                submission_scope={
+                    "endpoint": prepared.endpoint,
+                    "prepared_request_sha256": prepared.body_sha256,
+                    "capability_snapshot_ids": [
+                        prepared.capability_snapshot_id
+                    ],
+                    "instrument_versions": [
+                        prepared.instrument_version
+                    ],
+                },
+            )
+            self.assertEqual(outcome.status, "SENT")
+            binding = load_submission_response_binding(
+                store,
+                environment=prepared.environment,
+                account_id=prepared.account_id,
+                attempt_id=attempt,
+            )
+            observation = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="KRAKEN",
+                endpoint=prepared.endpoint,
+                prepared_request_sha256=prepared.body_sha256,
+                capability_snapshot_ids=(
+                    prepared.capability_snapshot_id,
+                ),
+                instrument_versions=(
+                    prepared.instrument_version,
+                ),
+            )
+        return attempt, prepared, observation
+
+    def test_prepared_request_separates_provider_and_runtime_environment(self):
+        demo = prepared_futures_request("futures-demo")
+        live = prepared_futures_request(
+            "futures-live",
+            provider_environment="LIVE",
+        )
+        self.assertEqual(demo.provider_environment, "DEMO")
+        self.assertEqual(demo.environment, "PAPER")
+        self.assertEqual(live.provider_environment, "LIVE")
+        self.assertEqual(live.environment, "LIVE")
+
     def test_success_is_acknowledgement_not_fill(self):
-        for send_status in (
-            {"order_id": "provider-order-1", "status": "placed"},
-            '{"order_id":"provider-order-1","status":"placed"}',
+        for index, send_status in enumerate(
+            (
+                {"order_id": "provider-order-1", "status": "placed"},
+                '{"order_id":"provider-order-1","status":"placed"}',
+            )
         ):
             with self.subTest(send_status=send_status):
+                attempt, prepared, observation = self._durable_submission_observation(
+                    {"result": "success", "sendStatus": send_status},
+                    intent_id=f"hedge-success-{index}",
+                    provider_environment="LIVE",
+                )
                 result = parse_submission_response(
-                    attempt_id=str(uuid4()),
-                    client_order_id="hedge-004",
-                    environment="LIVE",
-                    observed_at=NOW,
-                    response={"result": "success", "sendStatus": send_status},
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    observation=observation,
                 )
                 self.assertEqual(result["outcome"], "ACKNOWLEDGED")
                 self.assertEqual(result["provider_order_id"], "provider-order-1")
@@ -149,12 +328,11 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 self.assertNotIn("fill", repr(result).lower())
 
     def test_transport_ambiguity_is_unknown_and_never_blind_retried(self):
+        prepared = prepared_futures_request("hedge-unknown")
         result = parse_submission_response(
             attempt_id=str(uuid4()),
-            client_order_id="hedge-005",
-            environment="DEMO",
-            observed_at=NOW,
-            response=None,
+            prepared_request=prepared,
+            observation=None,
             transport_ambiguous=True,
         )
         self.assertEqual(result["outcome"], "UNKNOWN")
@@ -163,16 +341,104 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         self.assertNotIn("provider_received_at", result)
         self.assertNotIn("observed_at", result)
 
+    def test_transport_ambiguity_cannot_claim_provider_response(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {"result": "success", "sendStatus": {"order_id": "provider-order-1"}},
+            intent_id="hedge-ambiguous",
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "must not claim"):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+                transport_ambiguous=True,
+            )
+
     def test_explicit_provider_error_is_rejected(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {"result": "error", "error": "insufficientFunds"},
+            intent_id="hedge-rejected",
+            provider_environment="LIVE",
+        )
         result = parse_submission_response(
-            attempt_id=str(uuid4()),
-            client_order_id="hedge-006",
-            environment="LIVE",
-            observed_at=NOW,
-            response={"result": "error", "error": "insufficientFunds"},
+            attempt_id=attempt,
+            prepared_request=prepared,
+            observation=observation,
         )
         self.assertEqual(result["outcome"], "REJECTED")
         self.assertEqual(result["retry_disposition"], "NEVER")
+
+    def test_submission_evidence_preserves_exact_response_bytes(self):
+        payload = {
+            "result": "success",
+            "sendStatus": {"order_id": "provider-bind"},
+        }
+        raw_a = futures_response_bytes(payload)
+        raw_b = json.dumps(payload, indent=1).encode("utf-8")
+        a_attempt, a_prepared, a_observation = self._durable_submission_observation(
+            payload,
+            intent_id="hedge-bind-a",
+            raw_bytes=raw_a,
+        )
+        b_attempt, b_prepared, b_observation = self._durable_submission_observation(
+            payload,
+            intent_id="hedge-bind-b",
+            raw_bytes=raw_b,
+        )
+        a = parse_submission_response(
+            attempt_id=a_attempt,
+            prepared_request=a_prepared,
+            observation=a_observation,
+        )
+        b = parse_submission_response(
+            attempt_id=b_attempt,
+            prepared_request=b_prepared,
+            observation=b_observation,
+        )
+        self.assertNotEqual(
+            a["evidence"][0]["sha256"],
+            b["evidence"][0]["sha256"],
+        )
+
+    def test_submission_response_cannot_relabel_guarded_client_identity(self):
+        intent_id = "hedge-expected"
+        prepared = prepared_futures_request(intent_id)
+        wrong_client = stable_client_order_id(
+            "KRAKEN",
+            "different-intent",
+            environment=prepared.environment,
+            account_id=prepared.account_id,
+            max_length=36,
+            client_id_format="UUID",
+        )
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "provider-mismatch",
+                    "cliOrdId": wrong_client,
+                },
+            },
+            intent_id=intent_id,
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "guarded request"):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
+
+    def test_decoded_mapping_cannot_mint_submission_authority(self):
+        prepared = prepared_futures_request("hedge-forged")
+        with self.assertRaisesRegex(
+            TypeError,
+            "durable ProviderSubmissionObservation",
+        ):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=prepared,
+                observation={"result": "success"},
+            )
 
     def test_position_history_maps_only_trade_execution_facts(self):
         fills = parse_position_executions(

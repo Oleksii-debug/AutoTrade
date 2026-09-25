@@ -87,6 +87,10 @@ class DurableReservationBookTests(unittest.TestCase):
             final_guard()
             raise TimeoutError("simulated ambiguous provider result")
 
+        def sender_check(owner_token, owner_epoch):
+            self.assertTrue(owner_token)
+            self.assertEqual(owner_epoch, 1)
+
         outcome = dispatcher.dispatch(
             attempt_id=attempt_id,
             intent_id=intent_id,
@@ -96,6 +100,7 @@ class DurableReservationBookTests(unittest.TestCase):
             now="2026-09-25T00:00:00Z",
             authority_check=lambda intent_hash, now: (True, "allowed"),
             transport_send=ambiguous_transport,
+            sender_check=sender_check,
         )
         self.assertEqual(outcome.status, "UNKNOWN")
         return outcome
@@ -170,6 +175,46 @@ class DurableReservationBookTests(unittest.TestCase):
             snapshot.resolution_evidence,
             self.evidence,
         )
+        self.assertEqual(restarted.total_reserved("CASH:USD"), Decimal("0"))
+
+    def test_evidenced_filled_releases_unused_worst_case_buffer_across_restart(self):
+        book = self.book()
+        self.reserve(book, amount="70")
+        book.consume(
+            command_id="cmd-consume-filled",
+            idempotency_key="idem-consume-filled",
+            reservation_id="r1",
+            usage={"CASH:USD": "60"},
+        )
+        book.mark_unknown(
+            command_id="cmd-unknown-filled",
+            idempotency_key="idem-unknown-filled",
+            reservation_id="r1",
+        )
+        self.create_unknown_attempt()
+        filled_evidence = self.publish_resolution_evidence(
+            artifact_id="55555555-5555-4555-8555-555555555555",
+            outcome="FILLED",
+        )
+        terminal = book.mark_terminal(
+            command_id="cmd-terminal-filled",
+            idempotency_key="idem-terminal-filled",
+            reservation_id="r1",
+            outcome="FILLED",
+            provider="SIMULATED",
+            attempt_id="attempt-r1",
+            resolution_evidence=filled_evidence,
+        )
+        self.assertEqual(terminal.state, "FILLED")
+        self.assertEqual(terminal.consumed["CASH:USD"], Decimal("60"))
+        self.assertEqual(terminal.remaining["CASH:USD"], Decimal("0"))
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("0"))
+
+        restarted = self.book()
+        restored = restarted.get("r1")
+        self.assertEqual(restored.state, "FILLED")
+        self.assertEqual(restored.consumed["CASH:USD"], Decimal("60"))
+        self.assertEqual(restored.remaining["CASH:USD"], Decimal("0"))
         self.assertEqual(restarted.total_reserved("CASH:USD"), Decimal("0"))
 
     def test_restart_does_not_make_reserved_cash_available_again(self):

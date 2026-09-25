@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from mvp.autotrade_mvp.accounting import AccountingConflict
+from mvp.autotrade_mvp.accounting import AccountingConflict, transaction_digest
 from mvp.autotrade_mvp.accounting_persistence import (
     commit_provider_fill,
     commit_provider_fill_correction,
@@ -173,10 +173,9 @@ class DurableAccountingTests(unittest.TestCase):
             store = self._store(directory)
             self._commit_original(store)
             correction = self._commit_correction(store)
-            replacement_id = correction.transactions[1].transaction_id
             replacement_event_id = (
                 "accounting-event:"
-                + correction.transactions[1].transaction_id.split(":")[-1]
+                + transaction_digest(correction.transactions[1]).removeprefix("sha256:")
             )
 
             # Direct storage corruption models a torn/externally damaged durable

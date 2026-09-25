@@ -70,6 +70,7 @@ def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
     if not staging.is_dir():
         raise BundleError("staging must be an existing directory")
     collected: list[tuple[str, Path, bytes]] = []
+    windows_names: dict[str, str] = {}
     for path in sorted(staging.rglob("*"), key=lambda item: item.as_posix()):
         if path.is_symlink():
             raise BundleError(f"symlinks are forbidden in bundles: {path}")
@@ -78,6 +79,14 @@ def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
         if not path.is_file():
             raise BundleError(f"unsupported filesystem entry: {path}")
         relative = _safe_relative(path, staging)
+        windows_key = relative.replace("\\", "/").casefold()
+        previous = windows_names.get(windows_key)
+        if previous is not None and previous != relative:
+            raise BundleError(
+                "bundle contains Windows path collision: "
+                f"{previous} conflicts with {relative}"
+            )
+        windows_names[windows_key] = relative
         if _is_sensitive(PurePosixPath(relative)):
             raise BundleError(f"sensitive path is forbidden in bundles: {relative}")
         collected.append((relative, path, path.read_bytes()))

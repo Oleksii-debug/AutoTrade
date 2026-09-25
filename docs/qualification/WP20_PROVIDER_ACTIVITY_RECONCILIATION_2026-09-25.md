@@ -24,7 +24,7 @@ The existing account reconciliation now also supports evidence-bound provider ac
 - manual, external and unknown-origin activities are surfaced for explicit import/reconciliation rather than silently discarded;
 - expected local activity missing from provider evidence blocks account truth;
 - when configured, the complete reconciliation window requires a dedicated complete `ACTIVITIES` coverage surface with elapsed consistency horizon;
-- generic activity evidence never converts an ambiguous send into a fill, working order, or `PROVEN_ABSENT`;
+- generic activity evidence never converts an ambiguous send into a fill, working order, or `PROVEN_ABSENT`;\n- working-order evidence without a per-order observation timestamp resolves an UNKNOWN send only when the coherent provider snapshot itself begins at or after that submission; a pre-submission snapshot cannot be used as causal send evidence;
 - reconciliation checkpoints persist matched/unexpected/missing/manual activity identities and activity-coverage status;
 - after journal restart, unresolved unexpected or missing provider activity identities can be recovered without creating resend authority.
 

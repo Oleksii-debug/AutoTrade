@@ -83,6 +83,57 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.assertEqual(controller.unresolved_attempts, set())
         self.assertEqual(controller.state, HostState.READY)
 
+    def test_different_attempt_cannot_clear_sticky_unknown_by_reusing_id(self):
+        controller, owner = self._ready()
+        original = OutboundAttempt("a1", "intent-original", owner.epoch)
+        original.persist()
+        original.mark_send_started("journal:original-send")
+        controller.note_unknown_send(original)
+
+        forged = OutboundAttempt("a1", "intent-other", owner.epoch)
+        forged.persist()
+        forged.mark_send_started("journal:forged-send")
+        forged.acknowledge("provider-forged", "provider:forged-ack")
+        with self.assertRaisesRegex(ValueError, "identity does not match"):
+            controller.resolve_attempt(forged)
+        self.assertEqual(controller.unresolved_attempts, {"a1"})
+        self.assertEqual(controller.state, HostState.DEGRADED)
+
+        same_identity_wrong_evidence = OutboundAttempt(
+            "a1",
+            "intent-original",
+            owner.epoch,
+        )
+        same_identity_wrong_evidence.persist()
+        same_identity_wrong_evidence.mark_send_started("journal:different-send")
+        same_identity_wrong_evidence.reject("provider:rejected")
+        with self.assertRaisesRegex(ValueError, "original send evidence"):
+            controller.resolve_attempt(same_identity_wrong_evidence)
+        self.assertEqual(controller.unresolved_attempts, {"a1"})
+
+    def test_attempt_identity_and_reconciliation_uncertainty_are_strict(self):
+        for kwargs in (
+            {"attempt_id": "", "intent_id": "i1", "owner_epoch": 1},
+            {"attempt_id": "a1", "intent_id": "", "owner_epoch": 1},
+            {"attempt_id": "a1", "intent_id": "i1", "owner_epoch": True},
+            {"attempt_id": "a1", "intent_id": "i1", "owner_epoch": 0},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                OutboundAttempt(**kwargs)
+
+        controller = RecoveryController()
+        controller.start("host-a")
+        for uncertainty in ((1,), ("",), (None,)):
+            with self.subTest(uncertainty=uncertainty), self.assertRaisesRegex(
+                ValueError,
+                "uncertainty identities",
+            ):
+                controller.record_reconciliation(
+                    consistent=True,
+                    uncertainty=uncertainty,
+                )
+        self.assertEqual(controller.state, HostState.RECOVERING)
+
     def test_absence_requires_independent_evidence_before_retry(self):
         attempt = OutboundAttempt("a1", "intent-1", 1)
         attempt.persist()

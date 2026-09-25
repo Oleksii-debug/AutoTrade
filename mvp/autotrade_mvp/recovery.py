@@ -44,6 +44,28 @@ class OutboundAttempt:
     provider_order_id: str | None = None
     evidence: list[str] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.attempt_id, str) or not self.attempt_id.strip():
+            raise ValueError("Attempt identity is required")
+        if not isinstance(self.intent_id, str) or not self.intent_id.strip():
+            raise ValueError("Intent identity is required")
+        if (
+            not isinstance(self.owner_epoch, int)
+            or isinstance(self.owner_epoch, bool)
+            or self.owner_epoch <= 0
+        ):
+            raise ValueError("Owner epoch must be a positive integer")
+        self.attempt_id = self.attempt_id.strip()
+        self.intent_id = self.intent_id.strip()
+        if not isinstance(self.phase, SendPhase):
+            raise TypeError("Attempt phase must be a SendPhase")
+        if self.phase is not SendPhase.CREATED:
+            raise ValueError("New attempt must begin in CREATED phase")
+        if self.provider_order_id is not None:
+            raise ValueError("New attempt cannot already have provider order identity")
+        if self.evidence:
+            raise ValueError("New attempt cannot already contain evidence")
+
     def persist(self) -> None:
         if self.phase is not SendPhase.CREATED:
             raise ValueError("Attempt can be persisted only once")
@@ -105,6 +127,10 @@ class RecoveryController:
         self.reason_codes: set[str] = set()
         self.unresolved_attempts: set[str] = set()
         self._unresolved_send_attempts: set[str] = set()
+        self._unresolved_send_bindings: dict[
+            str,
+            tuple[str, int, tuple[str, ...]],
+        ] = {}
         self.storage_writable = True
         self.clock_trusted = True
         self.provider_reconciled = False
@@ -129,7 +155,13 @@ class RecoveryController:
             raise PermissionError(
                 "Reconciliation cannot establish readiness without durable journal"
             )
-        reported_unresolved = {item for item in uncertainty if item}
+        reported_unresolved: set[str] = set()
+        for item in uncertainty:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(
+                    "reconciliation uncertainty identities must be non-empty strings"
+                )
+            reported_unresolved.add(item.strip())
         # Generic reconciliation uncertainty is snapshot-scoped and may clear
         # on a later clean snapshot.  A previously recorded SENT_UNKNOWN
         # attempt is different: its identity remains sticky until
@@ -173,8 +205,25 @@ class RecoveryController:
         self._recompute_state()
 
     def note_unknown_send(self, attempt: OutboundAttempt) -> None:
+        if not isinstance(attempt, OutboundAttempt):
+            raise TypeError("attempt must be an OutboundAttempt")
         if attempt.phase is not SendPhase.SENT_UNKNOWN:
             raise ValueError("Only uncertain sent attempts block readiness")
+        if len(attempt.evidence) != 1:
+            raise ValueError(
+                "uncertain send must retain exactly one durable send-start evidence ref"
+            )
+        binding = (
+            attempt.intent_id,
+            attempt.owner_epoch,
+            tuple(attempt.evidence),
+        )
+        existing = self._unresolved_send_bindings.get(attempt.attempt_id)
+        if existing is not None and existing != binding:
+            raise ValueError(
+                "attempt_id is already bound to different unresolved send identity"
+            )
+        self._unresolved_send_bindings[attempt.attempt_id] = binding
         self._unresolved_send_attempts.add(attempt.attempt_id)
         self.unresolved_attempts.add(attempt.attempt_id)
         self.provider_reconciled = False
@@ -182,12 +231,34 @@ class RecoveryController:
         self._recompute_state()
 
     def resolve_attempt(self, attempt: OutboundAttempt) -> None:
+        if not isinstance(attempt, OutboundAttempt):
+            raise TypeError("attempt must be an OutboundAttempt")
         if attempt.phase not in {
             SendPhase.ACKNOWLEDGED,
             SendPhase.REJECTED,
             SendPhase.PROVEN_ABSENT,
         }:
             raise ValueError("Attempt is not externally resolved")
+        binding = self._unresolved_send_bindings.get(attempt.attempt_id)
+        if binding is None:
+            raise ValueError("Attempt was not recorded as an unresolved send")
+        intent_id, owner_epoch, send_evidence = binding
+        if (attempt.intent_id, attempt.owner_epoch) != (intent_id, owner_epoch):
+            raise ValueError(
+                "Resolved attempt identity does not match unresolved send"
+            )
+        if tuple(attempt.evidence[: len(send_evidence)]) != send_evidence:
+            raise ValueError(
+                "Resolved attempt does not preserve original send evidence"
+            )
+        if len(attempt.evidence) <= len(send_evidence):
+            raise ValueError("External resolution requires new terminal evidence")
+        if (
+            attempt.phase is SendPhase.ACKNOWLEDGED
+            and not attempt.provider_order_id
+        ):
+            raise ValueError("Acknowledged resolution requires provider order identity")
+        self._unresolved_send_bindings.pop(attempt.attempt_id, None)
         self._unresolved_send_attempts.discard(attempt.attempt_id)
         self.unresolved_attempts.discard(attempt.attempt_id)
         if not self.unresolved_attempts:

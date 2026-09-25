@@ -60,13 +60,30 @@ def _provider_environment(
     value: str | None,
     *,
     environment: str,
+    provider_id: str | None = None,
 ) -> str:
     runtime_environment = _text(environment, name="environment").upper()
-    return (
+    provider = (
+        None
+        if provider_id is None
+        else _text(provider_id, name="provider_id").upper()
+    )
+    if provider == "BYBIT" and value is None:
+        raise ValueError("BYBIT scope requires explicit provider_environment")
+    provider_environment = (
         runtime_environment
         if value is None
         else _text(value, name="provider_environment").upper()
     )
+    if provider == "BYBIT" and provider_environment not in {
+        "MAINNET",
+        "TESTNET",
+        "DEMO",
+    }:
+        raise ValueError(
+            "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+        )
+    return provider_environment
 
 
 def _reconciliation_aggregate_id(
@@ -86,6 +103,7 @@ def _reconciliation_aggregate_id(
     provider_scope = _provider_environment(
         provider_environment,
         environment=scope,
+        provider_id=provider,
     )
     identity_parts = [provider, account, scope]
     if provider_scope != scope:
@@ -127,6 +145,7 @@ def _require_checkpoint_scope(
         expected_provider_environment = _provider_environment(
             provider_environment,
             environment=scope,
+            provider_id=provider,
         )
         actual_provider_environment = payload.get(
             "provider_environment",
@@ -410,13 +429,10 @@ def load_latest_reconciliation_checkpoint_for_scope(
         account_id=account_id,
         environment=environment,
     )
-    provider_scope = (
-        None
-        if provider_environment is None
-        else _provider_environment(
-            provider_environment,
-            environment=scope,
-        )
+    provider_scope = _provider_environment(
+        provider_environment,
+        environment=scope,
+        provider_id=provider,
     )
     latest: dict[str, Any] | None = None
     latest_sequence = 0
@@ -430,14 +446,11 @@ def load_latest_reconciliation_checkpoint_for_scope(
             payload.get("provider_id") != provider
             or payload.get("account_id") != account
             or payload.get("environment") != scope
-            or (
-                provider_scope is not None
-                and payload.get(
-                    "provider_environment",
-                    payload.get("environment"),
-                )
-                != provider_scope
+            or payload.get(
+                "provider_environment",
+                payload.get("environment"),
             )
+            != provider_scope
         ):
             continue
         aggregate_version = event.get("aggregate_version")
@@ -560,6 +573,7 @@ def load_submission_resolution_evidence(
     attempt_id: str,
     intent_id: str,
     client_order_id: str,
+    provider_environment: str | None = None,
 ) -> dict[str, Any]:
     """Load one exact durable reconciliation verdict for a submission attempt.
 
@@ -589,6 +603,7 @@ def load_submission_resolution_evidence(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     resolutions = payload.get("submission_resolutions")
     if not isinstance(resolutions, list):
@@ -664,6 +679,11 @@ def load_submission_resolution_evidence(
         "provider_id": _text(payload.get("provider_id"), name="provider_id").upper(),
         "account_id": _text(payload.get("account_id"), name="account_id"),
         "environment": _text(payload.get("environment"), name="environment").upper(),
+        "provider_environment": _provider_environment(
+            payload.get("provider_environment"),
+            environment=_text(payload.get("environment"), name="environment"),
+            provider_id=_text(payload.get("provider_id"), name="provider_id"),
+        ),
         "attempt_id": expected_attempt,
         "intent_id": item_intent,
         "client_order_id": item_client,
@@ -687,6 +707,7 @@ def load_account_resource_availability_evidence(
     max_age_seconds: Decimal | str | int,
     evidence_artifact_store: ArtifactStore | None = None,
     require_latest_scope: bool = False,
+    provider_environment: str | None = None,
 ) -> dict[str, Any]:
     """Return exact reservable availability from a fresh provider snapshot.
 
@@ -709,6 +730,7 @@ def load_account_resource_availability_evidence(
             provider_id=provider_id,
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
         )
     checkpoint = store.get_event(event_id)
     if checkpoint is None:
@@ -724,6 +746,7 @@ def load_account_resource_availability_evidence(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     if (
         payload.get("complete") is not True
@@ -1047,6 +1070,11 @@ def load_account_resource_availability_evidence(
         "provider_id": _text(payload.get("provider_id"), name="provider_id").upper(),
         "account_id": _text(payload.get("account_id"), name="account_id"),
         "environment": _text(payload.get("environment"), name="environment").upper(),
+        "provider_environment": _provider_environment(
+            payload.get("provider_environment"),
+            environment=_text(payload.get("environment"), name="environment"),
+            provider_id=_text(payload.get("provider_id"), name="provider_id"),
+        ),
         "snapshot_mode": _text(snapshot.get("mode"), name="snapshot.mode").upper(),
         "snapshot_query_completed_at": completed_text,
         "resource_snapshot_id": _text(
@@ -1105,6 +1133,7 @@ def unresolved_attempt_ids_from_checkpoint(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> tuple[str, ...]:
     if checkpoint is None:
         return ()
@@ -1113,6 +1142,7 @@ def unresolved_attempt_ids_from_checkpoint(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     resolutions = payload.get("submission_resolutions")
     if not isinstance(resolutions, list):
@@ -1134,6 +1164,7 @@ def unresolved_provider_activity_ids_from_checkpoint(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> tuple[str, ...]:
     if checkpoint is None:
         return ()
@@ -1142,6 +1173,7 @@ def unresolved_provider_activity_ids_from_checkpoint(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     unexpected = payload.get("unexpected_provider_activity_ids", [])
     missing = payload.get("missing_local_provider_activity_ids", [])

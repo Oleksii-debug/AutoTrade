@@ -850,6 +850,7 @@ class DurablePerpetualFundingAuthority:
             "environment": observation.environment,
             "instrument_id": observation.instrument_id,
             "instrument_version": observation.instrument_version,
+            "collateral_currency": observation.collateral_currency,
             "external_event_id": observation.external_event_id,
             "corrects_external_event_id": observation.corrects_external_event_id,
             "provider_revision": observation.provider_revision,

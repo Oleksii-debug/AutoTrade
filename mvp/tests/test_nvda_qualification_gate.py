@@ -58,6 +58,7 @@ def complete_evidence():
         "method": "REAL_NVDA_KEYBOARD",
         "source_sha": "a" * 40,
         "artifact_sha256": "sha256:" + "b" * 64,
+        "release_artifact_id": "11111111-1111-4111-8111-111111111111",
         "release_artifact": True,
         "environment": {
             "windows_version": "Windows 11 24H2",
@@ -107,9 +108,24 @@ class NvdaQualificationGateTests(unittest.TestCase):
         self.assertEqual(result["source_sha"], "a" * 40)
         self.assertEqual(result["artifact_sha256"], "sha256:" + "b" * 64)
         self.assertEqual(
+            result["release_artifact_id"],
+            "11111111-1111-4111-8111-111111111111",
+        )
+        self.assertEqual(
             result["workflow_count"],
             len(REQUIREMENTS["workflows"]),
         )
+
+    def test_release_artifact_identity_is_required_and_canonical(self):
+        missing = complete_evidence()
+        missing.pop("release_artifact_id")
+        with self.assertRaisesRegex(NvdaQualificationError, "release_artifact_id"):
+            validate_evidence(missing, REQUIREMENTS)
+
+        malformed = complete_evidence()
+        malformed["release_artifact_id"] = "RELEASE-1"
+        with self.assertRaisesRegex(NvdaQualificationError, "canonical lowercase UUID"):
+            validate_evidence(malformed, REQUIREMENTS)
 
     def test_signed_trust_adapter_binds_exact_workflows_and_raw_evidence(self):
         evidence = complete_evidence()
@@ -173,6 +189,27 @@ class NvdaQualificationGateTests(unittest.TestCase):
                 evidence_sha256=evidence_sha,
                 release_artifact_sha256=release_sha,
                 receipt=bad_receipt,
+                policy=SimpleNamespace(),
+                evidence_store=SimpleNamespace(),
+                expected_policy_id="sha256:" + "4" * 64,
+                expected_policy_version="2026.09",
+            )
+
+        wrong_release_receipt = SimpleNamespace(
+            attestation=SimpleNamespace(
+                requirement_ids=requirement_ids,
+                release_artifact_id="22222222-2222-4222-8222-222222222222",
+                release_artifact_sha256=release_sha,
+                evidence_refs=receipt.attestation.evidence_refs,
+            )
+        )
+        with self.assertRaisesRegex(NvdaQualificationError, "release identity"):
+            validate_trusted_nvda_qualification(
+                evidence,
+                REQUIREMENTS,
+                evidence_sha256=evidence_sha,
+                release_artifact_sha256=release_sha,
+                receipt=wrong_release_receipt,
                 policy=SimpleNamespace(),
                 evidence_store=SimpleNamespace(),
                 expected_policy_id="sha256:" + "4" * 64,

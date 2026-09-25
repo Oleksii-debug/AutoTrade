@@ -79,7 +79,8 @@ class RejectingInitializationJournal(JournalStore):
         raise ValueError("synthetic malformed initialization")
 
 
-class DurableModelBudgetTests(unittest.TestCase):\n    def test_initialization_uses_canonical_sequence_text(self):
+class DurableModelBudgetTests(unittest.TestCase):
+    def test_initialization_uses_canonical_sequence_text(self):
         with TemporaryDirectory() as directory:
             journal = RecordingJournalStore(Path(directory) / "journal.db")
             budget = DurableModelBudget(

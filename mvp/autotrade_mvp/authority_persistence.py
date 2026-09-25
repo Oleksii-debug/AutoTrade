@@ -47,7 +47,7 @@ def persist_authority_snapshot(
         "event_type": AUTHORITY_EVENT_TYPE,
         "aggregate_type": AUTHORITY_AGGREGATE_TYPE,
         "aggregate_id": authority_id,
-        "aggregate_version": aggregate_version,
+        "aggregate_version": str(aggregate_version),
         "payload": payload,
         "payload_hash": payload_digest(payload),
         "committed_at": committed_at.strip(),

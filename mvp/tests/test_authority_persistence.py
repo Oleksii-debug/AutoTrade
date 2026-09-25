@@ -130,14 +130,15 @@ class AuthorityPersistenceTests(unittest.TestCase):
             self.assertFalse(retried.inserted)
             self.assertEqual(first.aggregate_version, 1)
             self.assertEqual(retried.aggregate_version, 1)
+            stored = store.load_events(
+                "financial-authority",
+                "runtime-authority",
+            )
+            self.assertEqual(len(stored), 1)
+            self.assertEqual(stored[0]["aggregate_version"], 1)
             self.assertEqual(
-                len(
-                    store.load_events(
-                        "financial-authority",
-                        "runtime-authority",
-                    )
-                ),
-                1,
+                stored[0]["payload"]["authority_id"],
+                "runtime-authority",
             )
 
     def test_lost_reply_retry_with_changed_state_fails_closed(self):

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 import uuid
 
@@ -15,6 +15,7 @@ REGISTRY_MODES_DISABLED = frozenset({
     "PROTOCOL_IMPLEMENTED_NOT_ENABLED",
 })
 REGISTRY_MODES = REGISTRY_MODES_DISABLED | {REGISTRY_MODE_ENABLED}
+MAX_LEASE_TTL_SECONDS = 3600
 
 
 class RegistryProtocolError(ValueError):
@@ -121,6 +122,8 @@ def path_covers(parent: str, child: str) -> bool:
 def _canonical_request(request: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(request, Mapping):
         raise RegistryProtocolError("request must be an object")
+    if "lease_until" in request:
+        raise RegistryProtocolError("lease_until is service-issued and must not be supplied by request")
     mode = _require_text(request, "claim_mode")
     if mode not in ALLOWED_MODES:
         raise RegistryProtocolError(
@@ -134,7 +137,6 @@ def _canonical_request(request: Mapping[str, Any]) -> dict[str, Any]:
         "authority_family": _require_text(request, "authority_family"),
         "semantic_key": _require_text(request, "semantic_key"),
         "mutation_scope": list(_normalized_scopes(request.get("mutation_scope"))),
-        "lease_until": format_instant(parse_instant(_require_text(request, "lease_until"))),
         "base_head": _require_text(request, "base_head"),
         "contract_versions": request.get("contract_versions", {}),
     }
@@ -147,6 +149,19 @@ def _canonical_request(request: Mapping[str, Any]) -> dict[str, Any]:
     ):
         raise RegistryProtocolError("contract_versions must map non-empty text to non-empty text")
     return claim
+
+
+def _validate_lease_ttl_seconds(value: int) -> int:
+    if type(value) is not int or not 1 <= value <= MAX_LEASE_TTL_SECONDS:
+        raise RegistryProtocolError(
+            f"lease_ttl_seconds must be an integer in [1, {MAX_LEASE_TTL_SECONDS}]"
+        )
+    return value
+
+
+def _service_lease_until(now: datetime, lease_ttl_seconds: int) -> str:
+    ttl = _validate_lease_ttl_seconds(lease_ttl_seconds)
+    return format_instant(now + timedelta(seconds=ttl))
 
 
 def _validate_registry(registry: Mapping[str, Any]) -> None:
@@ -180,7 +195,26 @@ def _validate_registry(registry: Mapping[str, Any]) -> None:
             raise RegistryProtocolError("duplicate request_id")
         seen_claim_ids.add(claim_id)
         seen_request_ids.add(request_id)
-        _canonical_request(claim)
+        canonical_claim_request = {
+            key: claim.get(key)
+            for key in (
+                "request_id",
+                "run_id",
+                "account_id",
+                "claim_mode",
+                "authority_family",
+                "semantic_key",
+                "mutation_scope",
+                "base_head",
+                "contract_versions",
+            )
+        }
+        _canonical_request(canonical_claim_request)
+        lease_until = claim.get("lease_until")
+        if not isinstance(lease_until, str):
+            raise RegistryProtocolError("claim lease_until must be service-issued ISO-8601 text")
+        parse_instant(lease_until)
+        _validate_lease_ttl_seconds(claim.get("lease_ttl_seconds"))
         if claim.get("status") not in {"ACTIVE", "EXPIRED", "RELEASED"}:
             raise RegistryProtocolError("invalid claim status")
         cg = claim.get("claim_generation")
@@ -216,6 +250,7 @@ def claim(
     *,
     expected_generation: int,
     now: str,
+    lease_ttl_seconds: int = MAX_LEASE_TTL_SECONDS,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     _validate_registry(registry)
     resolved_now = parse_instant(now)
@@ -250,8 +285,7 @@ def claim(
             return deepcopy(dict(registry)), deepcopy(dict(existing))
 
     _require_generation(registry, expected_generation)
-    if parse_instant(canonical["lease_until"]) <= resolved_now:
-        raise RegistryProtocolError("lease_until must be in the future")
+    lease_until = _service_lease_until(resolved_now, lease_ttl_seconds)
 
     if canonical["claim_mode"] in MUTATING_MODES:
         for existing in registry["claims"]:
@@ -271,6 +305,8 @@ def claim(
         "claim_id": claim_id,
         **canonical,
         "original_request": deepcopy(canonical),
+        "lease_until": lease_until,
+        "lease_ttl_seconds": lease_ttl_seconds,
         "status": "ACTIVE",
         "claimed_at": format_instant(resolved_now),
         "claim_generation": expected_generation + 1,
@@ -286,16 +322,14 @@ def renew(
     *,
     claim_id: str,
     run_id: str,
-    lease_until: str,
     expected_generation: int,
     now: str,
+    lease_ttl_seconds: int = MAX_LEASE_TTL_SECONDS,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     _validate_registry(registry)
     _require_generation(registry, expected_generation)
     resolved_now = parse_instant(now)
-    new_lease = parse_instant(lease_until)
-    if new_lease <= resolved_now:
-        raise RegistryProtocolError("renewed lease must be in the future")
+    new_lease = parse_instant(_service_lease_until(resolved_now, lease_ttl_seconds))
 
     next_registry = deepcopy(dict(registry))
     target = next((c for c in next_registry["claims"] if c.get("claim_id") == claim_id), None)
@@ -309,6 +343,7 @@ def renew(
         raise RegistryProtocolError("renewal must extend lease")
 
     target["lease_until"] = format_instant(new_lease)
+    target["lease_ttl_seconds"] = lease_ttl_seconds
     target["last_renewed_at"] = format_instant(resolved_now)
     target["claim_generation"] = expected_generation + 1
     next_registry["generation"] = expected_generation + 1

@@ -472,7 +472,7 @@ class AuthorityTests(unittest.TestCase):
         cases = [
             dict(account_id="other", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1, action="ORDER.SUBMIT", notional="10", risk_admitted=True, reason="account_out_of_scope"),
             dict(account_id="paper-1", environment="LIVE", instrument_id=INSTRUMENT_ID, instrument_version=1, action="ORDER.SUBMIT", notional="10", risk_admitted=True, reason="environment_out_of_scope"),
-            dict(account_id="paper-1", environment="PAPER", instrument_id=OTHER_INSTRUMENT_ID, instrument_version=1, action="ORDER.SUBMIT", notional="10", risk_admitted=True, reason="instrument_out_of_scope"),
+            dict(account_id="paper-1", environment="PAPER", instrument_id=OTHER_INSTRUMENT_ID, instrument_version=1, action="ORDER.SUBMIT", notional="10", risk_admitted=True, reason="instrument_version_out_of_scope"),
             dict(account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1, action="WITHDRAW", notional="10", risk_admitted=True, reason="action_out_of_scope"),
             dict(account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1, action="ORDER.SUBMIT", notional="1001", risk_admitted=True, reason="notional_out_of_scope"),
             dict(account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1, action="ORDER.SUBMIT", notional="10", risk_admitted=False, reason="risk_rejected"),

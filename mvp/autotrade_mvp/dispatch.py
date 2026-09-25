@@ -386,9 +386,27 @@ class GuardedDispatcher:
             # Transport cannot pass the barrier for one payload and then mutate
             # the same object before its actual provider call.
             if final_barrier_clock is not None:
-                barrier_now = final_barrier_clock()
-                _instant(barrier_now)
-                if _instant(barrier_now) < _instant(now):
+                try:
+                    barrier_now = final_barrier_clock()
+                    parsed_barrier_now = _instant(barrier_now)
+                except Exception as error:
+                    barrier_now = now
+                    reason = (
+                        "final_barrier_clock_failed:"
+                        + type(error).__name__
+                    )
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionBlocked",
+                        version=2,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": reason,
+                        },
+                        now=barrier_now,
+                    )
+                    raise DispatchBlocked(reason) from error
+                if parsed_barrier_now < _instant(now):
                     barrier_now = now
                     self._append(
                         attempt_id=attempt_id,

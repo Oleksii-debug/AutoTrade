@@ -13,7 +13,10 @@ from research.autotrade_research.learning.retention import (
     RetentionPolicy,
     evaluate_population_bound_retention,
 )
-from research.autotrade_research.memory.episodes import ExperienceMemory
+from research.autotrade_research.memory.episodes import (
+    ExperienceMemory,
+    MemoryIntegrityError,
+)
 
 
 H1 = "sha256:" + "1" * 64
@@ -77,18 +80,19 @@ class PopulationCoverageTests(unittest.TestCase):
         )
         return store, negative, no_trade
 
-    def _manifest(self, store, included, exclusions=None):
-        population = store.coverage_population(
+    def _snapshot(self, store):
+        return store.qualification_population_snapshot(
             causal_cutoff=CUTOFF,
             granted_permissions={"research"},
             task="research",
             instrument_family="equity",
         )
+
+    def _manifest(self, store, included, exclusions=None):
         return build_population_coverage(
-            population,
+            store,
             candidate_hash=H1,
             frozen_protocol_hash=H2,
-            input_snapshot_hash=H3,
             causal_cutoff=CUTOFF,
             permission_classes=["research"],
             included_episode_ids=included,
@@ -116,6 +120,97 @@ class PopulationCoverageTests(unittest.TestCase):
                 self._manifest(store, [no_trade])
             with self.assertRaisesRegex(ValueError, "not fully accounted"):
                 self._manifest(store, [negative])
+
+
+    def test_canonical_memory_snapshot_binds_scope_count_rows_and_root(self):
+        with TemporaryDirectory() as directory:
+            store, negative, no_trade = self._store_with_negative_and_no_trade(directory)
+            snapshot = self._snapshot(store)
+            repeated = self._snapshot(store)
+
+            self.assertEqual(snapshot.eligible_count, 2)
+            self.assertEqual(snapshot.root_hash, repeated.root_hash)
+            self.assertEqual(snapshot.row_digests, repeated.row_digests)
+            self.assertEqual(
+                tuple(row["episode_id"] for row in snapshot.rows),
+                (negative, no_trade),
+            )
+            self.assertTrue(snapshot.root_hash.startswith("sha256:"))
+            snapshot.verify()
+
+    def test_filtered_caller_population_cannot_replace_canonical_memory_query(self):
+        with TemporaryDirectory() as directory:
+            store, _negative, no_trade = self._store_with_negative_and_no_trade(directory)
+            filtered = store.coverage_population(
+                causal_cutoff=CUTOFF,
+                granted_permissions={"research"},
+                task="research",
+                instrument_family="equity",
+            )[1:]
+            with self.assertRaisesRegex(TypeError, "canonical ExperienceMemory"):
+                build_population_coverage(
+                    filtered,
+                    candidate_hash=H1,
+                    frozen_protocol_hash=H2,
+                    causal_cutoff=CUTOFF,
+                    permission_classes=["research"],
+                    included_episode_ids=[no_trade],
+                    exclusions={},
+                    task="research",
+                    instrument_family="equity",
+                )
+
+    def test_population_snapshot_rejects_omitted_negative_pending_unknown_or_tombstone(self):
+        with TemporaryDirectory() as directory:
+            store, negative, no_trade = self._store_with_negative_and_no_trade(directory)
+            pending, _ = store.append_episode(
+                episode_id="66666666-6666-4666-8666-666666666666",
+                decision_time=DECISION,
+                information_cutoff=DECISION,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=episode_payload(
+                    "PENDING",
+                    side="BUY",
+                    label_mature=False,
+                    label="pending",
+                ),
+            )
+            unknown, _ = store.append_episode(
+                episode_id="77777777-7777-4777-8777-777777777777",
+                decision_time=DECISION,
+                information_cutoff=DECISION,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=episode_payload(
+                    "UNKNOWN",
+                    side="SELL",
+                    label_mature=False,
+                    label="unknown",
+                ),
+            )
+            store.tombstone(negative, reason="privacy-retained-population-fact")
+            snapshot = self._snapshot(store)
+            self.assertEqual(snapshot.eligible_count, 4)
+            negative_row = next(
+                row for row in snapshot.rows if row["episode_id"] == negative
+            )
+            self.assertTrue(negative_row["tombstone_lineage"])
+
+            for omitted in (negative, no_trade, pending, unknown):
+                reduced_rows = tuple(
+                    row for row in snapshot.rows if row["episode_id"] != omitted
+                )
+                with self.subTest(omitted=omitted):
+                    with self.assertRaisesRegex(
+                        MemoryIntegrityError,
+                        "eligible_count|row digest|root",
+                    ):
+                        replace(snapshot, rows=reduced_rows)
 
     def test_explicit_exclusion_is_visible_and_digest_bound(self):
         with TemporaryDirectory() as directory:

@@ -199,11 +199,6 @@ class ReservationBook:
             raise ValueError(f"Unsupported terminal outcome: {normalized}")
         evidence = _text(resolution_evidence, name="resolution_evidence")
         any_consumed = any(amount != 0 for amount in current.consumed.values())
-        any_remaining = any(amount != 0 for amount in current.remaining.values())
-        if normalized == "FILLED" and any_remaining:
-            raise ReservationConflict(
-                "FILLED cannot release an unconsumed reservation remainder"
-            )
         if normalized in {"REJECTED", "PROVEN_ABSENT"} and any_consumed:
             raise ReservationConflict(
                 f"{normalized} cannot erase already consumed exposure"

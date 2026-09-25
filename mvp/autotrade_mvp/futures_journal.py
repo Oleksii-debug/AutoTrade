@@ -12,7 +12,12 @@ from decimal import Decimal
 from fractions import Fraction
 from typing import Any, Mapping
 
-from .accounting import JournalTransaction, canonical_transaction
+from .accounting import (
+    EconomicBook,
+    JournalTransaction,
+    canonical_transaction,
+    posting,
+)
 from .futures import (
     FuturesError,
     FuturesSettlementEvidence,
@@ -156,6 +161,68 @@ def _durable_scope(
     }
     aggregate_id = "futures-vm:" + payload_digest(identity).removeprefix("sha256:")
     return aggregate_id, scope.environment
+
+
+def variation_margin_aggregate_id(
+    state: VariationMarginState | InverseVariationMarginState,
+) -> str:
+    """Return the deterministic durable aggregate identity for one account contract."""
+
+    return _durable_scope(state)[0]
+
+
+def _transaction_from_payload(value: object) -> JournalTransaction | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise FuturesError("durable transaction must be an object")
+    postings_value = value.get("postings")
+    if not isinstance(postings_value, list):
+        raise FuturesError("durable transaction postings must be a list")
+    transaction = JournalTransaction(
+        transaction_id=value.get("transaction_id"),
+        cause_event_id=value.get("cause_event_id"),
+        reverses_transaction_id=value.get("reverses_transaction_id"),
+        postings=tuple(
+            posting(
+                item.get("ledger_account"),
+                item.get("asset_or_currency"),
+                item.get("signed_amount"),
+            )
+            for item in postings_value
+            if isinstance(item, Mapping)
+        ),
+    )
+    if len(transaction.postings) != len(postings_value):
+        raise FuturesError("durable transaction posting is not an object")
+    if canonical_transaction(transaction) != dict(value):
+        raise FuturesError("durable canonical transaction does not reproduce")
+    return transaction
+
+
+def rebuild_variation_margin_book(
+    store: JournalStore,
+    opening_state: VariationMarginState | InverseVariationMarginState,
+) -> EconomicBook:
+    """Rebuild the canonical double-entry projection from durable settlement events."""
+
+    if isinstance(opening_state, VariationMarginState):
+        restore_linear_variation_margin(store, opening_state)
+    elif isinstance(opening_state, InverseVariationMarginState):
+        restore_inverse_variation_margin(store, opening_state)
+    else:
+        raise TypeError("opening_state must be a variation-margin state")
+
+    aggregate_id, _ = _durable_scope(opening_state)
+    book = EconomicBook()
+    for event in store.load_events(_AGGREGATE_TYPE, aggregate_id):
+        payload = event["payload"]
+        if not isinstance(payload, Mapping):
+            raise FuturesError("durable futures settlement payload must be an object")
+        transaction = _transaction_from_payload(payload.get("transaction"))
+        if transaction is not None:
+            book.append(transaction)
+    return book
 
 
 def _linear_event_payload(

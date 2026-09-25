@@ -364,6 +364,10 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 reserved=None,
             )
             self.assertEqual(admitted.outcome, "ADMITTED")
+            authority._validate_durable_financial_evidence(
+                admitted,
+                authority._policies["borrow-policy"],
+            )
             dispatch_args = dict(
                 admission_id=admitted.admission_id,
                 intent_hash="sha256:" + ("a" * 64),

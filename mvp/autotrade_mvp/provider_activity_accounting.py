@@ -118,10 +118,16 @@ def _economic_provider_environment(
         if provider_environment is None
         else _text(provider_environment, name="provider_environment").upper()
     )
-    if provider == "BYBIT" and exact not in {"MAINNET", "TESTNET", "DEMO"}:
-        raise AccountingConflict(
-            "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
-        )
+    if provider == "BYBIT":
+        if exact not in {"MAINNET", "TESTNET", "DEMO"}:
+            raise AccountingConflict(
+                "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+            )
+        expected_runtime = "LIVE" if exact == "MAINNET" else "PAPER"
+        if runtime_environment != expected_runtime:
+            raise AccountingConflict(
+                "BYBIT provider_environment does not match runtime environment"
+            )
     return exact
 
 
@@ -458,6 +464,10 @@ def _prepare_provider_fill_binding(
         raise TypeError("projected_fill must be ProjectedFillEvidence")
     if not isinstance(provider_fill, ProviderFillEvidence):
         raise TypeError("provider_fill must be ProviderFillEvidence")
+    if provider_fill.provider_environment != economic_book.provider_environment:
+        raise AccountingConflict(
+            "provider fill binding provider_environment does not match economic book"
+        )
     if projected_fill.correction_of is not None:
         raise AccountingConflict(
             "initial provider fill binding cannot be created from correction evidence"
@@ -1031,10 +1041,15 @@ def commit_economic_batch_with_reservation_consumption(
                 "provider_fill_binding must be PreparedProviderFillBinding or None"
             )
         binding_request = provider_fill_binding.request
+        binding_provider_environment = binding_request.get(
+            "provider_environment",
+            binding_request.get("environment"),
+        )
         if (
             binding_request.get("provider_id") != economic_book.provider_id
             or binding_request.get("account_id") != economic_book.account_id
             or binding_request.get("environment") != economic_book.environment
+            or binding_provider_environment != economic_book.provider_environment
             or binding_request.get("reservation_id") != _text(
                 reservation_id, name="reservation_id"
             )

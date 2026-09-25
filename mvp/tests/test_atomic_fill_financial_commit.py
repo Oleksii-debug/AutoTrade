@@ -30,6 +30,7 @@ from mvp.autotrade_mvp.fill_accounting import (
 )
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
+    PreparedProviderFillBinding,
     _legacy_book_id,
     _provider_fill_binding_aggregate_id,
     _provider_fill_binding_payload,
@@ -284,6 +285,86 @@ class ProviderFillBindingEnvironmentTests(unittest.TestCase):
                     account_id="bybit-account",
                     environment="PAPER",
                 )
+
+            for runtime_environment, provider_environment in (
+                ("PAPER", "MAINNET"),
+                ("LIVE", "TESTNET"),
+                ("LIVE", "DEMO"),
+            ):
+                with self.subTest(
+                    runtime_environment=runtime_environment,
+                    provider_environment=provider_environment,
+                ):
+                    with self.assertRaisesRegex(
+                        AccountingConflict,
+                        "does not match runtime environment",
+                    ):
+                        DurableProviderEconomicBook(
+                            store,
+                            provider_id="BYBIT",
+                            account_id="bybit-account",
+                            environment=runtime_environment,
+                            provider_environment=provider_environment,
+                        )
+
+            live_book = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-live",
+                environment="LIVE",
+                provider_environment="MAINNET",
+            )
+            self.assertEqual(live_book.provider_environment, "MAINNET")
+
+    def test_atomic_barrier_rejects_cross_provider_environment_binding(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            economics = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="bybit-account",
+            )
+            binding = PreparedProviderFillBinding(
+                aggregate_id="demo-binding",
+                envelope=None,
+                request={
+                    "provider_id": "BYBIT",
+                    "account_id": "bybit-account",
+                    "environment": "PAPER",
+                    "provider_environment": "DEMO",
+                    "reservation_id": "reservation-1",
+                },
+                result={},
+                aggregate_version=1,
+            )
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "provider fill financial binding scope does not match atomic fill",
+            ):
+                commit_economic_batch_with_reservation_consumption(
+                    economics,
+                    reservations,
+                    command_id="cross-provider-environment",
+                    idempotency_key="cross-provider-environment",
+                    reservation_id="reservation-1",
+                    usage={},
+                    transactions=(fill_transaction(),),
+                    provider_fill_binding=binding,
+                )
+
+            self.assertEqual(economics.transactions, ())
+            self.assertEqual(
+                store.load_events("economic_book", economics.book_id),
+                [],
+            )
 
     def test_bybit_testnet_and_demo_have_distinct_economic_truth(self):
         with TemporaryDirectory() as directory:

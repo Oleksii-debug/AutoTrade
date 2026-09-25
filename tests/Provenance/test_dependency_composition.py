@@ -80,27 +80,26 @@ class DependencyCompositionGateTests(unittest.TestCase):
         lean = (root / ".github" / "workflows" / "lean-adoption.yml").read_text(
             encoding="utf-8"
         )
+        contracts = (root / ".github" / "workflows" / "contracts.yml").read_text(
+            encoding="utf-8"
+        )
+        verify = (root / ".github" / "workflows" / "verify.yml").read_text(
+            encoding="utf-8"
+        )
         self.assertEqual(foundation.count('dotnet-version: "10.0.100"'), 2)
         self.assertEqual(lean.count('dotnet-version: "10.0.100"'), 1)
-        self.assertNotIn('dotnet-version: "10.0.x"', foundation)
-        self.assertNotIn('dotnet-version: "10.0.x"', lean)
+        self.assertEqual(contracts.count('dotnet-version: "10.0.100"'), 1)
+        self.assertEqual(verify.count('dotnet-version: "10.0.100"'), 1)
+        for workflow in (foundation, lean, contracts, verify):
+            self.assertNotIn('dotnet-version: "10.0.x"', workflow)
 
-    def test_mutable_python_ci_runtime_is_an_explicit_blocker(self):
+    def test_ci_python_runtime_is_exact(self):
         blockers = {
             item
             for item in self.report.blockers
             if item.startswith("NON_EXACT_CI_PYTHON_VERSION:")
         }
-        self.assertEqual(
-            blockers,
-            {
-                "NON_EXACT_CI_PYTHON_VERSION:.github/workflows/baseline.yml:3.12",
-                "NON_EXACT_CI_PYTHON_VERSION:.github/workflows/contracts.yml:3.12",
-                "NON_EXACT_CI_PYTHON_VERSION:.github/workflows/control-plane.yml:3.12",
-                "NON_EXACT_CI_PYTHON_VERSION:.github/workflows/research-primitives.yml:3.12",
-                "NON_EXACT_CI_PYTHON_VERSION:.github/workflows/verify.yml:3.12",
-            },
-        )
+        self.assertEqual(blockers, set())
 
     def test_unresolved_first_party_rights_remain_fail_closed(self):
         unresolved = {

@@ -1542,7 +1542,7 @@ class AuthorityTests(unittest.TestCase):
             # Restart from durable truth: the failed process must leave no
             # half-admission, and the same persisted confirmation remains usable.
             restarted_store = JournalStore(path)
-            restarted_authority = AuthorityService(restarted_store)
+            restarted_authority = authority_service(restarted_store)
             restarted_reservations = DurableReservationBook(
                 restarted_store,
                 environment="PAPER",

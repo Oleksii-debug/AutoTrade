@@ -157,6 +157,8 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             attempt_id = str(uuid4())
             dispatcher = GuardedDispatcher(
                 journal,
+                environment="SIMULATION",
+                account_id="sim-account",
                 owner_token="sim-owner",
             )
             dispatched = dispatcher.dispatch(
@@ -264,6 +266,8 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             attempt_id = str(uuid4())
             dispatcher = GuardedDispatcher(
                 JournalStore(f"{directory}/journal.sqlite3"),
+                environment="SIMULATION",
+                account_id="sim-account",
                 owner_token="sim-owner",
             )
             dispatched = dispatcher.dispatch(
@@ -468,6 +472,8 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             }
             first_process = GuardedDispatcher(
                 JournalStore(journal_path),
+                environment="SIMULATION",
+                account_id="sim-account",
                 owner_token="process-one",
             )
 
@@ -503,6 +509,8 @@ class WholeSimulatorFlowTests(unittest.TestCase):
 
             restarted = GuardedDispatcher(
                 JournalStore(journal_path),
+                environment="SIMULATION",
+                account_id="sim-account",
                 owner_token="process-two",
             )
 

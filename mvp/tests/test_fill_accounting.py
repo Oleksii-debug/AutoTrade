@@ -25,6 +25,7 @@ def matched_fill(
     account_id="acct-1",
     environment="PAPER",
     provider_side="BUY",
+    provider_position_side=None,
 ):
     projected = ProjectedFillEvidence.create(
         fill_id="fill-1",
@@ -44,6 +45,7 @@ def matched_fill(
         client_order_id="client-1",
         instrument="ABC",
         side=provider_side,
+        position_side=provider_position_side,
         quantity="2",
         price=price,
         fee_amount=fee,
@@ -107,6 +109,54 @@ class FillAccountingTests(unittest.TestCase):
                 settlement_currency="USD",
             )
         self.assertEqual(book.transactions, ())
+
+    def test_hedge_leg_fill_fails_closed_before_generic_economic_booking(self):
+        for position_side, side in (("LONG", "BUY"), ("SHORT", "SELL")):
+            with self.subTest(position_side=position_side, side=side):
+                projected, provider = matched_fill(
+                    provider_side=side,
+                    provider_position_side=position_side,
+                )
+                if side == "SELL":
+                    projected = ProjectedFillEvidence.create(
+                        fill_id=projected.fill_id,
+                        provider_execution_id=projected.provider_execution_id,
+                        intent_id=projected.intent_id,
+                        client_order_id=projected.client_order_id,
+                        side="SELL",
+                        quantity=projected.quantity,
+                        price=projected.price,
+                    )
+                book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
+                before_digest = book.audit_digest()
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "leg-aware economic accounting",
+                ):
+                    book_provider_fill(
+                        book=book,
+                        provider_id="provider-a",
+                        projected_fill=projected,
+                        provider_fill=provider,
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                    )
+                self.assertEqual(book.transactions, ())
+                self.assertEqual(book.audit_digest(), before_digest)
+
+        projected, provider = matched_fill(provider_position_side="BOTH")
+        book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
+        self.assertTrue(
+            book_provider_fill(
+                book=book,
+                provider_id="provider-a",
+                projected_fill=projected,
+                provider_fill=provider,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+            )
+        )
+        self.assertEqual(book.position("ABC"), Decimal("2"))
 
     def test_same_provider_execution_is_idempotent(self):
         observed, provider = matched_fill()

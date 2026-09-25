@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
+from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.capabilities import CapabilitySnapshot
@@ -12,6 +13,7 @@ from mvp.autotrade_mvp.perpetual_margin import (
     PerpetualStress,
     evaluate_perpetual_margin,
 )
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 
 def tier(upper="10000", rate="0.005", adjustment="0", convention="ADD"):
@@ -148,6 +150,59 @@ class EvidenceArtifactStore:
             return self._records[artifact_id][1]
         except KeyError as error:
             raise FileNotFoundError(artifact_id) from error
+
+
+def publish_margin_artifacts(store: ArtifactStore, value: PerpetualMarginEvidence):
+    common = {
+        "schema_version": 1,
+        "provider_id": value.provider_id,
+        "account_id": value.account_id,
+        "entity_id": value.entity_id,
+        "environment": value.environment,
+        "instrument_version": value.instrument_version,
+        "capability_snapshot_id": value.capability_snapshot_id,
+        "position_mode": value.position_mode,
+        "margin_mode": value.margin_mode,
+        "collateral_currency": value.collateral_currency,
+        "settlement_currency": value.settlement_currency,
+        "risk_tier_revision": value.risk_tier_revision,
+    }
+    records = (
+        (
+            value.tier_table_evidence_ref,
+            value.tier_table_payload(),
+            {
+                **common,
+                "artifact_kind": "PERPETUAL_MARGIN_TIER_TABLE",
+                "observed_at": value.margin_tiers_observed_at,
+            },
+        ),
+        (
+            value.evidence_bundle_ref,
+            value.evidence_bundle_payload(),
+            {
+                **common,
+                "artifact_kind": "PERPETUAL_MARGIN_EVIDENCE_BUNDLE",
+                "observed_at": value.mark_observed_at,
+            },
+        ),
+    )
+    for artifact_id, payload, metadata in records:
+        data = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        store.publish_bytes(
+            artifact_id=artifact_id,
+            data=data,
+            media_type="application/json",
+            rights={"storage": True, "export": False},
+            source_refs=["provider:margin-evidence"],
+            metadata=metadata,
+        )
 
 
 def stress(**overrides):
@@ -365,6 +420,26 @@ class PerpetualMarginTests(unittest.TestCase):
         self.assertEqual(reopened.tier_identity, original.tier_identity)
         revised = evidence(risk_tier_revision="tier-v8")
         self.assertNotEqual(revised.tier_identity, original.tier_identity)
+
+    def test_real_artifact_store_binds_exact_margin_economics(self):
+        trusted = evidence()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish_margin_artifacts(store, trusted)
+            result = evaluate(evidence=trusted, artifact_store=store)
+            self.assertEqual(result.verdict, "ALLOW_NEW_RISK")
+
+            altered = evidence(
+                margin_tiers=(
+                    tier("10000", "0.001"),
+                    tier("50000", "0.002"),
+                )
+            )
+            with self.assertRaisesRegex(
+                PerpetualMarginError,
+                "content does not match supplied economics",
+            ):
+                evaluate(evidence=altered, artifact_store=store)
 
     def test_same_tier_ref_cannot_authorize_altered_tier_economics(self):
         trusted = evidence()

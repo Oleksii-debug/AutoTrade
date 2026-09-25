@@ -263,11 +263,54 @@ class WhiteBitOrderIntent:
 class WhiteBitPreparedRequest:
     endpoint: str
     body: Mapping[str, object]
+    account_id: str
+    environment: str
     capability_snapshot_id: str
     documentation_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
+        endpoint = _text(self.endpoint, name="endpoint")
+        allowed_endpoints = {
+            "/api/v4/order/market",
+            "/api/v4/order/new",
+            "/api/v4/order/stop_market",
+            "/api/v4/order/stop_limit",
+            "/api/v4/order/stock_market",
+            "/api/v4/order/collateral/market",
+            "/api/v4/order/collateral/limit",
+            "/api/v4/order/collateral/trigger-market",
+            "/api/v4/order/collateral/stop-limit",
+        }
+        if endpoint not in allowed_endpoints:
+            raise WhiteBitAdapterError(
+                "prepared endpoint must be a canonical WhiteBIT order path"
+            )
+        if not isinstance(self.body, Mapping):
+            raise TypeError("body must be a mapping")
+        body = dict(self.body)
+        validate_client_order_id(body.get("clientOrderId"))
+        _text(body.get("market"), name="market")
+        account = _text(self.account_id, name="account_id")
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+            raise WhiteBitAdapterError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
+        capability_snapshot_id = _text(
+            self.capability_snapshot_id,
+            name="capability_snapshot_id",
+        )
+        refs = tuple(
+            _text(value, name="documentation_ref")
+            for value in self.documentation_refs
+        )
+        if not refs:
+            raise WhiteBitAdapterError("documentation_refs must not be empty")
+
+        object.__setattr__(self, "endpoint", endpoint)
+        object.__setattr__(self, "body", MappingProxyType(body))
+        object.__setattr__(self, "account_id", account)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "capability_snapshot_id", capability_snapshot_id)
+        object.__setattr__(self, "documentation_refs", refs)
 
 
 @dataclass(frozen=True)
@@ -408,6 +451,8 @@ def prepare_order_request(
     intent: WhiteBitOrderIntent,
     *,
     client_order_id: str,
+    account_id: str,
+    environment: str,
     capability: CapabilitySnapshot,
     market_rules: WhiteBitMarketRules,
     at: datetime,
@@ -425,8 +470,14 @@ def prepare_order_request(
         raise TypeError("capability must be CapabilitySnapshot")
     point = _instant(at, name="at")
     client_id = validate_client_order_id(client_order_id)
+    account = _text(account_id, name="account_id")
+    env = _text(environment, name="environment").upper()
     if capability.provider_id.upper() != "WHITEBIT":
         raise WhiteBitAdapterError("capability belongs to another provider")
+    if capability.account_id != account:
+        raise WhiteBitAdapterError("capability account does not match target account")
+    if capability.environment.upper() != env:
+        raise WhiteBitAdapterError("capability environment does not match target environment")
     if capability.instrument_version != intent.instrument_version:
         raise WhiteBitAdapterError("capability instrument version does not match intent")
     if not capability.admits(
@@ -477,6 +528,8 @@ def prepare_order_request(
     return WhiteBitPreparedRequest(
         endpoint=endpoint,
         body=body,
+        account_id=account,
+        environment=env,
         capability_snapshot_id=capability.snapshot_id,
         documentation_refs=tuple(WHITEBIT_OFFICIAL_DOCS.values()),
     )
@@ -723,6 +776,14 @@ def parse_submission_result(
     account = _text(account_id, name="account_id")
     env = _text(environment, name="environment").upper()
     point = _instant(observed_at, name="observed_at")
+    if account != prepared.account_id:
+        raise WhiteBitAdapterError(
+            "submission account does not match prepared guarded request"
+        )
+    if env != prepared.environment:
+        raise WhiteBitAdapterError(
+            "submission environment does not match prepared guarded request"
+        )
 
     if type(transport_ambiguous) is not bool:
         raise WhiteBitAdapterError("transport_ambiguous must be boolean")
@@ -945,6 +1006,7 @@ class WhiteBitAbsenceEvidence:
     executions_complete: bool
     activities_complete: bool
     consistency_horizon_satisfied: bool
+    qualified_exclusion_semantics: bool = False
 
     def __post_init__(self) -> None:
         for field in (
@@ -954,21 +1016,18 @@ class WhiteBitAbsenceEvidence:
             "executions_complete",
             "activities_complete",
             "consistency_horizon_satisfied",
+            "qualified_exclusion_semantics",
         ):
             if type(getattr(self, field)) is not bool:
                 raise TypeError(f"{field} must be boolean")
+        if self.qualified_exclusion_semantics:
+            raise WhiteBitAdapterError(
+                "WhiteBIT foundation cannot self-assert provider exclusion semantics"
+            )
 
     def verdict(self) -> str:
         if self.order_found:
             return "FOUND"
-        if (
-            self.open_orders_complete
-            and self.order_history_complete
-            and self.executions_complete
-            and self.activities_complete
-            and self.consistency_horizon_satisfied
-        ):
-            return "PROVEN_ABSENT"
         return "INCONCLUSIVE"
 
 
@@ -1488,6 +1547,7 @@ def absence_evidence_from_coverages(
     executions: WhiteBitPaginationCoverage,
     activities_complete: bool,
     consistency_horizon_satisfied: bool,
+    qualified_exclusion_semantics: bool = False,
 ) -> WhiteBitAbsenceEvidence:
     """Bind absence semantics to concrete, surface-typed pagination proof."""
     for coverage, expected in (
@@ -1507,6 +1567,8 @@ def absence_evidence_from_coverages(
         raise TypeError("activities_complete must be boolean")
     if type(consistency_horizon_satisfied) is not bool:
         raise TypeError("consistency_horizon_satisfied must be boolean")
+    if type(qualified_exclusion_semantics) is not bool:
+        raise TypeError("qualified_exclusion_semantics must be boolean")
     return WhiteBitAbsenceEvidence(
         order_found=order_found,
         open_orders_complete=open_orders.complete,
@@ -1514,6 +1576,7 @@ def absence_evidence_from_coverages(
         executions_complete=executions.complete,
         activities_complete=activities_complete,
         consistency_horizon_satisfied=consistency_horizon_satisfied,
+        qualified_exclusion_semantics=qualified_exclusion_semantics,
     )
 
 

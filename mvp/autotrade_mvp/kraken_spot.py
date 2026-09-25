@@ -167,8 +167,8 @@ class KrakenSpotPreparedRequest:
         if not isinstance(self.body, Mapping):
             raise TypeError("body must be a mapping")
         body = dict(self.body)
-        validate_spot_client_order_id(str(body.get("cl_ord_id", "")))
-        _text(str(body.get("pair", "")), name="pair")
+        validate_spot_client_order_id(body.get("cl_ord_id"))
+        _text(body.get("pair"), name="pair")
         account = _text(self.account_id, name="account_id")
         environment = _text(self.environment, name="environment").upper()
         if environment not in {"PAPER", "LIVE"}:

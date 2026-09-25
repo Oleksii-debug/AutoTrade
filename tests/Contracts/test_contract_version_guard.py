@@ -29,6 +29,44 @@ def write_tree(root: Path, version="1.0.0", schemas=None, defs=None):
         )
 
 
+def write_openapi(root: Path, version: str, operations: list[tuple[str, str, str]], *, descriptions=None):
+    descriptions = {} if descriptions is None else descriptions
+    manifest_path = root / "contracts" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["openapi"] = {
+        "path": "contracts/openapi/host-api.yaml",
+        "version": version,
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    path = root / "contracts" / "openapi" / "host-api.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "openapi: 3.1.0",
+        "info:",
+        "  title: test",
+        f"  version: {version}",
+        "paths:",
+    ]
+    for route, method, schema_ref in operations:
+        lines.extend([
+            f"  {route}:",
+            f"    {method}:",
+            f"      operationId: {method}_{route.replace('/', '_').replace('{', '').replace('}', '')}",
+        ])
+        description = descriptions.get((route, method))
+        if description:
+            lines.append(f"      description: {description}")
+        lines.extend([
+            "      responses:",
+            '        "200":',
+            "          content:",
+            "            application/json:",
+            "              schema:",
+            f"                $ref: {schema_ref}",
+        ])
+    path.write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+
+
 class ContractVersionGuardTests(unittest.TestCase):
     def test_unchanged_surface_allows_same_version(self):
         with TemporaryDirectory() as left, TemporaryDirectory() as right:
@@ -124,6 +162,82 @@ class ContractVersionGuardTests(unittest.TestCase):
                 defs={"A": {"type": "string", "description": "new wording"}},
             )
             self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+
+    def test_openapi_existing_operation_change_requires_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+            )
+            write_tree(Path(right), version="1.1.0")
+            write_openapi(
+                Path(right),
+                "1.1.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/B")],
+            )
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(any("OpenAPI operation change" in item for item in errors))
+
+    def test_openapi_removed_operation_requires_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [
+                    ("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A"),
+                    ("/v1/health", "get", "../jsonschema/a.schema.json#/$defs/A"),
+                ],
+            )
+            write_tree(Path(right), version="1.1.0")
+            write_openapi(
+                Path(right),
+                "1.1.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+            )
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(any("removed operations" in item for item in errors))
+
+    def test_openapi_additive_operation_allows_minor_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+            )
+            write_tree(Path(right), version="1.1.0")
+            write_openapi(
+                Path(right),
+                "1.1.0",
+                [
+                    ("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A"),
+                    ("/v1/health", "get", "../jsonschema/a.schema.json#/$defs/A"),
+                ],
+            )
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
+    def test_openapi_description_only_change_allows_patch_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left))
+            write_openapi(
+                Path(left),
+                "1.0.0",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                descriptions={("/v1/state", "get"): "old wording"},
+            )
+            write_tree(Path(right), version="1.0.1")
+            write_openapi(
+                Path(right),
+                "1.0.1",
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                descriptions={("/v1/state", "get"): "new wording"},
+            )
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
 
     def test_version_cannot_decrease(self):
         with TemporaryDirectory() as left, TemporaryDirectory() as right:

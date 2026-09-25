@@ -11,6 +11,8 @@ from autotrade_research.evaluation.ablation import (
 
 
 CUT = datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc)
+FINGERPRINT_A = "sha256:" + ("a" * 64)
+FINGERPRINT_B = "sha256:" + ("b" * 64)
 
 
 class _NoOffsetTZ(tzinfo):
@@ -28,7 +30,7 @@ def outcome(
     cost,
     elapsed,
     components,
-    fingerprint="same",
+    fingerprint=FINGERPRINT_A,
     case_id="case-1",
     decision=None,
     cutoff=CUT,
@@ -96,9 +98,9 @@ class AblationTests(unittest.TestCase):
             AblationPair(
                 "agent",
                 outcome(variant="FULL", utility=1, cost=1, elapsed=10,
-                        components=("base", "agent"), fingerprint="a"),
+                        components=("base", "agent"), fingerprint=FINGERPRINT_A),
                 outcome(variant="ABLATED", utility=1, cost=0, elapsed=10,
-                        components=("base",), fingerprint="b"),
+                        components=("base",), fingerprint=FINGERPRINT_B),
             )
 
     def test_pair_may_only_remove_target_component(self):
@@ -170,7 +172,7 @@ class AblationTests(unittest.TestCase):
             " agent ",
             outcome(
                 case_id=" case-1 ",
-                fingerprint=" same-input ",
+                fingerprint=FINGERPRINT_A,
                 variant="FULL",
                 utility="0.2",
                 cost="0.01",
@@ -179,7 +181,7 @@ class AblationTests(unittest.TestCase):
             ),
             outcome(
                 case_id="case-1",
-                fingerprint="same-input",
+                fingerprint=FINGERPRINT_A,
                 variant="ABLATED",
                 utility="0.1",
                 cost="0",
@@ -190,7 +192,7 @@ class AblationTests(unittest.TestCase):
         summary = summarize_ablation("agent", [matched])
         self.assertEqual(matched.target_component, "agent")
         self.assertEqual(matched.full.case_id, "case-1")
-        self.assertEqual(matched.full.input_fingerprint, "same-input")
+        self.assertEqual(matched.full.input_fingerprint, FINGERPRINT_A)
         self.assertEqual(matched.full.components, ("base", "agent"))
         self.assertEqual(summary.total_pairs, 1)
 
@@ -199,7 +201,7 @@ class AblationTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "immutable tuple"):
             AblationOutcome(
                 case_id="case-mutable-components",
-                input_fingerprint="same",
+                input_fingerprint=FINGERPRINT_A,
                 variant="FULL",
                 utility=Decimal("0.1"),
                 cost=Decimal("0.01"),
@@ -215,7 +217,7 @@ class AblationTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "must be integers"):
             AblationOutcome(
                 case_id="case-bool-elapsed",
-                input_fingerprint="same",
+                input_fingerprint=FINGERPRINT_A,
                 variant="FULL",
                 utility=Decimal("0.1"),
                 cost=Decimal("0.01"),
@@ -229,7 +231,7 @@ class AblationTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "must be integers"):
             AblationOutcome(
                 case_id="case-bool-deadline",
-                input_fingerprint="same",
+                input_fingerprint=FINGERPRINT_A,
                 variant="FULL",
                 utility=Decimal("0.1"),
                 cost=Decimal("0.01"),
@@ -245,7 +247,7 @@ class AblationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "case_id"):
             AblationOutcome(
                 case_id=1,
-                input_fingerprint="same",
+                input_fingerprint=FINGERPRINT_A,
                 variant="FULL",
                 utility=Decimal("0.1"),
                 cost=Decimal("0.01"),
@@ -261,7 +263,7 @@ class AblationTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             AblationOutcome(
                 case_id="case-float-utility",
-                input_fingerprint="same",
+                input_fingerprint=FINGERPRINT_A,
                 variant="FULL",
                 utility=0.1,
                 cost=Decimal("0.01"),
@@ -275,7 +277,7 @@ class AblationTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             AblationOutcome(
                 case_id="case-float-cost",
-                input_fingerprint="same",
+                input_fingerprint=FINGERPRINT_A,
                 variant="FULL",
                 utility=Decimal("0.1"),
                 cost=0.01,

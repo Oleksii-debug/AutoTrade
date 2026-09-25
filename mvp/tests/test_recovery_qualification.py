@@ -2,6 +2,7 @@ import unittest
 
 from mvp.autotrade_mvp.recovery_qualification import (
     RecoveryEvidenceStatus,
+    RecoveryQualificationDecision,
     RecoveryQualificationPolicy,
     RecoveryScenario,
     RecoveryScenarioEvidence,
@@ -318,6 +319,52 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
                 evidence=[item, item],
             )
 
+
+    def test_direct_pass_decision_cannot_omit_required_scenarios(self):
+        with self.assertRaisesRegex(ValueError, "measure every required scenario"):
+            RecoveryQualificationDecision(
+                status=RecoveryEvidenceStatus.PASS,
+                blockers=(),
+                measured_downtime_ms={RecoveryScenario.POWER_LOSS: 10},
+            )
+
+    def test_direct_pass_decision_cannot_hide_blockers(self):
+        with self.assertRaisesRegex(ValueError, "cannot contain blockers"):
+            RecoveryQualificationDecision(
+                status=RecoveryEvidenceStatus.PASS,
+                blockers=("forged:blocker",),
+                measured_downtime_ms={scenario: 10 for scenario in RecoveryScenario},
+            )
+
+    def test_nonpass_decision_requires_explicit_blocker(self):
+        with self.assertRaisesRegex(ValueError, "requires blockers"):
+            RecoveryQualificationDecision(
+                status=RecoveryEvidenceStatus.INCONCLUSIVE,
+                blockers=(),
+                measured_downtime_ms={},
+            )
+
+    def test_decision_copies_measured_mapping_and_rejects_boolean_downtime(self):
+        measured = {scenario: 10 for scenario in RecoveryScenario}
+        decision = RecoveryQualificationDecision(
+            status=RecoveryEvidenceStatus.PASS,
+            blockers=(),
+            measured_downtime_ms=measured,
+        )
+        measured[RecoveryScenario.POWER_LOSS] = 999
+        self.assertEqual(
+            decision.measured_downtime_ms[RecoveryScenario.POWER_LOSS],
+            10,
+        )
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            RecoveryQualificationDecision(
+                status=RecoveryEvidenceStatus.PASS,
+                blockers=(),
+                measured_downtime_ms={
+                    scenario: (True if scenario is RecoveryScenario.POWER_LOSS else 10)
+                    for scenario in RecoveryScenario
+                },
+            )
 
 if __name__ == "__main__":
     unittest.main()

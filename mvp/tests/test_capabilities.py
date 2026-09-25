@@ -98,6 +98,35 @@ class CapabilityFoundationTests(unittest.TestCase):
                 sources=frozenset(),
             )
 
+    def test_capability_evidence_identity_aliases_fail_closed(self):
+        base = claim("API")
+        canonical_time = base.observed_at.isoformat().replace("+00:00", "Z")
+        canonical = {
+            "artifact_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "sha256": "sha256:" + ("a" * 64),
+            "observed_at": canonical_time,
+        }
+        accepted = replace(base, evidence_ref=canonical)
+        self.assertEqual(
+            accepted.evidence_ref["artifact_id"],
+            canonical["artifact_id"],
+        )
+
+        invalid_refs = (
+            {**canonical, "artifact_id": "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"},
+            {**canonical, "artifact_id": canonical["artifact_id"].replace("-", "")},
+            {**canonical, "artifact_id": " " + canonical["artifact_id"]},
+            {**canonical, "sha256": canonical["sha256"] + " "},
+            {**canonical, "observed_at": "2026-09-24T15:59:00.000000Z"},
+            {**canonical, "observed_at": canonical_time + " "},
+        )
+        for evidence_ref in invalid_refs:
+            with self.subTest(evidence_ref=evidence_ref), self.assertRaisesRegex(
+                CapabilityError,
+                "canonical",
+            ):
+                replace(base, evidence_ref=evidence_ref)
+
     def test_self_asserted_evidence_without_verifier_is_unknown(self):
         snapshot = _derive_capability_snapshot(
             snapshot_id=SNAPSHOT_1,

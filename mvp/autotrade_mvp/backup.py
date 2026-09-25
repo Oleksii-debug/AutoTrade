@@ -511,9 +511,11 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
         )
 
     observed_paths = {
-        path.relative_to(root).as_posix()
+        relative
         for path in root.rglob("*")
-        if path.is_file() and path.name not in {MANIFEST_NAME, MANIFEST_DIGEST_NAME}
+        if path.is_file()
+        for relative in (path.relative_to(root).as_posix(),)
+        if relative not in {MANIFEST_NAME, MANIFEST_DIGEST_NAME}
     }
     if observed_paths != expected_paths:
         raise BackupIntegrityError(

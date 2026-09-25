@@ -10,11 +10,13 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 from mvp.autotrade_mvp.kraken_futures import (
+    KrakenFuturesPreparedRequest,
     build_order_payload,
     coverage_evidence,
     futures_base_url,
     parse_position_executions,
     parse_submission_response,
+    prepare_order_request,
 )
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
@@ -82,6 +84,75 @@ def futures_position_observation(payload, *, account_id="paper-1", endpoint="/ap
     )
 
 
+def futures_write_capability(
+    *,
+    account_id="futures-account",
+    environment="DEMO",
+    instrument_version="PI_XBTUSD@v1",
+):
+    observed_at = NOW_DT - timedelta(hours=1)
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            provider_id="KRAKEN",
+            account_id=account_id,
+            entity_id="futures-trading",
+            environment=environment,
+            instrument_version=instrument_version,
+            observed_at=observed_at,
+            expires_at=NOW_DT + timedelta(hours=1),
+            supported_order_types=frozenset({"MARKET", "LIMIT"}),
+            time_in_force=frozenset({"GTC"}),
+            permission_scopes=frozenset({"ORDER_WRITE"}),
+            position_mode="NET",
+            native_protection=frozenset(),
+            rate_limit_policy_id="kraken-futures-write",
+            data_entitlements=frozenset(),
+            evidence_ref={
+                "artifact_id": str(uuid4()),
+                "sha256": "sha256:" + "f" * 64,
+                "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    return derive_capability_snapshot(
+        snapshot_id=str(uuid4()),
+        claims=claims,
+        observed_at=NOW_DT,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    )
+
+
+def prepared_futures_request(
+    client_order_id: str,
+    *,
+    environment="DEMO",
+) -> KrakenFuturesPreparedRequest:
+    return prepare_order_request(
+        capability=futures_write_capability(environment=environment),
+        account_id="futures-account",
+        environment=environment,
+        instrument_version="PI_XBTUSD@v1",
+        at=NOW_DT,
+        symbol="PI_XBTUSD",
+        side="BUY",
+        order_type="MARKET",
+        size="1",
+        client_order_id=client_order_id,
+    )
+
+
+def futures_response_bytes(payload) -> bytes:
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
 class KrakenFuturesAdapterTests(unittest.TestCase):
     def test_live_and_demo_services_are_explicit(self):
         self.assertEqual(futures_base_url("LIVE"), "https://futures.kraken.com")
@@ -138,10 +209,14 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
             with self.subTest(send_status=send_status):
                 result = parse_submission_response(
                     attempt_id=str(uuid4()),
-                    client_order_id="hedge-004",
-                    environment="LIVE",
+                    prepared_request=prepared_futures_request(
+                        "hedge-004",
+                        environment="LIVE",
+                    ),
                     observed_at=NOW,
-                    response={"result": "success", "sendStatus": send_status},
+                    response_bytes=futures_response_bytes(
+                        {"result": "success", "sendStatus": send_status}
+                    ),
                 )
                 self.assertEqual(result["outcome"], "ACKNOWLEDGED")
                 self.assertEqual(result["provider_order_id"], "provider-order-1")
@@ -151,10 +226,9 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
     def test_transport_ambiguity_is_unknown_and_never_blind_retried(self):
         result = parse_submission_response(
             attempt_id=str(uuid4()),
-            client_order_id="hedge-005",
-            environment="DEMO",
+            prepared_request=prepared_futures_request("hedge-005"),
             observed_at=NOW,
-            response=None,
+            response_bytes=None,
             transport_ambiguous=True,
         )
         self.assertEqual(result["outcome"], "UNKNOWN")
@@ -163,16 +237,88 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         self.assertNotIn("provider_received_at", result)
         self.assertNotIn("observed_at", result)
 
+    def test_transport_ambiguity_cannot_claim_response_bytes(self):
+        with self.assertRaisesRegex(ProviderCoreError, "response bytes"):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=prepared_futures_request("hedge-ambiguous"),
+                observed_at=NOW,
+                response_bytes=futures_response_bytes({"result": "success"}),
+                transport_ambiguous=True,
+            )
+
     def test_explicit_provider_error_is_rejected(self):
         result = parse_submission_response(
             attempt_id=str(uuid4()),
-            client_order_id="hedge-006",
-            environment="LIVE",
+            prepared_request=prepared_futures_request(
+                "hedge-006",
+                environment="LIVE",
+            ),
             observed_at=NOW,
-            response={"result": "error", "error": "insufficientFunds"},
+            response_bytes=futures_response_bytes(
+                {"result": "error", "error": "insufficientFunds"}
+            ),
         )
         self.assertEqual(result["outcome"], "REJECTED")
         self.assertEqual(result["retry_disposition"], "NEVER")
+
+    def test_submission_evidence_binds_exact_request_response_and_attempt(self):
+        request = prepared_futures_request("hedge-bind")
+        payload = {
+            "result": "success",
+            "sendStatus": {
+                "order_id": "provider-bind",
+                "cliOrdId": "hedge-bind",
+            },
+        }
+        raw_a = futures_response_bytes(payload)
+        raw_b = json.dumps(payload, indent=1).encode("utf-8")
+        attempt = str(uuid4())
+        a = parse_submission_response(
+            attempt_id=attempt,
+            prepared_request=request,
+            observed_at=NOW,
+            response_bytes=raw_a,
+        )
+        b = parse_submission_response(
+            attempt_id=attempt,
+            prepared_request=request,
+            observed_at=NOW,
+            response_bytes=raw_b,
+        )
+        other_attempt = parse_submission_response(
+            attempt_id=str(uuid4()),
+            prepared_request=request,
+            observed_at=NOW,
+            response_bytes=raw_a,
+        )
+        self.assertNotEqual(a["evidence"][0]["sha256"], b["evidence"][0]["sha256"])
+        self.assertNotEqual(
+            a["evidence"][0]["artifact_id"],
+            b["evidence"][0]["artifact_id"],
+        )
+        self.assertNotEqual(
+            a["evidence"][0]["artifact_id"],
+            other_attempt["evidence"][0]["artifact_id"],
+        )
+
+    def test_submission_response_cannot_relabel_guarded_client_identity(self):
+        request = prepared_futures_request("hedge-expected")
+        with self.assertRaisesRegex(ProviderCoreError, "guarded request"):
+            parse_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=request,
+                observed_at=NOW,
+                response_bytes=futures_response_bytes(
+                    {
+                        "result": "success",
+                        "sendStatus": {
+                            "order_id": "provider-mismatch",
+                            "cliOrdId": "hedge-other",
+                        },
+                    }
+                ),
+            )
 
     def test_position_history_maps_only_trade_execution_facts(self):
         fills = parse_position_executions(

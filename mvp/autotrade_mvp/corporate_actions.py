@@ -289,6 +289,7 @@ class CorporateActionBook:
         self.instrument_version = instrument_version
         self.registry = registry
         self._events: dict[str, tuple[CorporateEvent, Transition]] = {}
+        self._last_effective_date: date | None = None
 
     @classmethod
     def replay(
@@ -328,6 +329,13 @@ class CorporateActionBook:
             or event.instrument_version != current.version
         ):
             raise ValueError("corporate event instrument identity mismatch")
+        if (
+            self._last_effective_date is not None
+            and event.effective_date < self._last_effective_date
+        ):
+            raise ValueError(
+                "corporate events must be applied in non-decreasing effective-date order"
+            )
 
         successor = None
         if event.kind == "SPLIT":
@@ -346,6 +354,7 @@ class CorporateActionBook:
         if successor is not None:
             self.instrument_version = successor
         self._events[event.event_id] = (event, transition)
+        self._last_effective_date = event.effective_date
         return transition
 
     def _split(self, event: CorporateEvent) -> Transition:

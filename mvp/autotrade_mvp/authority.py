@@ -261,6 +261,13 @@ class AdmissionRecord:
     confirmation_id: str | None
     reason: str
     request_fingerprint: str
+    intent_id: str | None = None
+    risk_decision_id: str | None = None
+    reservation_id: str | None = None
+    capability_snapshot_id: str | None = None
+    risk_valid_until: str | None = None
+    policy_version: int | None = None
+    financial_command_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -322,6 +329,41 @@ class AdmissionRecord:
         ):
             raise ValueError("request_fingerprint must be a SHA-256 hex digest")
         object.__setattr__(self, "request_fingerprint", fingerprint)
+
+        evidence_values = (
+            self.intent_id,
+            self.risk_decision_id,
+            self.reservation_id,
+            self.capability_snapshot_id,
+            self.risk_valid_until,
+            self.policy_version,
+            self.financial_command_id,
+        )
+        if any(value is not None for value in evidence_values):
+            if outcome == "ADMITTED" and any(value is None for value in evidence_values):
+                raise ValueError(
+                    "admitted financial record requires complete risk/reservation evidence"
+                )
+            for field_name, value in (
+                ("intent_id", self.intent_id),
+                ("risk_decision_id", self.risk_decision_id),
+                ("reservation_id", self.reservation_id),
+                ("capability_snapshot_id", self.capability_snapshot_id),
+                ("risk_valid_until", self.risk_valid_until),
+                ("financial_command_id", self.financial_command_id),
+            ):
+                if value is not None:
+                    object.__setattr__(
+                        self, field_name, _text(value, name=field_name)
+                    )
+            if self.risk_valid_until is not None:
+                _instant(self.risk_valid_until, name="risk_valid_until")
+            if self.policy_version is not None and (
+                not isinstance(self.policy_version, int)
+                or isinstance(self.policy_version, bool)
+                or self.policy_version < 1
+            ):
+                raise ValueError("admission policy_version must be positive")
 
 
 class AuthorityConflict(ValueError):
@@ -402,6 +444,13 @@ class AuthorityService:
             "confirmation_id": record.confirmation_id,
             "reason": record.reason,
             "request_fingerprint": record.request_fingerprint,
+            "intent_id": record.intent_id,
+            "risk_decision_id": record.risk_decision_id,
+            "reservation_id": record.reservation_id,
+            "capability_snapshot_id": record.capability_snapshot_id,
+            "risk_valid_until": record.risk_valid_until,
+            "policy_version": record.policy_version,
+            "financial_command_id": record.financial_command_id,
         }
 
     def _persist(self, event_type: str, key: str, payload: dict[str, Any], *, committed_at: str) -> None:
@@ -561,6 +610,13 @@ class AuthorityService:
                     confirmation_id=payload["confirmation_id"],
                     reason=payload["reason"],
                     request_fingerprint=payload["request_fingerprint"],
+                    intent_id=payload.get("intent_id"),
+                    risk_decision_id=payload.get("risk_decision_id"),
+                    reservation_id=payload.get("reservation_id"),
+                    capability_snapshot_id=payload.get("capability_snapshot_id"),
+                    risk_valid_until=payload.get("risk_valid_until"),
+                    policy_version=payload.get("policy_version"),
+                    financial_command_id=payload.get("financial_command_id"),
                 )
                 if record.policy_id not in self._policies:
                     raise AuthorityConflict("durable admission references missing policy")
@@ -1044,6 +1100,13 @@ class AuthorityService:
                     "confirmation_id": record.confirmation_id,
                     "reason": record.reason,
                     "request_fingerprint": record.request_fingerprint,
+                    "intent_id": record.intent_id,
+                    "risk_decision_id": record.risk_decision_id,
+                    "reservation_id": record.reservation_id,
+                    "capability_snapshot_id": record.capability_snapshot_id,
+                    "risk_valid_until": record.risk_valid_until,
+                    "policy_version": record.policy_version,
+                    "financial_command_id": record.financial_command_id,
                 }
             )
 
@@ -1220,6 +1283,13 @@ class AuthorityService:
                 request_fingerprint=_text(
                     item.get("request_fingerprint"), name="request_fingerprint"
                 ),
+                intent_id=item.get("intent_id"),
+                risk_decision_id=item.get("risk_decision_id"),
+                reservation_id=item.get("reservation_id"),
+                capability_snapshot_id=item.get("capability_snapshot_id"),
+                risk_valid_until=item.get("risk_valid_until"),
+                policy_version=item.get("policy_version"),
+                financial_command_id=item.get("financial_command_id"),
             )
             restored_admissions[admission_id] = record
 

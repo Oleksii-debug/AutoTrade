@@ -34,6 +34,7 @@ def all_checks(*, source=SOURCE, override=None):
             status=override.get(name, "PASS"),
             source_sha=source,
             evidence_ref=f"evidence:{name.lower()}",
+            evidence_sha256=DIGEST,
         )
         for name in REQUIRED_RELEASE_CHECKS
     )
@@ -64,6 +65,7 @@ class ReleaseQualificationTests(unittest.TestCase):
             status="PASS",
             source_sha=OTHER_SOURCE,
             evidence_ref="evidence:old-windows-green",
+            evidence_sha256=DIGEST,
         )
         decision = evaluate_release(candidate(), checks)
         self.assertEqual(decision.status, "FAIL")
@@ -102,7 +104,22 @@ class ReleaseQualificationTests(unittest.TestCase):
                 status="PASS",
                 source_sha=SOURCE,
                 evidence_ref="   ",
+                evidence_sha256=DIGEST,
             )
+
+    def test_release_check_requires_immutable_evidence_digest(self):
+        with self.assertRaisesRegex(
+            ReleaseQualificationError,
+            "evidence_sha256 must be a canonical SHA-256 digest",
+        ):
+            ReleaseCheck.create(
+                name="PR_CI",
+                status="PASS",
+                source_sha=SOURCE,
+                evidence_ref="evidence:ci",
+                evidence_sha256="mutable-reference-only",
+            )
+
 
     def test_malformed_hashes_and_unknown_checks_fail_closed(self):
         with self.assertRaisesRegex(ReleaseQualificationError, "canonical SHA-256"):
@@ -125,6 +142,7 @@ class ReleaseQualificationTests(unittest.TestCase):
                         status="PASS",
                         source_sha=SOURCE,
                         evidence_ref="evidence:unknown",
+                        evidence_sha256=DIGEST,
                     ),
                 ),
             )

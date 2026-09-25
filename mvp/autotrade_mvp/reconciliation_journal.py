@@ -150,6 +150,9 @@ def reconciliation_payload(
         ),
         "cash_differences": _decimal_map(result.cash_differences),
         "position_differences": _decimal_map(result.position_differences),
+        "borrow_differences": _decimal_map(
+            result.borrow_differences or {}
+        ),
         "submission_resolutions": [
             {
                 "attempt_id": item.attempt_id,

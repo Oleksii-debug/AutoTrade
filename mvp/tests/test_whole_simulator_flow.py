@@ -114,6 +114,48 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 account_id="sim-account",
                 resolution_artifact_store=artifacts,
             )
+            initial_snapshot = provider.account_snapshot(now=NOW)
+            availability_result = reconcile_account(
+                provider_id="SIMULATED",
+                account_id="sim-account",
+                environment="SIMULATION",
+                local_cash={"USD": "1000"},
+                provider_cash={
+                    "USD": initial_snapshot["balances"][0]["total"]
+                },
+                local_positions={},
+                provider_positions={},
+                local_execution_ids=(),
+                provider_fills=(),
+                snapshot_consistency=SnapshotConsistencyEvidence(
+                    provider_id="SIMULATED",
+                    account_id="sim-account",
+                    environment="SIMULATION",
+                    mode="ATOMIC",
+                    query_started_at=NOW,
+                    query_completed_at=NOW,
+                ),
+                coverage_start=NOW,
+                coverage_end=NOW,
+                pagination_complete=True,
+                provider_activity_provider_id="SIMULATED",
+                provider_activity_account_id="sim-account",
+            )
+            availability_checkpoint = record_reconciliation_checkpoint(
+                journal,
+                reconciliation_id="sim-account:admission-availability",
+                result=availability_result,
+                observed_at=NOW,
+                host_id="sim-host",
+                owner_epoch="1",
+            )
+            for pending in journal.pending_outbox():
+                if pending["event_id"] == availability_checkpoint["event_id"]:
+                    journal.mark_outbox_delivered(
+                        pending["outbox_id"],
+                        expected_envelope_hash=pending["envelope_hash"],
+                    )
+
             intent = RiskIntent.create(
                 symbol=INSTRUMENT,
                 side="BUY",
@@ -144,6 +186,9 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 reservation_id="reservation-1",
                 reservation_requirements={"CASH:USD": "200.2"},
                 reservation_available={"CASH:USD": "1000"},
+                reservation_checkpoint_event_id=availability_checkpoint["event_id"],
+                reservation_provider_id="SIMULATED",
+                reservation_max_age_seconds="60",
                 now=NOW,
             )
             self.assertEqual(admission.outcome, "ADMITTED")
@@ -219,6 +264,9 @@ class WholeSimulatorFlowTests(unittest.TestCase):
 
             snapshot = provider.account_snapshot(now=LATER)
             provider_fill = ProviderFillEvidence.create(
+                provider_id="SIMULATED",
+                account_id="sim-account",
+                environment="SIMULATION",
                 provider_execution_id=fill["provider_execution_id"],
                 client_order_id=dispatched.client_order_id,
                 instrument=fill["instrument_version"],
@@ -230,10 +278,17 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             )
             unresolved_submission = UnknownSubmission.create(
                 attempt_id=attempt_id,
+                intent_id="intent-1",
+                provider_id="SIMULATED",
+                account_id="sim-account",
+                environment="SIMULATION",
                 client_order_id=dispatched.client_order_id,
                 started_at=NOW,
             )
             reconciled = reconcile_account(
+                provider_id="SIMULATED",
+                account_id="sim-account",
+                environment="SIMULATION",
                 local_cash={"USD": economic.cash("USD")},
                 provider_cash={"USD": snapshot["balances"][0]["total"]},
                 local_positions={INSTRUMENT: economic.position(INSTRUMENT)},
@@ -244,6 +299,9 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 local_execution_ids=[fill["provider_execution_id"]],
                 provider_fills=[provider_fill],
                 snapshot_consistency=SnapshotConsistencyEvidence(
+                    provider_id="SIMULATED",
+                    account_id="sim-account",
+                    environment="SIMULATION",
                     mode="ATOMIC",
                     query_started_at=LATER,
                     query_completed_at=LATER,
@@ -253,6 +311,8 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 coverage_start="2026-09-24T17:00:00Z",
                 coverage_end="2026-09-24T19:00:00Z",
                 pagination_complete=True,
+                provider_activity_provider_id="SIMULATED",
+                provider_activity_account_id="sim-account",
             )
             self.assertTrue(reconciled.complete)
             self.assertFalse(reconciled.blocks_new_risk)
@@ -267,6 +327,8 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 reconciliation_id="sim-account:whole-flow",
                 result=reconciled,
                 observed_at=LATER,
+                host_id="sim-host",
+                owner_epoch="1",
             )
             resolution_artifact_id = "44444444-4444-4444-8444-444444444444"
             resolution_receipt = {

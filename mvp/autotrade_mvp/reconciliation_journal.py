@@ -793,6 +793,41 @@ def load_account_resource_availability_evidence(
     requested = tuple(_text(value, name="resource") for value in resources)
     if not requested or len(requested) != len(set(requested)):
         raise ValueError("resources must be non-empty and unique")
+
+    # A provider availability snapshot is only a safe CASH reservation authority
+    # for the exact financial cut it reconciled. A later durable settlement
+    # registration or settlement-evidence event means local trade-date/settled
+    # cash truth advanced after that provider snapshot. Reusing the older
+    # checkpoint could otherwise make sale proceeds or stale buying power
+    # reservable before a fresh provider reconciliation.
+    if any(resource.startswith("CASH:") for resource in requested):
+        checkpoint_sequence = checkpoint.get("journal_sequence")
+        if type(checkpoint_sequence) is not int or checkpoint_sequence <= 0:
+            raise ValueError(
+                "availability checkpoint lacks durable journal sequence"
+            )
+        for settlement_event in store.load_events_by_aggregate_type(
+            "settlement_book"
+        ):
+            settlement_sequence = settlement_event.get("journal_sequence")
+            settlement_payload = settlement_event.get("payload")
+            if (
+                type(settlement_sequence) is not int
+                or settlement_sequence <= checkpoint_sequence
+                or not isinstance(settlement_payload, Mapping)
+            ):
+                continue
+            settlement_scope = settlement_payload.get("scope")
+            if not isinstance(settlement_scope, Mapping):
+                continue
+            if (
+                settlement_scope.get("provider_id") == provider
+                and settlement_scope.get("account_id") == account
+                and settlement_scope.get("environment") == scope
+            ):
+                raise ValueError(
+                    "availability checkpoint predates settlement financial truth"
+                )
     if "ACCOUNT" in blocking_resources or any(
         resource in blocking_resources for resource in requested
     ):

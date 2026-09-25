@@ -211,13 +211,14 @@ class ProducerFixture:
         min_calibration_episodes=4,
         max_compute_units="100",
         source_sha=SOURCE_SHA,
+        learning_rate="1",
     ):
         return UpdateProducerConfig(
             source_sha=source_sha,
             algorithm_version="1.0.0",
             feature_schema_hash=FEATURE_SCHEMA,
             label_version="label-v1",
-            learning_rate=Decimal("1"),
+            learning_rate=Decimal(learning_rate),
             min_update_episodes=min_update_episodes,
             min_calibration_episodes=min_calibration_episodes,
             target_false_alarm_rate=Decimal("0.25"),
@@ -260,6 +261,8 @@ class ProducerFixture:
         config,
         calibration_cutoff=CALIBRATION_CUTOFF,
         update_cutoff=UPDATE_CUTOFF,
+        runtime_state=None,
+        granted_permissions=None,
     ):
         return produce_bounded_online_update(
             memory=self.memory,
@@ -268,13 +271,13 @@ class ProducerFixture:
             calibration_evidence_ref=calibration_ref,
             envelope=envelope,
             config=config,
-            runtime_state=OnlineUpdateRuntimeState(
+            runtime_state=runtime_state or OnlineUpdateRuntimeState(
                 last_update_at=None,
                 updates_in_window=0,
             ),
             update_cutoff=update_cutoff,
             calibration_cutoff=calibration_cutoff,
-            granted_permissions={"research"},
+            granted_permissions=granted_permissions or {"research"},
         )
 
 
@@ -332,6 +335,123 @@ class UpdateProducerTests(unittest.TestCase):
             )
             self.assertFalse(
                 artifact["online_gate"]["grants_trading_authority"]
+            )
+
+            self.assertEqual(
+                artifact["producer_config"]["learning_rate"],
+                "1",
+            )
+            self.assertEqual(
+                artifact["producer_config"]["min_update_episodes"],
+                1,
+            )
+            self.assertEqual(
+                artifact["online_envelope"]["envelope_id"],
+                "online-envelope-v1",
+            )
+            self.assertEqual(
+                artifact["online_envelope"]["parameter_rules"][0],
+                {
+                    "name": "x",
+                    "minimum": "-10",
+                    "maximum": "10",
+                    "max_absolute_step": "2",
+                },
+            )
+            self.assertEqual(
+                artifact["runtime_state"],
+                {"last_update_at": None, "updates_in_window": 0},
+            )
+            self.assertEqual(
+                artifact["granted_permissions"],
+                ["research"],
+            )
+            self.assertTrue(
+                artifact["producer_config_sha256"].startswith("sha256:")
+            )
+            self.assertTrue(
+                artifact["online_envelope_sha256"].startswith("sha256:")
+            )
+
+    def test_early_no_update_still_binds_full_config_envelope_and_runtime(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            runtime = OnlineUpdateRuntimeState(
+                last_update_at=UPDATE_CUTOFF - timedelta(hours=1),
+                updates_in_window=3,
+            )
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(
+                    test_ref,
+                    min_update_episodes=2,
+                    learning_rate="0.25",
+                ),
+                runtime_state=runtime,
+                granted_permissions={"research"},
+            )
+            self.assertEqual(produced.status, "NO_UPDATE")
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIsNone(artifact["online_gate"])
+            self.assertIsNone(artifact["proposal"])
+            self.assertEqual(
+                artifact["producer_config"]["learning_rate"],
+                "0.25",
+            )
+            self.assertEqual(
+                artifact["producer_config"]["min_update_episodes"],
+                2,
+            )
+            self.assertEqual(
+                artifact["online_envelope"]["champion_artifact_hash"],
+                "sha256:" + checkpoint.rsplit("@sha256:", 1)[1],
+            )
+            self.assertEqual(
+                artifact["runtime_state"]["updates_in_window"],
+                3,
+            )
+            self.assertEqual(
+                artifact["runtime_state"]["last_update_at"],
+                "2026-10-09T23:00:00Z",
+            )
+            self.assertIn(
+                "LEARNING.INSUFFICIENT_UPDATE_EVIDENCE",
+                artifact["reasons"],
+            )
+
+    def test_learning_rate_is_part_of_identity_and_changes_proposal(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            full = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref, learning_rate="1"),
+            )
+            half = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref, learning_rate="0.5"),
+            )
+            self.assertEqual(full.proposed_parameters["x"], Decimal("1"))
+            self.assertEqual(half.proposed_parameters["x"], Decimal("0.5"))
+            self.assertNotEqual(full.artifact_digest, half.artifact_digest)
+            full_artifact = json.loads(full.artifact_bytes)
+            half_artifact = json.loads(half.artifact_bytes)
+            self.assertNotEqual(
+                full_artifact["producer_config_sha256"],
+                half_artifact["producer_config_sha256"],
+            )
+            self.assertEqual(
+                half_artifact["producer_config"]["learning_rate"],
+                "0.5",
             )
 
     def test_future_label_is_excluded_and_cannot_change_proposal(self):

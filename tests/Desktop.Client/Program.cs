@@ -34,7 +34,7 @@ internal static class Program
         {
             actor = "owner",
             role = "OWNER",
-            session_id = AuthenticatedEmergencyHostClient.PublicSessionReference(token),
+            session = AuthenticatedEmergencyHostClient.PublicSessionReference(token),
         },
         connection_freshness = new { host = "CURRENT", as_of = NowUtc() },
         portfolio = new { },
@@ -357,6 +357,17 @@ internal static class Program
         Check.True(
             pendingStore.Payload is not null,
             "uncertain command was not persisted before restart");
+        Check.True(
+            !pendingStore.Payload!.Contains(token, StringComparison.Ordinal),
+            "durable recovery record persisted the reusable bearer credential");
+        Check.True(
+            pendingStore.Payload!.Contains(
+                AuthenticatedEmergencyHostClient.PublicSessionReference(token),
+                StringComparison.Ordinal),
+            "durable recovery record did not persist the canonical public session reference");
+        Check.True(
+            pendingStore.Payload!.Contains("\"schema_version\":\"2\"", StringComparison.Ordinal),
+            "durable recovery record was not upgraded to the bearer-free v2 schema");
 
         AuthenticatedEmergencyHostClient restartedProcess = new(
             new HttpClient(handler),
@@ -450,6 +461,64 @@ internal static class Program
             "restart sent a persisted command under a replacement session");
     }
 
+    static async Task LegacyBearerRecoveryRecordMigratesFailClosedTest()
+    {
+        const string token = "legacy-session-token";
+        const string commandId = "55555555-5555-5555-5555-555555555555";
+        MutableSessionProvider sessions =
+            new(new EmergencyHostSession("owner", token));
+        MemoryPendingCommandStore pendingStore = new()
+        {
+            Payload = JsonSerializer.Serialize(
+                new
+                {
+                    schema_version = "1",
+                    command_id = commandId,
+                    idempotency_key = "66666666-6666-6666-6666-666666666666",
+                    actor = "owner",
+                    session = token,
+                    account_id = "paper-account-1",
+                    environment = "PAPER",
+                    expected_state_version = "11",
+                }),
+        };
+        int transportCalls = 0;
+        DelegateHandler handler = new((_, _, _) =>
+        {
+            transportCalls++;
+            throw new InvalidOperationException(
+                "mismatched recovered session must fail before transport");
+        });
+
+        AuthenticatedEmergencyHostClient client = new(
+            new HttpClient(handler),
+            new Uri("http://127.0.0.1:8765/"),
+            sessions,
+            pendingStore);
+
+        Check.True(
+            pendingStore.Payload is not null
+                && !pendingStore.Payload.Contains(token, StringComparison.Ordinal),
+            "legacy durable recovery record retained the reusable bearer after migration");
+        Check.True(
+            pendingStore.Payload!.Contains(
+                AuthenticatedEmergencyHostClient.PublicSessionReference(token),
+                StringComparison.Ordinal)
+                && pendingStore.Payload.Contains(
+                    "\"schema_version\":\"2\"",
+                    StringComparison.Ordinal),
+            "legacy recovery record did not migrate to the canonical public-reference schema");
+
+        sessions.Session =
+            new EmergencyHostSession("owner", "replacement-session-token");
+        await Check.ThrowsAsync<EmergencyCommandUncertainException>(
+            () => client.BlockNewExposureAsync(CancellationToken.None),
+            "migrated unresolved command must not retarget to a replacement session");
+        Check.True(
+            transportCalls == 0,
+            "migrated unresolved command reached transport under a replacement session");
+    }
+
     static void CorruptPersistedCommandFailsClosedTest()
     {
         MemoryPendingCommandStore pendingStore = new()
@@ -517,8 +586,15 @@ internal static class Program
             !safeState.Contains(token, StringComparison.Ordinal),
             "canonical snapshot fixture leaked the bearer credential");
         Check.True(
-            !safeState.Contains("\"session\":", StringComparison.Ordinal),
-            "canonical permission metadata must not expose a session credential field");
+            safeState.Contains(
+                "\"session\":\""
+                    + AuthenticatedEmergencyHostClient.PublicSessionReference(token)
+                    + "\"",
+                StringComparison.Ordinal),
+            "canonical permission metadata must expose only the public session reference");
+        Check.True(
+            !safeState.Contains("session_id", StringComparison.Ordinal),
+            "legacy session_id alias must not survive contract v3");
     }
 
     static async Task ScopeAndCanonicalResponseFailureTest()
@@ -566,6 +642,7 @@ internal static class Program
         await UncertainCommandCannotRetargetSessionTest();
         await UncertainCommandSurvivesDesktopRestartTest();
         await RestartedCommandCannotRetargetSessionTest();
+        await LegacyBearerRecoveryRecordMigratesFailClosedTest();
         CorruptPersistedCommandFailsClosedTest();
         await ScopeAndCanonicalResponseFailureTest();
         await SnapshotBearerEchoFailsClosedTest();

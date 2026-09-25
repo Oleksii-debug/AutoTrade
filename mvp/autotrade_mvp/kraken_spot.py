@@ -18,7 +18,7 @@ import json
 import re
 
 from .capabilities import CapabilitySnapshot
-from .provider_core import ProviderResponseObservation, Surface
+from .provider_core import ProviderResponseObservation, ProviderSubmissionObservation, Surface
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
@@ -83,8 +83,9 @@ def validate_spot_client_order_id(value: str) -> str:
     """Validate Kraken Spot cl_ord_id without inventing a provider format.
 
     Kraken accepts canonical UUID, 32 hexadecimal UUID text, or free-form ASCII
-    text up to 18 characters. The dispatcher should therefore use max_length=18
-    when supplying its normal prefixed deterministic identifier.
+    text up to 18 characters. AutoTrade's guarded dispatcher must use its
+    deterministic UUID client-order format here: truncating the normal token to
+    18 characters would violate the dispatch identity entropy floor.
     """
 
     client_id = _text(value, name="client_order_id")
@@ -380,39 +381,42 @@ def _validate_submission_scope(
 
 
 def _submission_evidence(
-    payload: Mapping[str, object],
+    observation: ProviderSubmissionObservation,
     *,
     prepared_request: KrakenSpotPreparedRequest,
-    observed_at: str,
     source_uri: str,
 ) -> dict[str, str]:
+    if not isinstance(observation, ProviderSubmissionObservation):
+        raise TypeError(
+            "observation must be durable ProviderSubmissionObservation"
+        )
     source = _validate_submission_scope(
         prepared_request,
         source_uri=source_uri,
     )
-    bound = {
-        "schema_version": 1,
-        "provider": "KRAKEN_SPOT",
-        "account_id": prepared_request.account_id,
-        "environment": prepared_request.environment,
-        "capability_snapshot_id": prepared_request.capability_snapshot_id,
-        "instrument_version": prepared_request.instrument_version,
-        "request_body_sha256": prepared_request.body_sha256,
-        "provider_response": dict(payload),
-    }
-    encoded = json.dumps(
-        bound,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
-    digest = sha256(encoded).hexdigest()
+    cid = validate_spot_client_order_id(
+        prepared_request.body.get("cl_ord_id")
+    )
+    observation.require_scope(
+        provider_id="KRAKEN",
+        endpoint=prepared_request.endpoint,
+        prepared_request_sha256=prepared_request.body_sha256,
+        capability_snapshot_ids=(prepared_request.capability_snapshot_id,),
+        instrument_versions=(prepared_request.instrument_version,),
+        account_id=prepared_request.account_id,
+        environment=prepared_request.environment,
+        client_order_id=cid,
+    )
     return {
-        "artifact_id": str(uuid5(NAMESPACE_URL, f"{source}#sha256:{digest}")),
-        "sha256": f"sha256:{digest}",
+        "artifact_id": str(
+            uuid5(
+                NAMESPACE_URL,
+                f"{source}#{observation.evidence_ref}",
+            )
+        ),
+        "sha256": observation.response_sha256,
         "source_uri": source,
-        "observed_at": _iso_utc_text(observed_at, name="observed_at"),
+        "observed_at": observation.observed_at,
         "rights_id": "provider-observation-kraken-spot",
     }
 
@@ -421,17 +425,16 @@ def parse_spot_submission_response(
     *,
     attempt_id: str,
     prepared_request: KrakenSpotPreparedRequest,
-    observed_at: str,
     source_uri: str,
-    payload: Mapping[str, object] | None,
+    observation: ProviderSubmissionObservation | None = None,
     transport_ambiguous: bool = False,
 ) -> dict[str, object]:
-    """Map a recorded AddOrder outcome without confusing ACK with execution.
+    """Map one durable exact AddOrder response without confusing ACK with fill.
 
-    The canonical prepared request is the account/environment/capability binding.
-    The SubmissionResult shape stays schema-compatible; scope is retained by the
-    durable attempt identity and, when a provider response exists, by the evidence
-    digest over the exact prepared-request scope plus response payload.
+    ACK/REJECT authority comes only from the exact provider response bytes bound
+    by the canonical guarded submission journal. A caller-decoded Mapping cannot
+    mint financial submission evidence. Transport ambiguity remains UNKNOWN and
+    requires reconciliation before any economic retry.
     """
 
     aid = _uuid_text(attempt_id, name="attempt_id")
@@ -442,11 +445,10 @@ def parse_spot_submission_response(
     cid = validate_spot_client_order_id(
         prepared_request.body.get("cl_ord_id")
     )
-    when = _iso_utc_text(observed_at, name="observed_at")
     if type(transport_ambiguous) is not bool:
         raise TypeError("transport_ambiguous must be boolean")
     if transport_ambiguous:
-        if payload is not None:
+        if observation is not None:
             raise KrakenSpotAdapterError(
                 "ambiguous transport must not fabricate a provider response"
             )
@@ -459,16 +461,22 @@ def parse_spot_submission_response(
             "retry_disposition": "RECONCILE_FIRST",
         }
 
-    if not isinstance(payload, Mapping):
-        raise TypeError("payload must be a mapping")
+    if not isinstance(observation, ProviderSubmissionObservation):
+        raise TypeError(
+            "observation must be durable ProviderSubmissionObservation"
+        )
+    if observation.response_binding.attempt_id != aid:
+        raise KrakenSpotAdapterError("submission observation attempt_id mismatch")
     evidence = [
         _submission_evidence(
-            payload,
+            observation,
             prepared_request=prepared_request,
-            observed_at=when,
             source_uri=source,
         )
     ]
+    payload = observation.payload
+    if not isinstance(payload, Mapping):
+        raise KrakenSpotAdapterError("provider response payload must be an object")
     errors = payload.get("error", ())
     if isinstance(errors, (str, bytes)) or not isinstance(errors, (list, tuple)):
         raise KrakenSpotAdapterError("Kraken error field must be a sequence")

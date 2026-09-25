@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
+from tempfile import TemporaryDirectory
 import unittest
 from uuid import uuid4
 
@@ -9,10 +10,18 @@ from mvp.autotrade_mvp.capabilities import (
     EvidenceVerification,
     derive_capability_snapshot,
 )
+from mvp.autotrade_mvp.dispatch import (
+    ExactJsonTransportResponse,
+    GuardedDispatcher,
+    load_submission_response_binding,
+    stable_client_order_id,
+)
+from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
     Surface,
     observe_authenticated_json_response,
+    observe_submission_json_response,
     prepare_authenticated_read_query,
 )
 from mvp.autotrade_mvp.kraken_spot import (
@@ -209,8 +218,17 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         *,
         account_id="spot-account",
         environment="LIVE",
-        client_order_id="at-order-1",
+        intent_id="kraken-spot-submission-intent",
+        client_order_id=None,
     ):
+        client_id = client_order_id or stable_client_order_id(
+            "KRAKEN",
+            intent_id,
+            environment=environment,
+            account_id=account_id,
+            max_length=36,
+            client_id_format="UUID",
+        )
         intent = KrakenSpotOrderIntent.create(
             instrument_version="XBTUSD:v1",
             pair="XBTUSD",
@@ -220,7 +238,7 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         )
         return prepare_spot_order_request(
             intent,
-            client_order_id=client_order_id,
+            client_order_id=client_id,
             account_id=account_id,
             environment=environment,
             capability=capability(
@@ -230,13 +248,104 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             at=NOW,
         )
 
+    def _durable_submission_observation(
+        self,
+        payload,
+        *,
+        prepared_request=None,
+        intent_id="kraken-spot-submission-intent",
+        attempt_id=None,
+    ):
+        prepared = prepared_request or self._prepared_submission_request(
+            intent_id=intent_id,
+        )
+        attempt = attempt_id or str(uuid4())
+        raw = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment=prepared.environment,
+                account_id=prepared.account_id,
+                owner_token="owner",
+            )
+            outcome = dispatcher.dispatch(
+                attempt_id=attempt,
+                intent_id=intent_id,
+                intent_hash="kraken-spot-intent-hash",
+                provider="KRAKEN",
+                request=prepared.body,
+                now="2026-09-24T20:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(raw),
+                )[1],
+                client_id_max_length=36,
+                client_id_format="UUID",
+                sender_check=lambda _owner, _epoch: None,
+                submission_scope={
+                    "endpoint": prepared.endpoint,
+                    "prepared_request_sha256": prepared.body_sha256,
+                    "capability_snapshot_ids": [
+                        prepared.capability_snapshot_id
+                    ],
+                    "instrument_versions": [
+                        prepared.instrument_version
+                    ],
+                },
+            )
+            self.assertEqual(outcome.status, "SENT")
+            binding = load_submission_response_binding(
+                store,
+                environment=prepared.environment,
+                account_id=prepared.account_id,
+                attempt_id=attempt,
+            )
+            observation = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="KRAKEN",
+                endpoint=prepared.endpoint,
+                prepared_request_sha256=prepared.body_sha256,
+                capability_snapshot_ids=(
+                    prepared.capability_snapshot_id,
+                ),
+                instrument_versions=(
+                    prepared.instrument_version,
+                ),
+            )
+        return attempt, prepared, observation
+
     def _parse_submission(self, payload, **overrides):
+        intent_id = overrides.pop(
+            "intent_id",
+            "kraken-spot-submission-intent",
+        )
+        prepared = overrides.pop("prepared_request", None)
+        if prepared is None:
+            prepared = self._prepared_submission_request(
+                intent_id=intent_id,
+            )
+        attempt_id = overrides.pop("attempt_id", str(uuid4()))
+        observation = None
+        if payload is not None:
+            attempt_id, prepared, observation = self._durable_submission_observation(
+                payload,
+                prepared_request=prepared,
+                intent_id=intent_id,
+                attempt_id=attempt_id,
+            )
         values = {
-            "attempt_id": str(uuid4()),
-            "prepared_request": self._prepared_submission_request(),
-            "observed_at": "2026-09-24T20:00:00Z",
+            "attempt_id": attempt_id,
+            "prepared_request": prepared,
             "source_uri": "https://api.kraken.com/0/private/AddOrder",
-            "payload": payload,
+            "observation": observation,
         }
         values.update(overrides)
         return parse_spot_submission_response(**values)
@@ -327,10 +436,52 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 account_id="spot-account-b",
             ),
         )
-        self.assertNotEqual(
+        self.assertEqual(
             first["evidence"][0]["sha256"],
             second["evidence"][0]["sha256"],
         )
+        self.assertNotEqual(
+            first["evidence"][0]["artifact_id"],
+            second["evidence"][0]["artifact_id"],
+        )
+
+    def test_submission_response_rejects_attempt_and_scope_relabelling(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {"error": [], "result": {"txid": ["OABC-D123-E456"]}}
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "attempt_id mismatch",
+        ):
+            parse_spot_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=prepared,
+                source_uri="https://api.kraken.com/0/private/AddOrder",
+                observation=observation,
+            )
+        wrong_request = self._prepared_submission_request(
+            account_id="other-spot-account",
+        )
+        with self.assertRaisesRegex(Exception, "provenance|digest|account|scope"):
+            parse_spot_submission_response(
+                attempt_id=attempt,
+                prepared_request=wrong_request,
+                source_uri="https://api.kraken.com/0/private/AddOrder",
+                observation=observation,
+            )
+
+    def test_decoded_mapping_cannot_mint_submission_authority(self):
+        prepared = self._prepared_submission_request()
+        with self.assertRaisesRegex(
+            TypeError,
+            "durable ProviderSubmissionObservation",
+        ):
+            parse_spot_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=prepared,
+                source_uri="https://api.kraken.com/0/private/AddOrder",
+                observation={"error": [], "result": {"txid": ["forged"]}},
+            )
 
     def test_empty_txid_fails_closed(self):
         with self.assertRaisesRegex(KrakenSpotAdapterError, "transaction id"):

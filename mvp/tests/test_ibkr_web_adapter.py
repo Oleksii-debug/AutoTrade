@@ -301,24 +301,27 @@ class IbkrWebAdapterTests(unittest.TestCase):
             executions_complete=False,
             account_activity_complete=True,
             consistency_horizon_satisfied=True,
-            exclusion_semantics_qualified=True,
+            exclusion_semantics_qualified=False,
             order_found=False,
         )
         self.assertEqual(evidence.verdict(), "INCONCLUSIVE")
 
-    def test_complete_order_execution_activity_evidence_can_prove_absence(self):
-        evidence = IbkrAbsenceEvidence(
-            exact_client_order_lookup_complete=True,
-            exact_client_order_absent=True,
-            open_orders_complete=True,
-            completed_orders_complete=True,
-            executions_complete=True,
-            account_activity_complete=True,
-            consistency_horizon_satisfied=True,
-            exclusion_semantics_qualified=True,
-            order_found=False,
-        )
-        self.assertEqual(evidence.verdict(), "PROVEN_ABSENT")
+    def test_foundation_cannot_self_assert_exclusion_semantics_qualification(self):
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "cannot self-assert exclusion semantics qualification",
+        ):
+            IbkrAbsenceEvidence(
+                exact_client_order_lookup_complete=True,
+                exact_client_order_absent=True,
+                open_orders_complete=True,
+                completed_orders_complete=True,
+                executions_complete=True,
+                account_activity_complete=True,
+                consistency_horizon_satisfied=True,
+                exclusion_semantics_qualified=True,
+                order_found=False,
+            )
 
 
     def test_complete_generic_surfaces_without_exact_lookup_are_still_inconclusive(self):
@@ -330,7 +333,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
             executions_complete=True,
             account_activity_complete=True,
             consistency_horizon_satisfied=True,
-            exclusion_semantics_qualified=True,
+            exclusion_semantics_qualified=False,
             order_found=False,
         )
         self.assertEqual(evidence.verdict(), "INCONCLUSIVE")
@@ -359,7 +362,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 executions_complete=True,
                 account_activity_complete=True,
                 consistency_horizon_satisfied=True,
-                exclusion_semantics_qualified=True,
+                exclusion_semantics_qualified=False,
                 order_found=True,
             )
 

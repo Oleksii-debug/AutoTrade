@@ -43,6 +43,12 @@
   ],
   "characterization": {
     "test_file": "research/tests/test_neutral_reuse_characterization.py",
+    "additional_test_files": [
+      "research/tests/test_wp04_lock_race_hardening.py",
+      "research/tests/test_wp04_durable_publish_hardening.py"
+    ],
+    "workflow": ".github/workflows/research-primitives.yml",
+    "evidence_suite": "wp04-neutral-reuse",
     "required_platforms": [
       "windows-latest",
       "ubuntu-latest"
@@ -56,9 +62,17 @@
       "explicit_utf8_decode_boundary",
       "atomic_publish_failure_before_replace",
       "atomic_publish_failure_after_replace",
+      "serialization_failure_preserves_old_bytes",
+      "nonfinite_json_never_reaches_replace",
+      "concurrent_whole_file_publication",
       "cross_process_lock_contention",
       "process_death_releases_local_lock",
       "path_alias_rejection",
+      "dangling_alias_create_through_rejection",
+      "path_swap_before_lock_rejection",
+      "path_swap_after_os_lock_rejection",
+      "cleanup_failure_poisoning",
+      "primary_failure_preserved_during_teardown",
       "no_autosport_runtime_import"
     ],
     "exact_head_ci_evidence": "PENDING"

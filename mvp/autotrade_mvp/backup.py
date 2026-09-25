@@ -311,6 +311,43 @@ def _validate_artifact_source(root: Path) -> None:
                 raise BackupIntegrityError("Artifact manifest references a missing or corrupt object")
 
 
+def _verify_runtime_trace_consistency(state_root: Path) -> None:
+    checkpoint = state_root / "checkpoint.json"
+    learning_evidence = state_root / "learning-evidence.jsonl"
+    journal = state_root / "journal.sqlite3"
+    present = (checkpoint.is_file(), learning_evidence.is_file())
+    if present == (False, False):
+        return
+    if present != (True, True):
+        raise BackupIntegrityError(
+            "Runtime consistency evidence is partial; checkpoint and learning evidence "
+            "must be captured together or both be absent"
+        )
+    if not journal.is_file():
+        raise BackupIntegrityError(
+            "Runtime consistency verification requires journal"
+        )
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".autotrade-backup-verify-",
+        ) as verification_directory:
+            verification_state = Path(verification_directory) / "state"
+            verification_state.mkdir()
+            for name in (
+                "journal.sqlite3",
+                "checkpoint.json",
+                "learning-evidence.jsonl",
+            ):
+                shutil.copy2(state_root / name, verification_state / name)
+            build_diagnostic_snapshot(verification_state)
+    except BackupIntegrityError:
+        raise
+    except Exception as error:
+        raise BackupIntegrityError(
+            "Runtime state, journal and evidence are not one consistent snapshot"
+        ) from error
+
+
 def create_backup(
     state_dir: str | Path,
     artifact_root: str | Path,
@@ -386,37 +423,12 @@ def create_backup(
         learning_evidence_present = (
             stage / "state" / "learning-evidence.jsonl"
         ).is_file()
-        if checkpoint_present != learning_evidence_present:
-            raise BackupIntegrityError(
-                "Runtime consistency evidence is partial; checkpoint and learning evidence "
-                "must be captured together or both be absent"
-            )
-
-        if checkpoint_present:
-            try:
-                # Diagnostic reconstruction opens the journal in WAL mode. Run it
-                # against an isolated byte-for-byte verification copy so SQLite
-                # sidecars can never become undeclared backup payloads.
-                with tempfile.TemporaryDirectory(
-                    prefix=".autotrade-backup-check-",
-                    dir=target.parent,
-                ) as verification_directory:
-                    verification_state = Path(verification_directory) / "state"
-                    verification_state.mkdir()
-                    for name in (
-                        "journal.sqlite3",
-                        "checkpoint.json",
-                        "learning-evidence.jsonl",
-                    ):
-                        shutil.copy2(stage / "state" / name, verification_state / name)
-                    build_diagnostic_snapshot(verification_state)
-            except ValueError as error:
-                raise BackupIntegrityError(
-                    "Runtime state, journal and evidence are not one consistent snapshot"
-                ) from error
-            runtime_consistency_check = "DURABLE_TRACE_RECONSTRUCTION"
-        else:
-            runtime_consistency_check = "JOURNAL_ONLY"
+        _verify_runtime_trace_consistency(stage / "state")
+        runtime_consistency_check = (
+            "DURABLE_TRACE_RECONSTRUCTION"
+            if checkpoint_present and learning_evidence_present
+            else "JOURNAL_ONLY"
+        )
 
         manifest = {
             "schema_version": BACKUP_SCHEMA_VERSION,
@@ -545,6 +557,8 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
         raise BackupIntegrityError("Backed-up journal is missing")
     if _sqlite_schema_version(root / journal_relative) != JournalStore.SCHEMA_VERSION:
         raise BackupCompatibilityError("Backed-up journal schema is incompatible")
+    if expected_consistency_check == "DURABLE_TRACE_RECONSTRUCTION":
+        _verify_runtime_trace_consistency(root / "state")
 
     artifact_manifests = [
         root / _safe_relative_path(item["path"])

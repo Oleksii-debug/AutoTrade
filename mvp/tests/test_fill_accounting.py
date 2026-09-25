@@ -31,7 +31,10 @@ def matched_fill(
     account_id="acct-1",
     environment="PAPER",
     provider_side="BUY",
+    projected_position_side=None,
     provider_position_side=None,
+    projected_position_effect=None,
+    provider_position_effect=None,
 ):
     projected = ProjectedFillEvidence.create(
         fill_id="fill-1",
@@ -41,6 +44,8 @@ def matched_fill(
         side="BUY",
         quantity="2",
         price=price,
+        position_side=projected_position_side,
+        position_effect=projected_position_effect,
         provider_revision=revision,
     )
     provider = ProviderFillEvidence.create(
@@ -52,6 +57,7 @@ def matched_fill(
         instrument="ABC",
         side=provider_side,
         position_side=provider_position_side,
+        position_effect=provider_position_effect,
         quantity="2",
         price=price,
         fee_amount=fee,
@@ -121,7 +127,10 @@ class FillAccountingTests(unittest.TestCase):
             with self.subTest(position_side=position_side, side=side):
                 projected, provider = matched_fill(
                     provider_side=side,
+                    projected_position_side=position_side,
                     provider_position_side=position_side,
+                    projected_position_effect="OPEN",
+                    provider_position_effect="OPEN",
                 )
                 if side == "SELL":
                     projected = ProjectedFillEvidence.create(
@@ -132,6 +141,8 @@ class FillAccountingTests(unittest.TestCase):
                         side="SELL",
                         quantity=projected.quantity,
                         price=projected.price,
+                        position_side=projected.position_side,
+                        position_effect=projected.position_effect,
                     )
                 book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
                 before_digest = book.audit_digest()
@@ -150,7 +161,10 @@ class FillAccountingTests(unittest.TestCase):
                 self.assertEqual(book.transactions, ())
                 self.assertEqual(book.audit_digest(), before_digest)
 
-        projected, provider = matched_fill(provider_position_side="BOTH")
+        projected, provider = matched_fill(
+            projected_position_side="BOTH",
+            provider_position_side="BOTH",
+        )
         book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
         self.assertTrue(
             book_provider_fill(
@@ -163,6 +177,85 @@ class FillAccountingTests(unittest.TestCase):
             )
         )
         self.assertEqual(book.position("ABC"), Decimal("2"))
+
+    def test_provider_position_identity_must_match_projection_before_booking(self):
+        cases = (
+            {
+                "projected_position_side": "LONG",
+                "provider_position_side": "SHORT",
+                "projected_position_effect": "OPEN",
+                "provider_position_effect": "OPEN",
+                "message": "position side does not match projection",
+            },
+            {
+                "projected_position_side": "LONG",
+                "provider_position_side": "LONG",
+                "projected_position_effect": "OPEN",
+                "provider_position_effect": "REDUCE",
+                "message": "position effect does not match projection",
+            },
+            {
+                "projected_position_side": None,
+                "provider_position_side": "LONG",
+                "projected_position_effect": None,
+                "provider_position_effect": "OPEN",
+                "message": "projection is missing provider-required position side",
+            },
+            {
+                "projected_position_side": "BOTH",
+                "provider_position_side": "BOTH",
+                "projected_position_effect": "REDUCE",
+                "provider_position_effect": None,
+                "message": "position effect is not independently evidenced",
+            },
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                projected, provider = matched_fill(
+                    projected_position_side=case["projected_position_side"],
+                    provider_position_side=case["provider_position_side"],
+                    projected_position_effect=case["projected_position_effect"],
+                    provider_position_effect=case["provider_position_effect"],
+                )
+                book = ScopedEconomicBook(
+                    environment="PAPER",
+                    account_id="acct-1",
+                )
+                before_digest = book.audit_digest()
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    case["message"],
+                ):
+                    book_provider_fill(
+                        book=book,
+                        provider_id="provider-a",
+                        projected_fill=projected,
+                        provider_fill=provider,
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                    )
+                self.assertEqual(book.transactions, ())
+                self.assertEqual(book.audit_digest(), before_digest)
+
+    def test_hedge_leg_requires_provider_evidenced_position_effect(self):
+        projected, provider = matched_fill(
+            projected_position_side="LONG",
+            provider_position_side="LONG",
+        )
+        book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
+        with self.assertRaisesRegex(
+            AccountingConflict,
+            "position effect is not independently evidenced",
+        ):
+            book_provider_fill(
+                book=book,
+                provider_id="provider-a",
+                projected_fill=projected,
+                provider_fill=provider,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+            )
+        self.assertEqual(book.transactions, ())
 
     def test_same_provider_execution_is_idempotent(self):
         observed, provider = matched_fill()

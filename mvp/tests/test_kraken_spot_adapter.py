@@ -169,6 +169,8 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "UNKNOWN")
         self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
         self.assertEqual(result["evidence"], [])
+        self.assertIsNone(result["provider_received_at"])
+        self.assertEqual(result["observed_at"], "2026-09-24T20:00:00Z")
 
         with self.assertRaisesRegex(KrakenSpotAdapterError, "must not fabricate"):
             self._parse_submission(

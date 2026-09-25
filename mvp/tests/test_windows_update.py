@@ -1,3 +1,4 @@
+from hashlib import sha256
 import json
 import unittest
 
@@ -72,6 +73,24 @@ def frozen_release(release_id: str, source_sha: str, digest_seed: int):
     if decision.status != "FROZEN":
         raise AssertionError(decision.reasons)
     return decision
+
+
+def rehashed_plan(plan: WindowsUpdatePlan, mutate) -> WindowsUpdatePlan:
+    body = json.loads(plan.plan_json)
+    mutate(body)
+    forged_json = json.dumps(
+        body,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return WindowsUpdatePlan(
+        status="PLAN_READY",
+        reasons=(),
+        plan_json=forged_json,
+        plan_sha256="sha256:" + sha256(forged_json.encode("utf-8")).hexdigest(),
+    )
 
 
 class WindowsUpdatePlanTests(unittest.TestCase):
@@ -816,9 +835,124 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             )
 
 
-    def test_rehashed_custom_step_sequence_cannot_bypass_canonical_plan(self):
-        from hashlib import sha256
+    def test_rehashed_backup_evidence_cannot_bypass_planner_gates(self):
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=self.backup,
+        )
+        mutations = (
+            (
+                lambda body: body["pre_update_backup"].__setitem__(
+                    "verification_status", "FAIL"
+                ),
+                "backup is not verified",
+            ),
+            (
+                lambda body: body["pre_update_backup"].__setitem__(
+                    "source_sha", CANDIDATE_SOURCE
+                ),
+                "backup source does not match current release",
+            ),
+            (
+                lambda body: body["pre_update_backup"].__setitem__(
+                    "journal_schema_version", 2
+                ),
+                "backup schema does not match current runtime",
+            ),
+            (
+                lambda body: body["pre_update_backup"].__setitem__(
+                    "reconciliation_required_after_restore", False
+                ),
+                "reconciliation gate is missing",
+            ),
+        )
+        for mutate, message in mutations:
+            with self.subTest(message=message):
+                forged = rehashed_plan(plan, mutate)
+                with self.assertRaisesRegex(WindowsUpdateError, message):
+                    start_update_checkpoint(forged)
 
+    def test_rehashed_release_identity_or_package_cannot_escape_frozen_manifest(self):
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=self.backup,
+        )
+        mutations = (
+            lambda body: body["candidate_release"].__setitem__(
+                "windows_package_sha256", "sha256:" + "f" * 64
+            ),
+            lambda body: body["candidate_release"].__setitem__(
+                "source_sha", "4" * 40
+            ),
+            lambda body: body["current_release"].__setitem__(
+                "release_id", "forged-current"
+            ),
+            lambda body: body["current_release"].__setitem__(
+                "manifest_sha256", "sha256:" + "e" * 64
+            ),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                forged = rehashed_plan(plan, mutate)
+                with self.assertRaises(WindowsUpdateError):
+                    start_update_checkpoint(forged)
+
+    def test_rehashed_migration_evidence_cannot_bypass_schema_gates(self):
+        migration = MigrationEvidence(
+            from_schema_version=1,
+            to_schema_version=2,
+            source_sha=CANDIDATE_SOURCE,
+            evidence_sha256="sha256:" + "d" * 64,
+            verification_status="PASS",
+            rollback_mode="RESTORE_PRE_UPDATE_BACKUP",
+        )
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=2,
+            backup_evidence=self.backup,
+            migration_evidence=migration,
+        )
+        mutations = (
+            (
+                lambda body: body["migration_evidence"].__setitem__(
+                    "verification_status", "FAIL"
+                ),
+                "migration evidence is not verified",
+            ),
+            (
+                lambda body: body["migration_evidence"].__setitem__(
+                    "source_sha", CURRENT_SOURCE
+                ),
+                "migration source release mismatch",
+            ),
+            (
+                lambda body: body["migration_evidence"].__setitem__(
+                    "from_schema_version", 2
+                ),
+                "migration source schema mismatch",
+            ),
+            (
+                lambda body: body["rollback"].__setitem__(
+                    "mode", "REVERSIBLE_MIGRATION"
+                ),
+                "rollback mode does not match migration evidence",
+            ),
+        )
+        for mutate, message in mutations:
+            with self.subTest(message=message):
+                forged = rehashed_plan(plan, mutate)
+                with self.assertRaisesRegex(WindowsUpdateError, message):
+                    start_update_checkpoint(forged)
+
+    def test_rehashed_custom_step_sequence_cannot_bypass_canonical_plan(self):
         plan = build_windows_update_plan(
             current_release=self.current,
             candidate_release=self.candidate,
@@ -845,8 +979,6 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             start_update_checkpoint(forged)
 
     def test_rehashed_plan_cannot_claim_trading_authority(self):
-        from hashlib import sha256
-
         plan = build_windows_update_plan(
             current_release=self.current,
             candidate_release=self.candidate,

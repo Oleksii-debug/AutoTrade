@@ -118,6 +118,8 @@ class DurableCapabilityRegistry:
         for event in events:
             if event["aggregate_type"] != _AGGREGATE_TYPE:
                 raise CapabilityError("capability event uses wrong aggregate type")
+            if event["event_type"] != _EVENT_TYPE:
+                raise CapabilityError("unsupported durable capability event type")
             aggregate_id = event["aggregate_id"]
             expected = seen_versions.get(aggregate_id, 0) + 1
             if event["aggregate_version"] != expected:

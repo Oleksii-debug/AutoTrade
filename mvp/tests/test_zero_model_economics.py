@@ -100,7 +100,11 @@ class ZeroModelEconomicsQualificationTests(unittest.TestCase):
             now_utc=NOW,
         )
         self.assertEqual(decision.status, RouteStatus.NO_MODEL)
-        allocation = allocate_targets([candidate()], policy())
+        allocation = allocate_targets(
+            [candidate()],
+            policy(),
+            stress_scenarios={"adverse": {"AAA": "-0.10"}},
+        )
         self.assertEqual(allocation.status, "ALLOCATED")
         self.assertGreater(allocation.gross_notional, Decimal("0"))
 

@@ -50,8 +50,11 @@ def stable_client_order_id(
         raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
     if not isinstance(account_id, str) or not account_id.strip():
         raise ValueError("account_id is required")
-    if not isinstance(max_length, int) or isinstance(max_length, bool) or max_length < 12:
-        raise ValueError("max_length must be an integer of at least 12")
+    if not isinstance(max_length, int) or isinstance(max_length, bool) or max_length < 20:
+        raise ValueError(
+            "max_length must be an integer of at least 20 "
+            "to preserve client-order identity entropy"
+        )
     digest = _identity_digest(
         provider.strip().lower(),
         normalized_environment,

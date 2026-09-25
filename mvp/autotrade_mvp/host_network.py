@@ -300,8 +300,8 @@ class AuthenticatedHostApplication:
         permission = payload["permission_summary"]
         if permission.get("actor") != principal.actor:
             raise ValueError("UiSnapshot actor does not match authenticated principal")
-        if permission.get("session") != principal.session:
-            raise ValueError("UiSnapshot session does not match authenticated principal")
+        if permission.get("session_id") != principal.session:
+            raise ValueError("UiSnapshot session_id does not match authenticated principal")
         if not isinstance(payload["jobs"], list) or any(
             not isinstance(item, Mapping) for item in payload["jobs"]
         ):

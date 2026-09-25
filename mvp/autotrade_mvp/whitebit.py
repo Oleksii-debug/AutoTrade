@@ -651,7 +651,7 @@ def parse_submission_result(
         code = payload.get("code")
         message = payload.get("message")
         errors = payload.get("errors")
-        if code is None or message in {None, ""} or not isinstance(errors, Mapping):
+        if code is None or message is None or message == "" or not isinstance(errors, Mapping):
             raise WhiteBitAdapterError(
                 "422 rejection is missing documented code/message/errors evidence"
             )

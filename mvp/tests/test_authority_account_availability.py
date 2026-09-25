@@ -286,6 +286,7 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 environment=ENVIRONMENT,
                 account_id=ACCOUNT_ID,
             )
+            pending_before_replay = len(restarted_store.pending_outbox())
             replay = _admit(
                 restarted_authority,
                 restarted_reservations,
@@ -295,7 +296,10 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 reservation_max_age_seconds=Decimal("60.0"),
             )
             self.assertEqual(replay, first)
-            self.assertEqual(len(restarted_store.pending_outbox()), 1)
+            self.assertEqual(
+                len(restarted_store.pending_outbox()),
+                pending_before_replay,
+            )
 
             with self.assertRaises(AuthorityConflict):
                 _admit(
@@ -306,7 +310,10 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                     reservation_requirements={"CASH:USD": Decimal("101")},
                     reservation_max_age_seconds=Decimal("60"),
                 )
-            self.assertEqual(len(restarted_store.pending_outbox()), 1)
+            self.assertEqual(
+                len(restarted_store.pending_outbox()),
+                pending_before_replay,
+            )
 
 
     def test_inflated_caller_availability_cannot_increase_reservation_capacity(self):

@@ -1,3 +1,4 @@
+# Qualification trigger: exact-current-head WP-28 evidence; no workflow behavior change.
 name: futures-qualification
 
 on:

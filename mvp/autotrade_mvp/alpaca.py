@@ -475,6 +475,8 @@ def parse_submission_response(
 def parse_trade_activities(
     activities: object,
     *,
+    account_id: str,
+    environment: str,
     instrument_versions: Mapping[str, str],
     client_ids_by_order_id: Mapping[str, str | None],
     fees_by_activity_id: Mapping[str, tuple[object, str]],
@@ -495,6 +497,13 @@ def parse_trade_activities(
     ):
         if not isinstance(mapping, Mapping):
             raise AlpacaAdapterError(f"{name} must be a mapping")
+
+    account = _text(account_id, name="account_id")
+    env = _text(environment, name="environment").upper()
+    if env not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+        raise AlpacaAdapterError(
+            "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
+        )
 
     by_activity: dict[str, ProviderFillEvidence] = {}
     for index, raw in enumerate(activities):
@@ -525,6 +534,9 @@ def parse_trade_activities(
             )
         fee_amount, fee_currency = fees_by_activity_id[activity_id]
         fill = ProviderFillEvidence.create(
+            provider_id="ALPACA",
+            account_id=account,
+            environment=env,
             provider_execution_id=activity_id,
             client_order_id=client_id,
             instrument=instrument,
@@ -547,6 +559,8 @@ def parse_trade_activities(
 
 def coverage_evidence(
     *,
+    account_id: str,
+    environment: str,
     surface: str,
     coverage_start: str,
     coverage_end: str,
@@ -556,6 +570,12 @@ def coverage_evidence(
 ) -> CoverageSurfaceEvidence:
     """Create canonical fail-closed reconciliation coverage evidence."""
 
+    account = _text(account_id, name="account_id")
+    env = _text(environment, name="environment").upper()
+    if env not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+        raise AlpacaAdapterError(
+            "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
+        )
     normalized = _text(surface, name="surface").upper()
     if normalized not in {
         "OPEN_ORDERS",
@@ -572,6 +592,9 @@ def coverage_evidence(
         if type(value) is not bool:
             raise AlpacaAdapterError(f"{name} must be boolean")
     return CoverageSurfaceEvidence(
+        provider_id="ALPACA",
+        account_id=account,
+        environment=env,
         surface=normalized,
         coverage_start=coverage_start,
         coverage_end=coverage_end,

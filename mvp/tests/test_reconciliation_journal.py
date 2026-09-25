@@ -12,6 +12,7 @@ from mvp.autotrade_mvp.reconciliation import (
     reconcile_account,
 )
 from mvp.autotrade_mvp.reconciliation_journal import (
+    _reconciliation_aggregate_id,
     load_latest_reconciliation_checkpoint,
     record_reconciliation_checkpoint,
     unknown_submissions_from_dispatch,
@@ -69,6 +70,21 @@ def reconciliation(**overrides):
 
 
 class ReconciliationJournalTests(unittest.TestCase):
+    def test_scoped_checkpoint_identity_cannot_collide_on_separator_characters(self):
+        left = _reconciliation_aggregate_id(
+            reconciliation_id="rid",
+            provider_id="PROVIDER/A",
+            account_id="B",
+            environment="PAPER",
+        )
+        right = _reconciliation_aggregate_id(
+            reconciliation_id="rid",
+            provider_id="PROVIDER",
+            account_id="A/B",
+            environment="PAPER",
+        )
+        self.assertNotEqual(left, right)
+
     def test_checkpoint_round_trip_is_exact_and_idempotent(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
@@ -98,7 +114,12 @@ class ReconciliationJournalTests(unittest.TestCase):
                 "-0.50",
             )
             self.assertEqual(
-                len(store.load_events("account_reconciliation", "acct-1")),
+                len(
+                    store.load_events(
+                        "account_reconciliation",
+                        first["aggregate_id"],
+                    )
+                ),
                 1,
             )
             self.assertEqual(len(store.pending_outbox()), 1)
@@ -120,23 +141,26 @@ class ReconciliationJournalTests(unittest.TestCase):
     def test_changed_checkpoint_appends_new_version(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
-            record_reconciliation_checkpoint(
+            first = record_reconciliation_checkpoint(
                 store,
                 reconciliation_id="acct-1",
                 result=reconciliation(provider_cash={"USD": "899.50"}),
                 observed_at="2026-09-24T19:00:00Z",
-            host_id="test-host",
-            owner_epoch="epoch-1",
+                host_id="test-host",
+                owner_epoch="epoch-1",
             )
             record_reconciliation_checkpoint(
                 store,
                 reconciliation_id="acct-1",
                 result=reconciliation(),
                 observed_at="2026-09-24T19:01:00Z",
-            host_id="test-host",
-            owner_epoch="epoch-1",
+                host_id="test-host",
+                owner_epoch="epoch-1",
             )
-            events = store.load_events("account_reconciliation", "acct-1")
+            events = store.load_events(
+                "account_reconciliation",
+                first["aggregate_id"],
+            )
             self.assertEqual(
                 [event["aggregate_version"] for event in events],
                 [1, 2],

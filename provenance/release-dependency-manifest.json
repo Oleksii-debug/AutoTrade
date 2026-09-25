@@ -17,6 +17,18 @@
       "detail": "Development authorization is recorded, but release distribution rights chain is unresolved."
     },
     {
+      "code": "COMPONENT_RELEASE_DISTRIBUTION_BLOCKED",
+      "components": [
+        "Alpaca official C# SDK",
+        "Autosport first-party source",
+        "CryptoExchange.Net",
+        "Nika Core first-party source",
+        "QuantConnect LEAN",
+        "WhiteBit.Net"
+      ],
+      "detail": "One or more inspected components are not machine-approved for release distribution."
+    },
+    {
       "code": "DEPENDENCY_ADVISORY_EVIDENCE_MISSING",
       "detail": "Exact release dependency graph has no qualified vulnerability/advisory review."
     }
@@ -28,6 +40,7 @@
       "adoption_state": "CANDIDATE_FOR_WP27_STABLE_RELEASE_7_2_2_PREFERRED_FOR_FIRST_QUALIFICATION",
       "license": "Apache-2.0",
       "name": "Alpaca official C# SDK",
+      "release_distribution_state": "BLOCKED",
       "repository": "alpacahq/alpaca-trade-api-csharp",
       "revision": "42043eafdefa4fc2314ff24be8c08d533dffeeb8",
       "source_import_allowed": "PREFER_DIRECT_DEPENDENCY_AFTER_STABLE_PACKAGE_AND_TRANSITIVE_REVIEW"
@@ -36,6 +49,7 @@
       "adoption_state": "NARROW_NEUTRAL_MIGRATION_IN_PROGRESS",
       "license": "UNRESOLVED_FIRST_PARTY_RIGHTS_RECORD",
       "name": "Autosport first-party source",
+      "release_distribution_state": "BLOCKED",
       "repository": "Oleksii-debug/Autosport",
       "revision": "cb102d85f0c820c7097875191deca73e53ec94f5",
       "source_import_allowed": "OWNER_AUTHORIZED_MIGRATION_FOR_PROJECT_DEVELOPMENT; RELEASE_DISTRIBUTION_RIGHTS_CHAIN_STILL_REQUIRES_WP03_RECORD"
@@ -44,6 +58,7 @@
       "adoption_state": "CANDIDATE_SHARED_TRANSPORT_FOR_WP24_AND_OTHER_JKORF_ADAPTERS",
       "license": "MIT",
       "name": "CryptoExchange.Net",
+      "release_distribution_state": "BLOCKED",
       "repository": "JKorf/CryptoExchange.Net",
       "revision": "cecfbcba48b84ff56109c7d1c67f548ba0eabf22",
       "source_import_allowed": "PREFER_DIRECT_DEPENDENCY_AFTER_EXACT_GRAPH_QUALIFICATION"
@@ -52,6 +67,7 @@
       "adoption_state": "CONTRACT_SEMANTICS_CHARACTERIZED_NO_RUNTIME_DEPENDENCY",
       "license": "UNRESOLVED_FIRST_PARTY_RIGHTS_RECORD",
       "name": "Nika Core first-party source",
+      "release_distribution_state": "BLOCKED",
       "repository": "Oleksii-debug/Nika-Core",
       "revision": "2f7be3389109d7dd6fb3bae40540fe0cf2eba695",
       "source_import_allowed": "OWNER_AUTHORIZED_SEMANTIC_ADAPTATION; RELEASE_DISTRIBUTION_RIGHTS_CHAIN_STILL_REQUIRES_WP03_RECORD"
@@ -60,6 +76,7 @@
       "adoption_state": "SELECTED_FOUNDATION_PENDING_WP02_BUILD_QUALIFICATION",
       "license": "Apache-2.0",
       "name": "QuantConnect LEAN",
+      "release_distribution_state": "BLOCKED",
       "repository": "QuantConnect/Lean",
       "revision": "985ef30ad3ac774218c5ac516b4cb0aa2655730f",
       "source_import_allowed": "PENDING_EXACT_COMPOSITION_AND_NOTICE_REVIEW"
@@ -68,6 +85,7 @@
       "adoption_state": "CANDIDATE_FOR_WP24",
       "license": "MIT",
       "name": "WhiteBit.Net",
+      "release_distribution_state": "BLOCKED",
       "repository": "JKorf/WhiteBit.Net",
       "revision": "5ef49daa517abe86a8e35a85256db184cffdfdb2",
       "source_import_allowed": "PREFER_DIRECT_DEPENDENCY_AFTER_EXACT_GRAPH_QUALIFICATION"

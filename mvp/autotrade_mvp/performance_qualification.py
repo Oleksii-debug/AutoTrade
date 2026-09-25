@@ -29,20 +29,34 @@ def _positive_int(value: int, *, name: str, allow_zero: bool = False) -> int:
 
 
 def _git_sha(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or len(value) != 40 or any(
-        char not in "0123456789abcdef" for char in value.lower()
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or value != value.lower()
+        or len(value) not in {40, 64}
+        or any(char not in "0123456789abcdef" for char in value)
     ):
-        raise RuntimeBudgetError(f"{name} must be a 40-hex commit SHA")
-    return value.lower()
+        raise RuntimeBudgetError(
+            f"{name} must be a canonical lowercase 40- or 64-character Git object id"
+        )
+    return value
 
 
 def _sha256_identity(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.startswith("sha256:"):
-        raise RuntimeBudgetError(f"{name} must use sha256:<64 hex>")
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or not value.startswith("sha256:")
+    ):
+        raise RuntimeBudgetError(f"{name} must use canonical lowercase sha256:<64 hex>")
     digest = value[7:]
-    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest.lower()):
-        raise RuntimeBudgetError(f"{name} must use sha256:<64 hex>")
-    return "sha256:" + digest.lower()
+    if (
+        len(digest) != 64
+        or digest != digest.lower()
+        or any(char not in "0123456789abcdef" for char in digest)
+    ):
+        raise RuntimeBudgetError(f"{name} must use canonical lowercase sha256:<64 hex>")
+    return value
 
 
 def _series(values: Sequence[int], *, name: str) -> tuple[int, ...]:

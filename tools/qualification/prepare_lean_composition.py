@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 DOTNETZIP_OLD = '<PackageReference Include="DotNetZip" Version="1.16.0" />'
@@ -42,17 +43,55 @@ def git_blob_digest(data: bytes) -> str:
     return hashlib.sha1(header + data).hexdigest()
 
 
-def _replace_exact(path: Path, old: str, new: str) -> tuple[str, str]:
-    before = path.read_bytes()
+def _canonical_preimage(root: Path, relative: str, path: Path) -> tuple[bytes, str]:
+    """Return the committed Git bytes when available, independent of checkout EOL filters."""
+    working_bytes = path.read_bytes()
+    git_marker = root / ".git"
+    if not git_marker.exists():
+        return working_bytes, git_blob_digest(working_bytes)
+
+    diff = subprocess.run(
+        ["git", "-C", str(root), "diff", "--quiet", "--", relative],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if diff.returncode == 1:
+        raise ValueError(f"{relative}: working tree differs from approved Git preimage")
+    if diff.returncode != 0:
+        raise ValueError(f"{relative}: unable to verify clean approved Git preimage")
+
+    try:
+        actual_blob = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", f"HEAD:{relative}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            text=True,
+        ).stdout.strip()
+        committed_bytes = subprocess.run(
+            ["git", "-C", str(root), "show", f"HEAD:{relative}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        ).stdout
+    except subprocess.CalledProcessError as error:
+        raise ValueError(f"{relative}: unable to read approved Git preimage") from error
+
+    if git_blob_digest(committed_bytes) != actual_blob:
+        raise ValueError(f"{relative}: committed Git preimage failed blob self-check")
+    return committed_bytes, actual_blob
+
+
+def _replace_exact(path: Path, before: bytes, old: str, new: str) -> tuple[str, str]:
     text = before.decode("utf-8")
     if text.count(old) != 1:
         raise ValueError(f"{path}: expected exactly one approved composition anchor")
     if new in text and old != new:
         raise ValueError(f"{path}: replacement already present before composition")
-    updated = text.replace(old, new, 1)
-    path.write_text(updated, encoding="utf-8", newline="\n")
-    after = path.read_bytes()
-    return digest(before), digest(after)
+    updated = text.replace(old, new, 1).encode("utf-8")
+    path.write_bytes(updated)
+    return digest(before), digest(updated)
 
 
 def prepare(
@@ -76,8 +115,7 @@ def prepare(
         path = root / relative
         if not path.is_file():
             raise ValueError(f"missing approved LEAN file: {relative}")
-        before_bytes = path.read_bytes()
-        actual_blob = git_blob_digest(before_bytes)
+        before_bytes, actual_blob = _canonical_preimage(root, relative, path)
         expected_blob = approved_blobs[relative]
         if actual_blob != expected_blob:
             raise ValueError(
@@ -95,12 +133,12 @@ def prepare(
             raise ValueError(
                 f"{path}: replacement already present before composition"
             )
-        preimages[relative] = (path, actual_blob)
+        preimages[relative] = (path, actual_blob, before_bytes)
 
     records: list[dict[str, str]] = []
     for relative, (old, new) in FILES.items():
-        path, actual_blob = preimages[relative]
-        before_sha, after_sha = _replace_exact(path, old, new)
+        path, actual_blob, before_bytes = preimages[relative]
+        before_sha, after_sha = _replace_exact(path, before_bytes, old, new)
         records.append(
             {
                 "path": relative,

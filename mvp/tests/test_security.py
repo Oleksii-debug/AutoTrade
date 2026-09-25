@@ -234,13 +234,19 @@ class SecurityBoundaryTests(unittest.TestCase):
             )
 
     def test_host_validator_binds_bearer_session_to_exact_actor(self):
-        store = HostCommandStore(session_validator=self.boundary.validate_host_session)
+        store = HostCommandStore(
+            account_id="paper-account-1",
+            environment="PAPER",
+            session_validator=self.boundary.validate_host_session,
+        )
         command = {
             "command_id": "11111111-1111-1111-1111-111111111111",
             "expected_state_version": "0",
             "idempotency_key": "security-integration",
             "actor": "owner",
             "session": self.owner.token,
+            "account_id": "paper-account-1",
+            "environment": "PAPER",
             "action": "BLOCK_NEW_EXPOSURE",
             "payload": {},
         }

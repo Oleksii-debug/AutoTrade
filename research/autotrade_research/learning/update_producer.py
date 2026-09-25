@@ -139,6 +139,49 @@ def _digest_bytes(data: bytes) -> str:
     return "sha256:" + sha256(data).hexdigest()
 
 
+def _physical_observation_id(
+    raw: Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> str:
+    """Derive a task/alias-independent identity for one immutable observation.
+
+    ExperienceMemory already verifies the source episode hash before this
+    producer receives the row.  This identity deliberately excludes the
+    learning alias/task/regime so the same underlying evidence cannot be used in
+    both calibration and update populations under different caller labels.
+    """
+    evidence_refs = payload.get("evidence_refs")
+    if (
+        isinstance(evidence_refs, (str, bytes))
+        or not isinstance(evidence_refs, Sequence)
+        or not evidence_refs
+    ):
+        raise ValueError("physical observation requires evidence_refs")
+    refs = tuple(
+        sorted(_text(value, name="evidence_ref") for value in evidence_refs)
+    )
+    if len(refs) != len(set(refs)):
+        raise ValueError("physical observation evidence_refs must be unique")
+    material = {
+        "decision_time": _iso(
+            _time(raw.get("decision_time"), name="decision_time")
+        ),
+        "information_cutoff": _iso(
+            _time(raw.get("information_cutoff"), name="information_cutoff")
+        ),
+        "instrument_family": _text(
+            raw.get("instrument_family"),
+            name="instrument_family",
+        ),
+        "permission_class": _text(
+            raw.get("permission_class"),
+            name="permission_class",
+        ),
+        "evidence_refs": list(refs),
+    }
+    return _digest_bytes(_canonical_bytes(material))
+
+
 def _artifact_ref(
     artifact_store: ArtifactStore,
     reference: object,
@@ -327,6 +370,7 @@ class _LearningRow:
     episode_id: str
     episode_hash: str
     observation_id: str
+    physical_observation_id: str
     features: Mapping[str, Decimal]
     target: Decimal
     label_version: str
@@ -493,6 +537,7 @@ def _extract_learning_rows(
                 learning.get("observation_id"),
                 name="observation_id",
             )
+            physical_observation_id = _physical_observation_id(raw, payload)
             label_version = _text(
                 learning.get("label_version"),
                 name="label_version",
@@ -557,6 +602,7 @@ def _extract_learning_rows(
                 episode_id=episode_id,
                 episode_hash=episode_hash,
                 observation_id=observation_id,
+                physical_observation_id=physical_observation_id,
                 features=MappingProxyType(features),
                 target=target,
                 label_version=label_version,
@@ -678,6 +724,7 @@ def _row_evidence(row: _LearningRow) -> dict[str, Any]:
         "episode_id": row.episode_id,
         "episode_hash": row.episode_hash,
         "observation_id": row.observation_id,
+        "physical_observation_id": row.physical_observation_id,
         "features": {
             name: str(value)
             for name, value in sorted(row.features.items())
@@ -831,7 +878,19 @@ def produce_bounded_online_update(
         feature_names=feature_names,
     )
 
+    update_physical_ids = {
+        row.physical_observation_id for row in update_rows
+    }
+    calibration_physical_ids = {
+        row.physical_observation_id for row in calibration_rows
+    }
+    cross_population_physical_overlap = tuple(
+        sorted(update_physical_ids.intersection(calibration_physical_ids))
+    )
+
     reasons: list[str] = []
+    if cross_population_physical_overlap:
+        reasons.append("LEARNING.CROSS_POPULATION_PHYSICAL_OVERLAP")
     if update_conflicts:
         reasons.append("LEARNING.UPDATE_ALIAS_CONFLICT")
     if calibration_conflicts:
@@ -989,6 +1048,9 @@ def produce_bounded_online_update(
                 [observation_id, list(episode_ids)]
                 for observation_id, episode_ids in calibration_aliases
             ],
+            "cross_population_physical_overlap": list(
+                cross_population_physical_overlap
+            ),
         },
         "calibration": {
             "target_false_alarm_rate": str(

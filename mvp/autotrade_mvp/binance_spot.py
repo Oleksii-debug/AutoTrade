@@ -18,7 +18,11 @@ from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .capabilities import CapabilitySnapshot
-from .provider_core import ProviderCoreError
+from .provider_core import (
+    ProviderCoreError,
+    ProviderResponseObservation,
+    Surface,
+)
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
@@ -286,16 +290,24 @@ def parse_order_ack(
 
 
 def parse_account_trades(
-    rows: object,
+    observation: ProviderResponseObservation,
     *,
-    account_id: str,
-    environment: str,
     instrument_versions: Mapping[str, str],
     client_ids_by_order_id: Mapping[int, str] | None = None,
 ) -> tuple[ProviderFillEvidence, ...]:
-    """Map recorded account-trade rows to unique economic fills."""
+    """Map one authenticated exact-byte account-trade read to unique fills."""
 
-    if not isinstance(rows, list):
+    if not isinstance(observation, ProviderResponseObservation):
+        raise TypeError("observation must be ProviderResponseObservation")
+    observation.require_scope(
+        provider_id="BINANCE",
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint=BINANCE_SPOT_ENDPOINTS["EXECUTIONS"],
+    )
+    rows = observation.payload
+    account_id = observation.account_id
+    environment = observation.environment
+    if not isinstance(rows, (list, tuple)):
         raise BinanceSpotAdapterError("trade rows must be an array")
     if not isinstance(instrument_versions, Mapping):
         raise BinanceSpotAdapterError("instrument_versions must be a mapping")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -63,6 +64,8 @@ class ProducerFixture:
         execution_reconciled_at=None,
         episode_id=None,
         decision_time=None,
+        evidence_ref=None,
+        regime="stable",
     ):
         self._episode_counter += 1
         decision = decision_time or (
@@ -70,8 +73,12 @@ class ProducerFixture:
         )
         horizon = outcome_horizon_at or label_available_at
         reconciled = execution_reconciled_at or label_available_at
+        physical_evidence = evidence_ref or (
+            "evidence:sha256:"
+            + sha256(observation_id.encode("utf-8")).hexdigest()
+        )
         payload = {
-            "evidence_refs": ["artifact:episode-evidence"],
+            "evidence_refs": [physical_evidence],
             "intended_action": {"kind": "NO_TRADE"},
             "actual_execution": {"kind": "NO_TRADE"},
             "outcome": {"class": "NULL"},
@@ -96,7 +103,7 @@ class ProducerFixture:
             decision_time=decision,
             information_cutoff=decision,
             task=task,
-            regime="stable",
+            regime=regime,
             instrument_family="equity",
             permission_class="research",
             payload=payload,
@@ -574,7 +581,8 @@ class UpdateProducerTests(unittest.TestCase):
                     2026, 10, 8, tzinfo=timezone.utc
                 ),
                 episode_id="00000000-0000-0000-0000-000000000212",
-                decision_time=DECISION + timedelta(minutes=1),
+                decision_time=DECISION,
+                regime="stable-alias",
             )
             checkpoint = fixture.publish_checkpoint()
             test_ref = fixture.publish_test_evidence()
@@ -595,7 +603,7 @@ class UpdateProducerTests(unittest.TestCase):
                 2,
             )
             self.assertIn(
-                "ALIAS_DUPLICATE",
+                "PHYSICAL_DUPLICATE",
                 {
                     reason
                     for _episode, reason
@@ -646,6 +654,57 @@ class UpdateProducerTests(unittest.TestCase):
                 "LEARNING.UPDATE_ALIAS_CONFLICT",
                 artifact["reasons"],
             )
+
+
+    def test_same_physical_observation_cannot_cross_calibration_and_update_aliases(self):
+        with TemporaryDirectory() as directory:
+            fixture = ProducerFixture(directory)
+            fixture.seed_calibration(values=("0", "1", "2"))
+            shared = "evidence:sha256:" + "9" * 64
+            physical_time = DECISION + timedelta(minutes=50)
+            fixture.append_learning(
+                task="calibration",
+                feature="3",
+                target="0",
+                observation_id="calibration-alias",
+                label_available_at=datetime(
+                    2026, 10, 3, 12, 3, tzinfo=timezone.utc
+                ),
+                decision_time=physical_time,
+                evidence_ref=shared,
+            )
+            fixture.append_learning(
+                task="update",
+                feature="3",
+                target="1",
+                observation_id="update-alias",
+                label_available_at=datetime(
+                    2026, 10, 8, tzinfo=timezone.utc
+                ),
+                decision_time=physical_time,
+                evidence_ref=shared,
+            )
+            checkpoint = fixture.publish_checkpoint()
+            test_ref = fixture.publish_test_evidence()
+            calibration = fixture.publish_calibration_evidence()
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=fixture.envelope(checkpoint),
+                config=fixture.config(test_ref),
+            )
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIsNone(produced.proposed_parameters)
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIn(
+                "LEARNING.CROSS_POPULATION_CONTAMINATION",
+                artifact["reasons"],
+            )
+            overlap = artifact["population"][
+                "cross_population_physical_overlap"
+            ]
+            self.assertEqual(len(overlap), 1)
+            self.assertTrue(overlap[0].startswith("sha256:"))
 
     def test_insufficient_evidence_is_first_class_no_update(self):
         with TemporaryDirectory() as directory:

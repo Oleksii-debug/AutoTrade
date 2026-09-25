@@ -327,6 +327,7 @@ class _LearningRow:
     episode_id: str
     episode_hash: str
     observation_id: str
+    physical_observation_id: str
     features: Mapping[str, Decimal]
     target: Decimal
     label_version: str
@@ -454,6 +455,45 @@ def _verify_registered_evidence(
     return calibration, tuple(sorted(verified_tests))
 
 
+def _physical_observation_identity(
+    raw: Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> str:
+    """Derive one physical observation identity without trusting caller aliases.
+
+    The identity is anchored to immutable evidence digests and the causal
+    observation locus. Task/regime and learning.observation_id are deliberately
+    excluded so relabelling one physical fact cannot move it between scientific
+    populations.
+    """
+
+    raw_refs = payload.get("evidence_refs")
+    if not isinstance(raw_refs, (list, tuple)) or not raw_refs:
+        raise ValueError("physical observation requires evidence references")
+    references = tuple(
+        sorted(_text(value, name="evidence_ref") for value in raw_refs)
+    )
+    if len(references) != len(set(references)):
+        raise ValueError("physical observation evidence references must be unique")
+    if any(re.search(r"sha256:[0-9a-f]{64}$", value) is None for value in references):
+        raise ValueError(
+            "physical observation evidence references must bind immutable SHA-256 identities"
+        )
+    material = {
+        "schema_version": "1.0.0",
+        "decision_time": _iso(_time(raw.get("decision_time"), name="decision_time")),
+        "information_cutoff": _iso(
+            _time(raw.get("information_cutoff"), name="information_cutoff")
+        ),
+        "instrument_family": _text(
+            raw.get("instrument_family"),
+            name="instrument_family",
+        ),
+        "evidence_refs": references,
+    }
+    return _digest_bytes(_canonical_bytes(material))
+
+
 def _extract_learning_rows(
     population: CoveragePopulationSnapshot,
     *,
@@ -492,6 +532,10 @@ def _extract_learning_rows(
             observation_id = _text(
                 learning.get("observation_id"),
                 name="observation_id",
+            )
+            physical_observation_id = _physical_observation_identity(
+                raw,
+                payload,
             )
             label_version = _text(
                 learning.get("label_version"),
@@ -557,6 +601,7 @@ def _extract_learning_rows(
                 episode_id=episode_id,
                 episode_hash=episode_hash,
                 observation_id=observation_id,
+                physical_observation_id=physical_observation_id,
                 features=MappingProxyType(features),
                 target=target,
                 label_version=label_version,
@@ -568,14 +613,18 @@ def _extract_learning_rows(
         )
 
     groups: dict[str, list[_LearningRow]] = {}
+    caller_aliases: dict[str, set[str]] = {}
     for row in selected:
-        groups.setdefault(row.observation_id, []).append(row)
+        groups.setdefault(row.physical_observation_id, []).append(row)
+        caller_aliases.setdefault(row.observation_id, set()).add(
+            row.physical_observation_id
+        )
 
     deduped: list[_LearningRow] = []
     aliases: list[tuple[str, tuple[str, ...]]] = []
     conflicts: list[str] = []
-    for observation_id in sorted(groups):
-        group = sorted(groups[observation_id], key=lambda item: item.episode_id)
+    for physical_id in sorted(groups):
+        group = sorted(groups[physical_id], key=lambda item: item.episode_id)
         semantic = {
             (
                 tuple(sorted((key, str(value)) for key, value in row.features.items())),
@@ -588,17 +637,24 @@ def _extract_learning_rows(
             for row in group
         }
         episode_ids = tuple(row.episode_id for row in group)
-        aliases.append((observation_id, episode_ids))
+        aliases.append((physical_id, episode_ids))
         if len(semantic) != 1:
-            conflicts.append(observation_id)
+            conflicts.append(physical_id)
             for row in group:
                 exclusions.append(
-                    (row.episode_id, "ALIAS_SEMANTIC_CONFLICT")
+                    (row.episode_id, "PHYSICAL_SEMANTIC_CONFLICT")
                 )
             continue
         deduped.append(group[0])
         for duplicate in group[1:]:
-            exclusions.append((duplicate.episode_id, "ALIAS_DUPLICATE"))
+            exclusions.append((duplicate.episode_id, "PHYSICAL_DUPLICATE"))
+
+    # Caller aliases remain useful diagnostic labels but cannot define physical
+    # identity. Reusing one alias for multiple evidence-backed observations is
+    # ambiguous and therefore fails closed rather than merging distinct facts.
+    for observation_id, physical_ids in sorted(caller_aliases.items()):
+        if len(physical_ids) > 1:
+            conflicts.append("caller-alias:" + observation_id)
 
     deduped.sort(key=lambda row: (row.label_available_at, row.episode_id))
     exclusions.sort()
@@ -607,7 +663,7 @@ def _extract_learning_rows(
         tuple(deduped),
         tuple(exclusions),
         tuple(aliases),
-        tuple(sorted(conflicts)),
+        tuple(sorted(set(conflicts))),
     )
 
 
@@ -678,6 +734,7 @@ def _row_evidence(row: _LearningRow) -> dict[str, Any]:
         "episode_id": row.episode_id,
         "episode_hash": row.episode_hash,
         "observation_id": row.observation_id,
+        "physical_observation_id": row.physical_observation_id,
         "features": {
             name: str(value)
             for name, value in sorted(row.features.items())
@@ -831,7 +888,16 @@ def produce_bounded_online_update(
         feature_names=feature_names,
     )
 
+    cross_population_overlap = tuple(
+        sorted(
+            {row.physical_observation_id for row in update_rows}
+            & {row.physical_observation_id for row in calibration_rows}
+        )
+    )
+
     reasons: list[str] = []
+    if cross_population_overlap:
+        reasons.append("LEARNING.CROSS_POPULATION_CONTAMINATION")
     if update_conflicts:
         reasons.append("LEARNING.UPDATE_ALIAS_CONFLICT")
     if calibration_conflicts:
@@ -976,8 +1042,8 @@ def produce_bounded_online_update(
                 list(value) for value in update_exclusions
             ],
             "update_alias_groups": [
-                [observation_id, list(episode_ids)]
-                for observation_id, episode_ids in update_aliases
+                [physical_observation_id, list(episode_ids)]
+                for physical_observation_id, episode_ids in update_aliases
             ],
             "calibration_included": [
                 _row_evidence(row) for row in calibration_rows
@@ -986,9 +1052,12 @@ def produce_bounded_online_update(
                 list(value) for value in calibration_exclusions
             ],
             "calibration_alias_groups": [
-                [observation_id, list(episode_ids)]
-                for observation_id, episode_ids in calibration_aliases
+                [physical_observation_id, list(episode_ids)]
+                for physical_observation_id, episode_ids in calibration_aliases
             ],
+            "cross_population_physical_overlap": list(
+                cross_population_overlap
+            ),
         },
         "calibration": {
             "target_false_alarm_rate": str(

@@ -79,6 +79,21 @@ class ScientificRegistryTests(unittest.TestCase):
             self.assertTrue(state["includes_non_successes"])
             self.assertEqual(state["remaining_trial_budget"], 1)
 
+    def test_completeness_hash_binds_all_recorded_trial_outcomes(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            p = store.register_protocol(protocol())
+            before = store.completeness(p.protocol_id)
+            store.record_trial(
+                p.protocol_id,
+                status="FAILED",
+                payload={"reason": "fit"},
+            )
+            after = store.completeness(p.protocol_id)
+            self.assertNotEqual(before["trial_log_hash"], after["trial_log_hash"])
+            self.assertEqual(after["recorded_trials"], 1)
+            self.assertTrue(after["includes_non_successes"])
+
     def test_trial_budget_cannot_be_silently_exceeded(self):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")

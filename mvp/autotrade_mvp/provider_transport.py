@@ -841,6 +841,7 @@ class WhiteBitHttpTransport:
         policy: ProviderEndpointPolicy,
         account_id: str,
         capability_snapshot_id: str,
+        capability_registry: CapabilityRegistry,
         secret_resolver: ProviderSecretResolver,
         credential_handle: PersistentCredentialHandle,
         session_token: str,
@@ -1006,6 +1007,10 @@ class WhiteBitHttpTransport:
         finally:
             credential_plaintext = None
 
+        self._require_current_capability(
+            entity_id=entity_id,
+            instrument_version=instrument_version,
+        )
         final_guard()
         raw = self.wire_client.send(signed)
         if not isinstance(raw, bytes):
@@ -1119,6 +1124,7 @@ class AlpacaTradingHttpTransport:
         self.capability_snapshot_id = _canonical_text(
             capability_snapshot_id, name="capability_snapshot_id"
         )
+        self.capability_registry = capability_registry
         self.secret_resolver = secret_resolver
         self.credential_handle = credential_handle
         self.session_token = _canonical_text(
@@ -1170,6 +1176,7 @@ class AlpacaTradingHttpTransport:
             request["capability_snapshot_id"],
             name="capability_snapshot_id",
         )
+        entity_id = _canonical_text(request["entity_id"], name="entity_id")
         raw_capabilities = request["capability_snapshot_ids"]
         raw_instruments = request["instrument_versions"]
         if (
@@ -1429,6 +1436,7 @@ class BybitV5HttpTransport:
         origin: str,
         execution_identity: str,
         clock_millis: ClockMillis,
+        clock_utc: ClockUtc,
         quota_gate: QuotaGate | None = None,
         wire_client: ProviderWireClient | None = None,
         recv_window_ms: int = 5000,
@@ -1464,12 +1472,14 @@ class BybitV5HttpTransport:
             raise ProviderTransportScopeError(
                 "credential handle account mismatch"
             )
+        if not isinstance(capability_registry, CapabilityRegistry):
+            raise TypeError("capability_registry must be CapabilityRegistry")
         if not hasattr(secret_resolver, "resolve_for_execution"):
             raise TypeError(
                 "secret_resolver must implement resolve_for_execution"
             )
-        if not callable(clock_millis):
-            raise TypeError("clock_millis must be callable")
+        if not callable(clock_millis) or not callable(clock_utc):
+            raise TypeError("Bybit write clocks must be callable")
         if quota_gate is not None and not callable(quota_gate):
             raise TypeError("quota_gate must be callable or None")
         if wire_client is not None and not hasattr(wire_client, "send"):
@@ -1500,6 +1510,7 @@ class BybitV5HttpTransport:
             execution_identity, name="execution_identity"
         )
         self.clock_millis = clock_millis
+        self.clock_utc = clock_utc
         self.quota_gate = quota_gate
         self.wire_client = wire_client or UrllibJsonWireClient()
         self.recv_window_ms = recv_window_ms
@@ -1510,6 +1521,8 @@ class BybitV5HttpTransport:
     ) -> tuple[
         str,
         Mapping[str, object],
+        str,
+        str,
         str,
         str,
         str,
@@ -1527,6 +1540,7 @@ class BybitV5HttpTransport:
             "environment",
             "provider_environment",
             "capability_snapshot_id",
+            "entity_id",
             "capability_snapshot_ids",
             "instrument_versions",
             "body_sha256",
@@ -1575,7 +1589,9 @@ class BybitV5HttpTransport:
             raise ProviderTransportScopeError(
                 "Bybit capability snapshot binding is inconsistent"
             )
-        _canonical_text(raw_instruments[0], name="instrument_version")
+        instrument_version = _canonical_text(
+            raw_instruments[0], name="instrument_version"
+        )
 
         exact_body = json.dumps(
             dict(body),
@@ -1597,8 +1613,56 @@ class BybitV5HttpTransport:
             environment,
             provider_environment,
             capability,
+            entity_id,
+            instrument_version,
             actual_digest,
         )
+
+    def _require_current_capability(
+        self,
+        *,
+        entity_id: str,
+        instrument_version: str,
+    ) -> CapabilitySnapshot:
+        point = self.clock_utc()
+        if (
+            not isinstance(point, datetime)
+            or point.tzinfo is None
+            or point.utcoffset() is None
+        ):
+            raise ProviderTransportScopeError(
+                "clock_utc must return a timezone-aware datetime"
+            )
+        point = point.astimezone(timezone.utc)
+        try:
+            current = self.capability_registry.require_verified(
+                provider_id="BYBIT",
+                account_id=self.account_id,
+                entity_id=entity_id,
+                environment=self.policy.environment,
+                instrument_version=instrument_version,
+                at=point,
+            )
+        except Exception as error:
+            raise ProviderTransportScopeError(
+                "Bybit write current capability cannot be verified"
+            ) from error
+        if (
+            not isinstance(current, CapabilitySnapshot)
+            or current.snapshot_id != self.capability_snapshot_id
+            or current.provider_id != "BYBIT"
+            or current.account_id != self.account_id
+            or current.entity_id != entity_id
+            or current.environment != self.policy.environment
+            or current.instrument_version != instrument_version
+            or current.status != "VERIFIED"
+            or not (current.observed_at <= point < current.expires_at)
+            or "ORDER_WRITE" not in current.permission_scopes
+        ):
+            raise ProviderTransportScopeError(
+                "Bybit write capability is no longer valid for exact prepared request"
+            )
+        return current
 
     def __call__(
         self,
@@ -1618,6 +1682,8 @@ class BybitV5HttpTransport:
             environment,
             provider_environment,
             capability,
+            entity_id,
+            instrument_version,
             _digest,
         ) = self._prepared_fields(request)
         if account != self.account_id:
@@ -1648,6 +1714,11 @@ class BybitV5HttpTransport:
                 self.policy.environment,
                 "ORDER_WRITE",
             )
+
+        self._require_current_capability(
+            entity_id=entity_id,
+            instrument_version=instrument_version,
+        )
 
         credential_plaintext = self.secret_resolver.resolve_for_execution(
             self.session_token,

@@ -460,9 +460,10 @@ def prepare_order_request(
 ) -> WhiteBitPreparedRequest:
     """Translate an admitted intent without sending it.
 
-    `request` and `nonce` are intentionally not added here. A transport wrapper
-    must add provider authentication fields after the guarded dispatcher's final
-    send barrier, so a stale signed payload cannot become a second send authority.
+    `request` and `nonce` are intentionally not added here. The shared guarded
+    transport allocates nonce and signs inside the attempt before the final send
+    barrier, then performs exactly one outbound send immediately after that guard.
+    Signed payload bytes are never a reusable or durable send authority.
     """
 
     if not isinstance(intent, WhiteBitOrderIntent):

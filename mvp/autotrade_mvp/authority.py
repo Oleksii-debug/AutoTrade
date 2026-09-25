@@ -16,6 +16,8 @@ from .durable_reservations import DurableReservationBook
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reconciliation_journal import load_account_resource_availability_evidence
 from .securities_borrow import (
+    BorrowAvailabilityEvidence,
+    DurableBorrowRecallProjection,
     borrow_resource_key,
     incremental_short_borrow_quantity,
 )
@@ -1960,9 +1962,71 @@ class AuthorityService:
                 risk_event = self.store.load_events(
                     "risk_decision", record.risk_decision_id
                 )[0]
+                risk_payload = risk_event["payload"]
                 admission_reservation_version = (
-                    int(risk_event["payload"]["reservation_version"]) + 1
+                    int(risk_payload["reservation_version"]) + 1
                 )
+                risk_requirements = risk_payload.get("reservation_requirements")
+                if not isinstance(risk_requirements, Mapping):
+                    raise AuthorityConflict(
+                        "durable risk reservation requirements are malformed"
+                    )
+                borrow_resources = tuple(
+                    resource
+                    for resource in risk_requirements
+                    if resource.startswith("BORROW:")
+                )
+                if borrow_resources:
+                    availability_evidence = risk_payload.get(
+                        "reservation_availability_evidence"
+                    )
+                    if not isinstance(availability_evidence, Mapping):
+                        raise AuthorityConflict(
+                            "durable short admission lacks availability evidence"
+                        )
+                    resource_details = availability_evidence.get(
+                        "resource_details"
+                    )
+                    if not isinstance(resource_details, Mapping):
+                        raise AuthorityConflict(
+                            "durable short admission lacks borrow resource details"
+                        )
+                    for borrow_resource in borrow_resources:
+                        detail = resource_details.get(borrow_resource)
+                        if not isinstance(detail, Mapping):
+                            raise AuthorityConflict(
+                                "durable short admission lacks typed borrow detail"
+                            )
+                        borrow = BorrowAvailabilityEvidence.from_resource_detail(
+                            detail
+                        )
+                        if (
+                            borrow.resource_key != borrow_resource
+                            or borrow.account_id != record.account_id
+                            or borrow.environment != record.environment
+                            or borrow.instrument_id
+                            != record.instrument_version.instrument_id
+                            or borrow.instrument_version
+                            != record.instrument_version.version
+                        ):
+                            raise AuthorityConflict(
+                                "durable borrow dispatch scope mismatch"
+                            )
+                        if self.evidence_artifact_store is None:
+                            raise AuthorityConflict(
+                                "borrow dispatch requires trusted ArtifactStore"
+                            )
+                        projection = DurableBorrowRecallProjection(
+                            self.store,
+                            provider_id=borrow.provider_id,
+                            account_id=borrow.account_id,
+                            environment=borrow.environment,
+                            instrument_id=borrow.instrument_id,
+                            instrument_version=borrow.instrument_version,
+                            evidence_artifact_store=self.evidence_artifact_store,
+                        )
+                        if projection.active_quantity > 0:
+                            return False, "borrow_recall_active"
             except Exception:
                 return False, "financial_evidence_invalid"
             if reservation.intent_id != record.intent_id:

@@ -1,6 +1,7 @@
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import sqlite3
 import unittest
 
 from mvp.autotrade_mvp.model_budget_journal import DurableModelBudget
@@ -10,18 +11,65 @@ from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 NOW = "2026-09-24T21:45:00+00:00"
 
 
-def open_budget(root, *, ceiling="1", budget_id="policy-1"):
+def open_budget(root, *, ceiling="1", budget_id="policy-1", environment="SIMULATION"):
     journal = JournalStore(Path(root) / "journal.db")
     budget = DurableModelBudget(
         journal=journal,
         budget_id=budget_id,
         ceiling=ceiling,
+        environment=environment,
         clock=lambda: NOW,
     )
     return journal, budget
 
 
 class DurableModelBudgetTests(unittest.TestCase):
+    def test_environment_is_required_and_validated_before_mutation(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            for invalid in ("", "STAGING", None):
+                with self.subTest(invalid=invalid):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "environment must be REPLAY, SIMULATION, PAPER, or LIVE",
+                    ):
+                        DurableModelBudget(
+                            journal=journal,
+                            budget_id="policy-1",
+                            ceiling="1",
+                            environment=invalid,
+                            clock=lambda: NOW,
+                        )
+            self.assertEqual(
+                journal.load_events("model_budget", "policy-1"),
+                [],
+            )
+
+    def test_command_scope_uses_stable_actor_and_caller_environment(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory, environment="PAPER")
+            self.assertTrue(budget.reserve("req-paper", "0.2"))
+            connection = sqlite3.connect(journal.path)
+            try:
+                actor, environment = connection.execute(
+                    "SELECT actor, environment FROM command_dedupe "
+                    "WHERE idempotency_key LIKE ?",
+                    ("%:reserve:req-paper",),
+                ).fetchone()
+            finally:
+                connection.close()
+            self.assertEqual(actor, "autotrade-model-budget")
+            self.assertEqual(environment, "PAPER")
+
+    def test_changed_economics_cannot_escape_through_different_environment(self):
+        with TemporaryDirectory() as directory:
+            _, first = open_budget(directory, environment="SIMULATION")
+            self.assertTrue(first.reserve("req-1", "0.4"))
+            _, paper = open_budget(directory, environment="PAPER")
+            with self.assertRaisesRegex(ValueError, "idempotency identity conflicts"):
+                paper.reserve("req-1", "0.5")
+            self.assertEqual(paper.snapshot().reserved, Decimal("0.4"))
+
     def test_reservation_survives_restart(self):
         with TemporaryDirectory() as directory:
             _, first = open_budget(directory)
@@ -149,6 +197,7 @@ class DurableModelBudgetTests(unittest.TestCase):
                 journal=journal,
                 budget_id="policy-1",
                 ceiling="1",
+                environment="SIMULATION",
                 clock=lambda: NOW,
             )
             budget.reserve("req-1", "0.4")

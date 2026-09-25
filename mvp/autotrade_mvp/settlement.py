@@ -12,6 +12,9 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Iterable, Mapping
 
+from .accounting import EconomicBook, JournalTransaction, _canonical_equity_fill_terms
+from .persistence import payload_digest
+
 
 class SettlementConflict(ValueError):
     """Raised when immutable settlement identity or lifecycle invariants conflict."""
@@ -44,6 +47,95 @@ def _utc(value: datetime, *, name: str) -> datetime:
 
 
 @dataclass(frozen=True, slots=True)
+class SettlementAccountScope:
+    provider_id: str
+    account_id: str
+    environment: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "provider_id", _text(self.provider_id, name="provider_id").upper()
+        )
+        object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+            raise ValueError("unsupported environment")
+        object.__setattr__(self, "environment", environment)
+
+
+@dataclass(frozen=True, slots=True)
+class SettlementRuleBinding:
+    """Versioned instrument/account/provider evidence for one settlement rule."""
+
+    rule_id: str
+    rule_version: str
+    scope: SettlementAccountScope
+    instrument_version: str
+    settlement_currency: str
+    effective_from: date
+    effective_to: date | None
+    evidence_refs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "rule_id", _text(self.rule_id, name="rule_id"))
+        object.__setattr__(
+            self, "rule_version", _text(self.rule_version, name="rule_version")
+        )
+        if not isinstance(self.scope, SettlementAccountScope):
+            raise TypeError("scope must be SettlementAccountScope")
+        object.__setattr__(
+            self,
+            "instrument_version",
+            _text(self.instrument_version, name="instrument_version"),
+        )
+        object.__setattr__(
+            self,
+            "settlement_currency",
+            _text(self.settlement_currency, name="settlement_currency").upper(),
+        )
+        if type(self.effective_from) is not date:
+            raise TypeError("effective_from must be a date value")
+        if self.effective_to is not None:
+            if type(self.effective_to) is not date:
+                raise TypeError("effective_to must be a date value")
+            if self.effective_to <= self.effective_from:
+                raise ValueError("effective_to must be after effective_from")
+        if not isinstance(self.evidence_refs, tuple) or not self.evidence_refs:
+            raise ValueError("evidence_refs must be a non-empty tuple")
+        refs = tuple(_text(item, name="evidence_ref") for item in self.evidence_refs)
+        if len(refs) != len(set(refs)):
+            raise ValueError("evidence_refs must be unique")
+        object.__setattr__(self, "evidence_refs", refs)
+
+    def applies_on(self, trade_date: date) -> bool:
+        if type(trade_date) is not date:
+            raise TypeError("trade_date must be a date value")
+        return self.effective_from <= trade_date and (
+            self.effective_to is None or trade_date < self.effective_to
+        )
+
+    @property
+    def digest(self) -> str:
+        return payload_digest(
+            {
+                "schema_version": "1.0.0",
+                "rule_id": self.rule_id,
+                "rule_version": self.rule_version,
+                "provider_id": self.scope.provider_id,
+                "account_id": self.scope.account_id,
+                "environment": self.scope.environment,
+                "instrument_version": self.instrument_version,
+                "settlement_currency": self.settlement_currency,
+                "effective_from": self.effective_from.isoformat(),
+                "effective_to": (
+                    None if self.effective_to is None else self.effective_to.isoformat()
+                ),
+                "evidence_refs": list(self.evidence_refs),
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class SettlementObligation:
     obligation_id: str
     cause_event_id: str
@@ -52,6 +144,8 @@ class SettlementObligation:
     trade_date: date
     settlement_date: date
     component_id: str = "PRIMARY"
+    source_transaction_id: str | None = None
+    rule_binding: SettlementRuleBinding | None = None
 
     def __post_init__(self) -> None:
         obligation_id = _text(self.obligation_id, name="obligation_id")
@@ -70,6 +164,23 @@ class SettlementObligation:
         object.__setattr__(self, "component_id", component_id)
         object.__setattr__(self, "currency", currency)
         object.__setattr__(self, "amount", amount)
+        if self.source_transaction_id is not None:
+            object.__setattr__(
+                self,
+                "source_transaction_id",
+                _text(self.source_transaction_id, name="source_transaction_id"),
+            )
+        if self.rule_binding is not None:
+            if not isinstance(self.rule_binding, SettlementRuleBinding):
+                raise TypeError("rule_binding must be SettlementRuleBinding")
+            if self.rule_binding.settlement_currency != currency:
+                raise SettlementConflict(
+                    "settlement rule currency does not match obligation currency"
+                )
+            if not self.rule_binding.applies_on(self.trade_date):
+                raise SettlementConflict(
+                    "settlement rule was not effective on the trade date"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +276,68 @@ class SettlementSnapshot:
     @property
     def economic_cash(self) -> Decimal:
         return self.settled_cash + self.net_unsettled
+
+
+@dataclass(frozen=True, slots=True)
+class BuyingPowerEvidence:
+    """Provider-granted credit kept separate from legal cash settlement."""
+
+    evidence_id: str
+    scope: SettlementAccountScope
+    currency: str
+    additional_credit: Decimal
+    observed_at: datetime
+    valid_until: datetime
+    evidence_refs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "evidence_id", _text(self.evidence_id, name="evidence_id")
+        )
+        if not isinstance(self.scope, SettlementAccountScope):
+            raise TypeError("scope must be SettlementAccountScope")
+        object.__setattr__(
+            self, "currency", _text(self.currency, name="currency").upper()
+        )
+        credit = _decimal(self.additional_credit, name="additional_credit")
+        if credit < 0:
+            raise ValueError("additional_credit cannot be negative")
+        object.__setattr__(self, "additional_credit", credit)
+        observed = _utc(self.observed_at, name="observed_at")
+        valid_until = _utc(self.valid_until, name="valid_until")
+        if valid_until <= observed:
+            raise ValueError("valid_until must be after observed_at")
+        object.__setattr__(self, "observed_at", observed)
+        object.__setattr__(self, "valid_until", valid_until)
+        if not isinstance(self.evidence_refs, tuple) or not self.evidence_refs:
+            raise ValueError("evidence_refs must be a non-empty tuple")
+        refs = tuple(_text(item, name="evidence_ref") for item in self.evidence_refs)
+        if len(refs) != len(set(refs)):
+            raise ValueError("evidence_refs must be unique")
+        object.__setattr__(self, "evidence_refs", refs)
+
+
+@dataclass(frozen=True, slots=True)
+class CapitalAvailabilityProjection:
+    scope: SettlementAccountScope
+    currency: str
+    as_of: datetime
+    settled_cash: Decimal
+    unsettled_receivable: Decimal
+    unsettled_payable: Decimal
+    available_cash: Decimal
+    additional_buying_power: Decimal
+    available_capital: Decimal
+    overdue_obligation_ids: tuple[str, ...]
+    blocks_new_risk: bool
+
+    def reservation_resources(self) -> Mapping[str, Decimal]:
+        return {
+            f"CASH:{self.currency}": max(self.available_cash, Decimal("0")),
+            f"BUYING_POWER:{self.currency}": max(
+                self.available_capital, Decimal("0")
+            ),
+        }
 
 
 class SettlementBook:
@@ -457,6 +630,269 @@ class SettlementBook:
         # the same settlement obligation.
         available = snapshot.settled_cash - snapshot.unsettled_payable - locked
         return max(Decimal("0"), available)
+
+    @classmethod
+    def from_economic_book(
+        cls,
+        *,
+        economic_book: EconomicBook,
+        obligations: Iterable[SettlementObligation],
+        settled_obligation_evidence: Mapping[str, SettlementEvidence] | None = None,
+    ) -> "SettlementBook":
+        """Rebuild settled/unsettled cash from canonical economic transactions.
+
+        Generic EconomicBook cash is trade-date economic cash.  This constructor
+        removes every active bound settlement obligation to recover the settled
+        opening balance, then reapplies only immutable provider settlement
+        evidence.  Reversed/busted source transactions are excluded, so their
+        old settlement facts cannot release capital twice.
+        """
+
+        if not isinstance(economic_book, EconomicBook):
+            raise TypeError("economic_book must be an EconomicBook")
+        items = tuple(obligations)
+        by_transaction = {
+            transaction.transaction_id: transaction
+            for transaction in economic_book.transactions
+        }
+        reversed_ids = {
+            transaction.reverses_transaction_id
+            for transaction in economic_book.transactions
+            if transaction.reverses_transaction_id is not None
+        }
+
+        all_ids = {item.obligation_id for item in items}
+        evidence = dict(settled_obligation_evidence or {})
+        unknown_evidence = set(evidence) - all_ids
+        if unknown_evidence:
+            raise SettlementConflict(
+                "settlement evidence references an unknown obligation"
+            )
+
+        active: list[SettlementObligation] = []
+        currencies: set[str] = set()
+        for transaction in economic_book.transactions:
+            for posting in transaction.postings:
+                if (
+                    posting.ledger_account.startswith("CASH:")
+                    and posting.ledger_account == f"CASH:{posting.asset_or_currency}"
+                ):
+                    currencies.add(posting.asset_or_currency)
+
+        for obligation in items:
+            if obligation.source_transaction_id is None or obligation.rule_binding is None:
+                raise SettlementConflict(
+                    "economic-book settlement requires source transaction and rule binding"
+                )
+            transaction = by_transaction.get(obligation.source_transaction_id)
+            if transaction is None:
+                raise SettlementConflict(
+                    "settlement obligation references an unknown economic transaction"
+                )
+            if transaction.cause_event_id != obligation.cause_event_id:
+                raise SettlementConflict(
+                    "settlement obligation cause does not match source transaction"
+                )
+            currencies.add(obligation.currency)
+            if obligation.source_transaction_id in reversed_ids:
+                continue
+            cash_effect = sum(
+                (
+                    posting.signed_amount
+                    for posting in transaction.postings
+                    if posting.ledger_account == f"CASH:{obligation.currency}"
+                    and posting.asset_or_currency == obligation.currency
+                ),
+                Decimal("0"),
+            )
+            if cash_effect != obligation.amount:
+                raise SettlementConflict(
+                    "settlement obligation amount does not match source economic cash effect"
+                )
+            active.append(obligation)
+
+        active_ids = {item.obligation_id for item in active}
+        active_evidence = {
+            obligation_id: record
+            for obligation_id, record in evidence.items()
+            if obligation_id in active_ids
+        }
+        opening_cash = {
+            currency: economic_book.cash(currency)
+            - sum(
+                (
+                    item.amount
+                    for item in active
+                    if item.currency == currency
+                ),
+                Decimal("0"),
+            )
+            for currency in currencies
+        }
+        return cls.from_history(
+            checkpoint=SettlementCheckpoint.create(
+                checkpoint_id="economic-book-settlement-opening",
+                settled_cash=opening_cash,
+                settled_obligation_evidence={},
+            ),
+            obligations=active,
+            settled_obligation_evidence=active_evidence,
+        )
+
+    def available_capital(
+        self,
+        *,
+        scope: SettlementAccountScope,
+        currency: str,
+        as_of: datetime,
+        buying_power_evidence: BuyingPowerEvidence | None = None,
+        require_buying_power_evidence: bool = False,
+    ) -> CapitalAvailabilityProjection:
+        """Project spendable capital without treating receivables as cash."""
+
+        if not isinstance(scope, SettlementAccountScope):
+            raise TypeError("scope must be SettlementAccountScope")
+        unit = _text(currency, name="currency").upper()
+        point = _utc(as_of, name="as_of")
+        if not isinstance(require_buying_power_evidence, bool):
+            raise TypeError("require_buying_power_evidence must be boolean")
+
+        overdue: list[str] = []
+        for obligation in self._obligations.values():
+            if obligation.currency != unit:
+                continue
+            if obligation.source_transaction_id is None or obligation.rule_binding is None:
+                raise SettlementConflict(
+                    "available capital requires source-bound settlement obligations"
+                )
+            if obligation.rule_binding.scope != scope:
+                raise SettlementConflict(
+                    "settlement obligation account/provider scope differs from capital scope"
+                )
+            if (
+                obligation.obligation_id not in self._settled_ids
+                and point.date() > obligation.settlement_date
+            ):
+                overdue.append(obligation.obligation_id)
+
+        additional_credit = Decimal("0")
+        credit_unknown = False
+        if buying_power_evidence is not None:
+            if not isinstance(buying_power_evidence, BuyingPowerEvidence):
+                raise TypeError(
+                    "buying_power_evidence must be BuyingPowerEvidence"
+                )
+            if (
+                buying_power_evidence.scope != scope
+                or buying_power_evidence.currency != unit
+            ):
+                raise SettlementConflict(
+                    "buying-power evidence scope/currency mismatch"
+                )
+            if (
+                buying_power_evidence.observed_at
+                <= point
+                < buying_power_evidence.valid_until
+            ):
+                additional_credit = buying_power_evidence.additional_credit
+            elif require_buying_power_evidence:
+                credit_unknown = True
+        elif require_buying_power_evidence:
+            credit_unknown = True
+
+        snapshot = self.snapshot(unit)
+        available_cash = self.available_to_spend(unit)
+        blocks = bool(overdue) or credit_unknown
+        return CapitalAvailabilityProjection(
+            scope=scope,
+            currency=unit,
+            as_of=point,
+            settled_cash=snapshot.settled_cash,
+            unsettled_receivable=snapshot.unsettled_receivable,
+            unsettled_payable=snapshot.unsettled_payable,
+            available_cash=available_cash,
+            additional_buying_power=additional_credit,
+            available_capital=available_cash + additional_credit,
+            overdue_obligation_ids=tuple(sorted(overdue)),
+            blocks_new_risk=blocks,
+        )
+
+
+def equity_cash_obligation_from_transaction(
+    transaction: JournalTransaction,
+    *,
+    obligation_id: str,
+    instrument: str,
+    settlement_currency: str,
+    settlement_date: date,
+    rule_binding: SettlementRuleBinding,
+) -> SettlementObligation:
+    """Create exact settlement obligation from canonical booked fill economics."""
+
+    if not isinstance(transaction, JournalTransaction):
+        raise TypeError("transaction must be a JournalTransaction")
+    if transaction.economic_effective_at is None:
+        raise SettlementConflict(
+            "settlement-bound fill requires economic_effective_at"
+        )
+    terms = _canonical_equity_fill_terms(
+        transaction,
+        instrument=instrument,
+        settlement_currency=settlement_currency,
+    )
+    if terms is None:
+        raise SettlementConflict(
+            "settlement obligation requires canonical equity-fill postings"
+        )
+    unit = _text(settlement_currency, name="settlement_currency").upper()
+    try:
+        trade_instant = datetime.fromisoformat(
+            transaction.economic_effective_at.replace("Z", "+00:00")
+        )
+    except ValueError as error:
+        raise SettlementConflict(
+            "source transaction economic_effective_at is invalid"
+        ) from error
+    if trade_instant.tzinfo is None or trade_instant.utcoffset() is None:
+        raise SettlementConflict(
+            "source transaction economic_effective_at must be timezone-aware"
+        )
+    trade_date = trade_instant.astimezone(timezone.utc).date()
+    if not isinstance(rule_binding, SettlementRuleBinding):
+        raise TypeError("rule_binding must be SettlementRuleBinding")
+    if rule_binding.settlement_currency != unit:
+        raise SettlementConflict(
+            "settlement rule currency does not match source fill"
+        )
+    if not rule_binding.applies_on(trade_date):
+        raise SettlementConflict(
+            "settlement rule was not effective on source fill date"
+        )
+
+    amount = sum(
+        (
+            posting.signed_amount
+            for posting in transaction.postings
+            if posting.ledger_account == f"CASH:{unit}"
+            and posting.asset_or_currency == unit
+        ),
+        Decimal("0"),
+    )
+    if amount == 0:
+        raise SettlementConflict(
+            "source fill has no settlement-currency cash effect"
+        )
+    return SettlementObligation(
+        obligation_id=_text(obligation_id, name="obligation_id"),
+        cause_event_id=transaction.cause_event_id,
+        currency=unit,
+        amount=amount,
+        trade_date=trade_date,
+        settlement_date=settlement_date,
+        component_id="PRINCIPAL_AND_SAME_CURRENCY_FEE",
+        source_transaction_id=transaction.transaction_id,
+        rule_binding=rule_binding,
+    )
 
 
 def equity_cash_obligation(

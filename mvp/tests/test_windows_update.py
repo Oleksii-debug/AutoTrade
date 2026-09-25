@@ -343,6 +343,133 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             ],
         )
 
+    def test_post_start_update_barriers_match_canonical_recovery_sequence(self):
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=self.backup,
+            trust=self.trust,
+        )
+        payload = json.loads(plan.plan_json)
+        install = payload["install_steps"]
+        degraded = install.index("START_DEGRADED_NO_TRADING_AUTHORITY")
+        self.assertEqual(
+            install[degraded:],
+            [
+                "START_DEGRADED_NO_TRADING_AUTHORITY",
+                "VALIDATE_JOURNAL_STORAGE_CLOCK_SECURITY_IDENTITY",
+                "REESTABLISH_AUTHENTICATED_PROVIDER_SESSIONS",
+                "RUN_POST_UPDATE_RECONCILIATION",
+                "VERIFY_HOST_UI_COMPATIBILITY",
+                "ENTER_READY_FOR_SEPARATE_AUTHORITY_REACQUISITION",
+            ],
+        )
+        rollback = payload["rollback"]["steps"]
+        rollback_degraded = rollback.index("START_DEGRADED_NO_TRADING_AUTHORITY")
+        self.assertEqual(
+            rollback[rollback_degraded:],
+            [
+                "START_DEGRADED_NO_TRADING_AUTHORITY",
+                "VALIDATE_JOURNAL_STORAGE_CLOCK_SECURITY_IDENTITY",
+                "REESTABLISH_AUTHENTICATED_PROVIDER_SESSIONS",
+                "RUN_POST_RESTORE_RECONCILIATION",
+                "VERIFY_HOST_UI_COMPATIBILITY",
+                "ENTER_READY_FOR_SEPARATE_AUTHORITY_REACQUISITION",
+            ],
+        )
+
+    def test_post_start_reconciliation_cannot_skip_identity_or_session_barriers(self):
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=self.backup,
+            trust=self.trust,
+        )
+        checkpoint = start_update_checkpoint(plan, trust=self.trust)
+        payload = json.loads(plan.plan_json)
+        for step in payload["install_steps"]:
+            if step == "VALIDATE_JOURNAL_STORAGE_CLOCK_SECURITY_IDENTITY":
+                break
+            checkpoint = advance_update_checkpoint(
+                plan,
+                checkpoint,
+                step,
+                trust=self.trust,
+            )
+
+        with self.assertRaisesRegex(
+            WindowsUpdateError,
+            "out-of-order update step",
+        ):
+            advance_update_checkpoint(
+                plan,
+                checkpoint,
+                "REESTABLISH_AUTHENTICATED_PROVIDER_SESSIONS",
+                trust=self.trust,
+            )
+        with self.assertRaisesRegex(
+            WindowsUpdateError,
+            "out-of-order update step",
+        ):
+            advance_update_checkpoint(
+                plan,
+                checkpoint,
+                "RUN_POST_UPDATE_RECONCILIATION",
+                trust=self.trust,
+            )
+
+        checkpoint = advance_update_checkpoint(
+            plan,
+            checkpoint,
+            "VALIDATE_JOURNAL_STORAGE_CLOCK_SECURITY_IDENTITY",
+            trust=self.trust,
+        )
+        with self.assertRaisesRegex(
+            WindowsUpdateError,
+            "out-of-order update step",
+        ):
+            advance_update_checkpoint(
+                plan,
+                checkpoint,
+                "RUN_POST_UPDATE_RECONCILIATION",
+                trust=self.trust,
+            )
+
+    def test_authority_reacquisition_requires_host_ui_compatibility_barrier(self):
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=self.backup,
+            trust=self.trust,
+        )
+        checkpoint = start_update_checkpoint(plan, trust=self.trust)
+        payload = json.loads(plan.plan_json)
+        for step in payload["install_steps"]:
+            if step == "VERIFY_HOST_UI_COMPATIBILITY":
+                break
+            checkpoint = advance_update_checkpoint(
+                plan,
+                checkpoint,
+                step,
+                trust=self.trust,
+            )
+        with self.assertRaisesRegex(
+            WindowsUpdateError,
+            "out-of-order update step",
+        ):
+            advance_update_checkpoint(
+                plan,
+                checkpoint,
+                "ENTER_READY_FOR_SEPARATE_AUTHORITY_REACQUISITION",
+                trust=self.trust,
+            )
+
     def test_schema_change_without_verified_migration_is_blocked(self):
         decision = build_windows_update_plan(
             current_release=self.current,

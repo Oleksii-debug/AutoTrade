@@ -198,13 +198,13 @@ def _sqlite_schema_version(path: Path) -> int:
         raise BackupIntegrityError(
             "Durable journal schema migration history is not contiguous"
         )
-    if versions != list(range(1, latest + 1)):
-        raise BackupIntegrityError(
-            "Durable journal schema migration history is not contiguous"
-        )
     if latest > JournalStore.SCHEMA_VERSION:
         raise BackupCompatibilityError(
             f"Unsupported journal schema version: {latest}"
+        )
+    if versions != list(range(1, latest + 1)):
+        raise BackupIntegrityError(
+            "Durable journal schema migration history is not contiguous"
         )
     return latest
 

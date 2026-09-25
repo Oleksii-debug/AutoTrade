@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
+import subprocess
+from tempfile import TemporaryDirectory
 import unittest
 
 from control.tools.reconvergence_integrity import (
     Change,
     PROTECTED_SENTINELS,
+    assess_git_revisions,
     assess_reconvergence,
     parse_name_status,
 )
@@ -38,6 +42,78 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
 
         self.assertTrue(result.allowed)
         self.assertEqual(result.deletion_count, 1)
+
+
+    def test_full_tree_but_diverged_candidate_fails_closed(self):
+        result = assess_reconvergence(
+            base_paths=["README.md", "mvp/runtime.py"],
+            changes=[],
+            protected_sentinels=frozenset(),
+            base_is_ancestor=False,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertFalse(result.base_is_ancestor)
+        self.assertEqual(result.deletion_count, 0)
+        self.assertIn(
+            "head is not descended from exact base revision",
+            result.reasons,
+        )
+
+    def test_git_guard_rejects_identical_tree_without_base_ancestry(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "reconvergence-test@example.invalid")
+            git("config", "user.name", "Reconvergence Test")
+            (root / "README.md").write_text("root\n", encoding="utf-8")
+            git("add", "README.md")
+            git("commit", "-m", "root")
+            root_sha = git("rev-parse", "HEAD")
+
+            (root / "mvp").mkdir()
+            (root / "mvp" / "runtime.py").write_text(
+                "VALUE = 1\n",
+                encoding="utf-8",
+            )
+            git("add", "mvp/runtime.py")
+            git("commit", "-m", "accepted base")
+            base_sha = git("rev-parse", "HEAD")
+
+            git("checkout", "-b", "stale-rebuild", root_sha)
+            (root / "mvp").mkdir(exist_ok=True)
+            (root / "mvp" / "runtime.py").write_text(
+                "VALUE = 1\n",
+                encoding="utf-8",
+            )
+            git("add", "mvp/runtime.py")
+            git("commit", "-m", "same tree without base ancestry")
+            head_sha = git("rev-parse", "HEAD")
+
+            self.assertEqual(
+                git("rev-parse", f"{base_sha}^{{tree}}"),
+                git("rev-parse", f"{head_sha}^{{tree}}"),
+            )
+            result = assess_git_revisions(base_sha, head_sha)
+
+        self.assertFalse(result.allowed)
+        self.assertFalse(result.base_is_ancestor)
+        self.assertEqual(result.deletion_count, 0)
+        self.assertIn(
+            "head is not descended from exact base revision",
+            result.reasons,
+        )
 
     def test_protected_sentinel_deletion_fails_even_when_single_path(self):
         sentinel = "control/INDEX.json"

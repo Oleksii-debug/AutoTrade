@@ -93,6 +93,74 @@ def changed_existing_definitions(
     return changed
 
 
+
+HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "options", "head", "trace"})
+
+
+def openapi_operation_blocks(root: Path, manifest: dict) -> dict[tuple[str, str], tuple[str, ...]]:
+    """Extract the canonical OpenAPI operation surface without a YAML dependency.
+
+    The repository intentionally keeps a small, regular OpenAPI 3.1 document.
+    This scanner is fail-closed for that reviewed shape: paths use two-space
+    indentation, HTTP methods use four, and operation content is nested below.
+    Human-facing descriptions/comments are excluded from semantic comparison.
+    """
+
+    openapi = manifest.get("openapi")
+    if not isinstance(openapi, dict):
+        return {}
+    relative = openapi.get("path")
+    if not isinstance(relative, str) or not relative:
+        raise ValueError("manifest openapi.path must be non-empty text")
+    path = root / relative
+    lines = path.read_text(encoding="utf-8").splitlines()
+    try:
+        start = next(index for index, line in enumerate(lines) if line == "paths:")
+    except StopIteration as error:
+        raise ValueError("OpenAPI document must contain top-level paths") from error
+
+    operations: dict[tuple[str, str], list[str]] = {}
+    current_path: str | None = None
+    current_key: tuple[str, str] | None = None
+
+    for line in lines[start + 1 :]:
+        if line and not line.startswith(" ") and not line.lstrip().startswith("#"):
+            break
+        path_match = re.fullmatch(r"  (/[^:]+):\s*", line)
+        if path_match:
+            current_path = path_match.group(1)
+            current_key = None
+            continue
+
+        method_match = re.fullmatch(
+            r"    (" + "|".join(sorted(HTTP_METHODS)) + r"):\s*",
+            line,
+        )
+        if method_match:
+            if current_path is None:
+                raise ValueError("OpenAPI method appeared before a path")
+            current_key = (current_path, method_match.group(1))
+            if current_key in operations:
+                raise ValueError(f"duplicate OpenAPI operation: {current_key}")
+            operations[current_key] = []
+            continue
+
+        if current_key is None:
+            continue
+        if line.strip() == "" or line.lstrip().startswith("#"):
+            continue
+        if len(line) - len(line.lstrip(" ")) < 6:
+            current_key = None
+            continue
+        normalized = line.strip()
+        if normalized.startswith("description:"):
+            continue
+        operations[current_key].append(normalized)
+
+    if not operations:
+        raise ValueError("OpenAPI document must expose at least one operation")
+    return {key: tuple(value) for key, value in operations.items()}
+
 def evaluate(base_root: Path, current_root: Path) -> list[str]:
     base = load_manifest(base_root)
     current = load_manifest(current_root)
@@ -143,6 +211,32 @@ def evaluate(base_root: Path, current_root: Path) -> list[str]:
         errors.append(
             "changed existing contract definition requires a new major version "
             "unless compatibility is proved by a dedicated migration; " + details
+        )
+
+
+    base_operations = openapi_operation_blocks(base_root, base)
+    current_operations = openapi_operation_blocks(current_root, current)
+    removed_operations = sorted(set(base_operations) - set(current_operations))
+    changed_operations = sorted(
+        key
+        for key in set(base_operations) & set(current_operations)
+        if base_operations[key] != current_operations[key]
+    )
+    if (removed_operations or changed_operations) and current_version[0] <= base_version[0]:
+        details: list[str] = []
+        if removed_operations:
+            details.append(
+                "removed operations: "
+                + ", ".join(f"{method.upper()} {path}" for path, method in removed_operations)
+            )
+        if changed_operations:
+            details.append(
+                "changed operations: "
+                + ", ".join(f"{method.upper()} {path}" for path, method in changed_operations)
+            )
+        errors.append(
+            "breaking or unproved OpenAPI operation change requires a new major version; "
+            + "; ".join(details)
         )
 
     return errors

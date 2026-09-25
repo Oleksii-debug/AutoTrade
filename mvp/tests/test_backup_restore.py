@@ -184,6 +184,26 @@ class BackupRestoreTests(unittest.TestCase):
                 create_backup(state, artifacts, root / "backup")
             self.assertFalse((root / "backup").exists())
 
+    def test_resealed_backup_cannot_hide_logically_inconsistent_runtime_state(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            evidence_path = backup / "state" / "learning-evidence.jsonl"
+            row = json.loads(evidence_path.read_text(encoding="utf-8"))
+            row["risk_outcome"] = "tampered-after-backup"
+            evidence_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            _reseal_backup_manifest(backup)
+
+            with self.assertRaisesRegex(
+                BackupIntegrityError,
+                "not one consistent snapshot",
+            ):
+                verify_backup(backup)
+            with self.assertRaises(BackupIntegrityError):
+                restore_backup(backup, root / "must-not-restore")
+            self.assertFalse((root / "must-not-restore").exists())
+
     def test_missing_artifact_blob_invalidates_backup(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

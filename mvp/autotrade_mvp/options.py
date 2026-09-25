@@ -287,6 +287,8 @@ def interim_multi_leg_reservation(
 ) -> Decimal:
     """Reserve interim leg risk unless package atomicity is actually guaranteed."""
 
+    if type(atomic_package_guaranteed) is not bool:
+        raise OptionError("atomic_package_guaranteed must be a boolean")
     losses = tuple(_decimal(value, "leg worst-case loss") for value in leg_worst_case_losses)
     if not losses:
         raise OptionError("at least one leg loss is required")
@@ -690,4 +692,5 @@ def require_current_option_risk(
         raise OptionError("option risk market evidence is stale")
     if point - evidence.market_as_of > maximum_market_age:
         raise OptionError("option risk market evidence exceeds independent policy age")
+    _verify_option_risk_evidence(evidence, artifact_store)
 

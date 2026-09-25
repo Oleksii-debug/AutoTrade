@@ -254,7 +254,11 @@ class DurableModelBudget:
         request = {"request_id": request_id}
 
         def validate(candidate: BudgetLedger) -> None:
-            candidate.release(request_id)
+            candidate_released = candidate.release(request_id)
+            if candidate_released != released:
+                raise ValueError(
+                    "model budget release amount changed before commit"
+                )
 
         return self._commit(
             action="release",

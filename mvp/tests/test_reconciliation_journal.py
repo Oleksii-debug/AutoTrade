@@ -37,11 +37,18 @@ def snapshot(*, provider_id="TEST_PROVIDER", account_id="test-account", environm
     )
 
 
-def fill(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER"):
+def fill(
+    *,
+    provider_id="TEST_PROVIDER",
+    account_id="test-account",
+    environment="PAPER",
+    provider_environment=None,
+):
     return ProviderFillEvidence.create(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         provider_execution_id="e1",
         client_order_id="c1",
         instrument="ABC",
@@ -89,12 +96,14 @@ def reconciliation(**overrides):
     provider_id = values["provider_id"]
     account_id = values["account_id"]
     environment = values["environment"]
+    provider_environment = values.get("provider_environment")
     if "provider_fills" not in overrides:
         values["provider_fills"] = [
             fill(
                 provider_id=provider_id,
                 account_id=account_id,
                 environment=environment,
+                provider_environment=provider_environment,
             )
         ]
     if "snapshot_consistency" not in overrides:
@@ -111,6 +120,47 @@ def reconciliation(**overrides):
 
 
 class ReconciliationJournalTests(unittest.TestCase):
+    def test_provider_environment_is_durable_reconciliation_scope(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            result = reconciliation(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="provider-environment",
+                result=result,
+                observed_at="2026-09-24T19:00:01Z",
+                host_id="host-1",
+                owner_epoch="epoch-1",
+            )
+            self.assertEqual(
+                checkpoint["payload"]["provider_environment"],
+                "TESTNET",
+            )
+            loaded = load_latest_reconciliation_checkpoint(
+                store,
+                reconciliation_id="provider-environment",
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            self.assertEqual(loaded["event_id"], checkpoint["event_id"])
+            self.assertIsNone(
+                load_latest_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id="provider-environment",
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                )
+            )
+
     def test_scoped_checkpoint_identity_cannot_collide_on_separator_characters(self):
         left = _reconciliation_aggregate_id(
             reconciliation_id="rid",

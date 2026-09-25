@@ -1092,6 +1092,53 @@ class ReconciliationTests(unittest.TestCase):
         )
         self.assertTrue(result.complete)
 
+    def test_bybit_financial_truth_requires_canonical_provider_environment(self):
+        common = dict(
+            provider_id="BYBIT",
+            account_id="test-account",
+            environment="PAPER",
+            provider_execution_id="bybit-exec",
+            client_order_id="bybit-client",
+            instrument="BTCUSDT@v1",
+            quantity="1",
+            price="10",
+            fee_amount="0",
+            fee_currency="USDT",
+            trade_time="2026-09-24T18:00:00Z",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires explicit provider_environment",
+        ):
+            ProviderFillEvidence.create(**common)
+        with self.assertRaisesRegex(
+            ValueError,
+            "must be MAINNET, TESTNET or DEMO",
+        ):
+            ProviderFillEvidence.create(
+                **common,
+                provider_environment="PAPER",
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires explicit provider_environment",
+        ):
+            reconcile_account(
+                provider_id="BYBIT",
+                account_id="test-account",
+                environment="PAPER",
+                local_cash={},
+                provider_cash={},
+                local_positions={},
+                provider_positions={},
+                local_execution_ids=(),
+                provider_fills=(),
+                snapshot_consistency=None,
+                coverage_start="2026-09-24T17:00:00Z",
+                coverage_end="2026-09-24T19:00:00Z",
+                pagination_complete=True,
+            )
+
     def test_environment_scope_is_enforced_before_reconciliation(self):
         with self.assertRaisesRegex(ValueError, "fill evidence environment mismatch"):
             self.base(provider_fills=[fill(environment="LIVE")])

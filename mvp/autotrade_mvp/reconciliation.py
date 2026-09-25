@@ -424,6 +424,10 @@ class ProviderFillEvidence:
         )
         runtime_environment = _environment(self.environment)
         object.__setattr__(self, "environment", runtime_environment)
+        if self.provider_id == "BYBIT" and self.provider_environment is None:
+            raise ValueError(
+                "BYBIT fill evidence requires explicit provider_environment"
+            )
         provider_environment = (
             runtime_environment
             if self.provider_environment is None
@@ -432,6 +436,14 @@ class ProviderFillEvidence:
                 name="provider_environment",
             ).upper()
         )
+        if self.provider_id == "BYBIT" and provider_environment not in {
+            "MAINNET",
+            "TESTNET",
+            "DEMO",
+        }:
+            raise ValueError(
+                "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+            )
         object.__setattr__(
             self,
             "provider_environment",
@@ -752,6 +764,7 @@ class ReconciliationResult:
     provider_id: str
     account_id: str
     environment: str
+    provider_environment: str
     complete: bool
     matched_execution_ids: tuple[str, ...]
     unexpected_execution_ids: tuple[str, ...]
@@ -900,6 +913,10 @@ def reconcile_account(
     provider_scope = _text(provider_id, name="provider_id").upper()
     account_scope = _text(account_id, name="account_id")
     environment_scope = _environment(environment)
+    if provider_scope == "BYBIT" and provider_environment is None:
+        raise ValueError(
+            "BYBIT reconciliation requires explicit provider_environment"
+        )
     provider_environment_scope = (
         environment_scope
         if provider_environment is None
@@ -908,6 +925,14 @@ def reconcile_account(
             name="provider_environment",
         ).upper()
     )
+    if provider_scope == "BYBIT" and provider_environment_scope not in {
+        "MAINNET",
+        "TESTNET",
+        "DEMO",
+    }:
+        raise ValueError(
+            "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+        )
     if not isinstance(pagination_complete, bool):
         raise TypeError("pagination_complete must be boolean")
     if not isinstance(require_activity_reconciliation, bool):
@@ -1561,6 +1586,7 @@ def reconcile_account(
         provider_id=provider_scope,
         account_id=account_scope,
         environment=environment_scope,
+        provider_environment=provider_environment_scope,
         complete=complete,
         matched_execution_ids=matched,
         unexpected_execution_ids=unexpected,

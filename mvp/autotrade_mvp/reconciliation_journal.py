@@ -56,12 +56,26 @@ def _scope(
     )
 
 
+def _provider_environment(
+    value: str | None,
+    *,
+    environment: str,
+) -> str:
+    runtime_environment = _text(environment, name="environment").upper()
+    return (
+        runtime_environment
+        if value is None
+        else _text(value, name="provider_environment").upper()
+    )
+
+
 def _reconciliation_aggregate_id(
     *,
     reconciliation_id: str,
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> str:
     rid = _text(reconciliation_id, name="reconciliation_id")
     provider, account, scope = _scope(
@@ -69,7 +83,15 @@ def _reconciliation_aggregate_id(
         account_id=account_id,
         environment=environment,
     )
-    scoped_identity = canonical_json([provider, account, scope, rid])
+    provider_scope = _provider_environment(
+        provider_environment,
+        environment=scope,
+    )
+    identity_parts = [provider, account, scope]
+    if provider_scope != scope:
+        identity_parts.append(provider_scope)
+    identity_parts.append(rid)
+    scoped_identity = canonical_json(identity_parts)
     return "account-reconciliation:" + str(
         uuid5(
             NAMESPACE_URL,
@@ -85,6 +107,7 @@ def _require_checkpoint_scope(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> Mapping[str, Any]:
     payload = checkpoint.get("payload")
     if not isinstance(payload, Mapping):
@@ -100,6 +123,19 @@ def _require_checkpoint_scope(
         or payload.get("environment") != scope
     ):
         raise ValueError("checkpoint reconciliation scope mismatch")
+    if provider_environment is not None:
+        expected_provider_environment = _provider_environment(
+            provider_environment,
+            environment=scope,
+        )
+        actual_provider_environment = payload.get(
+            "provider_environment",
+            payload.get("environment"),
+        )
+        if actual_provider_environment != expected_provider_environment:
+            raise ValueError(
+                "checkpoint reconciliation provider_environment mismatch"
+            )
     return payload
 
 
@@ -127,6 +163,7 @@ def reconciliation_payload(
         "provider_id": result.provider_id,
         "account_id": result.account_id,
         "environment": result.environment,
+        "provider_environment": result.provider_environment,
         "observed_at": timestamp,
         "complete": result.complete,
         "snapshot_consistent": result.snapshot_consistent,
@@ -269,6 +306,7 @@ def record_reconciliation_checkpoint(
         provider_id=result.provider_id,
         account_id=result.account_id,
         environment=result.environment,
+        provider_environment=result.provider_environment,
     )
     existing = store.load_events("account_reconciliation", aggregate_id)
     if existing and existing[-1]["payload"] == payload:
@@ -320,6 +358,7 @@ def load_latest_reconciliation_checkpoint(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> dict[str, Any] | None:
     if not isinstance(store, JournalStore):
         raise TypeError("store must be JournalStore")
@@ -329,6 +368,7 @@ def load_latest_reconciliation_checkpoint(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     events = store.load_events("account_reconciliation", aggregate_id)
     if not events:
@@ -339,6 +379,7 @@ def load_latest_reconciliation_checkpoint(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     return event
 
@@ -349,6 +390,7 @@ def load_latest_reconciliation_checkpoint_for_scope(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the latest durably recorded reconciliation fact for one scope.
 
@@ -368,6 +410,14 @@ def load_latest_reconciliation_checkpoint_for_scope(
         account_id=account_id,
         environment=environment,
     )
+    provider_scope = (
+        None
+        if provider_environment is None
+        else _provider_environment(
+            provider_environment,
+            environment=scope,
+        )
+    )
     latest: dict[str, Any] | None = None
     latest_sequence = 0
     for event in store.load_events_by_aggregate_type("account_reconciliation"):
@@ -380,6 +430,14 @@ def load_latest_reconciliation_checkpoint_for_scope(
             payload.get("provider_id") != provider
             or payload.get("account_id") != account
             or payload.get("environment") != scope
+            or (
+                provider_scope is not None
+                and payload.get(
+                    "provider_environment",
+                    payload.get("environment"),
+                )
+                != provider_scope
+            )
         ):
             continue
         aggregate_version = event.get("aggregate_version")
@@ -413,6 +471,7 @@ def require_current_reconciliation_checkpoint(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> dict[str, Any]:
     """Fail closed unless an exact checkpoint is current scope-wide truth."""
 
@@ -422,6 +481,7 @@ def require_current_reconciliation_checkpoint(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     if latest is None:
         raise ValueError("no reconciliation checkpoint exists for account scope")
@@ -441,6 +501,7 @@ def load_reconciliation_checkpoint_for_readiness(
     environment: str,
     host_id: str,
     owner_epoch: str,
+    provider_environment: str | None = None,
 ) -> dict[str, Any] | None:
     """Return only a checkpoint eligible to authorize the current owner.
 
@@ -455,6 +516,7 @@ def load_reconciliation_checkpoint_for_readiness(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     if checkpoint is None:
         return None
@@ -463,12 +525,14 @@ def load_reconciliation_checkpoint_for_readiness(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     latest_scope_checkpoint = load_latest_reconciliation_checkpoint_for_scope(
         store,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     if (
         latest_scope_checkpoint is None

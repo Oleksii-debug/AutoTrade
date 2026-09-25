@@ -121,6 +121,8 @@ def verify_release_bundle(bundle: Path) -> dict[str, object]:
                 "release_eligible",
                 "trading_authority_granted_by_artifact",
                 "provenance_sha256",
+                "composition_sha256",
+                "composition",
                 "provenance_blockers",
                 "files",
             }
@@ -157,6 +159,23 @@ def verify_release_bundle(bundle: Path) -> dict[str, object]:
                 manifest.get("provenance_sha256"),
                 name="provenance_sha256",
             )
+            composition_sha256 = _digest(
+                manifest.get("composition_sha256"),
+                name="composition_sha256",
+            )
+            composition = manifest.get("composition")
+            if not isinstance(composition, dict):
+                raise InstallerManifestError(
+                    "release bundle composition evidence is missing"
+                )
+            if composition.get("product") != "AutoTrade":
+                raise InstallerManifestError(
+                    "release bundle composition product identity is invalid"
+                )
+            if composition.get("source_sha") != source_sha:
+                raise InstallerManifestError(
+                    "release bundle composition source_sha does not match bundle"
+                )
             files = manifest.get("files")
             if not isinstance(files, list) or not files:
                 raise InstallerManifestError("bundle file inventory is empty")

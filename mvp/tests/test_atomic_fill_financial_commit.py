@@ -1,4 +1,5 @@
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -8,7 +9,7 @@ from mvp.autotrade_mvp.accounting import (
     book_equity_fill,
 )
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
     commit_economic_batch_with_reservation_consumption,
@@ -226,16 +227,14 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
 
             component_key = (
                 "atomic-fill-reservation:"
-                + __import__("hashlib").sha256(
-                    __import__("json").dumps(
+                + sha256(
+                    canonical_json(
                         [
                             PROVIDER,
                             ACCOUNT,
                             ENVIRONMENT,
                             "fill-financial-idempotency-1",
-                        ],
-                        sort_keys=True,
-                        separators=(",", ":"),
+                        ]
                     ).encode("utf-8")
                 ).hexdigest()
             )

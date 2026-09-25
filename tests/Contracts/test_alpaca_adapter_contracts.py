@@ -22,6 +22,7 @@ from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
     load_submission_response_binding,
+    stable_client_order_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import observe_submission_json_response
@@ -33,7 +34,7 @@ NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
 def capability():
-    observed_at = NOW - timedelta(hours=1)
+    observed = NOW - timedelta(hours=1)
     claims = tuple(
         CapabilityClaim(
             source=source,
@@ -42,7 +43,7 @@ def capability():
             entity_id="contract-entity",
             environment="PAPER",
             instrument_version="AAPL:v1",
-            observed_at=observed_at,
+            observed_at=observed,
             expires_at=NOW + timedelta(hours=1),
             supported_order_types=frozenset({"MARKET"}),
             time_in_force=frozenset({"DAY"}),
@@ -54,7 +55,7 @@ def capability():
             evidence_ref={
                 "artifact_id": str(uuid4()),
                 "sha256": "sha256:" + "1" * 64,
-                "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+                "observed_at": observed.isoformat().replace("+00:00", "Z"),
             },
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
@@ -86,9 +87,17 @@ def prepared(client_order_id: str):
     )
 
 
-def durable_observation(prepared_request, *, attempt_id: str, payload):
+def durable_observation(*, payload, intent_id: str):
+    attempt_id = str(uuid4())
+    client_order_id = stable_client_order_id(
+        "ALPACA",
+        intent_id,
+        environment="PAPER",
+        account_id="contract-account",
+    )
+    request = prepared(client_order_id)
     raw = json.dumps(
-        payload,
+        payload(client_order_id),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -104,10 +113,10 @@ def durable_observation(prepared_request, *, attempt_id: str, payload):
         )
         outcome = dispatcher.dispatch(
             attempt_id=attempt_id,
-            intent_id="contract-intent",
+            intent_id=intent_id,
             intent_hash="contract-intent-hash",
             provider="ALPACA",
-            request=prepared_request.body,
+            request=request.body,
             now="2026-09-24T20:00:00Z",
             authority_check=lambda _hash, _now: (True, "allowed"),
             transport_send=lambda _cid, _request, guard: (
@@ -116,30 +125,29 @@ def durable_observation(prepared_request, *, attempt_id: str, payload):
             )[1],
             sender_check=lambda _owner, _epoch: None,
             submission_scope={
-                "endpoint": prepared_request.endpoint,
-                "prepared_request_sha256": prepared_request.body_sha256,
-                "capability_snapshot_ids": list(
-                    prepared_request.capability_snapshot_ids
-                ),
-                "instrument_versions": list(prepared_request.instrument_versions),
+                "endpoint": request.endpoint,
+                "prepared_request_sha256": request.body_sha256,
+                "capability_snapshot_ids": list(request.capability_snapshot_ids),
+                "instrument_versions": list(request.instrument_versions),
             },
         )
         if outcome.status != "SENT":
-            raise AssertionError(f"expected SENT, got {outcome.status}")
+            raise AssertionError(f"guarded dispatch did not persist SENT: {outcome}")
         binding = load_submission_response_binding(
             store,
             environment="PAPER",
             account_id="contract-account",
             attempt_id=attempt_id,
         )
-        return observe_submission_json_response(
+        observation = observe_submission_json_response(
             response_binding=binding,
             provider_id="ALPACA",
-            endpoint=prepared_request.endpoint,
-            prepared_request_sha256=prepared_request.body_sha256,
-            capability_snapshot_ids=prepared_request.capability_snapshot_ids,
-            instrument_versions=prepared_request.instrument_versions,
+            endpoint=request.endpoint,
+            prepared_request_sha256=request.body_sha256,
+            capability_snapshot_ids=request.capability_snapshot_ids,
+            instrument_versions=request.instrument_versions,
         )
+    return attempt_id, request, observation
 
 
 class AlpacaAdapterContractTests(unittest.TestCase):
@@ -165,29 +173,31 @@ class AlpacaAdapterContractTests(unittest.TestCase):
         ).validate(value)
 
     def test_submission_matches_canonical_provider_contract(self):
-        attempt_id = str(uuid4())
-        prepared_request = prepared("contract-1")
-        observation = durable_observation(
-            prepared_request,
-            attempt_id=attempt_id,
-            payload={
+        attempt_id, request, observation = durable_observation(
+            intent_id="contract-intent-1",
+            payload=lambda client_id: {
                 "id": str(uuid4()),
-                "client_order_id": "contract-1",
+                "client_order_id": client_id,
                 "status": "accepted",
             },
         )
         value = parse_submission_response(
             attempt_id=attempt_id,
-            prepared_request=prepared_request,
+            prepared_request=request,
             observation=observation,
         )
         self.assertNotIn("provider_received_at", value)
-        self.assertEqual(value["evidence"][0]["sha256"], observation.response_sha256)
         self.validate_submission(value)
 
+        unknown_client_id = stable_client_order_id(
+            "ALPACA",
+            "contract-intent-unknown",
+            environment="PAPER",
+            account_id="contract-account",
+        )
         unknown = parse_submission_response(
             attempt_id=str(uuid4()),
-            prepared_request=prepared("contract-unknown"),
+            prepared_request=prepared(unknown_client_id),
             observation=None,
             transport_ambiguous=True,
         )

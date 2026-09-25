@@ -335,10 +335,23 @@ class PopulationCoverageManifest:
 
     @property
     def complete(self) -> bool:
+        """True only when every eligible episode is actually scored.
+
+        Explicit exclusions remain immutable audit evidence, but this module
+        cannot independently prove that an arbitrary exclusion reason was
+        authorized by the frozen protocol.  Therefore exclusions fail closed
+        for terminal retention qualification until that authorization is
+        verified by a separate protocol-evidence boundary.
+        """
+
         accounted = set(self.included_episode_ids) | {
             episode_id for episode_id, _reason in self.exclusions
         }
-        return accounted == set(self.eligible_episode_ids)
+        return (
+            accounted == set(self.eligible_episode_ids)
+            and not self.exclusions
+            and set(self.included_episode_ids) == set(self.eligible_episode_ids)
+        )
 
 
 def build_population_coverage(

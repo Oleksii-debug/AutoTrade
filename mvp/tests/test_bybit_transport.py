@@ -49,6 +49,17 @@ def trade_handle(*, environment="PAPER", account_id="bybit-account"):
     )
 
 
+class BybitWriteRecordingWire(RecordingWire):
+    """Record the request while preserving Bybit's exact raw-response contract."""
+
+    def send(self, request):
+        self.events.append("wire")
+        self.requests.append(request)
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
 def prepared(client_order_id="bybit-order-1"):
     capability = write_capability(
         family="LINEAR_DERIVATIVES",
@@ -279,7 +290,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
             clock_millis=lambda: 1700000000000,
             clock_utc=clock_utc or (lambda: READ_AT),
             quota_gate=quota_gate,
-            wire_client=wire or RecordingWire(events),
+            wire_client=wire or BybitWriteRecordingWire(events),
         )
         return transport, resolver
 
@@ -333,7 +344,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
     def test_testnet_transport_binds_scope_quota_guard_and_one_send(self):
         capability, request = prepared()
         events = []
-        wire = RecordingWire(
+        wire = BybitWriteRecordingWire(
             events,
             response=b'{"retCode":0,"retMsg":"OK","result":{"orderId":"provider-1","orderLinkId":"bybit-order-1"}}',
         )

@@ -641,6 +641,50 @@ class AllocationTests(unittest.TestCase):
                 expected_return_rate=0.01,
             )
 
+    def test_objective_stress_penalty_prefers_lower_tail_loss_subset(self):
+        result = allocate_objective_targets(
+            [
+                ObjectiveCandidate.create(
+                    symbol="LOW_STRESS",
+                    desired_notional="1000",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.10",
+                ),
+                ObjectiveCandidate.create(
+                    symbol="HIGH_STRESS",
+                    desired_notional="1000",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.10",
+                ),
+            ],
+            self.policy(
+                cash_available="3000",
+                max_gross_notional="3000",
+                max_net_notional="3000",
+                max_symbol_notional="3000",
+                max_stress_loss="1000",
+                stress_loss_penalty_rate="1",
+                require_adverse_stress_evidence=False,
+            ),
+            stress_scenarios={
+                "joint_down": {
+                    "LOW_STRESS": "-0.01",
+                    "HIGH_STRESS": "-0.20",
+                }
+            },
+        )
+        self.assertEqual(result.allocation.status, "ALLOCATED")
+        self.assertEqual(result.selected_symbols, ("LOW_STRESS",))
+        self.assertEqual(result.allocation.worst_stress_loss, Decimal("10"))
+        self.assertEqual(result.expected_net_utility, Decimal("90"))
+        self.assertEqual(result.objective_version, "deterministic-net-utility-v3")
+
+    def test_stress_loss_penalty_rejects_binary_float(self):
+        with self.assertRaises(TypeError):
+            self.policy(stress_loss_penalty_rate=0.5)
+
     def test_objective_selection_preserves_stress_constraints(self):
         result = allocate_objective_targets(
             [
@@ -822,7 +866,7 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result.allocation.status, "ALLOCATED")
         self.assertEqual(result.selected_symbols, ("CHEAP",))
         self.assertEqual(result.expected_net_utility, Decimal("50"))
-        self.assertEqual(result.objective_version, "deterministic-net-utility-v2")
+        self.assertEqual(result.objective_version, "deterministic-net-utility-v3")
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,7 +5,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from mvp.autotrade_mvp.accounting import (\n    AccountingConflict,\n    EconomicBook,\n    book_equity_fill,\n    project_equity_position,\n)
+from mvp.autotrade_mvp.accounting import (
+    AccountingConflict,
+    EconomicBook,
+    book_equity_fill,
+    project_equity_position,
+)
 from mvp.autotrade_mvp.corporate_action_accounting import (
     commit_authoritative_corporate_action,
 )

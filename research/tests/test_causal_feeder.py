@@ -314,6 +314,8 @@ class CausalFeederTests(unittest.TestCase):
         with self.assertRaisesRegex(CausalReplayError, "future event"):
             CausalDataView(
                 simulation_time=datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc),
+                manifest_sha256=MANIFEST,
+                dataset_sha256="sha256:" + ("2" * 64),
                 events=(future,),
             )
 
@@ -325,19 +327,53 @@ class CausalFeederTests(unittest.TestCase):
         with self.assertRaisesRegex(CausalReplayError, "duplicate event"):
             CausalDataView(
                 simulation_time=simulation_time,
+                manifest_sha256=MANIFEST,
+                dataset_sha256="sha256:" + ("2" * 64),
                 events=(first, first),
             )
         with self.assertRaisesRegex(CausalReplayError, "deterministic causal order"):
             CausalDataView(
                 simulation_time=simulation_time,
+                manifest_sha256=MANIFEST,
+                dataset_sha256="sha256:" + ("2" * 64),
                 events=(second, first),
             )
 
         valid = CausalDataView(
             simulation_time=simulation_time,
+            manifest_sha256=MANIFEST,
+            dataset_sha256="sha256:" + ("2" * 64),
             events=(first, second),
         )
         self.assertEqual(valid.events, (first, second))
+
+    def test_view_digest_binds_dataset_cutoff_and_resume_equivalence(self):
+        dataset = CausalDataset.create(
+            manifest_sha256=MANIFEST,
+            events=[
+                event("one", available_at="2026-01-01T10:00:00Z", sequence=1),
+                event("two", available_at="2026-01-01T10:01:00Z", sequence=2),
+            ],
+        )
+        feeder = CausalFeeder(dataset, start_time="2026-01-01T10:00:00Z")
+        first_view = feeder.view()
+        checkpoint = feeder.checkpoint()
+
+        self.assertEqual(first_view.manifest_sha256, dataset.manifest_sha256)
+        self.assertEqual(first_view.dataset_sha256, dataset.dataset_sha256)
+
+        resumed = CausalFeeder.restore(dataset=dataset, checkpoint=checkpoint)
+        self.assertEqual(resumed.view().digest, first_view.digest)
+
+        feeder.advance_to("2026-01-01T10:01:00Z")
+        later_view = feeder.view()
+        self.assertNotEqual(later_view.digest, first_view.digest)
+
+        same_events_later_cutoff = CausalFeeder(
+            CausalDataset.create(manifest_sha256=MANIFEST, events=[dataset.events[0]]),
+            start_time="2026-01-01T10:00:30Z",
+        ).view()
+        self.assertNotEqual(same_events_later_cutoff.digest, first_view.digest)
 
     def test_restore_rejects_tampered_published_prefix(self):
         dataset = CausalDataset.create(

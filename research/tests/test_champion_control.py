@@ -417,5 +417,95 @@ class ChampionRegistryTests(unittest.TestCase):
             )
 
 
+    def test_promotion_retry_after_response_loss_is_idempotent(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            candidate = approval(science)
+            first = registry.promote(
+                candidate,
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            retry = registry.promote(
+                candidate,
+                expected_generation=0,
+                now=BASE + timedelta(seconds=1),
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            self.assertEqual(retry, first)
+            self.assertEqual(len(registry.history()), 1)
+
+    def test_same_generation_retry_with_changed_request_conflicts(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            candidate = approval(science)
+            registry.promote(
+                candidate,
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            with self.assertRaises(PromotionConflict):
+                registry.promote(
+                    candidate,
+                    expected_generation=0,
+                    now=BASE + timedelta(seconds=1),
+                    open_position_count=0,
+                    existing_position_policy="changed-policy",
+                )
+
+    def test_rollback_retry_after_response_loss_is_idempotent(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            registry.promote(
+                approval(science, "candidate-a"),
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            registry.promote(
+                approval(science, "candidate-b"),
+                expected_generation=1,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            first = registry.rollback(
+                target_generation=1,
+                expected_generation=2,
+                now=BASE,
+                open_position_count=1,
+                existing_position_policy="manage-under-original-exit-owner",
+            )
+            retry = registry.rollback(
+                target_generation=1,
+                expected_generation=2,
+                now=BASE + timedelta(seconds=1),
+                open_position_count=1,
+                existing_position_policy="manage-under-original-exit-owner",
+            )
+            self.assertEqual(retry, first)
+            self.assertEqual(
+                [row["action"] for row in registry.history()],
+                ["PROMOTE", "PROMOTE", "ROLLBACK"],
+            )
+
 if __name__ == "__main__":
     unittest.main()

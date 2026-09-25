@@ -131,7 +131,7 @@ class ExportBoundaryTests(unittest.TestCase):
         self.assertFalse(verify_prepared_export(forged))
         with TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ExportBoundaryError, "integrity"):
-                write_prepared_export(forged, directory)
+                write_prepared_export(forged, directory, rights={"export": True, "rights_id": "rights:test"})
 
     def test_duplicate_serialized_secret_key_cannot_hide_raw_value(self):
         export = self.prepare({"authorization": "safe-placeholder"})
@@ -190,10 +190,27 @@ class ExportBoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(ExportBoundaryError, "hard limit"):
             self.prepare({"x": 1}, maximum_items=100_001)
 
+    def test_publication_rechecks_export_rights_and_identity(self):
+        export = self.prepare({"value": "ok"})
+        with TemporaryDirectory() as directory:
+            with self.assertRaises(PermissionError):
+                write_prepared_export(
+                    export,
+                    directory,
+                    rights={"export": False, "rights_id": "rights:test"},
+                )
+            with self.assertRaisesRegex(PermissionError, "rights identity"):
+                write_prepared_export(
+                    export,
+                    directory,
+                    rights={"export": True, "rights_id": "rights:other"},
+                )
+            self.assertFalse((Path(directory) / export.filename).exists())
+
     def test_atomic_write_stays_under_caller_directory(self):
         export = self.prepare({"value": "ok"}, filename="safe.json")
         with TemporaryDirectory() as directory:
-            target = write_prepared_export(export, directory)
+            target = write_prepared_export(export, directory, rights={"export": True, "rights_id": "rights:test"})
             self.assertEqual(target, Path(directory) / "safe.json")
             self.assertEqual(target.read_bytes(), export.data)
             self.assertEqual(

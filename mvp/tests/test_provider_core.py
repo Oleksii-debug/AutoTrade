@@ -15,6 +15,8 @@ from mvp.autotrade_mvp.provider_core import (
 
 
 NOW = datetime(2026, 9, 24, 18, tzinfo=timezone.utc)
+SOURCE_SHA = "3cae63fac37820611cddd38128a91185cb271fff"
+OTHER_SHA = "1" * 40
 
 
 class ProviderCoreTests(unittest.TestCase):
@@ -37,38 +39,63 @@ class ProviderCoreTests(unittest.TestCase):
             provider_id="BYBIT",
             product_family="SPOT",
             environment="TEST",
-            adapter_code_sha="abc123",
+            adapter_code_sha=SOURCE_SHA,
             documentation_ref="official-docs-snapshot",
             observed_at=NOW,
             expires_at=NOW + timedelta(days=30),
             passed_cases=REQUIRED_QUALIFICATION_CASES,
         )
         self.assertEqual(
-            evidence.status(now=NOW + timedelta(days=1), exact_code_sha="abc123"),
+            evidence.status(now=NOW + timedelta(days=1), exact_code_sha=SOURCE_SHA),
             "QUALIFIED_FOR_NONLIVE",
         )
         self.assertEqual(
-            evidence.status(now=NOW + timedelta(days=1), exact_code_sha="other"),
+            evidence.status(now=NOW + timedelta(days=1), exact_code_sha=OTHER_SHA),
             "CODE_MISMATCH",
         )
         self.assertEqual(
-            evidence.status(now=NOW + timedelta(days=31), exact_code_sha="abc123"),
+            evidence.status(now=NOW + timedelta(days=31), exact_code_sha=SOURCE_SHA),
             "EXPIRED",
         )
+
+    def test_qualification_rejects_noncanonical_or_short_code_identity(self):
+        with self.assertRaisesRegex(ProviderCoreError, "exact 40-character"):
+            QualificationEvidence(
+                provider_id="BYBIT",
+                product_family="SPOT",
+                environment="TEST",
+                adapter_code_sha="abc123",
+                documentation_ref="official-docs-snapshot",
+                observed_at=NOW,
+                expires_at=NOW + timedelta(days=1),
+                passed_cases=REQUIRED_QUALIFICATION_CASES,
+            )
+        evidence = QualificationEvidence(
+            provider_id="BYBIT",
+            product_family="SPOT",
+            environment="TEST",
+            adapter_code_sha=SOURCE_SHA,
+            documentation_ref="official-docs-snapshot",
+            observed_at=NOW,
+            expires_at=NOW + timedelta(days=1),
+            passed_cases=REQUIRED_QUALIFICATION_CASES,
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "exact 40-character"):
+            evidence.status(now=NOW, exact_code_sha=SOURCE_SHA.upper())
 
     def test_incomplete_qualification_fails_closed(self):
         evidence = QualificationEvidence(
             provider_id="ALPACA",
             product_family="EQUITIES",
             environment="PAPER",
-            adapter_code_sha="sha",
+            adapter_code_sha=SOURCE_SHA,
             documentation_ref="docs",
             observed_at=NOW,
             expires_at=NOW + timedelta(days=1),
             passed_cases=frozenset({"metadata", "authentication"}),
         )
         self.assertEqual(
-            evidence.status(now=NOW, exact_code_sha="sha"),
+            evidence.status(now=NOW, exact_code_sha=SOURCE_SHA),
             "INCOMPLETE",
         )
 

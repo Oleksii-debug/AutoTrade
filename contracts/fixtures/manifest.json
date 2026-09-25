@@ -1,5 +1,5 @@
 {
-  "corpus_version": "1.0.0",
+  "corpus_version": "2.0.0",
   "fixtures": [
     {
       "path": "dataset-manifest.valid.json",
@@ -36,6 +36,18 @@
       "schema": "ui.schema.json",
       "definition": "UiCommand",
       "expected": "valid"
+    },
+    {
+      "path": "ui-command.legacy-unscoped.invalid.json",
+      "schema": "ui.schema.json",
+      "definition": "UiCommand",
+      "expected": "invalid"
+    },
+    {
+      "path": "ui-command.bad-environment.invalid.json",
+      "schema": "ui.schema.json",
+      "definition": "UiCommand",
+      "expected": "invalid"
     }
   ],
   "conformance_corpora": [

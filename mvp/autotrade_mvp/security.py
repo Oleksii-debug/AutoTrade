@@ -63,6 +63,7 @@ class SecurityBoundary:
 
     _ROLES = {"OWNER", "OPERATOR", "RESEARCHER", "OBSERVER"}
     _EXECUTION_ROLES = {"OWNER", "OPERATOR"}
+    _CREDENTIAL_PURPOSES = {"READ", "TRADE"}
 
     def __init__(
         self,
@@ -144,8 +145,10 @@ class SecurityBoundary:
         normalized_purpose = _required_text(purpose, name="purpose").upper()
         if not isinstance(secret_value, str) or not secret_value:
             raise ValueError("Secret value must not be empty")
-        if normalized_purpose in {"WITHDRAWAL", "TRANSFER", "EXTERNAL_TRANSFER"}:
-            raise PermissionError("Withdrawal and external-transfer credentials are unsupported")
+        if normalized_purpose not in self._CREDENTIAL_PURPOSES:
+            raise PermissionError(
+                "Only READ and TRADE credential purposes are supported"
+            )
         handle_id = "cred_" + secrets.token_hex(16)
         handle = CredentialHandle(
             handle_id=handle_id,

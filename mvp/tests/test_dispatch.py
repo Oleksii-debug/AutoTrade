@@ -112,8 +112,11 @@ class DispatchTests(unittest.TestCase):
             )
             self.assertEqual(len(paper_events), 3)
             self.assertEqual(len(live_events), 3)
-            self.assertTrue(all(event["environment"] == "PAPER" for event in paper_events))
-            self.assertTrue(all(event["environment"] == "LIVE" for event in live_events))
+            self.assertEqual(paper_events[0]["payload"]["environment"], "PAPER")
+            self.assertEqual(paper_events[0]["payload"]["account_id"], "acct")
+            self.assertEqual(live_events[0]["payload"]["environment"], "LIVE")
+            self.assertEqual(live_events[0]["payload"]["account_id"], "acct")
+            self.assertNotEqual(paper_events[0]["aggregate_id"], live_events[0]["aggregate_id"])
 
     def test_success_uses_final_barrier_and_persists_three_states(self):
         with TemporaryDirectory() as directory:

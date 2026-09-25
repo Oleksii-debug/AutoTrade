@@ -14,6 +14,21 @@ from research.autotrade_research.memory.episodes import (
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
+def correction_evidence_time(evidence_ref: str) -> datetime:
+    overrides = {
+        "artifact:parent-a": BASE + timedelta(seconds=1),
+        "artifact:later-correction": BASE + timedelta(days=2),
+    }
+    return overrides.get(evidence_ref, BASE)
+
+
+def memory(path: Path) -> ExperienceMemory:
+    return ExperienceMemory(
+        path,
+        correction_evidence_resolver=correction_evidence_time,
+    )
+
+
 def payload(outcome="flat"):
     return {
         "evidence_refs": ["artifact:abc"],
@@ -27,7 +42,7 @@ def payload(outcome="flat"):
 class ExperienceMemoryTests(unittest.TestCase):
     def test_duplicate_episode_is_idempotent(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             identifier = "00000000-0000-0000-0000-000000000001"
             first, inserted = store.append_episode(
                 episode_id=identifier,
@@ -55,7 +70,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_episode_identity_uses_canonical_text_fields(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             identifier = "00000000-0000-0000-0000-000000000077"
             first, inserted = store.append_episode(
                 episode_id=identifier,
@@ -89,7 +104,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_episode_identity_cannot_be_destructively_upserted(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             identifier = "00000000-0000-0000-0000-000000000001"
             kwargs = dict(
                 episode_id=identifier,
@@ -106,7 +121,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_correction_preserves_old_truth_and_appends_lineage(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             episode, _ = store.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -141,7 +156,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_correction_supersedes_fields_are_semantically_bound(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             episode, _ = store.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -182,7 +197,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_correction_cannot_claim_to_supersede_absent_source_field(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             episode, _ = store.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -208,7 +223,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_correction_cannot_introduce_unsuperseded_historical_field(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             episode, _ = store.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -235,7 +250,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_correction_retry_without_explicit_availability_is_idempotent(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             episode, _ = store.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -265,10 +280,10 @@ class ExperienceMemoryTests(unittest.TestCase):
             self.assertFalse(inserted_again)
             self.assertEqual(first, second)
 
-    def test_legacy_correction_hash_remains_idempotent_after_schema_migration(self):
+    def test_legacy_correction_availability_requires_explicit_recovery(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "memory.sqlite3"
-            store = ExperienceMemory(path)
+            store = memory(path)
             episode, _ = store.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -293,21 +308,27 @@ class ExperienceMemoryTests(unittest.TestCase):
             from research.autotrade_research.memory.episodes import _hash
             with store._connect() as con:
                 con.execute(
-                    "UPDATE corrections SET correction_hash=?, available_at=NULL WHERE correction_id=?",
+                    """
+                    UPDATE corrections
+                    SET correction_hash=?, available_at=NULL, availability_authority=NULL
+                    WHERE correction_id=?
+                    """,
                     (_hash(correction), correction_id),
                 )
 
-            reopened = ExperienceMemory(path)
-            same_id, inserted_again = reopened.append_correction(
-                episode,
-                correction_id=correction_id,
-                payload=correction,
-            )
-            self.assertEqual(same_id, correction_id)
-            self.assertFalse(inserted_again)
+            reopened = memory(path)
             with self.assertRaisesRegex(
                 MemoryIntegrityError,
-                "legacy correction lacks episode-bound integrity",
+                "legacy correction availability lacks independent provenance",
+            ):
+                reopened.append_correction(
+                    episode,
+                    correction_id=correction_id,
+                    payload=correction,
+                )
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "legacy correction availability lacks independent provenance",
             ):
                 reopened.retrieve(
                     information_cutoff=BASE,
@@ -317,7 +338,7 @@ class ExperienceMemoryTests(unittest.TestCase):
     def test_correction_parent_rewrite_fails_integrity_verification(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "memory.sqlite3"
-            store = ExperienceMemory(path)
+            store = memory(path)
             episode_a, _ = store.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -351,7 +372,7 @@ class ExperienceMemoryTests(unittest.TestCase):
                     (episode_b, correction_id),
                 )
 
-            reopened = ExperienceMemory(path)
+            reopened = memory(path)
             with self.assertRaisesRegex(
                 MemoryIntegrityError,
                 "correction integrity mismatch",
@@ -363,7 +384,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_correction_cannot_be_backdated_before_episode_decision(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             episode, _ = store.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -387,9 +408,159 @@ class ExperienceMemoryTests(unittest.TestCase):
                     },
                 )
 
-    def test_future_correction_is_not_visible_before_its_evidenced_availability(self):
+    def test_explicit_historical_availability_requires_independent_evidence(self):
         with TemporaryDirectory() as directory:
             store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("pending"),
+            )
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "independent correction evidence resolver is unavailable",
+            ):
+                store.append_correction(
+                    episode,
+                    available_at=BASE,
+                    payload={
+                        "supersedes_fields": ["outcome"],
+                        "outcome": {"label": "backdated-without-authority"},
+                        "evidence_ref": "artifact:unverified-history",
+                    },
+                )
+
+    def test_explicit_availability_must_match_resolved_evidence_time(self):
+        with TemporaryDirectory() as directory:
+            store = ExperienceMemory(
+                Path(directory) / "memory.sqlite3",
+                correction_evidence_resolver=lambda _ref: BASE + timedelta(days=1),
+            )
+            episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("pending"),
+            )
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "does not match independently verified evidence",
+            ):
+                store.append_correction(
+                    episode,
+                    available_at=BASE,
+                    payload={
+                        "supersedes_fields": ["outcome"],
+                        "outcome": {"label": "false-early-truth"},
+                        "evidence_ref": "artifact:later-truth",
+                    },
+                )
+
+    def test_evidence_backed_availability_is_reverified_after_restart(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.sqlite3"
+            first = memory(path)
+            episode, _ = first.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("pending"),
+            )
+            first.append_correction(
+                episode,
+                available_at=BASE,
+                payload={
+                    "supersedes_fields": ["outcome"],
+                    "outcome": {"label": "verified"},
+                    "evidence_ref": "artifact:restart-evidence",
+                },
+            )
+
+            without_authority = ExperienceMemory(path)
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "independent correction evidence resolver is unavailable",
+            ):
+                without_authority.retrieve(
+                    information_cutoff=BASE,
+                    granted_permissions={"research"},
+                )
+
+            wrong_authority = ExperienceMemory(
+                path,
+                correction_evidence_resolver=lambda _ref: BASE + timedelta(seconds=1),
+            )
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "does not match independently verified evidence",
+            ):
+                wrong_authority.retrieve(
+                    information_cutoff=BASE,
+                    granted_permissions={"research"},
+                )
+
+            verified = memory(path).retrieve(
+                information_cutoff=BASE,
+                granted_permissions={"research"},
+            )
+            self.assertEqual(
+                verified[0]["corrections"][0]["outcome"]["label"],
+                "verified",
+            )
+
+    def test_local_append_availability_is_append_time_and_needs_no_resolver(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.sqlite3"
+            store = ExperienceMemory(path)
+            episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("pending"),
+            )
+            correction_id, _ = store.append_correction(
+                episode,
+                payload={
+                    "supersedes_fields": ["outcome"],
+                    "outcome": {"label": "observed-now"},
+                    "evidence_ref": "artifact:local-observation",
+                },
+            )
+            with store._connect() as con:
+                row = con.execute(
+                    "SELECT created_at,available_at,availability_authority "
+                    "FROM corrections WHERE correction_id=?",
+                    (correction_id,),
+                ).fetchone()
+            self.assertEqual(row["availability_authority"], "LOCAL_APPEND")
+            self.assertEqual(row["available_at"], row["created_at"])
+
+            reopened = ExperienceMemory(path)
+            items = reopened.retrieve(
+                information_cutoff=datetime.now(timezone.utc) + timedelta(seconds=1),
+                granted_permissions={"research"},
+            )
+            self.assertEqual(
+                items[0]["corrections"][0]["outcome"]["label"],
+                "observed-now",
+            )
+
+    def test_future_correction_is_not_visible_before_its_evidenced_availability(self):
+        with TemporaryDirectory() as directory:
+            store = memory(Path(directory) / "memory.sqlite3")
             episode, _ = store.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -427,7 +598,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_default_correction_availability_is_append_time_not_historical_episode_time(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             episode, _ = store.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -453,7 +624,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_episode_payload_tamper_fails_closed_on_source_and_retrieve(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             episode, _ = store.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -488,7 +659,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_episode_metadata_tamper_cannot_hide_row_from_filtered_retrieval(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             episode, _ = store.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -512,7 +683,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_episode_hash_tamper_fails_closed(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             episode, _ = store.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -537,7 +708,7 @@ class ExperienceMemoryTests(unittest.TestCase):
     def test_correction_payload_and_hash_tamper_fail_closed(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "memory.sqlite3"
-            store = ExperienceMemory(path)
+            store = memory(path)
             episode, _ = store.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -567,7 +738,7 @@ class ExperienceMemoryTests(unittest.TestCase):
                     granted_permissions={"research"},
                 )
 
-            clean = ExperienceMemory(Path(directory) / "second.sqlite3")
+            clean = memory(Path(directory) / "second.sqlite3")
             episode2, _ = clean.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -597,10 +768,44 @@ class ExperienceMemoryTests(unittest.TestCase):
                     granted_permissions={"research"},
                 )
 
+    def test_correction_availability_authority_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.sqlite3"
+            store = memory(path)
+            episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("pending"),
+            )
+            correction_id, _ = store.append_correction(
+                episode,
+                available_at=BASE,
+                payload={
+                    "supersedes_fields": ["outcome"],
+                    "outcome": {"label": "verified"},
+                    "evidence_ref": "artifact:authority-tamper",
+                },
+            )
+            with store._connect() as con:
+                con.execute(
+                    "UPDATE corrections SET availability_authority='LOCAL_APPEND' "
+                    "WHERE correction_id=?",
+                    (correction_id,),
+                )
+            with self.assertRaises(MemoryIntegrityError):
+                store.retrieve(
+                    information_cutoff=BASE,
+                    granted_permissions={"research"},
+                )
+
     def test_verified_correction_survives_reopen(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "memory.sqlite3"
-            first = ExperienceMemory(path)
+            first = memory(path)
             episode, _ = first.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -619,7 +824,7 @@ class ExperienceMemoryTests(unittest.TestCase):
                     "evidence_ref": "artifact:reopen",
                 },
             )
-            reopened = ExperienceMemory(path)
+            reopened = memory(path)
             item = reopened.retrieve(
                 information_cutoff=BASE,
                 granted_permissions={"research"},
@@ -630,7 +835,7 @@ class ExperienceMemoryTests(unittest.TestCase):
     def test_tombstone_tamper_and_unverified_legacy_null_fail_closed(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "memory.sqlite3"
-            store = ExperienceMemory(path)
+            store = memory(path)
             episode, _ = store.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -653,7 +858,7 @@ class ExperienceMemoryTests(unittest.TestCase):
                     include_tombstoned=True,
                 )
 
-            second = ExperienceMemory(Path(directory) / "legacy.sqlite3")
+            second = memory(Path(directory) / "legacy.sqlite3")
             episode2, _ = second.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -669,7 +874,7 @@ class ExperienceMemoryTests(unittest.TestCase):
                     "UPDATE tombstones SET tombstone_hash=NULL WHERE episode_id=?",
                     (episode2,),
                 )
-            reopened = ExperienceMemory(Path(directory) / "legacy.sqlite3")
+            reopened = memory(Path(directory) / "legacy.sqlite3")
             with reopened._connect() as con:
                 persisted = con.execute(
                     "SELECT tombstone_hash FROM tombstones WHERE episode_id=?",
@@ -688,7 +893,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_negative_and_no_trade_episodes_remain_visible(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             negative = payload("loss")
             negative["intended_action"] = {"side": "SELL"}
             no_trade = payload("no-trade")
@@ -722,7 +927,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_source_episode_cannot_bypass_cutoff_permission_or_tombstone(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             episode, _ = store.append_episode(
                 decision_time=BASE + timedelta(hours=1),
                 information_cutoff=BASE + timedelta(minutes=30),
@@ -771,7 +976,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_tombstone_access_flag_requires_real_boolean(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             episode, _ = store.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -792,7 +997,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_permission_context_rejects_noncanonical_tokens(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             store.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -815,7 +1020,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_tombstone_hides_episode_but_keeps_auditable_record(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             episode, _ = store.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -839,7 +1044,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_permission_filter_blocks_sensitive_episode(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             store.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -861,7 +1066,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_information_cutoff_prevents_future_memory_leakage(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             future = BASE + timedelta(days=1)
             store.append_episode(
                 decision_time=future,
@@ -879,7 +1084,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_future_decision_with_old_information_cutoff_is_not_retrieved_early(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             future = BASE + timedelta(days=2)
             store.append_episode(
                 decision_time=future,
@@ -901,7 +1106,7 @@ class ExperienceMemoryTests(unittest.TestCase):
     def test_reopen_preserves_episode(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "memory.sqlite3"
-            first = ExperienceMemory(path)
+            first = memory(path)
             episode, _ = first.append_episode(
                 decision_time=BASE,
                 information_cutoff=BASE,
@@ -911,7 +1116,7 @@ class ExperienceMemoryTests(unittest.TestCase):
                 permission_class="research",
                 payload=payload(),
             )
-            second = ExperienceMemory(path)
+            second = memory(path)
             self.assertEqual(second.source_episode(
                 episode,
                 information_cutoff=BASE,
@@ -921,7 +1126,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
     def test_binary_float_economics_are_rejected_before_immutable_memory_write(self):
         with TemporaryDirectory() as directory:
-            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            store = memory(Path(directory) / "memory.sqlite3")
             bad_episode = payload("candidate")
             bad_episode["costs"] = {"fees": 0.1}
             with self.assertRaisesRegex(TypeError, "binary float"):

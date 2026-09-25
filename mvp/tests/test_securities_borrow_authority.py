@@ -22,10 +22,13 @@ from mvp.autotrade_mvp.reservations import InsufficientAvailable
 from mvp.autotrade_mvp.risk import RiskContext, RiskIntent, RiskPolicy
 from mvp.autotrade_mvp.securities_borrow import (
     BorrowAvailabilityEvidence,
+    BorrowRecallEvidence,
+    BorrowRecallResolutionEvidence,
     borrow_resource_key,
     incremental_short_borrow_quantity,
 )
 from mvp.tests.securities_borrow_evidence_helpers import (
+    EvidencedBorrowRecallProjection,
     artifact_store_for,
     bind_provider_evidence,
 )
@@ -341,6 +344,95 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                     reserved="-50",
                 )
             self.assertEqual(reservations.total_reserved(key), Decimal("50"))
+
+    def test_recall_after_admission_blocks_final_dispatch_until_provider_resolution(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = _authority(store)
+            checkpoint = _checkpoint(store)
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            admitted = _admit_short(
+                authority,
+                reservations,
+                checkpoint,
+                suffix="dispatch-recall",
+                reserved=None,
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+            dispatch_args = dict(
+                admission_id=admitted.admission_id,
+                intent_hash="sha256:" + ("a" * 64),
+                account_id=ACCOUNT_ID,
+                environment=ENVIRONMENT,
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                capability_snapshot_id="borrow-capability-1",
+            )
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    **dispatch_args,
+                    now="2026-09-25T05:01:05Z",
+                ),
+                (True, "allowed"),
+            )
+            projection = EvidencedBorrowRecallProjection(
+                store,
+                provider_id=PROVIDER_ID,
+                account_id=ACCOUNT_ID,
+                environment=ENVIRONMENT,
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+            )
+            projection.record_recall(
+                BorrowRecallEvidence(
+                    recall_id="dispatch-recall-1",
+                    provider_id=PROVIDER_ID,
+                    account_id=ACCOUNT_ID,
+                    environment=ENVIRONMENT,
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    provider_revision="dispatch-recall-r1",
+                    quantity="2",
+                    observed_at="2026-09-25T05:01:20Z",
+                    effective_at="2026-09-25T05:01:10Z",
+                    evidence_ref="provider:dispatch-recall-r1",
+                )
+            )
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    **dispatch_args,
+                    now="2026-09-25T05:01:30Z",
+                ),
+                (False, "borrow_recall_active"),
+            )
+            projection.resolve_recall(
+                BorrowRecallResolutionEvidence(
+                    resolution_id="dispatch-resolution-1",
+                    recall_id="dispatch-recall-1",
+                    provider_id=PROVIDER_ID,
+                    account_id=ACCOUNT_ID,
+                    environment=ENVIRONMENT,
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    provider_revision="dispatch-recall-r2",
+                    resolved_quantity="2",
+                    observed_at="2026-09-25T05:01:45Z",
+                    effective_at="2026-09-25T05:01:40Z",
+                    evidence_ref="provider:dispatch-recall-r2",
+                )
+            )
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    **dispatch_args,
+                    now="2026-09-25T05:02:00Z",
+                ),
+                (True, "allowed"),
+            )
 
     def test_equity_short_cannot_use_boolean_borrow_without_exact_resource(self):
         with TemporaryDirectory() as directory:

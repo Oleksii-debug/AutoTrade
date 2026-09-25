@@ -330,5 +330,55 @@ class EvaluationGateTests(unittest.TestCase):
             )
 
 
+    def test_multi_trial_protocol_cannot_register_noop_multiplicity_treatment(self):
+        for correction in ("none", "UNADJUSTED", "disabled", "n/a"):
+            with self.subTest(correction=correction):
+                with self.assertRaisesRegex(ValueError, "multiplicity treatment"):
+                    GateProfile.create(
+                        profile_id="bad-multiplicity",
+                        minimum_net_advantage="0.01",
+                        max_drawdown="0.10",
+                        max_adverse_cost_loss="0.03",
+                        min_power="0.80",
+                        primary_baseline_id="champion",
+                        baseline_ids=("champion",),
+                        selection_correction=correction,
+                        max_trials=2,
+                        required_regimes=("normal",),
+                    )
+
+        with self.assertRaisesRegex(ValueError, "multiplicity treatment"):
+            GateProfile(
+                profile_id="direct-bad-multiplicity",
+                minimum_net_advantage="0.01",
+                max_drawdown="0.10",
+                max_adverse_cost_loss="0.03",
+                min_power="0.80",
+                primary_baseline_id="champion",
+                baseline_ids=("champion",),
+                selection_correction="none",
+                max_trials=2,
+                required_regimes=("normal",),
+                require_complete_trials=True,
+                require_causal_audit=True,
+                require_financial_invariants=True,
+            )
+
+    def test_single_trial_protocol_may_explicitly_register_no_adjustment(self):
+        single = GateProfile.create(
+            profile_id="single-trial",
+            minimum_net_advantage="0.01",
+            max_drawdown="0.10",
+            max_adverse_cost_loss="0.03",
+            min_power="0.80",
+            primary_baseline_id="champion",
+            baseline_ids=("champion",),
+            selection_correction="none",
+            max_trials=1,
+            required_regimes=("normal",),
+        )
+        self.assertEqual(single.selection_correction, "none")
+
+
 if __name__ == "__main__":
     unittest.main()

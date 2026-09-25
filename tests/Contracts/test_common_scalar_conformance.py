@@ -5,7 +5,10 @@ import unittest
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
-from contracts.bindings.python.common_scalars import (\n    CONTRACT_VERSION,\n    is_valid_common_scalar,\n)
+from contracts.bindings.python.common_scalars import (
+    CONTRACT_VERSION,
+    is_valid_common_scalar,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -29,7 +32,12 @@ class CommonScalarConformanceTests(unittest.TestCase):
             self.corpus["contract_version"],
             self.manifest["contract_version"],
         )
-        self.assertEqual(self.corpus["corpus_version"], self.manifest["contract_version"])
+        self.assertEqual(CONTRACT_VERSION, self.manifest["contract_version"])
+        self.assertEqual(self.corpus["contract_version"], CONTRACT_VERSION)
+        self.assertEqual(self.corpus["corpus_version"], CONTRACT_VERSION)
+        base = self.manifest["schema_base_uri"].rstrip("/") + "/"
+        self.assertEqual(self.common["$id"], base + "common.schema.json")
+        self.assertEqual(base.rstrip("/").split("/")[-1], CONTRACT_VERSION)
         self.assertEqual(self.corpus["scope"], "common-scalar-subset")
 
     def test_python_binding_and_json_schema_accept_identical_corpus(self):

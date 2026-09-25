@@ -674,6 +674,35 @@ class ContractVersionGuardTests(unittest.TestCase):
                 any("removed OpenAPI security schemes: Unused" in item for item in errors)
             )
 
+    def test_openapi_block_scope_list_is_multi_item_and_order_insensitive(self):
+        schemes = {
+            "OAuth": {"type": "oauth2", "in": "header", "name": "Authorization"},
+        }
+
+        def write_scoped(root: Path, version: str, scopes: list[str]) -> None:
+            write_tree(root, version=version)
+            write_openapi(
+                root,
+                version,
+                [("/v1/state", "get", "../jsonschema/a.schema.json#/$defs/A")],
+                default_security=[["OAuth"]],
+                security_schemes=schemes,
+            )
+            path = root / "contracts" / "openapi" / "host-api.yaml"
+            text = path.read_text(encoding="utf-8")
+            replacement = "  - OAuth:\n" + "\n".join(
+                f"      - {scope}" for scope in scopes
+            )
+            path.write_text(
+                text.replace("  - OAuth: []", replacement),
+                encoding="utf-8",
+            )
+
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_scoped(Path(left), "1.0.0", ["orders:read", "fills:read"])
+            write_scoped(Path(right), "1.0.1", ["fills:read", "orders:read"])
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
     def test_openapi_health_security_override_is_operation_semantics(self):
         schemes = {
             "AutoTradeSession": {"type": "apiKey", "in": "header", "name": "Authorization"},

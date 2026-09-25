@@ -123,6 +123,17 @@ def reconciliation_payload(
         "observed_at": timestamp,
         "complete": result.complete,
         "snapshot_consistent": result.snapshot_consistent,
+        "provider_cash": _decimal_map(result.provider_cash),
+        "provider_positions": _decimal_map(result.provider_positions),
+        "snapshot": (
+            {
+                "mode": result.snapshot_mode,
+                "query_started_at": result.snapshot_query_started_at,
+                "query_completed_at": result.snapshot_query_completed_at,
+            }
+            if result.snapshot_mode is not None
+            else None
+        ),
         "matched_execution_ids": list(result.matched_execution_ids),
         "unexpected_execution_ids": list(result.unexpected_execution_ids),
         "missing_local_execution_ids": list(result.missing_local_execution_ids),
@@ -447,6 +458,147 @@ def load_submission_resolution_evidence(
         "evidence_reason": _text(item.get("evidence_reason"), name="evidence_reason"),
         "provider_order_ids": provider_order_ids,
         "provider_execution_ids": provider_execution_ids,
+    }
+
+
+def load_account_resource_availability_evidence(
+    store: JournalStore,
+    *,
+    checkpoint_event_id: str,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    resources: Iterable[str],
+    now: str,
+    max_age_seconds: Decimal | str | int,
+) -> dict[str, Any]:
+    """Return exact cash availability from one fresh, complete provider snapshot.
+
+    The reconciliation checkpoint is the authority. Callers may choose which
+    resource keys they need, but may not supply the numeric availability. Only
+    CASH resources are exposed until canonical provider semantics exist for
+    margin, borrow and position-availability resources.
+    """
+
+    if not isinstance(store, JournalStore):
+        raise TypeError("store must be JournalStore")
+    event_id = _text(checkpoint_event_id, name="checkpoint_event_id")
+    checkpoint = store.get_event(event_id)
+    if checkpoint is None:
+        raise KeyError(f"Unknown reconciliation checkpoint event: {event_id}")
+    if (
+        checkpoint.get("event_type") != "AccountReconciled"
+        or checkpoint.get("aggregate_type") != "account_reconciliation"
+    ):
+        raise ValueError("availability evidence requires AccountReconciled checkpoint")
+
+    payload = _require_checkpoint_scope(
+        checkpoint,
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
+    if (
+        payload.get("complete") is not True
+        or payload.get("snapshot_consistent") is not True
+        or payload.get("blocking_resources") != []
+    ):
+        raise ValueError(
+            "availability evidence requires complete non-blocking reconciliation"
+        )
+
+    snapshot = payload.get("snapshot")
+    if not isinstance(snapshot, Mapping):
+        raise ValueError("availability evidence requires snapshot timing")
+    completed_text = _instant(
+        snapshot.get("query_completed_at"),
+        name="snapshot.query_completed_at",
+    )
+    now_text = _instant(now, name="now")
+    completed = datetime.fromisoformat(completed_text.replace("Z", "+00:00"))
+    current = datetime.fromisoformat(now_text.replace("Z", "+00:00"))
+    if current < completed:
+        raise ValueError("availability checkpoint cannot be from the future")
+
+    if isinstance(max_age_seconds, bool) or isinstance(max_age_seconds, float):
+        raise TypeError("max_age_seconds must use Decimal, string or integer input")
+    try:
+        max_age = (
+            max_age_seconds
+            if isinstance(max_age_seconds, Decimal)
+            else Decimal(max_age_seconds)
+        )
+    except Exception as error:
+        raise ValueError("max_age_seconds must be a finite decimal") from error
+    if not max_age.is_finite() or max_age < 0:
+        raise ValueError("max_age_seconds must be a non-negative finite decimal")
+    delta = current - completed
+    age_microseconds = (
+        (delta.days * 86400 + delta.seconds) * 1_000_000
+        + delta.microseconds
+    )
+    age_seconds = Decimal(age_microseconds) / Decimal(1_000_000)
+    if age_seconds > max_age:
+        raise ValueError("availability checkpoint is stale")
+
+    raw_cash = payload.get("provider_cash")
+    if not isinstance(raw_cash, Mapping):
+        raise ValueError("availability checkpoint lacks provider cash truth")
+    provider_cash: dict[str, Decimal] = {}
+    for raw_currency, raw_amount in raw_cash.items():
+        currency = _text(raw_currency, name="provider_cash currency")
+        if isinstance(raw_amount, bool) or isinstance(raw_amount, float):
+            raise TypeError("provider cash must use exact decimal encoding")
+        try:
+            amount = Decimal(raw_amount)
+        except Exception as error:
+            raise ValueError("provider cash must be a finite decimal") from error
+        if not amount.is_finite():
+            raise ValueError("provider cash must be a finite decimal")
+        provider_cash[currency] = amount
+
+    requested = tuple(_text(value, name="resource") for value in resources)
+    if not requested or len(requested) != len(set(requested)):
+        raise ValueError("resources must be non-empty and unique")
+    availability: dict[str, Decimal] = {}
+    for resource in requested:
+        if not resource.startswith("CASH:"):
+            raise ValueError(
+                "resource availability semantics are not canonically supported"
+            )
+        currency = _text(resource.removeprefix("CASH:"), name="cash currency")
+        if currency not in provider_cash:
+            raise ValueError("provider snapshot does not contain requested cash resource")
+        amount = provider_cash[currency]
+        if amount < 0:
+            raise ValueError("negative provider cash cannot authorize new reservation")
+        availability[resource] = amount
+
+    aggregate_version = checkpoint.get("aggregate_version")
+    if type(aggregate_version) is not int or aggregate_version <= 0:
+        raise ValueError("checkpoint aggregate_version must be a positive integer")
+    return {
+        "checkpoint_event_id": event_id,
+        "checkpoint_payload_hash": _text(
+            checkpoint.get("payload_hash"),
+            name="payload_hash",
+        ),
+        "checkpoint_aggregate_id": _text(
+            checkpoint.get("aggregate_id"),
+            name="aggregate_id",
+        ),
+        "checkpoint_aggregate_version": aggregate_version,
+        "provider_id": _text(payload.get("provider_id"), name="provider_id").upper(),
+        "account_id": _text(payload.get("account_id"), name="account_id"),
+        "environment": _text(payload.get("environment"), name="environment").upper(),
+        "snapshot_mode": _text(snapshot.get("mode"), name="snapshot.mode").upper(),
+        "snapshot_query_completed_at": completed_text,
+        "observed_at": _instant(payload.get("observed_at"), name="observed_at"),
+        "age_seconds": str(age_seconds),
+        "availability": {
+            resource: str(amount)
+            for resource, amount in sorted(availability.items())
+        },
     }
 
 def unresolved_attempt_ids_from_checkpoint(

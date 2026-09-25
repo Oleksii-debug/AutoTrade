@@ -99,6 +99,7 @@ def _install_risk_resolver(authority, *, context, risk_policy):
             authority_policy_id=request.authority_policy_id,
             authority_policy_version=request.authority_policy_version,
             evaluated_at=request.evaluated_at,
+            valid_until="2026-09-24T18:05:00Z",
             evidence_refs={
                 dimension: f"test:{dimension.lower()}"
                 for dimension in (

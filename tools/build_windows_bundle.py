@@ -149,9 +149,9 @@ def _entry_metadata(relative: str, data: bytes) -> dict[str, object]:
 
 
 def _canonical_digest(value: object, *, name: str) -> str:
-    digest = _required_text(value, name=name).lower()
+    digest = _required_text(value, name=name)
     if CANONICAL_SHA256.fullmatch(digest) is None:
-        raise BundleError(f"{name} must be a canonical sha256: digest")
+        raise BundleError(f"{name} must be a canonical lowercase sha256: digest")
     return digest
 
 
@@ -268,6 +268,16 @@ def _load_composition(
             runtime["minimum_windows_version"], name="minimum Windows version"
         ),
     }
+    expected_rid = {
+        "x64": "win-x64",
+        "arm64": "win-arm64",
+    }.get(normalized_runtime["architecture"])
+    if expected_rid is None:
+        raise BundleError("composition runtime architecture must be x64 or arm64")
+    if normalized_runtime["runtime_identifier"] != expected_rid:
+        raise BundleError(
+            "composition runtime_identifier does not match runtime architecture"
+        )
 
     components_raw = value["components"]
     if not isinstance(components_raw, list) or not components_raw:
@@ -309,15 +319,34 @@ def _load_composition(
                 f"composition digest does not match staged file: {relative}"
             )
 
+    dependency_lock_sha256 = _canonical_digest(
+        value["dependency_lock_sha256"],
+        name="dependency_lock_sha256",
+    )
+    sbom_sha256 = _canonical_digest(value["sbom_sha256"], name="sbom_sha256")
+    by_kind: dict[str, list[dict[str, str]]] = {}
+    for component in components:
+        by_kind.setdefault(component["kind"], []).append(component)
+    for kind, expected_digest in (
+        ("dependency-lock", dependency_lock_sha256),
+        ("sbom", sbom_sha256),
+    ):
+        matching = by_kind.get(kind, [])
+        if len(matching) != 1:
+            raise BundleError(
+                f"composition requires exactly one {kind} component"
+            )
+        if matching[0]["sha256"] != expected_digest:
+            raise BundleError(
+                f"composition {kind} digest does not match declared component"
+            )
+
     normalized = {
         "schema_version": "1.0.0",
         "product": "AutoTrade",
         "source_sha": composition_sha,
-        "dependency_lock_sha256": _canonical_digest(
-            value["dependency_lock_sha256"],
-            name="dependency_lock_sha256",
-        ),
-        "sbom_sha256": _canonical_digest(value["sbom_sha256"], name="sbom_sha256"),
+        "dependency_lock_sha256": dependency_lock_sha256,
+        "sbom_sha256": sbom_sha256,
         "schema_compatibility": normalized_schema_range,
         "runtime": normalized_runtime,
         "components": sorted(components, key=lambda item: item["path"]),

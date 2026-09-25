@@ -104,13 +104,22 @@ def persist_authority_snapshot(
     event_id = event_id.strip()
     state = service.export_state()
     existing = store.get_event(event_id)
+    checked_previous_version: int | None = None
     # An immutable event-id replay is a lost-reply retry, not a new authority
     # publication. Let JournalStore compare the reconstructed envelope exactly;
     # only a genuinely new event must extend the latest durable snapshot.
     if existing is None:
         existing_events = store.load_events(AUTHORITY_AGGREGATE_TYPE, authority_id)
         if existing_events:
-            previous_payload = existing_events[-1].get("payload")
+            previous_event = existing_events[-1]
+            checked_previous_version = previous_event.get("aggregate_version")
+            if (
+                isinstance(checked_previous_version, bool)
+                or not isinstance(checked_previous_version, int)
+                or checked_previous_version < 1
+            ):
+                raise ValueError("latest authority aggregate version is invalid")
+            previous_payload = previous_event.get("payload")
             previous_state = (
                 previous_payload.get("state")
                 if isinstance(previous_payload, dict)
@@ -127,7 +136,7 @@ def persist_authority_snapshot(
     aggregate_version = (
         existing["aggregate_version"]
         if existing is not None
-        else store.next_aggregate_version(AUTHORITY_AGGREGATE_TYPE, authority_id)
+        else (1 if checked_previous_version is None else checked_previous_version + 1)
     )
     envelope = {
         "event_id": event_id,

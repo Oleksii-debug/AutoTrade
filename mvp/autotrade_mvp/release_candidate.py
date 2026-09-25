@@ -12,7 +12,13 @@ from dataclasses import dataclass
 from hashlib import sha256
 import json
 import re
-from typing import Callable, Sequence
+from typing import Sequence
+from uuid import UUID
+
+from research.autotrade_research.artifacts.store import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+)
 
 
 class ReleaseCandidateError(ValueError):
@@ -41,6 +47,8 @@ _SIGNATURE_STATUSES = frozenset(
     {"VERIFIED", "NOT_APPLICABLE", "MISSING", "INVALID"}
 )
 _EVIDENCE_STATUSES = frozenset({"PASS", "FAIL", "INCONCLUSIVE"})
+_RELEASE_ARTIFACT_MEDIA_TYPE = "application/vnd.autotrade.release-artifact"
+_RELEASE_EVIDENCE_KIND = "AUTOTRADE_RELEASE_EVIDENCE_V1"
 
 
 def _text(value: str, *, name: str) -> str:
@@ -58,6 +66,14 @@ def _git_sha(value: str, *, name: str) -> str:
     return text
 
 
+def _artifact_id(value: str, *, name: str) -> str:
+    text = _text(value, name=name)
+    try:
+        return str(UUID(text))
+    except (ValueError, AttributeError, TypeError) as error:
+        raise ReleaseCandidateError(f"{name} must be a UUID") from error
+
+
 def _sha256(value: str, *, name: str) -> str:
     text = _text(value, name=name)
     if text != text.lower() or _SHA256.fullmatch(text) is None:
@@ -70,6 +86,7 @@ def _sha256(value: str, *, name: str) -> str:
 @dataclass(frozen=True)
 class ReleaseArtifactEvidence:
     role: str
+    artifact_id: str
     artifact_sha256: str
     source_sha: str
     signature_status: str
@@ -96,6 +113,11 @@ class ReleaseArtifactEvidence:
         object.__setattr__(self, "role", role)
         object.__setattr__(
             self,
+            "artifact_id",
+            _artifact_id(self.artifact_id, name="artifact_id"),
+        )
+        object.__setattr__(
+            self,
             "artifact_sha256",
             _sha256(self.artifact_sha256, name="artifact_sha256"),
         )
@@ -112,6 +134,7 @@ class ReleaseArtifactEvidence:
         cls,
         *,
         role: str,
+        artifact_id: str,
         artifact_sha256: str,
         source_sha: str,
         signature_status: str,
@@ -136,6 +159,7 @@ class ReleaseArtifactEvidence:
             )
         return cls(
             role=normalized_role,
+            artifact_id=_artifact_id(artifact_id, name="artifact_id"),
             artifact_sha256=_sha256(
                 artifact_sha256,
                 name="artifact_sha256",
@@ -305,6 +329,7 @@ def _canonical_manifest(candidate: ReleaseCandidateInput) -> str:
         "artifacts": [
             {
                 "role": artifact.role,
+                "artifact_id": artifact.artifact_id,
                 "artifact_sha256": artifact.artifact_sha256,
                 "source_sha": artifact.source_sha,
                 "signature_status": artifact.signature_status,
@@ -325,26 +350,62 @@ def _canonical_manifest(candidate: ReleaseCandidateInput) -> str:
     )
 
 
+def _stored_evidence_is_verified(
+    store: ArtifactStore,
+    artifact: ReleaseArtifactEvidence,
+) -> bool:
+    """Resolve one exact release artifact through the trusted immutable store."""
+
+    try:
+        manifest = store.load_manifest(artifact.artifact_id)
+        if not isinstance(manifest.get("manifest_hash"), str):
+            return False
+        if manifest.get("sha256") != artifact.artifact_sha256:
+            return False
+        if manifest.get("media_type") != _RELEASE_ARTIFACT_MEDIA_TYPE:
+            return False
+        if manifest.get("source_refs") != [f"git:{artifact.source_sha}"]:
+            return False
+        if manifest.get("metadata") != {
+            "evidence_kind": _RELEASE_EVIDENCE_KIND,
+            "role": artifact.role,
+            "source_sha": artifact.source_sha,
+            "signature_status": artifact.signature_status,
+            "evidence_status": artifact.evidence_status,
+        }:
+            return False
+        store.read_bytes(artifact.artifact_id)
+    except (
+        ArtifactIntegrityError,
+        FileNotFoundError,
+        OSError,
+        TypeError,
+        ValueError,
+    ):
+        return False
+    return True
+
+
 def freeze_release_candidate(
     candidate: ReleaseCandidateInput,
     *,
-    verify_evidence: Callable[[ReleaseArtifactEvidence], bool] | None = None,
+    evidence_store: ArtifactStore | None = None,
 ) -> ReleaseCandidateDecision:
     """Freeze exact accepted evidence or fail closed without an RC manifest.
 
-    PASS and VERIFIED fields are evidence claims, not proof by themselves.
-    A release candidate can freeze only when an independent verifier resolves
-    every exact artifact record successfully.
+    PASS and VERIFIED fields are claims, not proof. The exact artifact id,
+    digest, source SHA and release-evidence metadata must resolve through the
+    configured immutable ArtifactStore before a release candidate can freeze.
     """
 
     if not isinstance(candidate, ReleaseCandidateInput):
         raise TypeError("candidate must be ReleaseCandidateInput")
-    if verify_evidence is not None and not callable(verify_evidence):
-        raise TypeError("verify_evidence must be callable")
+    if evidence_store is not None and not isinstance(evidence_store, ArtifactStore):
+        raise TypeError("evidence_store must be ArtifactStore")
 
     reasons: list[str] = []
-    if verify_evidence is None:
-        reasons.append("independent_evidence_verifier_missing")
+    if evidence_store is None:
+        reasons.append("trusted_evidence_store_missing")
     by_role = {artifact.role: artifact for artifact in candidate.artifacts}
 
     for role in sorted(_REQUIRED_ROLES - set(by_role)):
@@ -358,15 +419,13 @@ def freeze_release_candidate(
         elif artifact.evidence_status == "INCONCLUSIVE":
             reasons.append(f"evidence_inconclusive:{artifact.role}")
 
-        if verify_evidence is not None:
-            try:
-                independently_verified = verify_evidence(artifact)
-            except Exception:
-                independently_verified = False
-            if independently_verified is not True:
-                reasons.append(
-                    f"evidence_not_independently_verified:{artifact.role}"
-                )
+        if (
+            evidence_store is not None
+            and not _stored_evidence_is_verified(evidence_store, artifact)
+        ):
+            reasons.append(
+                f"evidence_not_independently_verified:{artifact.role}"
+            )
         if (
             artifact.role not in _SIGNED_BINARY_ROLES
             and artifact.signature_status in {"MISSING", "INVALID"}

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -17,6 +18,7 @@ def activity(
     *,
     provider_id="ALPACA",
     account_id="paper-1",
+    environment="PAPER",
     activity_id="cash-1",
     activity_type="DEPOSIT",
     origin="EXTERNAL",
@@ -26,10 +28,12 @@ def activity(
     client_order_id=None,
     provider_order_id=None,
     provider_execution_id=None,
+    signed_amount=None,
 ):
     return ProviderActivityEvidence.create(
         provider_id=provider_id,
         account_id=account_id,
+        environment=environment,
         activity_id=activity_id,
         activity_type=activity_type,
         origin=origin,
@@ -39,6 +43,7 @@ def activity(
         client_order_id=client_order_id,
         provider_order_id=provider_order_id,
         provider_execution_id=provider_execution_id,
+        signed_amount=signed_amount,
     )
 
 
@@ -51,6 +56,14 @@ def paper_book_id(**kwargs):
 
 
 def book_paper_activity(store, **kwargs):
+    # Legacy test-call convenience only: convert the old test amount keyword
+    # into immutable provider evidence before crossing the production boundary.
+    amount = kwargs.pop("amount", None)
+    evidence = kwargs.get("activity")
+    if amount is not None:
+        if evidence is None:
+            raise AssertionError("activity test evidence is required")
+        kwargs["activity"] = replace(evidence, signed_amount=amount)
     return book_external_provider_cash_activity(
         store,
         environment="PAPER",
@@ -98,8 +111,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                     provider_id="ALPACA",
                     account_id="paper-1",
                     environment="UNKNOWN",
-                    activity=activity(),
-                    amount="1",
+                    activity=activity(signed_amount="1"),
                     observed_at="2026-09-24T18:01:00Z",
                 )
 
@@ -271,18 +283,38 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 Decimal("100"),
             )
 
-    def test_same_identity_with_changed_amount_fails_closed(self):
+    def test_same_identity_with_changed_provider_amount_fails_closed(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
-            kwargs = dict(
+            first_evidence = activity(
                 provider_id="KRAKEN",
                 account_id="acct",
-                activity=activity(provider_id="KRAKEN", account_id="acct", activity_id="dep-conflict"),
+                activity_id="dep-conflict",
+                signed_amount="10",
+            )
+            _, inserted = book_paper_activity(
+                store,
+                provider_id="KRAKEN",
+                account_id="acct",
+                activity=first_evidence,
                 observed_at="2026-09-24T18:03:00Z",
             )
-            book_paper_activity(store, amount="10", **kwargs)
-            with self.assertRaisesRegex(ValueError, "idempotency_key"):
-                book_paper_activity(store, amount="11", **kwargs)
+            self.assertTrue(inserted)
+
+            changed_evidence = activity(
+                provider_id="KRAKEN",
+                account_id="acct",
+                activity_id="dep-conflict",
+                signed_amount="11",
+            )
+            with self.assertRaises(ValueError):
+                book_paper_activity(
+                    store,
+                    provider_id="KRAKEN",
+                    account_id="acct",
+                    activity=changed_evidence,
+                    observed_at="2026-09-24T18:03:00Z",
+                )
 
             book = load_paper_book(
                 store,
@@ -291,6 +323,63 @@ class ProviderActivityAccountingTests(unittest.TestCase):
             )
             self.assertEqual(book.cash("USD"), Decimal("10"))
             self.assertEqual(len(book.transactions), 1)
+
+    def test_caller_has_no_independent_cash_amount_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            evidence = activity(
+                provider_id="ALPACA",
+                account_id="acct",
+                activity_id="provider-amount-only",
+                signed_amount="12.345",
+            )
+            transaction, inserted = book_paper_activity(
+                store,
+                provider_id="ALPACA",
+                account_id="acct",
+                activity=evidence,
+                observed_at="2026-09-24T18:03:00Z",
+            )
+            self.assertTrue(inserted)
+            self.assertEqual(
+                transaction.postings[0].signed_amount,
+                Decimal("12.345"),
+            )
+            self.assertEqual(
+                load_paper_book(
+                    store,
+                    provider_id="ALPACA",
+                    account_id="acct",
+                ).cash("USD"),
+                Decimal("12.345"),
+            )
+
+    def test_environment_mismatch_rejected_before_cash_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            evidence = activity(
+                provider_id="ALPACA",
+                account_id="acct",
+                environment="LIVE",
+                activity_id="live-deposit",
+                signed_amount="10",
+            )
+            with self.assertRaisesRegex(ValueError, "environment mismatch"):
+                book_paper_activity(
+                    store,
+                    provider_id="ALPACA",
+                    account_id="acct",
+                    activity=evidence,
+                    observed_at="2026-09-24T18:03:00Z",
+                )
+            self.assertEqual(
+                load_paper_book(
+                    store,
+                    provider_id="ALPACA",
+                    account_id="acct",
+                ).transactions,
+                (),
+            )
 
     def test_withdrawal_requires_negative_amount_and_books_exactly(self):
         with TemporaryDirectory() as directory:

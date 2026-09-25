@@ -741,6 +741,8 @@ class ChampionRegistry:
             expected_keys = common | {"triggered"}
         elif kind == "ONLINE_LABEL":
             expected_keys = common | {"label_ref", "outcome_state"}
+        elif kind == "ONLINE_SUPPORT":
+            expected_keys = common | {"purpose"}
         else:
             raise ValueError("unsupported online evidence kind")
         if set(payload) != expected_keys or payload.get("kind") != kind:
@@ -776,6 +778,8 @@ class ChampionRegistry:
                 raise ValueError("online label evidence identity mismatch")
             if payload.get("outcome_state") != "RECONCILED":
                 raise ValueError("online update label outcome is not reconciled/eligible")
+        if kind == "ONLINE_SUPPORT":
+            _text(payload.get("purpose"), name="online support evidence purpose")
         return payload
 
     def record_online_update(
@@ -789,8 +793,9 @@ class ChampionRegistry:
         evidence_refs,
         actual_update_cost,
         now: datetime,
-        drift_gate_passed: bool,
-        stop_condition_triggered: bool,
+        drift_gate_evidence: OnlineEvidenceRef,
+        stop_condition_evidence: OnlineEvidenceRef,
+        label_evidence_refs: Mapping[str, OnlineEvidenceRef],
     ) -> dict:
         if not isinstance(envelope, OnlineEnvelope):
             raise TypeError("envelope must be OnlineEnvelope")
@@ -810,14 +815,6 @@ class ChampionRegistry:
             or expected_generation < 1
         ):
             raise ValueError("expected_generation must be a positive integer")
-        if not isinstance(drift_gate_passed, bool):
-            raise TypeError("drift_gate_passed must be boolean")
-        if not isinstance(stop_condition_triggered, bool):
-            raise TypeError("stop_condition_triggered must be boolean")
-        if not drift_gate_passed:
-            raise ValueError("online update is blocked by the registered drift gate")
-        if stop_condition_triggered:
-            raise ValueError("online update is blocked by a registered stop condition")
 
         normalized_updates = envelope.normalize_updates(updates)
         labels = tuple(_text(item, name="label reference") for item in label_refs)
@@ -827,14 +824,26 @@ class ChampionRegistry:
             raise ValueError("online update label references must be unique")
         if not set(labels).issubset(set(envelope.eligible_label_refs)):
             raise ValueError("online update uses labels outside the approved envelope")
-        evidence = tuple(
-            _text(item, name="online update evidence reference")
-            for item in evidence_refs
-        )
+
+        evidence = tuple(evidence_refs)
         if not evidence:
-            raise ValueError("online update requires evidence references")
-        if len(set(evidence)) != len(evidence):
+            raise ValueError("online update requires immutable evidence references")
+        if any(not isinstance(item, OnlineEvidenceRef) for item in evidence):
+            raise TypeError(
+                "online update evidence references must be OnlineEvidenceRef"
+            )
+        evidence_tokens = tuple(item.token for item in evidence)
+        if len(set(evidence_tokens)) != len(evidence_tokens):
             raise ValueError("online update evidence references must be unique")
+
+        if not isinstance(label_evidence_refs, Mapping):
+            raise TypeError("label_evidence_refs must be a mapping")
+        normalized_label_evidence = dict(label_evidence_refs)
+        if set(normalized_label_evidence) != set(labels):
+            raise ValueError(
+                "every online label must have exactly one immutable evidence artifact"
+            )
+
         cost = _decimal(
             actual_update_cost,
             name="actual_update_cost",
@@ -843,6 +852,48 @@ class ChampionRegistry:
         if cost > envelope.maximum_update_cost:
             raise ValueError("online update exceeds the approved resource budget")
         applied = _time(now, name="now")
+
+        # The decisive continual-learning gates are derived from immutable,
+        # causally available evidence bound to this exact routing state. Naked
+        # caller booleans are deliberately not part of this API.
+        self._verified_online_decision(
+            drift_gate_evidence,
+            kind="DRIFT_GATE",
+            envelope=envelope,
+            expected_generation=expected_generation,
+            applied=applied,
+        )
+        self._verified_online_decision(
+            stop_condition_evidence,
+            kind="STOP_CONDITION",
+            envelope=envelope,
+            expected_generation=expected_generation,
+            applied=applied,
+        )
+        label_tokens: dict[str, str] = {}
+        for label in labels:
+            ref = normalized_label_evidence[label]
+            if not isinstance(ref, OnlineEvidenceRef):
+                raise TypeError("label evidence values must be OnlineEvidenceRef")
+            self._verified_online_decision(
+                ref,
+                kind="ONLINE_LABEL",
+                envelope=envelope,
+                expected_generation=expected_generation,
+                applied=applied,
+                label_ref=label,
+            )
+            label_tokens[label] = ref.token
+
+        for ref in evidence:
+            self._verified_online_decision(
+                ref,
+                kind="ONLINE_SUPPORT",
+                envelope=envelope,
+                expected_generation=expected_generation,
+                applied=applied,
+            )
+
         request_fingerprint = _request_fingerprint(
             {
                 "update_id": update_id,
@@ -850,10 +901,11 @@ class ChampionRegistry:
                 "envelope_hash": envelope.envelope_hash,
                 "updates": normalized_updates,
                 "label_refs": sorted(labels),
-                "evidence_refs": sorted(evidence),
+                "evidence_refs": sorted(evidence_tokens),
+                "drift_gate_evidence": drift_gate_evidence.token,
+                "stop_condition_evidence": stop_condition_evidence.token,
+                "label_evidence_refs": label_tokens,
                 "actual_update_cost": str(cost),
-                "drift_gate_passed": drift_gate_passed,
-                "stop_condition_triggered": stop_condition_triggered,
             }
         )
 
@@ -929,9 +981,22 @@ class ChampionRegistry:
                     envelope.authority_scope_id,
                     envelope.envelope_id,
                     envelope.envelope_hash,
-                    json.dumps(normalized_updates, sort_keys=True, separators=(",", ":")),
+                    json.dumps(
+                        normalized_updates,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
                     json.dumps(sorted(labels), separators=(",", ":")),
-                    json.dumps(sorted(evidence), separators=(",", ":")),
+                    json.dumps(
+                        {
+                            "supporting": sorted(evidence_tokens),
+                            "drift_gate": drift_gate_evidence.token,
+                            "stop_condition": stop_condition_evidence.token,
+                            "labels": label_tokens,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
                     str(cost),
                     request_fingerprint,
                     applied.isoformat(),

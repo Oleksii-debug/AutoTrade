@@ -36,6 +36,7 @@ from .online import (
 from .population_coverage import (
     PopulationCoverageManifest,
     build_population_coverage,
+    resolve_outcome_evidence,
     resolve_reconciliation_evidence,
 )
 
@@ -347,6 +348,7 @@ class _LearningRow:
     label_available_at: datetime
     outcome_horizon_at: datetime
     execution_reconciled_at: datetime
+    outcome_evidence: Mapping[str, Any]
     reconciliation_evidence: Mapping[str, Any] | None
     correction_hashes: tuple[str, ...]
 
@@ -545,6 +547,7 @@ def _extract_learning_rows(
     config: UpdateProducerConfig,
     feature_names: tuple[str, ...],
     reconciliation_evidence_resolver: Callable[[str], Mapping[str, Any]] | None,
+    outcome_evidence_resolver: Callable[[str], Mapping[str, Any]] | None,
 ) -> tuple[
     tuple[_LearningRow, ...],
     tuple[tuple[str, str], ...],
@@ -614,6 +617,66 @@ def _extract_learning_rows(
         except (TypeError, ValueError):
             exclusions.append((episode_id, "LEARNING_SCHEMA_INVALID"))
             continue
+
+        try:
+            resolved_outcome = resolve_outcome_evidence(
+                episode_id,
+                causal_cutoff=cutoff,
+                resolver=outcome_evidence_resolver,
+            )
+        except (TypeError, ValueError):
+            exclusions.append((episode_id, "OUTCOME_EVIDENCE_INVALID"))
+            continue
+        if resolved_outcome.get("status") != "VERIFIED":
+            exclusions.append((episode_id, "OUTCOME_EVIDENCE_UNVERIFIED"))
+            continue
+        try:
+            authority_label_version = _text(
+                resolved_outcome.get("label_version"),
+                name="authority label_version",
+            )
+            authority_label_available = _time(
+                resolved_outcome.get("label_available_at"),
+                name="authority label_available_at",
+            )
+            authority_horizon = _time(
+                resolved_outcome.get("outcome_horizon_at"),
+                name="authority outcome_horizon_at",
+            )
+            authority_target = _decimal(
+                resolved_outcome.get("target"),
+                name="authority target",
+            )
+            outcome_payload = payload.get("outcome")
+            if not isinstance(outcome_payload, Mapping):
+                raise ValueError("outcome must be a mapping")
+            payload_outcome_class = _text(
+                outcome_payload.get("class"),
+                name="outcome.class",
+            ).upper()
+            authority_outcome_class = _text(
+                resolved_outcome.get("outcome_class"),
+                name="authority outcome_class",
+            ).upper()
+        except (TypeError, ValueError):
+            exclusions.append((episode_id, "OUTCOME_EVIDENCE_INVALID"))
+            continue
+        if authority_outcome_class in {"PENDING", "UNKNOWN"}:
+            exclusions.append((episode_id, "OUTCOME_EVIDENCE_NOT_TERMINAL"))
+            continue
+        if (
+            authority_outcome_class != payload_outcome_class
+            or authority_label_version != label_version
+            or authority_label_available != label_available
+            or authority_horizon != horizon
+            or authority_target != target
+        ):
+            exclusions.append((episode_id, "OUTCOME_EVIDENCE_MISMATCH"))
+            continue
+        label_version = authority_label_version
+        label_available = authority_label_available
+        horizon = authority_horizon
+        target = authority_target
 
         if label_version != config.label_version:
             exclusions.append((episode_id, "LABEL_VERSION_INELIGIBLE"))
@@ -710,6 +773,7 @@ def _extract_learning_rows(
                 label_available_at=label_available,
                 outcome_horizon_at=horizon,
                 execution_reconciled_at=reconciled,
+                outcome_evidence=MappingProxyType(dict(resolved_outcome)),
                 reconciliation_evidence=reconciliation_evidence,
                 correction_hashes=tuple(sorted(correction_hashes)),
             )
@@ -847,6 +911,7 @@ def _row_evidence(row: _LearningRow) -> dict[str, Any]:
         "label_available_at": _iso(row.label_available_at),
         "outcome_horizon_at": _iso(row.outcome_horizon_at),
         "execution_reconciled_at": _iso(row.execution_reconciled_at),
+        "outcome_evidence": dict(row.outcome_evidence),
         "reconciliation_evidence": (
             None
             if row.reconciliation_evidence is None
@@ -960,6 +1025,7 @@ def _population_authority_reason(
     instrument_family: str | None,
     population_name: str,
     reconciliation_evidence_resolver: Callable[[str], Mapping[str, Any]] | None,
+    outcome_evidence_resolver: Callable[[str], Mapping[str, Any]] | None,
 ) -> tuple[str | None, PopulationCoverageManifest | None]:
     """Verify one caller-supplied manifest against the canonical memory cut."""
 
@@ -988,6 +1054,7 @@ def _population_authority_reason(
             included_episode_ids=included_episode_ids,
             exclusions=coverage_exclusions,
             reconciliation_evidence_resolver=reconciliation_evidence_resolver,
+            outcome_evidence_resolver=outcome_evidence_resolver,
             task=task,
             instrument_family=instrument_family,
         )
@@ -1090,6 +1157,7 @@ def produce_bounded_online_update(
     calibration_population_manifest: PopulationCoverageManifest | None = None,
     scientific_registry: ScientificRegistry | None = None,
     reconciliation_evidence_resolver: Callable[[str], Mapping[str, Any]] | None = None,
+    outcome_evidence_resolver: Callable[[str], Mapping[str, Any]] | None = None,
 ) -> ProducedOnlineUpdate:
     if not isinstance(memory, ExperienceMemory):
         raise TypeError("memory must be ExperienceMemory")
@@ -1108,6 +1176,10 @@ def produce_bounded_online_update(
         raise TypeError(
             "reconciliation_evidence_resolver must be callable or None"
         )
+    if outcome_evidence_resolver is not None and not callable(
+        outcome_evidence_resolver
+    ):
+        raise TypeError("outcome_evidence_resolver must be callable or None")
     update_time = _time(update_cutoff, name="update_cutoff")
     calibration_time = _time(
         calibration_cutoff,
@@ -1164,6 +1236,7 @@ def produce_bounded_online_update(
         config=config,
         feature_names=feature_names,
         reconciliation_evidence_resolver=reconciliation_evidence_resolver,
+        outcome_evidence_resolver=outcome_evidence_resolver,
     )
     (
         calibration_rows,
@@ -1177,6 +1250,7 @@ def produce_bounded_online_update(
         config=config,
         feature_names=feature_names,
         reconciliation_evidence_resolver=reconciliation_evidence_resolver,
+        outcome_evidence_resolver=outcome_evidence_resolver,
     )
 
     cross_population_overlap = tuple(
@@ -1204,6 +1278,7 @@ def produce_bounded_online_update(
             instrument_family=config.instrument_family,
             population_name="UPDATE",
             reconciliation_evidence_resolver=reconciliation_evidence_resolver,
+            outcome_evidence_resolver=outcome_evidence_resolver,
         )
     )
     calibration_population_reason, verified_calibration_manifest = (
@@ -1220,6 +1295,7 @@ def produce_bounded_online_update(
             instrument_family=config.instrument_family,
             population_name="CALIBRATION",
             reconciliation_evidence_resolver=reconciliation_evidence_resolver,
+            outcome_evidence_resolver=outcome_evidence_resolver,
         )
     )
 

@@ -21,6 +21,7 @@ H2 = "sha256:" + "2" * 64
 H3 = "sha256:" + "3" * 64
 DECISION = datetime(2026, 9, 25, 12, tzinfo=timezone.utc)
 CUTOFF = datetime(2030, 1, 1, tzinfo=timezone.utc)
+_AUTO_OUTCOME_RESOLVER = object()
 
 
 def correction_evidence_time(evidence_ref):
@@ -115,6 +116,7 @@ class PopulationCoverageTests(unittest.TestCase):
         included,
         exclusions=None,
         reconciliation_evidence_resolver=reconciliation_evidence,
+        outcome_evidence_resolver=_AUTO_OUTCOME_RESOLVER,
     ):
         population = store.coverage_population_snapshot(
             causal_cutoff=CUTOFF,
@@ -122,6 +124,31 @@ class PopulationCoverageTests(unittest.TestCase):
             task="research",
             instrument_family="equity",
         )
+        if outcome_evidence_resolver is _AUTO_OUTCOME_RESOLVER:
+            rows = {
+                row["episode_id"]: row
+                for row in population.rows
+            }
+
+            def outcome_evidence_resolver(episode_id):
+                outcome = rows[episode_id]["effective_payload"]["outcome"]
+                mature = outcome.get("label_mature") is True
+                available_at = (
+                    "2029-01-01T00:00:00Z"
+                    if mature
+                    else "2031-01-01T00:00:00Z"
+                )
+                return {
+                    "episode_id": episode_id,
+                    "evidence_ref": f"outcome-evidence:{episode_id}",
+                    "evidence_digest": H2,
+                    "observed_at": available_at,
+                    "label_available_at": available_at,
+                    "outcome_horizon_at": "2028-01-01T00:00:00Z",
+                    "outcome_class": outcome["class"],
+                    "current_scope": True,
+                }
+
         return build_population_coverage(
             population,
             candidate_hash=H1,
@@ -132,6 +159,7 @@ class PopulationCoverageTests(unittest.TestCase):
             included_episode_ids=included,
             exclusions=exclusions or {},
             reconciliation_evidence_resolver=reconciliation_evidence_resolver,
+            outcome_evidence_resolver=outcome_evidence_resolver,
             task="research",
             instrument_family="equity",
         )
@@ -508,6 +536,34 @@ class PopulationCoverageTests(unittest.TestCase):
             self.assertEqual(result.status, "INCONCLUSIVE")
             self.assertFalse(result.promotable)
 
+
+    def test_payload_maturity_flag_without_outcome_authority_is_not_complete(self):
+        with TemporaryDirectory() as directory:
+            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            episode_id, _ = store.append_episode(
+                episode_id="44444444-4444-4444-8444-444444444444",
+                decision_time=DECISION,
+                information_cutoff=DECISION,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=episode_payload(
+                    "NULL",
+                    side="NO_TRADE",
+                    label_mature=True,
+                    label="caller-claims-mature",
+                ),
+            )
+            manifest = self._manifest(
+                store,
+                [episode_id],
+                outcome_evidence_resolver=None,
+            )
+            self.assertTrue(manifest.complete)
+            self.assertFalse(
+                dict(manifest.included_labels_complete_by_regime)["calm"]
+            )
 
     def test_mature_trade_without_authority_reconciliation_is_not_complete(self):
         with TemporaryDirectory() as directory:

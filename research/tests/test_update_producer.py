@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -58,6 +59,7 @@ class ProducerFixture:
         self.science = ScientificRegistry(self.root / "science.sqlite3")
         self.protocol_registration = None
         self.reconciliation_evidence = {}
+        self.outcome_evidence = {}
         self._episode_counter = 0
         self._physical_evidence_refs = {}
 
@@ -93,6 +95,44 @@ class ProducerFixture:
 
     def resolve_reconciliation_evidence(self, episode_id):
         return self.reconciliation_evidence[episode_id]
+
+    def resolve_outcome_evidence(self, episode_id):
+        return self.outcome_evidence[episode_id]
+
+    def bind_outcome_evidence(
+        self,
+        episode_id,
+        *,
+        outcome_class,
+        label_available_at,
+        outcome_horizon_at,
+        target,
+        label_version="label-v1",
+        observed_at=None,
+        current_scope=True,
+    ):
+        observed = observed_at or label_available_at
+        material = {
+            "episode_id": episode_id,
+            "outcome_class": outcome_class,
+            "label_version": label_version,
+            "label_available_at": label_available_at.isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "outcome_horizon_at": outcome_horizon_at.isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "target": str(target),
+            "observed_at": observed.isoformat().replace("+00:00", "Z"),
+        }
+        self.outcome_evidence[episode_id] = {
+            **material,
+            "evidence_ref": f"outcome-evidence:{episode_id}",
+            "evidence_digest": "sha256:" + sha256(
+                canonical_bytes(material)
+            ).hexdigest(),
+            "current_scope": current_scope,
+        }
 
     def bind_reconciliation_evidence(
         self,
@@ -143,6 +183,7 @@ class ProducerFixture:
         canonical_label_mature=True,
         canonical_reconciliation_state="RECONCILED",
         intended_side="NO_TRADE",
+        bind_outcome_evidence=True,
     ):
         self._episode_counter += 1
         decision = decision_time or (
@@ -182,7 +223,7 @@ class ProducerFixture:
                 "target": str(target),
             },
         }
-        return self.memory.append_episode(
+        stored_episode_id = self.memory.append_episode(
             decision_time=decision,
             information_cutoff=decision,
             task=task,
@@ -192,6 +233,15 @@ class ProducerFixture:
             payload=payload,
             episode_id=episode_id,
         )[0]
+        if bind_outcome_evidence:
+            self.bind_outcome_evidence(
+                stored_episode_id,
+                outcome_class=outcome_class,
+                label_available_at=label_available_at,
+                outcome_horizon_at=horizon,
+                target=target,
+            )
+        return stored_episode_id
 
     def seed_calibration(self, values=("0", "1", "2", "3")):
         for index, value in enumerate(values):
@@ -445,6 +495,7 @@ class ProducerFixture:
             included_episode_ids=included,
             exclusions=exclusions,
             reconciliation_evidence_resolver=self.resolve_reconciliation_evidence,
+            outcome_evidence_resolver=self.resolve_outcome_evidence,
             task=task,
             instrument_family="equity",
         )
@@ -496,6 +547,7 @@ class ProducerFixture:
             calibration_population_manifest=calibration_population_manifest,
             scientific_registry=self.science,
             reconciliation_evidence_resolver=self.resolve_reconciliation_evidence,
+            outcome_evidence_resolver=self.resolve_outcome_evidence,
         )
 
 
@@ -781,7 +833,7 @@ class UpdateProducerTests(unittest.TestCase):
                 artifact["reasons"],
             )
 
-    def test_learning_timestamps_cannot_override_incomplete_canonical_outcome(self):
+    def test_caller_payload_maturity_cannot_replace_missing_outcome_authority(self):
         with TemporaryDirectory() as directory:
             fixture, checkpoint, test_ref, calibration, envelope = (
                 self.ready_fixture(directory)
@@ -794,8 +846,9 @@ class UpdateProducerTests(unittest.TestCase):
                 label_available_at=datetime(
                     2026, 10, 8, 2, tzinfo=timezone.utc
                 ),
-                canonical_label_mature=False,
-                canonical_reconciliation_state="PENDING",
+                canonical_label_mature=True,
+                canonical_reconciliation_state="RECONCILED",
+                bind_outcome_evidence=False,
             )
             produced = fixture.produce(
                 checkpoint_ref=checkpoint,
@@ -807,7 +860,15 @@ class UpdateProducerTests(unittest.TestCase):
             self.assertIsNone(produced.proposed_parameters)
             artifact = json.loads(produced.artifact_bytes)
             self.assertIn(
-                "LEARNING.UPDATE_OUTCOME_EVIDENCE_INCOMPLETE",
+                "OUTCOME_EVIDENCE_UNVERIFIED",
+                {
+                    reason
+                    for _episode_id, reason
+                    in artifact["population"]["update_exclusions"]
+                },
+            )
+            self.assertIn(
+                "LEARNING.UPDATE_POPULATION_COVERAGE_MISMATCH",
                 artifact["reasons"],
             )
 

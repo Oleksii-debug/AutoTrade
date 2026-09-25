@@ -182,6 +182,49 @@ class BinanceSpotSymbolRules:
     min_notional_applies_to_market: bool
     max_notional_applies_to_market: bool
 
+    def __post_init__(self) -> None:
+        instrument = _text(self.instrument_version, name="instrument_version")
+        symbol = _text(self.symbol, name="symbol")
+        digest = _text(self.source_sha256, name="source_sha256")
+        if (
+            len(digest) != 71
+            or not digest.startswith("sha256:")
+            or any(ch not in "0123456789abcdef" for ch in digest[7:])
+        ):
+            raise BinanceSpotAdapterError(
+                "source_sha256 must be canonical lowercase SHA-256"
+            )
+        lot_min = _decimal(self.lot_min_qty, name="lot_min_qty", positive=True)
+        lot_max = _decimal(self.lot_max_qty, name="lot_max_qty", positive=True)
+        lot_step = _decimal(self.lot_step_size, name="lot_step_size", positive=True)
+        price_min = _decimal(self.price_min, name="price_min")
+        price_max = _decimal(self.price_max, name="price_max")
+        tick = _decimal(self.tick_size, name="tick_size", positive=True)
+        if lot_min > lot_max or price_min < 0 or price_max < 0:
+            raise BinanceSpotAdapterError("exchangeInfo rule bounds are invalid")
+        for name in ("min_notional_applies_to_market", "max_notional_applies_to_market"):
+            if type(getattr(self, name)) is not bool:
+                raise BinanceSpotAdapterError(f"{name} must be boolean")
+        for name in ("market_min_qty", "market_max_qty", "market_step_size"):
+            value = getattr(self, name)
+            if value is not None:
+                normalized = _decimal(value, name=name, positive=True)
+                object.__setattr__(self, name, normalized)
+        for name in ("min_notional", "max_notional"):
+            value = getattr(self, name)
+            if value is not None:
+                normalized = _decimal(value, name=name, positive=True)
+                object.__setattr__(self, name, normalized)
+        object.__setattr__(self, "instrument_version", instrument)
+        object.__setattr__(self, "symbol", symbol)
+        object.__setattr__(self, "source_sha256", digest)
+        object.__setattr__(self, "lot_min_qty", lot_min)
+        object.__setattr__(self, "lot_max_qty", lot_max)
+        object.__setattr__(self, "lot_step_size", lot_step)
+        object.__setattr__(self, "price_min", price_min)
+        object.__setattr__(self, "price_max", price_max)
+        object.__setattr__(self, "tick_size", tick)
+
     @classmethod
     def from_exchange_info(
         cls,
@@ -367,9 +410,20 @@ class BinanceSpotPreparedRequest:
     endpoint: str
     body: Mapping[str, str]
     capability_snapshot_id: str
+    filter_source_sha256: str
 
     def __post_init__(self) -> None:
+        digest = _text(self.filter_source_sha256, name="filter_source_sha256")
+        if (
+            len(digest) != 71
+            or not digest.startswith("sha256:")
+            or any(ch not in "0123456789abcdef" for ch in digest[7:])
+        ):
+            raise BinanceSpotAdapterError(
+                "filter_source_sha256 must be canonical lowercase SHA-256"
+            )
         object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
+        object.__setattr__(self, "filter_source_sha256", digest)
 
 
 def prepare_order_request(
@@ -431,6 +485,7 @@ def prepare_order_request(
         endpoint=BINANCE_SPOT_ENDPOINTS["PLACE_ORDER"],
         body=body,
         capability_snapshot_id=capability.snapshot_id,
+        filter_source_sha256=symbol_rules.source_sha256,
     )
 
 

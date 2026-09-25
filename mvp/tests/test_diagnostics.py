@@ -96,12 +96,16 @@ class DiagnosticTraceTests(unittest.TestCase):
             "message": "proxy-authorization=Basic c2VjcmV0",
             "connection": "server=db;client_secret=client123;database=main",
             "pem": "-----BEGIN OPENSSH PRIVATE KEY-----\\nprivate-bytes",
+            "token_text": "token=plain-token-secret",
+            "session_text": "session: plain-session-secret",
             "safe": "latency=12ms",
         }
         redacted = redact_diagnostic_value(payload)
         self.assertNotIn("token123", redacted["url"])
         self.assertNotIn("c2VjcmV0", redacted["message"])
         self.assertNotIn("client123", redacted["connection"])
+        self.assertNotIn("plain-token-secret", redacted["token_text"])
+        self.assertNotIn("plain-session-secret", redacted["session_text"])
         self.assertEqual(redacted["pem"], "[REDACTED]")
         self.assertEqual(redacted["safe"], "latency=12ms")
 

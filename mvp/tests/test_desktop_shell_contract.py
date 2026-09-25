@@ -64,8 +64,8 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         )[0]
         self.assertNotIn(".Focus()", handler)
         self.assertIn("if (!IsLoaded)", handler)
-        self.assertGreaterEqual(code.count("SetLiveRegionText(HostStatusAnnouncement"), 2)
-        self.assertGreaterEqual(code.count("SetLiveRegionText(EmergencyResult"), 6)
+        self.assertGreaterEqual(code.count("HostStatusAnnouncement,"), 2)
+        self.assertGreaterEqual(code.count("EmergencyResult,"), 6)
 
     def test_failed_refresh_preserves_last_known_values_as_stale(self):
         code = CODE.read_text(encoding="utf-8")

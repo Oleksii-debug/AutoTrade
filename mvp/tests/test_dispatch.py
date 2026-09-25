@@ -1,7 +1,7 @@
 from tempfile import TemporaryDirectory
 import unittest
 
-from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id
+from mvp.autotrade_mvp.dispatch import DispatchBlocked, GuardedDispatcher, stable_client_order_id
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.recovery import RecoveryController
 

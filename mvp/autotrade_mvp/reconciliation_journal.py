@@ -635,6 +635,18 @@ def load_account_resource_availability_evidence(
             )
         availability[resource] = canonical_available[resource]
 
+    raw_evidence_refs = resource_evidence.get("evidence_refs")
+    if not isinstance(raw_evidence_refs, list) or not raw_evidence_refs:
+        raise ValueError(
+            "resource availability evidence_refs must be a non-empty list"
+        )
+    normalized_evidence_refs = tuple(
+        _text(value, name="resource_availability.evidence_ref")
+        for value in raw_evidence_refs
+    )
+    if len(normalized_evidence_refs) != len(set(normalized_evidence_refs)):
+        raise ValueError("resource availability evidence_refs must be unique")
+
     aggregate_version = checkpoint.get("aggregate_version")
     if type(aggregate_version) is not int or aggregate_version <= 0:
         raise ValueError("checkpoint aggregate_version must be a positive integer")
@@ -659,14 +671,7 @@ def load_account_resource_availability_evidence(
             name="resource_availability.snapshot_id",
         ),
         "resource_valid_until": valid_until_text,
-        "resource_evidence_refs": tuple(
-            _text(value, name="resource_availability.evidence_ref")
-            for value in (
-                resource_evidence.get("evidence_refs")
-                if isinstance(resource_evidence.get("evidence_refs"), list)
-                else ()
-            )
-        ),
+        "resource_evidence_refs": normalized_evidence_refs,
         "observed_at": _instant(payload.get("observed_at"), name="observed_at"),
         "age_seconds": str(age_seconds),
         "availability": {

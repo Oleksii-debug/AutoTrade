@@ -213,8 +213,14 @@ class RecoveryController:
             raise ValueError("New owner must differ from current owner")
         if not old_sender_fenced:
             raise PermissionError("Old sender must be externally fenced")
-        if not reconciled or self.unresolved_attempts:
-            raise PermissionError("Ownership transfer requires reconciliation")
+        if (
+            not reconciled
+            or not self.provider_reconciled
+            or self.unresolved_attempts
+        ):
+            raise PermissionError(
+                "Ownership transfer requires recorded current reconciliation"
+            )
         self.owner = OwnerFence(new_owner_id, self.owner.epoch + 1)
         self.provider_reconciled = False
         self.reason_codes.discard("lease_expired_no_failover")

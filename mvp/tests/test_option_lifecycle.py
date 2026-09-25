@@ -105,7 +105,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             economic_book=self.book,
         )
 
-    def _authority(self, *, registry, economic_book):
+    def _authority(self, *, registry, economic_book, provider_environment="TESTNET"):
         def resolve(reference):
             return self._evidence[reference]
 
@@ -116,6 +116,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             evidence_resolver=resolve,
             lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
             permission_scope=LIFECYCLE_SCOPE,
+            provider_environment=provider_environment,
         )
 
     @staticmethod
@@ -147,6 +148,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id=source.provider_id,
             account_id=source.account_id,
             environment=source.environment,
+            provider_environment=source.provider_environment,
             venue_id=payload["venue_id"],
             instrument_version=source.query_binding.instrument_version,
             external_event_id=payload["external_event_id"],
@@ -227,6 +229,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         venue_id: str = "OPTIONS",
         endpoint: str = LIFECYCLE_ENDPOINT,
         permission_scope: str = LIFECYCLE_SCOPE,
+        provider_environment: str | None = None,
     ) -> str:
         capability = self._capability(
             provider_id=provider_id,
@@ -263,7 +266,9 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             ).encode("utf-8"),
             observed_at=observed_at,
             provider_environment=(
-                "TESTNET" if provider_id.upper() == "BYBIT" else None
+                ("TESTNET" if provider_id.upper() == "BYBIT" else None)
+                if provider_environment is None
+                else provider_environment
             ),
         )
         self._evidence[source.evidence_ref] = source
@@ -291,6 +296,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
             venue_id="OPTIONS",
             instrument_version=f"{OPTION_ID}@1",
             external_event_id="forged-life",
@@ -301,6 +307,59 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             raw_evidence_digest="sha256:" + "f" * 64,
             provider_revision="forged-r1",
         )
+
+    def test_provider_environment_scopes_lifecycle_authority_and_evidence(self):
+        self.seed_option_position("1")
+        testnet = self.evidence(
+            external_event_id="shared-provider-environment-event",
+            provider_environment="TESTNET",
+        )
+        demo = self.evidence(
+            external_event_id="shared-provider-environment-event",
+            provider_environment="DEMO",
+        )
+        demo_authority = self._authority(
+            registry=self.registry,
+            economic_book=self.book,
+            provider_environment="DEMO",
+        )
+        self.assertNotEqual(self.authority.aggregate_id, demo_authority.aggregate_id)
+        applied = self.authority.apply(testnet)
+        event = self.store.get_event(applied.lifecycle_event_id)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["payload"]["provider_environment"], "TESTNET")
+        self.assertEqual(
+            event["payload"]["provider_evidence"]["provider_environment"],
+            "TESTNET",
+        )
+        before_transactions = tuple(self.book.transactions)
+        before_events = tuple(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id)
+        )
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "provider lifecycle evidence scope mismatch",
+        ):
+            self.authority.apply(demo)
+        self.assertEqual(tuple(self.book.transactions), before_transactions)
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", self.authority.aggregate_id)),
+            before_events,
+        )
+
+    def test_bybit_lifecycle_authority_requires_explicit_provider_environment(self):
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "requires explicit provider_environment",
+        ):
+            DurableOptionLifecycleAuthority(
+                self.store,
+                registry=self.registry,
+                economic_book=self.book,
+                evidence_resolver=lambda reference: self._evidence[reference],
+                lifecycle_endpoints=frozenset({LIFECYCLE_ENDPOINT}),
+                permission_scope=LIFECYCLE_SCOPE,
+            )
 
     def test_direct_fabricated_lifecycle_fact_cannot_mutate_financial_state(self):
         with self.assertRaisesRegex(
@@ -368,6 +427,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                 provider_id=valid.provider_id,
                 account_id=valid.account_id,
                 environment=valid.environment,
+                provider_environment=valid.provider_environment,
                 venue_id="FORGED_VENUE",
                 instrument_version=valid.instrument_version,
                 external_event_id="forged-external-id",

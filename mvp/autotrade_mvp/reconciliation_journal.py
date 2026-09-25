@@ -817,6 +817,11 @@ def load_account_resource_availability_evidence(
         account_id=account_id,
         environment=environment,
     )
+    provider_scope = _provider_environment(
+        provider_environment,
+        environment=scope,
+        provider_id=provider,
+    )
     if (
         resource_evidence.get("provider_id") != provider
         or resource_evidence.get("account_id") != account
@@ -960,6 +965,17 @@ def load_account_resource_availability_evidence(
                 or lifecycle_payload.get("account_id") != account
                 or lifecycle_payload.get("environment") != scope
             ):
+                continue
+            lifecycle_provider_environment = lifecycle_payload.get(
+                "provider_environment"
+            )
+            if lifecycle_provider_environment is None:
+                if provider == "BYBIT":
+                    raise ValueError(
+                        "BYBIT option lifecycle financial truth lacks provider_environment"
+                    )
+                lifecycle_provider_environment = scope
+            if lifecycle_provider_environment != provider_scope:
                 continue
             if lifecycle_sequence >= checkpoint_sequence:
                 raise ValueError(

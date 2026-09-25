@@ -16,6 +16,16 @@ import re
 from typing import FrozenSet, Iterable
 from uuid import UUID
 
+from research.autotrade_research.artifacts.store import ArtifactStore
+
+from .qualification_attestation import (
+    AcceptedQualificationAttestation,
+    QualificationTrustError,
+    QualificationTrustPolicy,
+    SignedQualificationAttestation,
+    verify_qualification_attestation,
+)
+
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -30,6 +40,12 @@ _ALLOWED_ACTIONS = frozenset(
     }
 )
 _FORBIDDEN_ACTIONS = frozenset({"WITHDRAW", "TRANSFER", "CREDENTIAL.ROTATE"})
+_QUALIFICATION_DOMAIN = "BOUNDED_REAL"
+_QUALIFICATION_GATE = "QUALIFICATION"
+_QUALIFICATION_PACKAGE = "WP-58"
+_QUALIFICATION_PROTOCOL = "bounded-real-qualification-v1"
+_QUALIFICATION_PROTOCOL_VERSION = "1.0.0"
+_QUALIFICATION_REQUIREMENT = "bounded-real-terminal-evidence"
 
 
 def _text(value: str, *, name: str) -> str:
@@ -261,20 +277,18 @@ class EvidenceVerification:
 
 
 class ArtifactStoreEvidenceVerifier:
-    """Trusted terminal verifier backed by the canonical ArtifactStore type.
+    """Immutable-evidence integrity verifier backed by the canonical ArtifactStore.
 
-    The verifier identity includes a digest of the configured store root so the
-    qualification decision records which host-managed store was consulted.
-    This object verifies evidence only; it never grants trading authority.
+    ArtifactStore is content/integrity infrastructure, not an independent
+    qualification authority. Terminal bounded-real completion additionally
+    requires the shared signed qualification-attestation boundary.
     """
 
     VERIFIER_ID = "AUTOTRADE_ARTIFACT_STORE_BOUNDED_REAL_V1"
 
     def __init__(self, store: object):
-        from autotrade_research.artifacts.store import ArtifactStore
-
         if type(store) is not ArtifactStore:
-            raise TypeError("bounded-real terminal verification requires canonical ArtifactStore")
+            raise TypeError("bounded-real integrity verification requires canonical ArtifactStore")
         self._store = store
         root = str(Path(store.root).resolve())
         self._store_identity = "sha256:" + hashlib.sha256(root.encode("utf-8")).hexdigest()
@@ -282,6 +296,10 @@ class ArtifactStoreEvidenceVerifier:
     @property
     def identity(self) -> str:
         return f"{self.VERIFIER_ID}:{self._store_identity}"
+
+    @property
+    def store(self) -> ArtifactStore:
+        return self._store
 
     @staticmethod
     def _manifest_hash(manifest: dict) -> str:
@@ -378,7 +396,7 @@ class ArtifactStoreEvidenceVerifier:
 
 
 def artifact_store_evidence_verifier(store: object) -> ArtifactStoreEvidenceVerifier:
-    """Create the only verifier accepted for terminal bounded-real completion."""
+    """Create the canonical bounded-real immutable-evidence integrity verifier."""
 
     return ArtifactStoreEvidenceVerifier(store)
 
@@ -509,6 +527,10 @@ class BoundedRealQualificationResult:
     envelope_id: str
     envelope_digest: str
     evidence_verifier_identity: str | None
+    qualification_attestation_id: str | None = None
+    qualification_attestation_digest: str | None = None
+    qualification_policy_id: str | None = None
+    qualification_trust_root_id: str | None = None
 
     @property
     def authorizes_trading(self) -> bool:
@@ -546,6 +568,10 @@ def assess_bounded_real_qualification(
     prerequisite_evidence: Iterable[QualificationEvidence],
     observations: BoundedRealObservations,
     evidence_verifier: ArtifactStoreEvidenceVerifier | None = None,
+    qualification_receipt: SignedQualificationAttestation | None = None,
+    qualification_policy: QualificationTrustPolicy | None = None,
+    expected_policy_id: str | None = None,
+    expected_policy_version: str | None = None,
 ) -> BoundedRealQualificationResult:
     """Validate a bounded-real evidence bundle without granting authority."""
 
@@ -641,6 +667,7 @@ def assess_bounded_real_qualification(
             reasons.append(f"unresolved_blockers:{kind}")
 
     verifier_identity: str | None = None
+    accepted: AcceptedQualificationAttestation | None = None
     if evidence_verifier is None:
         reasons.append("trusted_immutable_evidence_verifier_required")
     elif not isinstance(evidence_verifier, ArtifactStoreEvidenceVerifier):
@@ -663,6 +690,58 @@ def assess_bounded_real_qualification(
             if not verification.valid:
                 suffix = "conflicted" if verification.conflicted else "unverified"
                 reasons.append(f"immutable_evidence_{suffix}:{label}")
+
+    trust_inputs = (
+        qualification_receipt,
+        qualification_policy,
+        expected_policy_id,
+        expected_policy_version,
+    )
+    if all(value is None for value in trust_inputs):
+        reasons.append("independent_evidence_trust_unavailable")
+    elif any(value is None for value in trust_inputs):
+        reasons.append("independent_evidence_trust_incomplete")
+    elif not isinstance(evidence_verifier, ArtifactStoreEvidenceVerifier):
+        reasons.append("independent_evidence_trust_unavailable")
+    else:
+        required_scope = f"envelope/{envelope.envelope_digest}"
+        signed_requirements = frozenset(
+            qualification_receipt.attestation.requirement_ids
+        )
+        signed_refs = frozenset(
+            (ref.artifact_id, ref.sha256, ref.evidence_kind)
+            for ref in qualification_receipt.attestation.evidence_refs
+        )
+        expected_refs = frozenset(
+            (ref.artifact_id, ref.sha256, ref.evidence_kind)
+            for _, ref in all_refs
+        )
+        try:
+            accepted = verify_qualification_attestation(
+                qualification_receipt,
+                policy=qualification_policy,
+                evidence_store=evidence_verifier.store,
+                expected_policy_id=expected_policy_id,
+                expected_policy_version=expected_policy_version,
+                expected_source_sha=envelope.source_sha,
+                expected_domain=_QUALIFICATION_DOMAIN,
+                expected_gate=_QUALIFICATION_GATE,
+                expected_package_id=_QUALIFICATION_PACKAGE,
+                expected_protocol_id=_QUALIFICATION_PROTOCOL,
+                expected_protocol_version=_QUALIFICATION_PROTOCOL_VERSION,
+                expected_requirement_id=_QUALIFICATION_REQUIREMENT,
+            )
+        except (QualificationTrustError, TypeError, ValueError):
+            reasons.append("independent_evidence_trust_invalid")
+        else:
+            if accepted.result == "FAIL":
+                reasons.append("independent_evidence_attestation_failed")
+            elif accepted.result != "PASS":
+                reasons.append("independent_evidence_attestation_inconclusive")
+            if required_scope not in signed_requirements:
+                reasons.append("independent_evidence_scope_mismatch")
+            if signed_refs != expected_refs:
+                reasons.append("independent_evidence_set_mismatch")
 
     if observations.observed_fill_count < 1:
         reasons.append("no_real_fill_evidence")
@@ -688,4 +767,16 @@ def assess_bounded_real_qualification(
         envelope_id=envelope.envelope_id,
         envelope_digest=envelope.envelope_digest,
         evidence_verifier_identity=verifier_identity,
+        qualification_attestation_id=(
+            None if accepted is None else accepted.attestation_id
+        ),
+        qualification_attestation_digest=(
+            None if accepted is None else accepted.attestation_digest
+        ),
+        qualification_policy_id=(
+            None if accepted is None else accepted.policy_id
+        ),
+        qualification_trust_root_id=(
+            None if accepted is None else accepted.trust_root_id
+        ),
     )

@@ -33,11 +33,7 @@ from mvp.autotrade_mvp.provider_transport import (
     WhiteBitDurableNonceAllocator,
     WhiteBitHttpTransport,
 )
-from mvp.autotrade_mvp.whitebit import (
-    WhiteBitMarketRules,
-    WhiteBitOrderIntent,
-    prepare_order_request as prepare_whitebit_order_request,
-)
+from mvp.autotrade_mvp.whitebit import WhiteBitPreparedRequest
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 
 
@@ -506,24 +502,19 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
             )
             # This fixture exercises the real projection shape emitted by the
             # existing WhiteBIT adapter without fabricating another dispatcher.
-            prepared = type("_PreparedProjectionFixture", (), {})()
-            prepared.endpoint = "/api/v4/order/new"
-            prepared.body = {
-                "market": "BTC_USDT",
-                "side": "buy",
-                "amount": "0.001",
-                "price": "50000",
-                "clientOrderId": client_id,
-                "postOnly": False,
-            }
-            prepared.capability_snapshot_id = "wb-cap-1"
-            from mvp.autotrade_mvp.whitebit import WhiteBitPreparedRequest
             actual = WhiteBitPreparedRequest(
-                endpoint=prepared.endpoint,
-                body=prepared.body,
+                endpoint="/api/v4/order/new",
+                body={
+                    "market": "BTC_USDT",
+                    "side": "buy",
+                    "amount": "0.001",
+                    "price": "50000",
+                    "clientOrderId": client_id,
+                    "postOnly": False,
+                },
                 account_id="acct-wb",
                 environment="LIVE",
-                capability_snapshot_id=prepared.capability_snapshot_id,
+                capability_snapshot_id="wb-cap-1",
                 documentation_refs=("https://docs.whitebit.com/api-reference/overview",),
             )
 

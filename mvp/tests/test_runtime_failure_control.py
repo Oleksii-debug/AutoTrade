@@ -54,12 +54,43 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.assertEqual(controller.state, HostState.READY)
         self.assertEqual(attempt.retry_disposition, "NEVER")
 
+    def test_generic_reconciliation_cannot_erase_known_unknown_attempt(self):
+        controller, owner = self._ready()
+        attempt = OutboundAttempt("a1", "intent-1", owner.epoch)
+        attempt.persist()
+        attempt.mark_send_started("journal:send-started")
+        controller.note_unknown_send(attempt)
+
+        controller.record_reconciliation(consistent=True)
+        self.assertEqual(controller.unresolved_attempts, {"a1"})
+        self.assertEqual(controller.state, HostState.DEGRADED)
+
+        controller.record_reconciliation(
+            consistent=True,
+            uncertainty=["unrelated-provider-gap"],
+        )
+        self.assertEqual(
+            controller.unresolved_attempts,
+            {"a1", "unrelated-provider-gap"},
+        )
+        self.assertEqual(controller.state, HostState.DEGRADED)
+
+        attempt.acknowledge("provider-7", "provider:ack")
+        controller.resolve_attempt(attempt)
+        self.assertEqual(controller.unresolved_attempts, {"unrelated-provider-gap"})
+        controller.record_reconciliation(consistent=False)
+        self.assertEqual(controller.state, HostState.DEGRADED)
+
     def test_absence_requires_independent_evidence_before_retry(self):
         attempt = OutboundAttempt("a1", "intent-1", 1)
         attempt.persist()
         attempt.mark_send_started("journal:send-started")
         with self.assertRaises(ValueError):
             attempt.prove_absent(["orders:none"])
+        with self.assertRaisesRegex(ValueError, "independent evidence"):
+            attempt.prove_absent(["orders:none", "orders:none"])
+        self.assertEqual(attempt.phase, SendPhase.SENT_UNKNOWN)
+        self.assertEqual(attempt.retry_disposition, "RECONCILE_FIRST")
         attempt.prove_absent(["orders:none", "history:none"])
         self.assertEqual(attempt.phase, SendPhase.PROVEN_ABSENT)
         self.assertEqual(attempt.retry_disposition, "SAFE_WITH_NEW_ADMISSION")
@@ -121,14 +152,25 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.assertEqual(controller.owner.owner_id, "host-a")
         self.assertEqual(controller.owner.epoch, 1)
 
-    def test_clock_jump_blocks_until_clock_is_requalified(self):
+    def test_clock_jump_blocks_until_clock_is_requalified_and_reconciled(self):
         controller, owner = self._ready()
         controller.set_clock_trusted(False)
         self.assertEqual(controller.state, HostState.BLOCKED)
+        self.assertFalse(controller.provider_reconciled)
+        self.assertIn("clock_requalification_required", controller.reason_codes)
         with self.assertRaises(PermissionError):
             controller.validate_sender(owner.owner_id, owner.epoch)
+
         controller.set_clock_trusted(True)
+        self.assertEqual(controller.state, HostState.RECOVERING)
+        self.assertIn("clock_requalification_required", controller.reason_codes)
+        with self.assertRaises(PermissionError):
+            controller.validate_sender(owner.owner_id, owner.epoch)
+
+        controller.record_reconciliation(consistent=True)
         self.assertEqual(controller.state, HostState.READY)
+        self.assertNotIn("clock_requalification_required", controller.reason_codes)
+        controller.validate_sender(owner.owner_id, owner.epoch)
 
     def test_lease_expiry_does_not_create_a_new_sender(self):
         controller, owner = self._ready()

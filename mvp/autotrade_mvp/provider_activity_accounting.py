@@ -271,6 +271,43 @@ def _provider_fill_binding_aggregate_id(
     )
 
 
+def _projected_fill_binding_payload(
+    projected_fill: ProjectedFillEvidence,
+) -> dict[str, Any]:
+    return {
+        "fill_id": projected_fill.fill_id,
+        "provider_execution_id": projected_fill.provider_execution_id,
+        "intent_id": projected_fill.intent_id,
+        "client_order_id": projected_fill.client_order_id,
+        "side": projected_fill.side,
+        "quantity": _decimal_text(projected_fill.quantity),
+        "price": _decimal_text(projected_fill.price),
+        "provider_revision": projected_fill.provider_revision,
+        "correction_of": projected_fill.correction_of,
+    }
+
+
+def _provider_fill_binding_payload(
+    provider_fill: ProviderFillEvidence,
+) -> dict[str, Any]:
+    return {
+        "provider_id": provider_fill.provider_id,
+        "account_id": provider_fill.account_id,
+        "environment": provider_fill.environment,
+        "provider_execution_id": provider_fill.provider_execution_id,
+        "client_order_id": provider_fill.client_order_id,
+        "instrument": provider_fill.instrument,
+        "quantity": _decimal_text(provider_fill.quantity),
+        "price": _decimal_text(provider_fill.price),
+        "fee_amount": _decimal_text(provider_fill.fee_amount),
+        "fee_currency": provider_fill.fee_currency,
+        "trade_time": _instant_text(provider_fill.trade_time, name="trade_time"),
+        "side": provider_fill.side,
+        "position_side": provider_fill.position_side,
+        "evidence_refs": list(provider_fill.evidence_refs),
+    }
+
+
 def _prepare_provider_fill_binding(
     economic_book: "DurableProviderEconomicBook",
     *,
@@ -306,6 +343,8 @@ def _prepare_provider_fill_binding(
         key: _decimal_text(value)
         for key, value in plan.usage_items
     }
+    projected_payload = _projected_fill_binding_payload(projected_fill)
+    provider_payload = _provider_fill_binding_payload(provider_fill)
     request = {
         "schema_version": "1.0.0",
         "provider_id": economic_book.provider_id,
@@ -316,6 +355,10 @@ def _prepare_provider_fill_binding(
         "provider_execution_id": plan.provider_execution_id,
         "fill_id": projected_fill.fill_id,
         "provider_revision": projected_fill.provider_revision,
+        "projected_fill": projected_payload,
+        "projected_fill_digest": payload_digest(projected_payload),
+        "provider_fill": provider_payload,
+        "provider_fill_digest": payload_digest(provider_payload),
         "plan_digest": plan.plan_digest,
         "transaction_id": plan.transaction.transaction_id,
         "transaction_digest": payload_digest(

@@ -50,6 +50,8 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
             financial_staleness_us=[200_000] * 20,
             research_interference_us=[300_000],
             reconnect_backlog_remaining=0,
+            declared_duration_us=1_000_000,
+            observed_duration_us=900_000,
         )
         values.update(overrides)
         return RuntimeLoadObservation.create(**values)
@@ -75,6 +77,34 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
         self.assertEqual(decision.scenario_id, "declared-host-load-a")
         self.assertEqual(decision.reasons, ())
         self.assertEqual(decision.metrics["p95_financial_latency_us"], 100_000)
+
+    def test_declared_throughput_must_be_measured_and_met(self):
+        missing = self.observation(
+            declared_duration_us=None,
+            observed_duration_us=None,
+        )
+        decision = evaluate_runtime_budget(self.spec(), missing)
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertIn("missing_throughput_measurement", decision.reasons)
+
+        slow = self.observation(observed_duration_us=1_100_000)
+        decision = evaluate_runtime_budget(self.spec(), slow)
+        self.assertEqual(decision.status, "FAIL")
+        self.assertIn("declared_throughput_not_met", decision.reasons)
+        self.assertEqual(
+            decision.metrics["declared_financial_throughput_milli_eps"],
+            20_000,
+        )
+        self.assertEqual(
+            decision.metrics["observed_financial_throughput_milli_eps"],
+            18_181,
+        )
+
+    def test_duration_fields_are_atomic_and_positive(self):
+        with self.assertRaisesRegex(RuntimeBudgetError, "supplied together"):
+            self.observation(observed_duration_us=None)
+        with self.assertRaisesRegex(RuntimeBudgetError, "observed_duration_us"):
+            self.observation(observed_duration_us=0)
 
     def test_event_loss_fails_even_when_latency_is_fast(self):
         decision = evaluate_runtime_budget(
@@ -193,6 +223,7 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
             store = JournalStore(Path(folder) / "runtime-budget.sqlite3")
             latencies = []
             count = 30
+            campaign_started = perf_counter_ns()
             for index in range(count):
                 payload = {"sequence": index, "kind": "financial_probe"}
                 envelope = {
@@ -209,6 +240,10 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
                 store.append_event(envelope, outbox_topic="financial.probe")
                 latencies.append((perf_counter_ns() - started) // 1_000)
 
+            campaign_duration_us = max(
+                1,
+                (perf_counter_ns() - campaign_started + 999) // 1_000,
+            )
             recovered = store.load_events("PERFORMANCE_PROBE", "burst-a")
             budget_spec = RuntimeBudgetSpec(
                 scenario_id="journal-wiring-ci",
@@ -234,6 +269,8 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
                 financial_staleness_us=[0] * count,
                 research_interference_us=[0],
                 reconnect_backlog_remaining=0,
+                declared_duration_us=60_000_000,
+                observed_duration_us=campaign_duration_us,
             )
             decision = evaluate_runtime_budget(
                 budget_spec,

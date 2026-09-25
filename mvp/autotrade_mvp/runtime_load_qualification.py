@@ -13,9 +13,10 @@ from __future__ import annotations
 from dataclasses import InitVar, dataclass
 from hashlib import sha256
 from types import MappingProxyType
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 import json
 import re
+import time
 
 from .performance_qualification import (
     RuntimeBudgetDecision,
@@ -219,6 +220,7 @@ class RuntimeCampaignCut:
     plan_digest: str
     spec_digest: str
     start_journal_sequence: int
+    started_monotonic_ns: int
     _token: InitVar[object | None] = None
 
     def __post_init__(self, _token: object | None) -> None:
@@ -239,6 +241,15 @@ class RuntimeCampaignCut:
                 allow_zero=True,
             ),
         )
+        object.__setattr__(
+            self,
+            "started_monotonic_ns",
+            _positive_int(
+                self.started_monotonic_ns,
+                name="started_monotonic_ns",
+                allow_zero=True,
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -248,6 +259,8 @@ class RuntimeCampaignEvidence:
     release_sha: str
     configuration_hash: str
     host_fingerprint: str
+    declared_duration_us: int
+    observed_duration_us: int
     start_journal_sequence: int
     end_journal_sequence: int
     expected_financial_event_ids: tuple[str, ...]
@@ -285,6 +298,16 @@ class RuntimeCampaignEvidence:
             self,
             "host_fingerprint",
             _sha256_identity(self.host_fingerprint, name="host_fingerprint"),
+        )
+        object.__setattr__(
+            self,
+            "declared_duration_us",
+            _positive_int(self.declared_duration_us, name="declared_duration_us"),
+        )
+        object.__setattr__(
+            self,
+            "observed_duration_us",
+            _positive_int(self.observed_duration_us, name="observed_duration_us"),
         )
         start = _positive_int(
             self.start_journal_sequence,
@@ -392,6 +415,8 @@ class RuntimeCampaignEvidence:
                 "release_sha": self.release_sha,
                 "configuration_hash": self.configuration_hash,
                 "host_fingerprint": self.host_fingerprint,
+                "declared_duration_us": self.declared_duration_us,
+                "observed_duration_us": self.observed_duration_us,
                 "start_journal_sequence": self.start_journal_sequence,
                 "end_journal_sequence": self.end_journal_sequence,
                 "expected_financial_event_ids": list(self.expected_financial_event_ids),
@@ -431,6 +456,8 @@ class RuntimeCampaignEvidence:
             financial_staleness_us=self.financial_staleness_us,
             research_interference_us=self.research_interference_us,
             reconnect_backlog_remaining=self.reconnect_backlog_remaining,
+            declared_duration_us=self.declared_duration_us,
+            observed_duration_us=self.observed_duration_us,
         )
 
 
@@ -439,6 +466,7 @@ def begin_runtime_campaign(
     journal: JournalStore,
     spec: RuntimeBudgetSpec,
     plan: RuntimeCampaignPlan,
+    monotonic_ns: Callable[[], int] = time.monotonic_ns,
 ) -> RuntimeCampaignCut:
     if not isinstance(journal, JournalStore):
         raise TypeError("journal must be JournalStore")
@@ -454,10 +482,16 @@ def begin_runtime_campaign(
         or plan.host_fingerprint != spec.host_fingerprint
     ):
         raise RuntimeBudgetError("runtime campaign plan does not match budget spec")
+    started_monotonic_ns = _positive_int(
+        monotonic_ns(),
+        name="started_monotonic_ns",
+        allow_zero=True,
+    )
     return RuntimeCampaignCut(
         plan_digest=plan.digest,
         spec_digest=spec.digest,
         start_journal_sequence=journal.current_journal_sequence(),
+        started_monotonic_ns=started_monotonic_ns,
         _token=_CUT_TOKEN,
     )
 
@@ -473,6 +507,7 @@ def collect_runtime_campaign_evidence(
     research_interference_us: Sequence[int],
     resource_evidence_hash: str,
     resource_metrics: Mapping[str, int],
+    monotonic_ns: Callable[[], int] = time.monotonic_ns,
     max_events: int = 100000,
 ) -> RuntimeCampaignEvidence:
     if not isinstance(journal, JournalStore):
@@ -485,6 +520,16 @@ def collect_runtime_campaign_evidence(
         raise TypeError("cut must be RuntimeCampaignCut")
     if cut.plan_digest != plan.digest or cut.spec_digest != spec.digest:
         raise RuntimeBudgetError("campaign cut belongs to another plan or spec")
+    ended_monotonic_ns = _positive_int(
+        monotonic_ns(),
+        name="ended_monotonic_ns",
+        allow_zero=True,
+    )
+    if ended_monotonic_ns < cut.started_monotonic_ns:
+        raise RuntimeBudgetError("monotonic clock moved backwards during runtime campaign")
+    elapsed_ns = ended_monotonic_ns - cut.started_monotonic_ns
+    observed_duration_us = max(1, (elapsed_ns + 999) // 1000)
+    declared_duration_us = plan.declared_duration_ms * 1000
     end_sequence = journal.current_journal_sequence()
     events = journal.load_events_after_journal_sequence(
         cut.start_journal_sequence,
@@ -529,6 +574,8 @@ def collect_runtime_campaign_evidence(
         release_sha=spec.release_sha,
         configuration_hash=spec.configuration_hash,
         host_fingerprint=spec.host_fingerprint,
+        declared_duration_us=declared_duration_us,
+        observed_duration_us=observed_duration_us,
         start_journal_sequence=cut.start_journal_sequence,
         end_journal_sequence=end_sequence,
         expected_financial_event_ids=plan.expected_financial_event_ids,

@@ -85,6 +85,12 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 "account_id": "acct:paper:1",
                 "capability_snapshot_id": "capability:1",
                 "source_as_of": "2026-09-25T18:15:00Z",
+                "asset_class": "CASH_EQUITY",
+                "payoff": "LINEAR",
+                "quantity_unit": "SHARE",
+                "contract_multiplier": "1",
+                "quote_currency": "USD",
+                "settlement_currency": "USD",
                 "price": "10",
                 "lot_size": "1",
                 "cost_rate": "0.001",
@@ -92,6 +98,42 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 "min_notional": "10",
                 "fee_floor": "0",
                 "max_executable_notional": "500",
+            },
+        )
+        valuation = self.evidence(
+            evidence_id="valuation:aaa:v1",
+            kind="VALUATION",
+            environment=environment,
+            payload={
+                "symbol": "AAA",
+                "instrument_version": "instrument:aaa:v3",
+                "capability_snapshot_id": "capability:1",
+                "asset_class": "CASH_EQUITY",
+                "payoff": "LINEAR",
+                "quantity_unit": "SHARE",
+                "contract_multiplier": "1",
+                "quote_currency": "USD",
+                "settlement_currency": "USD",
+                "source_price": "10",
+                "portfolio_base_currency": "USD",
+                "fx_rate": "1",
+                "fx_source_id": "IDENTITY",
+                "unit_base_notional": "10",
+                "capital_requirement_rate": "1",
+                "min_notional_base": "10",
+                "fee_floor_base": "0",
+                "max_executable_notional_base": "500",
+                "payoff_identity": "linear:cash-equity:v1",
+                "cost_rate_components": {
+                    "execution": "0.001", "financing": "0", "funding": "0", "borrow": "0", "fx": "0"
+                },
+                "cost_evidence_refs": {
+                    "execution": "execution-cost:aaa:v1",
+                    "financing": "financing:none:aaa:v1",
+                    "funding": "funding:none:aaa:v1",
+                    "borrow": "borrow:none:aaa:v1",
+                    "fx": "fx:identity:usd:v1",
+                },
             },
         )
         capital = self.evidence(
@@ -107,6 +149,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 "reservation_state_version": 9,
                 "reservation_state_digest": "3" * 64,
                 "cash_available": capital_cash,
+                "base_currency": "USD",
             },
         )
         stress = self.evidence(
@@ -121,7 +164,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
         )
         resolved = {
             item.evidence_id: item
-            for item in (objective, market, capital, stress)
+            for item in (objective, market, valuation, capital, stress)
         }
         return objective, market, capital, stress, resolved
 
@@ -136,6 +179,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             policy,
             objective_evidence={"AAA": objective},
             market_evidence={"AAA": market},
+            valuation_evidence={"AAA": resolved["valuation:aaa:v1"]},
             capital_evidence=capital,
             stress_source_evidence=(stress,),
             resolved_evidence=resolved,
@@ -223,6 +267,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 self.policy(),
                 objective_evidence={"AAA": objective},
                 market_evidence={"AAA": market},
+                valuation_evidence={"AAA": resolved["valuation:aaa:v1"]},
                 capital_evidence=capital,
                 stress_source_evidence=(stress,),
                 resolved_evidence=resolved,
@@ -249,6 +294,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 self.policy(),
                 objective_evidence={"AAA": objective},
                 market_evidence={"AAA": market},
+                valuation_evidence={"AAA": resolved["valuation:aaa:v1"]},
                 capital_evidence=capital,
                 stress_source_evidence=(stress,),
                 resolved_evidence=resolved,
@@ -404,6 +450,85 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 resolved_evidence=bundle[-1],
                 environment="SIMULATION",
                 as_of="2026-09-25T19:01:00Z",
+                current_policy_version="risk-policy:12",
+                current_provider_id="SIMULATED",
+                current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                current_capability_snapshot_ids={"AAA": "capability:1"},
+                current_account_id="acct:paper:1",
+                current_account_snapshot_id="snapshot:acct:1:v5",
+                current_reconciliation_run_id="reconciliation:acct:1:v5",
+                current_account_state_version=5,
+                current_reservation_state_version=9,
+                current_reservation_state_digest="3" * 64,
+            )
+
+
+    def test_valuation_evidence_identity_is_part_of_decision_digest(self):
+        bundle = self.bundle()
+        first = self.allocate(bundle=bundle)
+        objective, market, capital, stress, resolved = bundle
+        original = resolved["valuation:aaa:v1"]
+        payload = dict(original.payload)
+        cost_refs = dict(payload["cost_evidence_refs"])
+        cost_refs["execution"] = "execution-cost:aaa:v2"
+        payload["cost_evidence_refs"] = cost_refs
+        changed = self.evidence(
+            evidence_id="valuation:aaa:v2",
+            kind="VALUATION",
+            payload=payload,
+        )
+        changed_resolved = {
+            key: value
+            for key, value in resolved.items()
+            if key != original.evidence_id
+        }
+        changed_resolved[changed.evidence_id] = changed
+        second = allocate_evidence_bound_objective_targets(
+            (self.candidate(),),
+            self.policy(),
+            objective_evidence={"AAA": objective},
+            market_evidence={"AAA": market},
+            valuation_evidence={"AAA": changed},
+            capital_evidence=capital,
+            stress_source_evidence=(stress,),
+            resolved_evidence=changed_resolved,
+            environment="SIMULATION",
+            decision_time=self.DECISION_TIME,
+            policy_version="risk-policy:12",
+        )
+        self.assertNotEqual(first.decision_digest, second.decision_digest)
+        self.assertEqual(first.objective.allocation, second.objective.allocation)
+
+    def test_valuation_evidence_must_still_be_fresh_at_admission(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        original = resolved["valuation:aaa:v1"]
+        expiring = self.evidence(
+            evidence_id=original.evidence_id,
+            kind="VALUATION",
+            payload=original.payload,
+            valid_until="2026-09-25T18:35:00Z",
+        )
+        expiring_resolved = dict(resolved)
+        expiring_resolved[expiring.evidence_id] = expiring
+        result = allocate_evidence_bound_objective_targets(
+            (self.candidate(),),
+            self.policy(),
+            objective_evidence={"AAA": objective},
+            market_evidence={"AAA": market},
+            valuation_evidence={"AAA": expiring},
+            capital_evidence=capital,
+            stress_source_evidence=(stress,),
+            resolved_evidence=expiring_resolved,
+            environment="SIMULATION",
+            decision_time=self.DECISION_TIME,
+            policy_version="risk-policy:12",
+        )
+        with self.assertRaisesRegex(ValueError, "stale at admission"):
+            revalidate_evidence_bound_allocation(
+                result,
+                resolved_evidence=expiring_resolved,
+                environment="SIMULATION",
+                as_of="2026-09-25T18:40:00Z",
                 current_policy_version="risk-policy:12",
                 current_provider_id="SIMULATED",
                 current_instrument_versions={"AAA": "instrument:aaa:v3"},

@@ -324,6 +324,366 @@ class DeterministicProposal:
                 )
 
 
+@dataclass(frozen=True)
+class StrategyEconomicsBinding:
+    """Frozen ex-ante economics/capacity evidence for one deterministic proposal cut.
+
+    This is research evidence only. It cannot authorize execution, change risk
+    limits, or use realized post-arrival liquidity. Every evidence timestamp must
+    already be available at the proposal information cutoff.
+    """
+
+    strategy_fingerprint: str
+    strategy_configuration_fingerprint: str
+    instrument_version: str
+    information_cutoff: datetime
+    decision_time: datetime
+    horizon_seconds: int
+    expiry: datetime
+    available_at: datetime
+    input_manifest_refs: tuple[str, ...]
+    gross_return_distribution_sha256: str
+    after_cost_return_distribution_sha256: str
+    after_cost_lower_bound: Decimal
+    execution_model_fingerprint: str
+    execution_calibration_sha256: str
+    execution_fidelity: str
+    capacity_assessment_sha256: str
+    max_feasible_quantity: Decimal
+    lot_size: Decimal
+    required_evidence_dimensions: tuple[str, ...] = ()
+    dimension_evidence: tuple[tuple[str, str], ...] = ()
+    status: str = "INCONCLUSIVE"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "strategy_fingerprint",
+            _digest(self.strategy_fingerprint, name="strategy_fingerprint"),
+        )
+        object.__setattr__(
+            self,
+            "strategy_configuration_fingerprint",
+            _digest(
+                self.strategy_configuration_fingerprint,
+                name="strategy_configuration_fingerprint",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "instrument_version",
+            _text(self.instrument_version, name="instrument_version"),
+        )
+        cutoff = _time(self.information_cutoff, name="information_cutoff")
+        decision = _time(self.decision_time, name="decision_time")
+        expiry = _time(self.expiry, name="expiry")
+        available = _time(self.available_at, name="available_at")
+        if cutoff > decision:
+            raise ValueError("information_cutoff cannot be after decision_time")
+        if available > cutoff:
+            raise ValueError(
+                "economics evidence is not causally available at information_cutoff"
+            )
+        if (
+            isinstance(self.horizon_seconds, bool)
+            or not isinstance(self.horizon_seconds, int)
+            or self.horizon_seconds <= 0
+        ):
+            raise ValueError("horizon_seconds must be a positive integer")
+        if expiry != cutoff + timedelta(seconds=self.horizon_seconds):
+            raise ValueError(
+                "economics expiry must equal information_cutoff plus horizon_seconds"
+            )
+        object.__setattr__(self, "information_cutoff", cutoff)
+        object.__setattr__(self, "decision_time", decision)
+        object.__setattr__(self, "expiry", expiry)
+        object.__setattr__(self, "available_at", available)
+
+        if isinstance(self.input_manifest_refs, (str, bytes)) or not isinstance(
+            self.input_manifest_refs, tuple
+        ):
+            raise ValueError("input_manifest_refs must be a tuple")
+        manifests = tuple(
+            _digest(value, name="input_manifest_ref")
+            for value in self.input_manifest_refs
+        )
+        if not manifests or len(set(manifests)) != len(manifests):
+            raise ValueError(
+                "input_manifest_refs must contain unique immutable evidence"
+            )
+        object.__setattr__(self, "input_manifest_refs", manifests)
+        for name in (
+            "gross_return_distribution_sha256",
+            "after_cost_return_distribution_sha256",
+            "execution_model_fingerprint",
+            "execution_calibration_sha256",
+            "capacity_assessment_sha256",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _digest(getattr(self, name), name=name),
+            )
+        object.__setattr__(
+            self,
+            "execution_fidelity",
+            _text(self.execution_fidelity, name="execution_fidelity").upper(),
+        )
+
+        lower_bound = _decimal(
+            self.after_cost_lower_bound,
+            name="after_cost_lower_bound",
+        )
+        capacity = _decimal(
+            self.max_feasible_quantity,
+            name="max_feasible_quantity",
+        )
+        lot_size = _decimal(self.lot_size, name="lot_size")
+        if capacity < 0:
+            raise ValueError("max_feasible_quantity cannot be negative")
+        if lot_size <= 0:
+            raise ValueError("lot_size must be positive")
+        object.__setattr__(self, "after_cost_lower_bound", lower_bound)
+        object.__setattr__(self, "max_feasible_quantity", capacity)
+        object.__setattr__(self, "lot_size", lot_size)
+
+        if isinstance(self.required_evidence_dimensions, (str, bytes)) or not isinstance(
+            self.required_evidence_dimensions, tuple
+        ):
+            raise ValueError("required_evidence_dimensions must be a tuple")
+        required = tuple(
+            _text(value, name="required_evidence_dimension").upper()
+            for value in self.required_evidence_dimensions
+        )
+        if len(set(required)) != len(required):
+            raise ValueError("required_evidence_dimensions contains duplicates")
+        object.__setattr__(self, "required_evidence_dimensions", required)
+
+        if not isinstance(self.dimension_evidence, tuple):
+            raise ValueError("dimension_evidence must be a tuple")
+        evidence: list[tuple[str, str]] = []
+        evidence_names: set[str] = set()
+        for item in self.dimension_evidence:
+            if not isinstance(item, tuple) or len(item) != 2:
+                raise ValueError(
+                    "dimension_evidence entries must be (dimension, sha256)"
+                )
+            dimension = _text(item[0], name="dimension_evidence dimension").upper()
+            if dimension in evidence_names:
+                raise ValueError("dimension_evidence contains duplicate dimensions")
+            evidence_names.add(dimension)
+            evidence.append(
+                (
+                    dimension,
+                    _digest(item[1], name=f"{dimension} evidence"),
+                )
+            )
+        object.__setattr__(
+            self,
+            "dimension_evidence",
+            tuple(sorted(evidence)),
+        )
+
+        status = _text(self.status, name="status").upper()
+        if status not in {"QUALIFIED", "INCONCLUSIVE", "NO_TRADE"}:
+            raise ValueError("unsupported economics binding status")
+        missing = set(required) - evidence_names
+        if status == "QUALIFIED" and missing:
+            raise ValueError(
+                "QUALIFIED economics binding is missing required evidence dimensions"
+            )
+        if status == "QUALIFIED" and lower_bound <= 0:
+            raise ValueError(
+                "QUALIFIED economics binding requires positive after-cost lower bound"
+            )
+        object.__setattr__(self, "status", status)
+
+    @property
+    def missing_dimensions(self) -> tuple[str, ...]:
+        evidenced = {dimension for dimension, _digest_value in self.dimension_evidence}
+        return tuple(
+            sorted(set(self.required_evidence_dimensions) - evidenced)
+        )
+
+    def canonical_document(self) -> dict[str, object]:
+        return {
+            "schema_version": "1.0.0",
+            "strategy_fingerprint": self.strategy_fingerprint,
+            "strategy_configuration_fingerprint": (
+                self.strategy_configuration_fingerprint
+            ),
+            "instrument_version": self.instrument_version,
+            "information_cutoff": _utc_text(self.information_cutoff),
+            "decision_time": _utc_text(self.decision_time),
+            "horizon_seconds": self.horizon_seconds,
+            "expiry": _utc_text(self.expiry),
+            "available_at": _utc_text(self.available_at),
+            "input_manifest_refs": list(self.input_manifest_refs),
+            "gross_return_distribution_sha256": (
+                self.gross_return_distribution_sha256
+            ),
+            "after_cost_return_distribution_sha256": (
+                self.after_cost_return_distribution_sha256
+            ),
+            "after_cost_lower_bound": str(self.after_cost_lower_bound),
+            "execution_model_fingerprint": self.execution_model_fingerprint,
+            "execution_calibration_sha256": self.execution_calibration_sha256,
+            "execution_fidelity": self.execution_fidelity,
+            "capacity_assessment_sha256": self.capacity_assessment_sha256,
+            "max_feasible_quantity": str(self.max_feasible_quantity),
+            "lot_size": str(self.lot_size),
+            "required_evidence_dimensions": list(
+                self.required_evidence_dimensions
+            ),
+            "dimension_evidence": [
+                {"dimension": dimension, "sha256": digest}
+                for dimension, digest in self.dimension_evidence
+            ],
+            "missing_dimensions": list(self.missing_dimensions),
+            "status": self.status,
+        }
+
+    @property
+    def fingerprint(self) -> str:
+        return "sha256:" + sha256(
+            _canonical_json(self.canonical_document()).encode("utf-8")
+        ).hexdigest()
+
+
+@dataclass(frozen=True)
+class EconomicsBoundProposal:
+    """Gross deterministic signal plus a non-expansive ex-ante economics gate."""
+
+    gross_proposal: DeterministicProposal
+    economics: StrategyEconomicsBinding
+    instrument_version: str
+    action: str
+    quantity: Decimal
+    reason: str
+
+    @property
+    def fingerprint(self) -> str:
+        gross = self.gross_proposal
+        payload = {
+            "schema_version": "1.0.0",
+            "strategy_version": gross.strategy_version,
+            "strategy_fingerprint": gross.strategy_fingerprint,
+            "strategy_configuration_fingerprint": (
+                gross.strategy_configuration_fingerprint
+            ),
+            "symbol": gross.symbol,
+            "gross_action": gross.action,
+            "gross_quantity": str(gross.quantity),
+            "decision_time": _utc_text(gross.decision_time),
+            "information_cutoff": _utc_text(gross.information_cutoff),
+            "horizon_seconds": gross.horizon_seconds,
+            "expiry": _utc_text(gross.expiry),
+            "evidence_event_ids": list(gross.evidence_event_ids),
+            "economics_binding_sha256": self.economics.fingerprint,
+            "instrument_version": self.instrument_version,
+            "effective_action": self.action,
+            "effective_quantity": str(self.quantity),
+            "reason": self.reason,
+        }
+        return "sha256:" + sha256(
+            _canonical_json(payload).encode("utf-8")
+        ).hexdigest()
+
+
+def bind_strategy_economics(
+    proposal: DeterministicProposal,
+    economics: StrategyEconomicsBinding,
+    *,
+    instrument_version: str,
+) -> EconomicsBoundProposal:
+    """Bind frozen decision-time economics without expanding the gross signal."""
+
+    if not isinstance(proposal, DeterministicProposal):
+        raise TypeError("proposal must be DeterministicProposal")
+    if not isinstance(economics, StrategyEconomicsBinding):
+        raise TypeError("economics must be StrategyEconomicsBinding")
+    instrument = _text(instrument_version, name="instrument_version")
+    if (
+        proposal.information_cutoff is None
+        or proposal.horizon_seconds is None
+        or proposal.expiry is None
+        or proposal.strategy_fingerprint is None
+        or proposal.strategy_configuration_fingerprint is None
+    ):
+        raise ValueError("proposal lacks registered strategy/horizon metadata")
+    if economics.strategy_fingerprint != proposal.strategy_fingerprint:
+        raise ValueError("economics strategy fingerprint does not match proposal")
+    if (
+        economics.strategy_configuration_fingerprint
+        != proposal.strategy_configuration_fingerprint
+    ):
+        raise ValueError(
+            "economics strategy configuration fingerprint does not match proposal"
+        )
+    if economics.instrument_version != instrument:
+        raise ValueError("economics instrument_version does not match proposal")
+    if economics.information_cutoff != proposal.information_cutoff:
+        raise ValueError("economics information_cutoff does not match proposal")
+    if economics.decision_time != proposal.decision_time:
+        raise ValueError("economics decision_time does not match proposal")
+    if economics.horizon_seconds != proposal.horizon_seconds:
+        raise ValueError("economics horizon does not match proposal")
+    if economics.expiry != proposal.expiry:
+        raise ValueError("economics expiry does not match proposal")
+
+    if proposal.action == "HOLD":
+        return EconomicsBoundProposal(
+            gross_proposal=proposal,
+            economics=economics,
+            instrument_version=instrument,
+            action="HOLD",
+            quantity=Decimal("0"),
+            reason=proposal.reason,
+        )
+
+    if economics.status != "QUALIFIED":
+        missing = (
+            ", ".join(economics.missing_dimensions)
+            if economics.missing_dimensions
+            else economics.status
+        )
+        return EconomicsBoundProposal(
+            gross_proposal=proposal,
+            economics=economics,
+            instrument_version=instrument,
+            action="HOLD",
+            quantity=Decimal("0"),
+            reason=f"decision-time economics {economics.status}: {missing}",
+        )
+
+    capped = min(proposal.quantity, economics.max_feasible_quantity)
+    lots = capped // economics.lot_size
+    quantity = lots * economics.lot_size
+    if quantity <= 0:
+        return EconomicsBoundProposal(
+            gross_proposal=proposal,
+            economics=economics,
+            instrument_version=instrument,
+            action="HOLD",
+            quantity=Decimal("0"),
+            reason="decision-time capacity is below one executable lot",
+        )
+    if quantity > proposal.quantity:
+        raise ValueError("economics binding cannot increase proposal exposure")
+    return EconomicsBoundProposal(
+        gross_proposal=proposal,
+        economics=economics,
+        instrument_version=instrument,
+        action=proposal.action,
+        quantity=quantity,
+        reason=(
+            proposal.reason
+            if quantity == proposal.quantity
+            else "gross signal retained with quantity reduced by frozen ex-ante capacity"
+        ),
+    )
+
+
 class NoTradeBaseline:
     """Deterministic null baseline that can never propose financial exposure."""
 
@@ -741,18 +1101,16 @@ def to_decision_proposal(
     *,
     proposal_id: str,
     instrument_version: str,
-    input_manifest_refs: tuple[str, ...],
-    expected_return_distribution_ref: str,
+    economics_binding: StrategyEconomicsBinding,
     exit_policy_ref: str,
     compute_cost_currency: str,
     counterarguments: tuple[str, ...] = (),
 ) -> dict[str, object]:
-    """Project a registered zero-model result into canonical DecisionProposal shape.
+    """Project a registered zero-model result through frozen ex-ante economics.
 
-    This adapter does not invent an expected-return distribution, exit policy,
-    instrument identity or input manifest. Those remain explicit external
-    evidence. A HOLD result becomes a canonical NO_TRADE proposal and never
-    gains an executable candidate instrument from its display symbol.
+    Gross strategy evidence remains visible and immutable. The economics binding
+    may only preserve/reduce exposure or convert it to NO_TRADE; it never grants
+    financial authority and never consumes realized post-arrival liquidity.
     """
 
     if not isinstance(proposal, DeterministicProposal):
@@ -773,25 +1131,8 @@ def to_decision_proposal(
     if normalized_proposal_id != proposal_id:
         raise ValueError("proposal_id must be a canonical UUID")
     instrument = _text(instrument_version, name="instrument_version")
-    distribution_ref = _text(
-        expected_return_distribution_ref,
-        name="expected_return_distribution_ref",
-    )
     exit_ref = _text(exit_policy_ref, name="exit_policy_ref")
     currency = _text(compute_cost_currency, name="compute_cost_currency")
-    if isinstance(input_manifest_refs, (str, bytes)) or not isinstance(
-        input_manifest_refs,
-        tuple,
-    ):
-        raise ValueError("input_manifest_refs must be a tuple")
-    manifests = tuple(
-        _digest(value, name="input_manifest_ref")
-        for value in input_manifest_refs
-    )
-    if not manifests or len(set(manifests)) != len(manifests):
-        raise ValueError(
-            "input_manifest_refs must contain unique immutable evidence"
-        )
     if isinstance(counterarguments, (str, bytes)) or not isinstance(
         counterarguments,
         tuple,
@@ -804,17 +1145,24 @@ def to_decision_proposal(
     if len(set(normalized_counterarguments)) != len(normalized_counterarguments):
         raise ValueError("counterarguments contains duplicates")
 
-    no_trade = proposal.action == "HOLD"
+    bound = bind_strategy_economics(
+        proposal,
+        economics_binding,
+        instrument_version=instrument,
+    )
+    no_trade = bound.action == "HOLD"
     body: dict[str, object] = {
         "proposal_id": normalized_proposal_id,
         "strategy_version": proposal.strategy_version,
         "decision_at": _utc_text(proposal.decision_time),
         "information_cutoff": _utc_text(proposal.information_cutoff),
-        "input_manifest_refs": list(manifests),
+        "input_manifest_refs": list(economics_binding.input_manifest_refs),
         "thesis": proposal.reason,
         "candidate_instruments": [] if no_trade else [instrument],
         "horizon": f"PT{proposal.horizon_seconds}S",
-        "expected_return_distribution_ref": distribution_ref,
+        "expected_return_distribution_ref": (
+            economics_binding.after_cost_return_distribution_sha256
+        ),
         "confidence_basis": {
             "economic_edge_claim": proposal.economic_edge_claim,
             "strategy_fingerprint": proposal.strategy_fingerprint,
@@ -822,6 +1170,35 @@ def to_decision_proposal(
                 proposal.strategy_configuration_fingerprint
             ),
             "model_calls": proposal.model_calls,
+            "gross_action": proposal.action,
+            "gross_quantity": str(proposal.quantity),
+            "effective_action": bound.action,
+            "effective_quantity": str(bound.quantity),
+            "strategy_economics_binding_sha256": economics_binding.fingerprint,
+            "economics_bound_proposal_sha256": bound.fingerprint,
+            "gross_return_distribution_ref": (
+                economics_binding.gross_return_distribution_sha256
+            ),
+            "after_cost_lower_bound": str(
+                economics_binding.after_cost_lower_bound
+            ),
+            "economics_status": economics_binding.status,
+            "missing_economic_dimensions": list(
+                economics_binding.missing_dimensions
+            ),
+            "execution_model_fingerprint": (
+                economics_binding.execution_model_fingerprint
+            ),
+            "execution_calibration_sha256": (
+                economics_binding.execution_calibration_sha256
+            ),
+            "execution_fidelity": economics_binding.execution_fidelity,
+            "capacity_assessment_sha256": (
+                economics_binding.capacity_assessment_sha256
+            ),
+            "max_feasible_quantity": str(
+                economics_binding.max_feasible_quantity
+            ),
         },
         "counterarguments": list(normalized_counterarguments),
         "exit_policy_ref": exit_ref,
@@ -832,5 +1209,5 @@ def to_decision_proposal(
         },
     }
     if no_trade:
-        body["NO_TRADE_reason"] = proposal.reason
+        body["NO_TRADE_reason"] = bound.reason
     return body

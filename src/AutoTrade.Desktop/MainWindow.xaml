@@ -136,6 +136,13 @@
                     Click="BlockNewExposure_Click"
                     AutomationProperties.Name="Block new exposure"
                     AutomationProperties.HelpText="Request a durable host-side block on new exposure. This does not cancel or flatten existing exposure." />
+            <Label Margin="0,12,0,0"
+                   Target="{Binding ElementName=EmergencyOperationValue}"
+                   Content="Emergency _operation:" />
+            <TextBox x:Name="EmergencyOperationValue"
+                     Text="Unavailable"
+                     IsReadOnly="True"
+                     AutomationProperties.Name="Emergency operation" />
             <TextBlock x:Name="EmergencyResult"
                        Margin="0,12,0,0"
                        TextWrapping="Wrap"

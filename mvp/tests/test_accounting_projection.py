@@ -164,6 +164,39 @@ class EquityPositionProjectionTests(unittest.TestCase):
         self.assertEqual(projection.realized_pnl, Decimal("10"))
         self.assertEqual(book.fee_expense("USD"), Decimal("5"))
 
+    def test_third_currency_fee_never_changes_gross_projection(self):
+        book = EconomicBook()
+        book.append(book_equity_fill(
+            transaction_id="buy-third-fee",
+            cause_event_id="fill-buy-third-fee",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="1",
+            price="100",
+            fee="2",
+            fee_currency="EUR",
+        ))
+        book.append(book_equity_fill(
+            transaction_id="sell-third-fee",
+            cause_event_id="fill-sell-third-fee",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="SELL",
+            quantity="1",
+            price="110",
+            fee="-0.50",
+            fee_currency="EUR",
+        ))
+        projection = project_equity_position(
+            book,
+            instrument="ABC",
+            settlement_currency="USD",
+            mark_price="110",
+        )
+        self.assertEqual(projection.realized_pnl, Decimal("10"))
+        self.assertEqual(book.fee_expense("EUR"), Decimal("1.50"))
+
     def test_missing_mark_keeps_unrealized_unknown(self):
         book = EconomicBook()
         book.append(book_equity_fill(

@@ -760,6 +760,7 @@ class RiskContext:
     option_exercise_cash_available: Decimal | None = None
     futures_delivery_headroom_seconds: Mapping[str, Decimal] | None = None
     equivalent_exposure_per_unit: Mapping[str, Decimal] | None = None
+    instrument_types: Mapping[str, str] | None = None
 
     @classmethod
     def create(
@@ -798,6 +799,7 @@ class RiskContext:
         option_exercise_cash_available=None,
         futures_delivery_headroom_seconds: Mapping[str, object] | None = None,
         equivalent_exposure_per_unit: Mapping[str, object] | None = None,
+        instrument_types: Mapping[str, str] | None = None,
     ) -> "RiskContext":
         if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
@@ -836,6 +838,26 @@ class RiskContext:
             venues or {},
             name="venues",
         )
+        normalized_instrument_types = _normalize_text_mapping(
+            instrument_types or {},
+            name="instrument_types",
+        )
+        normalized_instrument_types = {
+            symbol: value.upper()
+            for symbol, value in normalized_instrument_types.items()
+        }
+        invalid_instrument_types = sorted(
+            {
+                value
+                for value in normalized_instrument_types.values()
+                if value not in RISK_INSTRUMENT_TYPES
+            }
+        )
+        if invalid_instrument_types:
+            raise ValueError(
+                "Unsupported context instrument type(s): "
+                + ", ".join(invalid_instrument_types)
+            )
         normalized_liquidity = _normalize_mapping(
             liquidity_capacity or {},
             name="liquidity_capacity",
@@ -1081,6 +1103,7 @@ class RiskContext:
             option_exercise_cash_available=normalized_exercise_available,
             futures_delivery_headroom_seconds=normalized_delivery_headroom,
             equivalent_exposure_per_unit=normalized_equivalent_exposure,
+            instrument_types=normalized_instrument_types,
         )
 
 
@@ -1422,6 +1445,7 @@ def evaluate_risk(
         option_exercise_cash_available=context.option_exercise_cash_available,
         futures_delivery_headroom_seconds=context.futures_delivery_headroom_seconds,
         equivalent_exposure_per_unit=context.equivalent_exposure_per_unit,
+        instrument_types=context.instrument_types,
     )
     policy = RiskPolicy.create(
         max_abs_position=policy.max_abs_position,
@@ -1466,10 +1490,26 @@ def evaluate_risk(
         "OPTION",
     }
     equivalent_exposure_map = context.equivalent_exposure_per_unit or {}
-    derivative_exposure_evidenced = (
-        not derivative_requires_equivalent_exposure
-        or intent.symbol in equivalent_exposure_map
+    derivative_instrument_types = {"FUTURE", "PERPETUAL", "OPTION"}
+    context_instrument_types = context.instrument_types or {}
+    required_equivalent_symbols = {
+        symbol
+        for symbol, quantity in {
+            **context.positions,
+            **{
+                symbol: context.positions.get(symbol, Decimal("0")) + delta
+                for symbol, delta in context.reserved_position_delta.items()
+            },
+        }.items()
+        if quantity != 0
+        and context_instrument_types.get(symbol) in derivative_instrument_types
+    }
+    if derivative_requires_equivalent_exposure:
+        required_equivalent_symbols.add(intent.symbol)
+    missing_equivalent_symbols = tuple(
+        sorted(required_equivalent_symbols - set(equivalent_exposure_map))
     )
+    derivative_exposure_evidenced = not missing_equivalent_symbols
     current = context.positions.get(intent.symbol, Decimal("0"))
     reserved = context.reserved_position_delta.get(intent.symbol, Decimal("0"))
     base_position = current + reserved
@@ -1789,7 +1829,11 @@ def evaluate_risk(
                 _canonical_decimal_text(equivalent_exposure_map[intent.symbol])
                 if derivative_exposure_evidenced
                 and derivative_requires_equivalent_exposure
-                else ("NOT_REQUIRED" if not derivative_requires_equivalent_exposure else "UNKNOWN")
+                else (
+                    "MISSING:" + ",".join(missing_equivalent_symbols)
+                    if missing_equivalent_symbols
+                    else "NOT_REQUIRED"
+                )
             ),
             "REQUIRED_FOR_DERIVATIVE",
             (

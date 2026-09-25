@@ -647,6 +647,232 @@ def _evaluation_payload(item: AblationEvaluation) -> dict[str, object]:
     }
 
 
+
+@dataclass(frozen=True)
+class CanonicalAblationOutcomeEvidence:
+    """Immutable binding from one matched outcome to canonical economic evidence."""
+
+    case_id: str
+    variant: str
+    population_unit_id: str
+    utility: Decimal
+    cost: Decimal
+    outcome_available_utc: datetime
+    source_revision: str
+    utility_evidence_digest: str
+    cost_evidence_digest: str
+    evidence_digest: str
+    superseded_at_utc: datetime | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("case_id", "population_unit_id"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} is required")
+            canonical = value.strip()
+            if canonical != value:
+                raise ValueError(f"{name} must use canonical text")
+            object.__setattr__(self, name, canonical)
+        if self.variant not in {"FULL", "ABLATED"}:
+            raise ValueError("variant must be FULL or ABLATED")
+        object.__setattr__(self, "utility", _decimal(self.utility, "utility"))
+        cost = _decimal(self.cost, "cost")
+        if cost < 0:
+            raise ValueError("cost must be non-negative")
+        object.__setattr__(self, "cost", cost)
+        object.__setattr__(
+            self,
+            "outcome_available_utc",
+            _utc(self.outcome_available_utc, "outcome_available_utc"),
+        )
+        if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
+            raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
+        for name in (
+            "utility_evidence_digest",
+            "cost_evidence_digest",
+            "evidence_digest",
+        ):
+            object.__setattr__(self, name, _digest(getattr(self, name), name))
+        if self.superseded_at_utc is not None:
+            superseded = _utc(self.superseded_at_utc, "superseded_at_utc")
+            if superseded <= self.outcome_available_utc:
+                raise ValueError(
+                    "superseded_at_utc must follow outcome availability"
+                )
+            object.__setattr__(self, "superseded_at_utc", superseded)
+
+
+@dataclass(frozen=True)
+class RegisteredAblationPopulation:
+    """Frozen pre-outcome population/protocol identity for qualified ablation."""
+
+    protocol_digest: str
+    population_digest: str
+    stopping_rule_digest: str
+    source_revision: str
+    registered_at_utc: datetime
+    evaluation_cutoff_utc: datetime
+    population_unit_ids: tuple[str, ...]
+    complete: bool = True
+
+    def __post_init__(self) -> None:
+        for name in (
+            "protocol_digest",
+            "population_digest",
+            "stopping_rule_digest",
+        ):
+            object.__setattr__(self, name, _digest(getattr(self, name), name))
+        if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
+            raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
+        registered = _utc(self.registered_at_utc, "registered_at_utc")
+        cutoff = _utc(self.evaluation_cutoff_utc, "evaluation_cutoff_utc")
+        if cutoff < registered:
+            raise ValueError("evaluation cutoff cannot precede population registration")
+        object.__setattr__(self, "registered_at_utc", registered)
+        object.__setattr__(self, "evaluation_cutoff_utc", cutoff)
+        if not isinstance(self.population_unit_ids, tuple) or not self.population_unit_ids:
+            raise ValueError("population_unit_ids must be a non-empty immutable tuple")
+        normalized = tuple(
+            value.strip()
+            for value in self.population_unit_ids
+            if isinstance(value, str) and value.strip()
+        )
+        if len(normalized) != len(self.population_unit_ids):
+            raise ValueError("population_unit_ids must contain canonical non-empty strings")
+        if tuple(sorted(normalized)) != normalized:
+            raise ValueError("population_unit_ids must be sorted canonically")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("population_unit_ids must be unique")
+        object.__setattr__(self, "population_unit_ids", normalized)
+        if type(self.complete) is not bool:
+            raise TypeError("complete must be a boolean")
+
+
+def _qualified_inconclusive(
+    *,
+    target_component: str,
+    required_lower_bound: Decimal,
+    uncertainty_multiplier: Decimal,
+    reason: str,
+) -> AblationEvaluation:
+    return AblationEvaluation(
+        target_component=target_component,
+        pair_count=0,
+        mean_net_incremental_value=None,
+        sample_stddev=None,
+        lower_bound=None,
+        required_lower_bound=required_lower_bound,
+        uncertainty_multiplier=uncertainty_multiplier,
+        status="INCONCLUSIVE",
+        reason=reason,
+    )
+
+
+def evaluate_qualified_incremental_value(
+    target_component: str,
+    pairs: Iterable[AblationPair],
+    *,
+    population: RegisteredAblationPopulation,
+    canonical_outcomes: Iterable[CanonicalAblationOutcomeEvidence],
+    minimum_pairs: int,
+    required_lower_bound: Decimal,
+    uncertainty_multiplier: Decimal = Decimal("2"),
+) -> AblationEvaluation:
+    """Evaluate only evidence-bound, pre-registered, complete matched populations.
+
+    The existing evaluate_incremental_value() remains a descriptive/statistical
+    primitive. This qualification path cannot PASS from caller-authored utility
+    or cost alone: every scored outcome must match immutable canonical evidence,
+    the population must be complete and registered before causal inputs, and
+    stale pre-cutoff outcome revisions fail closed.
+    """
+
+    if not isinstance(population, RegisteredAblationPopulation):
+        raise TypeError("population must be RegisteredAblationPopulation")
+    required = _decimal(required_lower_bound, "required_lower_bound")
+    multiplier = _decimal(uncertainty_multiplier, "uncertainty_multiplier")
+    if multiplier < 0:
+        raise ValueError("uncertainty_multiplier must be non-negative")
+    target = target_component.strip() if isinstance(target_component, str) else target_component
+    selected = _validate_pairs(target, pairs)
+
+    def inconclusive(reason: str) -> AblationEvaluation:
+        return _qualified_inconclusive(
+            target_component=target,
+            required_lower_bound=required,
+            uncertainty_multiplier=multiplier,
+            reason=reason,
+        )
+
+    if not population.complete:
+        return inconclusive("incomplete_registered_population")
+
+    selected_units = tuple(sorted(pair.full.population_unit_id for pair in selected))
+    if selected_units != population.population_unit_ids:
+        return inconclusive("incomplete_registered_population")
+
+    if selected:
+        earliest_cutoff = min(pair.full.input_cutoff_utc for pair in selected)
+        if population.registered_at_utc > earliest_cutoff:
+            return inconclusive("post_hoc_population_or_protocol_registration")
+
+    evidence_index: dict[tuple[str, str], CanonicalAblationOutcomeEvidence] = {}
+    for evidence in canonical_outcomes:
+        if not isinstance(evidence, CanonicalAblationOutcomeEvidence):
+            raise TypeError(
+                "canonical_outcomes must contain CanonicalAblationOutcomeEvidence"
+            )
+        key = (evidence.case_id, evidence.variant)
+        if key in evidence_index:
+            return inconclusive("duplicate_canonical_outcome_identity")
+        evidence_index[key] = evidence
+
+    for pair in selected:
+        for item in (pair.full, pair.ablated):
+            evidence = evidence_index.get((item.case_id, item.variant))
+            if evidence is None:
+                return inconclusive("missing_canonical_outcome_evidence")
+            if (
+                evidence.population_unit_id != item.population_unit_id
+                or evidence.source_revision != population.source_revision
+            ):
+                return inconclusive("canonical_outcome_identity_mismatch")
+            if (
+                evidence.utility != item.utility
+                or evidence.cost != item.cost
+                or evidence.outcome_available_utc != item.outcome_available_utc
+            ):
+                return inconclusive("canonical_outcome_economic_mismatch")
+            if evidence.outcome_available_utc > population.evaluation_cutoff_utc:
+                return inconclusive("canonical_outcome_not_mature_at_cutoff")
+            if (
+                evidence.superseded_at_utc is not None
+                and evidence.superseded_at_utc <= population.evaluation_cutoff_utc
+            ):
+                return inconclusive("stale_canonical_outcome_revision")
+
+    base = evaluate_incremental_value(
+        target,
+        selected,
+        minimum_pairs=minimum_pairs,
+        required_lower_bound=required,
+        uncertainty_multiplier=multiplier,
+    )
+    if base.status == "INCONCLUSIVE":
+        return base
+    return AblationEvaluation(
+        target_component=base.target_component,
+        pair_count=base.pair_count,
+        mean_net_incremental_value=base.mean_net_incremental_value,
+        sample_stddev=base.sample_stddev,
+        lower_bound=base.lower_bound,
+        required_lower_bound=base.required_lower_bound,
+        uncertainty_multiplier=base.uncertainty_multiplier,
+        status=base.status,
+        reason="qualified_registered_canonical_ablation_net_of_cost",
+    )
+
+
 def build_ablation_evidence_bundle(
     target_component: str,
     pairs: Iterable[AblationPair],

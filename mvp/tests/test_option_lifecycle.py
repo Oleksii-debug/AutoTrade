@@ -262,6 +262,9 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                 separators=(",", ":"),
             ).encode("utf-8"),
             observed_at=observed_at,
+            provider_environment=(
+                "TESTNET" if provider_id.upper() == "BYBIT" else None
+            ),
         )
         self._evidence[source.evidence_ref] = source
         return source.evidence_ref

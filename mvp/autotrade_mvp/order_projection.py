@@ -459,11 +459,18 @@ class OrderBookProjection:
         return self._amend_children.get(_text(parent_intent_id, name="parent_intent_id"))
 
     def effective_fills(self) -> tuple[FillRecord, ...]:
-        return tuple(
-            fill
-            for order in self._orders.values()
-            for fill in order.active_fills
-        )
+        fills: list[FillRecord] = []
+        execution_owner: dict[str, str] = {}
+        for order in self._orders.values():
+            for fill in order.active_fills:
+                prior_order_id = execution_owner.get(fill.provider_execution_id)
+                if prior_order_id is not None and prior_order_id != order.client_order_id:
+                    raise OrderProjectionConflict(
+                        "provider_execution_id appears in multiple orders"
+                    )
+                execution_owner[fill.provider_execution_id] = order.client_order_id
+                fills.append(fill)
+        return tuple(fills)
 
     def snapshots(self) -> tuple[OrderSnapshot, ...]:
         return tuple(order.snapshot() for order in self._orders.values())

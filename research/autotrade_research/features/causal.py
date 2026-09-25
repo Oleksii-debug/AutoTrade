@@ -606,7 +606,12 @@ def causal_cross_market_point(
     decision_time: datetime,
     max_age_seconds: int,
 ) -> CrossMarketPoint:
-    """Build an as-of cross-market input without future or stale components."""
+    """Build an as-of cross-market input without future or stale components.
+
+    Causal visibility is controlled by available_at, while freshness is measured
+    from the economic event_time. A late correction to an old event therefore
+    cannot make stale market state appear fresh.
+    """
 
     cutoff = _time(decision_time, name="decision_time")
     if (
@@ -626,7 +631,7 @@ def causal_cross_market_point(
     stale = [
         symbol
         for symbol, item in selected.items()
-        if cutoff - item.available_at > timedelta(seconds=max_age_seconds)
+        if cutoff - item.event_time > timedelta(seconds=max_age_seconds)
     ]
     if stale:
         raise ValueError(

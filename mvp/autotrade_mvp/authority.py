@@ -1446,6 +1446,284 @@ class AuthorityService:
             self._used_confirmations.add(used_confirmation)
         return record
 
+    @staticmethod
+    def _allocation_binding(
+        result: EvidenceBoundObjectiveAllocationResult,
+    ) -> dict[str, Any]:
+        if not isinstance(result, EvidenceBoundObjectiveAllocationResult):
+            raise TypeError(
+                "allocation_result must be EvidenceBoundObjectiveAllocationResult"
+            )
+        allocation = result.objective.allocation
+        return {
+            "decision_digest": result.decision_digest,
+            "evidence_refs": [
+                {"evidence_id": evidence_id, "digest": digest}
+                for evidence_id, digest in result.evidence_refs
+            ],
+            "environment": result.environment,
+            "policy_version": result.policy_version,
+            "decision_time": result.decision_time,
+            "provider_id": result.provider_id,
+            "account_id": result.account_id,
+            "instrument_versions": [
+                {"symbol": symbol, "instrument_version": version}
+                for symbol, version in result.instrument_versions
+            ],
+            "capability_snapshot_ids": [
+                {"symbol": symbol, "capability_snapshot_id": snapshot_id}
+                for symbol, snapshot_id in result.capability_snapshot_ids
+            ],
+            "account_snapshot_id": result.account_snapshot_id,
+            "reconciliation_run_id": result.reconciliation_run_id,
+            "account_state_version": result.account_state_version,
+            "reservation_state_version": result.reservation_state_version,
+            "reservation_state_digest": result.reservation_state_digest,
+            "objective": {
+                "objective_version": result.objective.objective_version,
+                "selected_symbols": list(result.objective.selected_symbols),
+                "expected_net_utility": str(result.objective.expected_net_utility),
+                "status": allocation.status,
+                "scale": str(allocation.scale),
+                "gross_notional": str(allocation.gross_notional),
+                "net_notional": str(allocation.net_notional),
+                "estimated_cost": str(allocation.estimated_cost),
+                "worst_stress_loss": str(allocation.worst_stress_loss),
+                "cash_required": str(allocation.cash_required),
+                "targets": [
+                    {
+                        "symbol": target.symbol,
+                        "quantity": str(target.quantity),
+                        "notional": str(target.notional),
+                        "estimated_cost": str(target.estimated_cost),
+                    }
+                    for target in allocation.targets
+                ],
+            },
+        }
+
+    def _resolve_durable_allocation_evidence(
+        self,
+        result: EvidenceBoundObjectiveAllocationResult,
+    ) -> dict[str, ImmutableAllocationEvidence]:
+        if self.store is None:
+            raise AuthorityConflict(
+                "allocation admission requires durable JournalStore evidence"
+            )
+        resolved: dict[str, ImmutableAllocationEvidence] = {}
+        for evidence_id, expected_digest in result.evidence_refs:
+            events = self.store.load_events(
+                _ALLOCATION_EVIDENCE_AGGREGATE,
+                evidence_id,
+            )
+            if len(events) != 1:
+                raise AuthorityConflict(
+                    f"allocation evidence {evidence_id} is absent or ambiguous in canonical journal"
+                )
+            event = events[0]
+            if event.get("event_type") != _ALLOCATION_EVIDENCE_EVENT:
+                raise AuthorityConflict(
+                    f"allocation evidence {evidence_id} has invalid durable event type"
+                )
+            payload = event.get("payload")
+            if not isinstance(payload, Mapping):
+                raise AuthorityConflict(
+                    f"allocation evidence {evidence_id} durable payload is malformed"
+                )
+            try:
+                evidence = ImmutableAllocationEvidence(
+                    evidence_id=payload.get("evidence_id"),
+                    kind=payload.get("kind"),
+                    environment=payload.get("environment"),
+                    schema_version=payload.get("schema_version"),
+                    observed_at=payload.get("observed_at"),
+                    valid_until=payload.get("valid_until"),
+                    payload=payload.get("payload"),
+                    digest=payload.get("digest"),
+                )
+            except (TypeError, ValueError) as error:
+                raise AuthorityConflict(
+                    f"allocation evidence {evidence_id} durable content is invalid"
+                ) from error
+            if evidence.evidence_id != evidence_id or evidence.digest != expected_digest:
+                raise AuthorityConflict(
+                    f"allocation evidence {evidence_id} durable identity changed"
+                )
+            resolved[evidence_id] = evidence
+        return resolved
+
+    def _validate_allocation_admission(
+        self,
+        result: EvidenceBoundObjectiveAllocationResult,
+        *,
+        authority_policy: AuthorityPolicy,
+        risk_policy: RiskPolicy,
+        risk_intent: RiskIntent,
+        risk_context: RiskContext,
+        account_id: str,
+        environment: str,
+        instrument_id: str,
+        instrument_version: int,
+        capability_snapshot_id: str,
+        notional,
+        reservation_book: DurableReservationBook,
+        availability_evidence: Mapping[str, Any],
+        now: str,
+    ) -> dict[str, Any]:
+        if self.instrument_registry is None or self.capability_registry is None:
+            raise AuthorityConflict(
+                "allocation admission requires canonical instrument and capability registries"
+            )
+        if not isinstance(availability_evidence, Mapping):
+            raise AuthorityConflict(
+                "allocation admission requires authoritative reconciliation evidence"
+            )
+
+        point = _instant(now, name="now")
+        env = _text(environment, name="environment").upper()
+        account = _text(account_id, name="account_id")
+        provider = _text(
+            availability_evidence.get("provider_id"),
+            name="allocation provider_id",
+        ).upper()
+        current_policy = allocation_admission_policy_version(
+            authority_policy,
+            risk_policy,
+        )
+
+        expected_versions = dict(result.instrument_versions)
+        expected_capabilities = dict(result.capability_snapshot_ids)
+        if set(expected_versions) != set(expected_capabilities):
+            raise AuthorityConflict(
+                "allocation instrument and capability scopes differ"
+            )
+
+        current_versions: dict[str, str] = {}
+        current_capabilities: dict[str, str] = {}
+        for symbol, expected_ref in expected_versions.items():
+            try:
+                expected = self.instrument_registry.exact(expected_ref)
+                current = self.instrument_registry.at(expected.instrument_id, point)
+            except (InstrumentRegistryError, ValueError) as error:
+                raise AuthorityConflict(
+                    f"allocation instrument {symbol} cannot be resolved canonically"
+                ) from error
+            current_ref = f"{current.instrument_id}@{current.version}"
+            if current_ref != expected_ref:
+                raise AuthorityConflict(
+                    f"allocation instrument {symbol} version advanced after proposal"
+                )
+            if current.provider_id.upper() != provider:
+                raise AuthorityConflict(
+                    f"allocation instrument {symbol} provider scope changed"
+                )
+            if current.provider_symbol != symbol:
+                raise AuthorityConflict(
+                    f"allocation symbol {symbol} no longer resolves to the bound instrument"
+                )
+            current_versions[symbol] = current_ref
+
+            snapshot_id = expected_capabilities[symbol]
+            try:
+                snapshot = self.capability_registry.require_snapshot(
+                    snapshot_id,
+                    at=point,
+                )
+            except (CapabilityError, ValueError) as error:
+                raise AuthorityConflict(
+                    f"allocation capability {symbol} cannot be resolved canonically"
+                ) from error
+            if (
+                snapshot.provider_id.upper() != provider
+                or snapshot.account_id != account
+                or snapshot.environment != env
+                or snapshot.instrument_version != current_ref
+            ):
+                raise AuthorityConflict(
+                    f"allocation capability {symbol} scope changed after proposal"
+                )
+            current_capabilities[symbol] = snapshot.snapshot_id
+
+        symbol = risk_intent.symbol
+        if symbol not in current_versions or symbol not in current_capabilities:
+            raise AuthorityConflict(
+                "financial intent symbol is absent from allocation decision"
+            )
+        admission_ref = (
+            f"{InstrumentVersionIdentity(instrument_id, instrument_version).instrument_id}"
+            f"@{instrument_version}"
+        )
+        if current_versions[symbol] != admission_ref:
+            raise AuthorityConflict(
+                "financial intent instrument differs from allocation target"
+            )
+        if current_capabilities[symbol] != _text(
+            capability_snapshot_id,
+            name="capability_snapshot_id",
+        ):
+            raise AuthorityConflict(
+                "financial intent capability differs from allocation target"
+            )
+
+        targets = [
+            target
+            for target in result.objective.allocation.targets
+            if target.symbol == symbol
+        ]
+        if len(targets) != 1 or targets[0].quantity == 0:
+            raise AuthorityConflict(
+                "financial intent requires one non-zero allocation target"
+            )
+        target = targets[0]
+        expected_side = "BUY" if target.quantity > 0 else "SELL"
+        if risk_intent.side != expected_side:
+            raise AuthorityConflict(
+                "financial intent side differs from allocation target"
+            )
+        if risk_intent.quantity != abs(target.quantity):
+            raise AuthorityConflict(
+                "financial intent quantity differs from allocation target"
+            )
+        if _decimal(notional, name="notional") != abs(target.notional):
+            raise AuthorityConflict(
+                "financial admission notional differs from allocation target"
+            )
+        target_price = abs(target.notional / target.quantity)
+        if risk_intent.price != target_price:
+            raise AuthorityConflict(
+                "financial intent price differs from allocation target"
+            )
+
+        resolved = self._resolve_durable_allocation_evidence(result)
+        try:
+            revalidate_evidence_bound_allocation(
+                result,
+                resolved_evidence=resolved,
+                environment=env,
+                as_of=now,
+                current_policy_version=current_policy,
+                current_provider_id=provider,
+                current_instrument_versions=current_versions,
+                current_capability_snapshot_ids=current_capabilities,
+                current_account_id=account,
+                current_account_snapshot_id=_text(
+                    availability_evidence.get("resource_snapshot_id"),
+                    name="resource_snapshot_id",
+                ),
+                current_reconciliation_run_id=_text(
+                    availability_evidence.get("checkpoint_event_id"),
+                    name="checkpoint_event_id",
+                ),
+                current_account_state_version=risk_context.state_version,
+                current_reservation_state_version=reservation_book.version,
+                current_reservation_state_digest=reservation_book.state_digest,
+            )
+        except (TypeError, ValueError) as error:
+            raise AuthorityConflict(
+                f"allocation evidence failed final admission revalidation: {error}"
+            ) from error
+        return self._allocation_binding(result)
+
     def admit(
         self,
         *,
@@ -1474,6 +1752,7 @@ class AuthorityService:
         reservation_provider_id: str,
         reservation_max_age_seconds,
         now: str,
+        allocation_result: EvidenceBoundObjectiveAllocationResult | None = None,
         confirmation_id: str | None = None,
         risk_reducing: bool = False,
     ) -> AdmissionRecord:

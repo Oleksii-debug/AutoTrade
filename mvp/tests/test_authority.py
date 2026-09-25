@@ -649,7 +649,12 @@ class AuthorityTests(unittest.TestCase):
                 instrument_version=1,
                 action="ORDER.SUBMIT",
             )
-            dispatcher = GuardedDispatcher(store, owner_token="owner")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+                owner_token="owner",
+            )
             outbound = 0
 
             def transport(client_id, request, final_guard):

@@ -346,7 +346,15 @@ class MarketNormalizer:
                 if isinstance(value, datetime):
                     result["next_funding_at"] = _utc_text(_instant(value, "next_funding_at"))
                 elif isinstance(value, str) and value.endswith("Z"):
-                    result["next_funding_at"] = value
+                    try:
+                        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+                    except ValueError as error:
+                        raise MarketDataError(
+                            "next_funding_at must be an UTC instant"
+                        ) from error
+                    result["next_funding_at"] = _utc_text(
+                        _instant(parsed, "next_funding_at")
+                    )
                 else:
                     raise MarketDataError("next_funding_at must be an UTC instant")
             return result

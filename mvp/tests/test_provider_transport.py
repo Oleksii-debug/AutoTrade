@@ -375,6 +375,50 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
             )
             self.assertEqual(len(nonce_events), 1)
 
+    def test_whitebit_rejects_non_order_private_endpoint_before_authority_work(self):
+        fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        calls = []
+        with TemporaryDirectory() as directory:
+            allocator = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(f"{directory}/journal.sqlite3"),
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: calls.append("nonce") or 1_700_000_000_000,
+                clock_utc=lambda: fixed,
+            )
+            transport = WhiteBitHttpTransport(
+                policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                account_id="acct-wb",
+                capability_snapshot_id="wb-cap-1",
+                secret_resolver=FakeSecretResolver(calls),
+                credential_handle=whitebit_trade_handle(),
+                session_token="session-1",
+                origin="autotrade://execution",
+                execution_identity="sender-1",
+                nonce_allocator=allocator,
+                quota_gate=lambda *_args: calls.append("quota"),
+                wire_client=RecordingWire(calls),
+            )
+            request = whitebit_prepared_request("at-whitebit-scope")
+            request["endpoint"] = "/api/v4/main-account/withdraw"
+            with self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "canonical order path",
+            ):
+                transport(
+                    "at-whitebit-scope",
+                    request,
+                    lambda: calls.append("guard"),
+                )
+            self.assertEqual(calls, [])
+            self.assertEqual(
+                JournalStore(f"{directory}/journal.sqlite3").load_events(
+                    "provider_nonce",
+                    allocator.aggregate_id,
+                ),
+                [],
+            )
+
     def test_whitebit_rejects_transport_owned_auth_fields_before_allocation(self):
         fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
         calls = []

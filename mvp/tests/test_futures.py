@@ -4,6 +4,7 @@ from fractions import Fraction
 import unittest
 
 from mvp.autotrade_mvp.accounting import EconomicBook
+from mvp.autotrade_mvp.instruments import InstrumentVersion
 from mvp.autotrade_mvp.futures import (
     FuturesContract,
     FuturesSettlementEvidence,
@@ -32,25 +33,59 @@ def utc(day: int, hour: int = 0):
 
 
 class FuturesLifecycleTests(unittest.TestCase):
-    def _linear_contract(self, settlement_method="CASH"):
-        return FuturesContract(
-            instrument="FUT:TEST:202609",
-            payoff="LINEAR",
-            multiplier=Decimal("10"),
+    def _instrument_version(
+        self,
+        *,
+        payoff="LINEAR",
+        settlement_method="CASH",
+        provider_id="TEST_CLEARER",
+    ):
+        return InstrumentVersion(
+            instrument_id=(
+                "11111111-1111-4111-8111-111111111111"
+                if payoff == "LINEAR"
+                else "22222222-2222-4222-8222-222222222222"
+            ),
+            version=1,
+            provider_id=provider_id,
+            venue_id="TEST_VENUE",
+            provider_symbol=("FUT-TEST-202609" if payoff == "LINEAR" else "BTC-USD-INVERSE"),
+            asset_class="FUTURE",
+            base_currency=("TEST" if payoff == "LINEAR" else "BTC"),
             quote_currency="USD",
-            settlement_currency="USD",
-            last_trade_at=utc(30, 20),
-            delivery_cutoff=utc(29, 12),
+            settlement_currency=("USD" if payoff == "LINEAR" else "BTC"),
+            quantity_unit="CONTRACT",
+            contract_multiplier=Decimal("10" if payoff == "LINEAR" else "1"),
+            price_tick=Decimal("0.01"),
+            quantity_step=Decimal("1"),
+            minimum_quantity=Decimal("1"),
+            calendar_id="CONTINUOUS_24_7",
+            timezone_id="UTC",
+            effective_from=utc(1),
+            payoff=payoff,
+            underlying_id=("TEST" if payoff == "LINEAR" else "BTC"),
             expiry=utc(30, 21),
+            last_trade_at=utc(30, 20),
+            delivery_cutoff=utc(29, 12) if payoff == "LINEAR" else utc(30, 20),
             settlement_method=settlement_method,
         )
 
-    def _scope(self):
+    def _linear_contract(self, settlement_method="CASH"):
+        return FuturesContract.from_instrument_version(
+            self._instrument_version(settlement_method=settlement_method)
+        )
+
+    def _inverse_contract(self):
+        return FuturesContract.from_instrument_version(
+            self._instrument_version(payoff="INVERSE")
+        )
+
+    def _scope(self, *, provider_id="TEST_CLEARER", environment="PAPER"):
         return FuturesSettlementScope(
             source_id="clearing:settlements",
-            provider_id="TEST_CLEARER",
+            provider_id=provider_id,
             account_id="acct-1",
-            environment="PAPER",
+            environment=environment,
         )
 
     def _settlement(
@@ -63,17 +98,28 @@ class FuturesLifecycleTests(unittest.TestCase):
         sequence=1,
         revision=0,
         scope=None,
+        observation_id=None,
+        supersedes_observation_id=None,
     ):
+        version = contract.canonical_instrument
+        self.assertIsNotNone(version)
+        if observation_id is None:
+            observation_id = f"{settlement_id}:r{revision}"
+        if revision > 0 and supersedes_observation_id is None:
+            supersedes_observation_id = f"{settlement_id}:r{revision - 1}"
         return FuturesSettlementEvidence(
             settlement_id=settlement_id,
-            instrument=contract.instrument,
-            scope=scope or self._scope(),
+            observation_id=observation_id,
+            instrument_id=version.instrument_id,
+            instrument_version=version.version,
+            scope=scope or self._scope(provider_id=version.provider_id),
             effective_at=effective_at or utc(25),
             sequence=sequence,
             revision=revision,
             settlement_price=Decimal(str(price)),
             price_currency=contract.quote_currency,
             settlement_currency=contract.settlement_currency,
+            supersedes_observation_id=supersedes_observation_id,
         )
 
     def test_linear_fixture_matches_canonical_example(self):
@@ -167,18 +213,7 @@ class FuturesLifecycleTests(unittest.TestCase):
             )
 
     def test_inverse_variation_margin_remains_exact_until_settlement(self):
-        contract = FuturesContract(
-            instrument="BTC-USD-INVERSE",
-            payoff="INVERSE",
-            multiplier=Decimal("1"),
-            quote_currency="USD",
-            settlement_currency="BTC",
-            price_base_currency="BTC",
-            last_trade_at=utc(30, 20),
-            delivery_cutoff=utc(30, 20),
-            expiry=utc(30, 21),
-            settlement_method="CASH",
-        )
+        contract = self._inverse_contract()
         state = InverseVariationMarginState(
             contract=contract,
             signed_contracts=Decimal("100"),
@@ -219,18 +254,7 @@ class FuturesLifecycleTests(unittest.TestCase):
         )
 
     def test_inverse_settlement_rounds_once_then_books_settlement_currency(self):
-        contract = FuturesContract(
-            instrument="BTC-USD-INVERSE",
-            payoff="INVERSE",
-            multiplier=Decimal("1"),
-            quote_currency="USD",
-            settlement_currency="BTC",
-            price_base_currency="BTC",
-            last_trade_at=utc(30, 20),
-            delivery_cutoff=utc(30, 20),
-            expiry=utc(30, 21),
-            settlement_method="CASH",
-        )
+        contract = self._inverse_contract()
         exact = Fraction(1, 1100)
         settlement = self._settlement(contract, "inverse-book-1", "11000")
         settled, transaction = settle_and_book_inverse_variation_margin(
@@ -249,18 +273,7 @@ class FuturesLifecycleTests(unittest.TestCase):
         )
 
     def test_sub_quantum_inverse_settlement_does_not_create_zero_journal_entry(self):
-        contract = FuturesContract(
-            instrument="BTC-USD-INVERSE",
-            payoff="INVERSE",
-            multiplier=Decimal("1"),
-            quote_currency="USD",
-            settlement_currency="BTC",
-            price_base_currency="BTC",
-            last_trade_at=utc(30, 20),
-            delivery_cutoff=utc(30, 20),
-            expiry=utc(30, 21),
-            settlement_method="CASH",
-        )
+        contract = self._inverse_contract()
         settlement = self._settlement(contract, "inverse-book-small", "11000")
         settled, transaction = settle_and_book_inverse_variation_margin(
             settlement=settlement,
@@ -272,18 +285,7 @@ class FuturesLifecycleTests(unittest.TestCase):
         self.assertIsNone(transaction)
 
     def test_inverse_unrealized_marks_only_since_last_settlement(self):
-        contract = FuturesContract(
-            instrument="BTC-USD-INVERSE",
-            payoff="INVERSE",
-            multiplier=Decimal("1"),
-            quote_currency="USD",
-            settlement_currency="BTC",
-            price_base_currency="BTC",
-            last_trade_at=utc(30, 20),
-            delivery_cutoff=utc(30, 20),
-            expiry=utc(30, 21),
-            settlement_method="CASH",
-        )
+        contract = self._inverse_contract()
         state = InverseVariationMarginState(
             contract=contract,
             signed_contracts=Decimal("100"),
@@ -384,10 +386,159 @@ class FuturesLifecycleTests(unittest.TestCase):
         accepted = self._settlement(contract, "same-id", "105", sequence=1)
         state, _ = apply_variation_margin(opening, accepted)
         conflicting = self._settlement(
-            contract, "same-id", "106", sequence=1, revision=1
+            contract,
+            "same-id",
+            "106",
+            sequence=1,
+            revision=0,
+            observation_id="same-id:r0",
         )
         with self.assertRaisesRegex(FuturesError, "conflicts"):
             apply_variation_margin(state, conflicting)
+
+    def test_latest_settlement_correction_is_delta_only_and_revision_safe(self):
+        contract = self._linear_contract()
+        opening = VariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("2"),
+            last_settlement_price=Decimal("100"),
+            settlement_scope=self._scope(),
+        )
+        original = self._settlement(
+            contract, "period-1", "105", effective_at=utc(25), sequence=7
+        )
+        state, original_amount = apply_variation_margin(opening, original)
+        self.assertEqual(original_amount, Decimal("100"))
+
+        corrected = self._settlement(
+            contract,
+            "period-1",
+            "106",
+            effective_at=utc(25),
+            sequence=7,
+            revision=1,
+        )
+        corrected_state, correction_delta = apply_variation_margin(state, corrected)
+        self.assertEqual(correction_delta, Decimal("20"))
+        self.assertEqual(
+            corrected_state.cumulative_variation_margin,
+            Decimal("120"),
+        )
+        self.assertEqual(corrected_state.last_settlement_price, Decimal("106"))
+
+        retried, retry_delta = apply_variation_margin(corrected_state, corrected)
+        self.assertEqual(retried, corrected_state)
+        self.assertEqual(retry_delta, Decimal("0"))
+
+        with self.assertRaisesRegex(FuturesError, "stale|conflicts"):
+            apply_variation_margin(corrected_state, original)
+
+    def test_correction_requires_latest_period_and_exact_supersedes_lineage(self):
+        contract = self._linear_contract()
+        opening = VariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("100"),
+            settlement_scope=self._scope(),
+        )
+        first = self._settlement(
+            contract, "period-a", "101", effective_at=utc(24), sequence=1
+        )
+        second = self._settlement(
+            contract, "period-b", "102", effective_at=utc(25), sequence=2
+        )
+        state, _ = apply_variation_margin(opening, first)
+        state, _ = apply_variation_margin(state, second)
+
+        stale_correction = self._settlement(
+            contract,
+            "period-a",
+            "103",
+            effective_at=utc(24),
+            sequence=1,
+            revision=1,
+            supersedes_observation_id="period-a:r0",
+        )
+        with self.assertRaisesRegex(FuturesError, "non-latest"):
+            apply_variation_margin(state, stale_correction)
+
+        wrong_supersedes = self._settlement(
+            contract,
+            "period-b",
+            "103",
+            effective_at=utc(25),
+            sequence=2,
+            revision=1,
+            supersedes_observation_id="not-period-b-r0",
+        )
+        with self.assertRaisesRegex(FuturesError, "supersede"):
+            apply_variation_margin(state, wrong_supersedes)
+
+    def test_provider_identity_is_exact_and_environment_uses_canonical_enum(self):
+        exact = FuturesSettlementScope(
+            source_id="clearing:settlements",
+            provider_id="Provider-MixedCase",
+            account_id="acct-1",
+            environment="paper",
+        )
+        self.assertEqual(exact.provider_id, "Provider-MixedCase")
+        self.assertEqual(exact.environment, "PAPER")
+        with self.assertRaisesRegex(FuturesError, "environment"):
+            FuturesSettlementScope(
+                source_id="clearing:settlements",
+                provider_id="Provider-MixedCase",
+                account_id="acct-1",
+                environment="sandbox",
+            )
+
+    def test_settlement_requires_canonical_instrument_provider_and_effective_interval(self):
+        contract = self._linear_contract()
+        opening = VariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("100"),
+            settlement_scope=self._scope(),
+        )
+        wrong_provider = self._settlement(
+            contract,
+            "wrong-provider",
+            "105",
+            scope=self._scope(provider_id="OtherProvider"),
+        )
+        with self.assertRaisesRegex(FuturesError, "provider"):
+            apply_variation_margin(opening, wrong_provider)
+
+        outside_interval = self._settlement(
+            contract,
+            "too-early",
+            "105",
+            effective_at=datetime(2026, 8, 31, tzinfo=timezone.utc),
+        )
+        with self.assertRaisesRegex(FuturesError, "outside InstrumentVersion"):
+            apply_variation_margin(opening, outside_interval)
+
+        unbound = FuturesContract(
+            instrument="legacy-unbound",
+            payoff="LINEAR",
+            multiplier=Decimal("10"),
+            quote_currency="USD",
+            settlement_currency="USD",
+            last_trade_at=utc(30, 20),
+            delivery_cutoff=utc(29, 12),
+            expiry=utc(30, 21),
+            settlement_method="CASH",
+        )
+        unbound_state = VariationMarginState(
+            contract=unbound,
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("100"),
+            settlement_scope=self._scope(),
+        )
+        with self.assertRaisesRegex(FuturesError, "canonical InstrumentVersion"):
+            apply_variation_margin(
+                unbound_state,
+                self._settlement(contract, "bound-evidence", "105"),
+            )
 
     def test_equal_effective_time_uses_immutable_sequence_and_rejects_collisions(self):
         contract = self._linear_contract()
@@ -433,7 +584,9 @@ class FuturesLifecycleTests(unittest.TestCase):
 
         wrong_instrument = FuturesSettlementEvidence(
             settlement_id="wrong-instrument",
-            instrument="FUT:OTHER:202609",
+            observation_id="wrong-instrument:r0",
+            instrument_id="33333333-3333-4333-8333-333333333333",
+            instrument_version=1,
             scope=self._scope(),
             effective_at=utc(25),
             sequence=1,
@@ -469,18 +622,7 @@ class FuturesLifecycleTests(unittest.TestCase):
         self.assertEqual(unrealized_after_variation(rebuilt, "111"), Decimal("20"))
 
     def test_inverse_duplicate_out_of_order_and_replay_remain_exact(self):
-        contract = FuturesContract(
-            instrument="BTC-USD-INVERSE",
-            payoff="INVERSE",
-            multiplier=Decimal("1"),
-            quote_currency="USD",
-            settlement_currency="BTC",
-            price_base_currency="BTC",
-            last_trade_at=utc(30, 20),
-            delivery_cutoff=utc(30, 20),
-            expiry=utc(30, 21),
-            settlement_method="CASH",
-        )
+        contract = self._inverse_contract()
         opening = InverseVariationMarginState(
             contract=contract,
             signed_contracts=Decimal("100"),

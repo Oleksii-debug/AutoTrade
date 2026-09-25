@@ -181,19 +181,6 @@ def _validated_fill_evidence(
             "provider fill environment scope does not match economic book"
         )
 
-    if provider_fill.provider_id != provider:
-        raise AccountingConflict(
-            "provider fill provider_id does not match accounting scope"
-        )
-    if provider_fill.account_id != book.account_id:
-        raise AccountingConflict(
-            "provider fill account_id does not match accounting scope"
-        )
-    if provider_fill.environment != book.environment:
-        raise AccountingConflict(
-            "provider fill environment does not match accounting scope"
-        )
-
     if projected_fill.correction_of is not None and not allow_correction:
         raise AccountingConflict(
             "corrected fills require explicit atomic reversal/replacement evidence"

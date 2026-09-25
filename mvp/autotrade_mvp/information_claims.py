@@ -109,6 +109,7 @@ class SourceDocument:
     passage: str
     published_at: datetime
     available_at: datetime
+    ingested_at: datetime
     rights_basis: str
     locator: str
 
@@ -130,10 +131,14 @@ class SourceDocument:
 
         published = _time(self.published_at, name="published_at")
         available = _time(self.available_at, name="available_at")
+        ingested = _time(self.ingested_at, name="ingested_at")
         if available < published:
             raise ValueError("available_at cannot precede published_at")
+        if ingested < available:
+            raise ValueError("ingested_at cannot precede available_at")
         object.__setattr__(self, "published_at", published)
         object.__setattr__(self, "available_at", available)
+        object.__setattr__(self, "ingested_at", ingested)
 
     @classmethod
     def create(
@@ -146,13 +151,17 @@ class SourceDocument:
         passage: str,
         published_at: datetime,
         available_at: datetime,
+        ingested_at: datetime,
         rights_basis: str,
         locator: str,
     ) -> "SourceDocument":
         published = _time(published_at, name="published_at")
         available = _time(available_at, name="available_at")
+        ingested = _time(ingested_at, name="ingested_at")
         if available < published:
             raise ValueError("available_at cannot precede published_at")
+        if ingested < available:
+            raise ValueError("ingested_at cannot precede available_at")
         kind = _text(source_kind, name="source_kind").upper()
         if kind not in {"NEWS", "MACRO", "CORPORATE", "OFFICIAL"}:
             raise ValueError("unsupported source_kind")
@@ -164,6 +173,7 @@ class SourceDocument:
             passage=_text(passage, name="passage"),
             published_at=published,
             available_at=available,
+            ingested_at=ingested,
             rights_basis=_text(rights_basis, name="rights_basis"),
             locator=_text(locator, name="locator"),
         )
@@ -180,6 +190,7 @@ class InformationClaim:
     source_kind: str
     published_at: datetime
     available_at: datetime
+    ingested_at: datetime
     passage_hash: str
     locator: str
     rights_basis: str
@@ -207,10 +218,14 @@ class InformationClaim:
 
         published = _time(self.published_at, name="published_at")
         available = _time(self.available_at, name="available_at")
+        ingested = _time(self.ingested_at, name="ingested_at")
         if available < published:
             raise ValueError("available_at cannot precede published_at")
+        if ingested < available:
+            raise ValueError("ingested_at cannot precede available_at")
         object.__setattr__(self, "published_at", published)
         object.__setattr__(self, "available_at", available)
+        object.__setattr__(self, "ingested_at", ingested)
 
         for field in ("claim_id", "passage_hash", "syndication_key", "conflict_key"):
             object.__setattr__(
@@ -259,6 +274,7 @@ class InformationClaim:
             "source_kind": self.source_kind,
             "published_at": self.published_at.isoformat(),
             "available_at": self.available_at.isoformat(),
+            "ingested_at": self.ingested_at.isoformat(),
             "passage_hash": self.passage_hash,
             "locator": self.locator,
             "rights_basis": self.rights_basis,
@@ -295,7 +311,7 @@ class InformationSnapshot:
         for claim in self.claims:
             if not isinstance(claim, InformationClaim):
                 raise ValueError("snapshot claims must be InformationClaim values")
-            if claim.available_at > cutoff:
+            if claim.available_at > cutoff or claim.ingested_at > cutoff:
                 raise ValueError("snapshot cannot contain future claims")
             if claim.claim_id in seen:
                 raise ValueError("snapshot cannot contain duplicate claim identities")
@@ -307,7 +323,11 @@ class InformationSnapshot:
         canonical = tuple(
             sorted(
                 self.claims,
-                key=lambda item: (item.available_at, item.published_at, item.claim_id),
+                key=lambda item: (
+                    max(item.available_at, item.ingested_at),
+                    item.published_at,
+                    item.claim_id,
+                ),
             )
         )
         if canonical != self.claims:
@@ -389,6 +409,7 @@ class ClaimStore:
             source_kind=document.source_kind,
             published_at=document.published_at,
             available_at=document.available_at,
+            ingested_at=document.ingested_at,
             passage_hash=passage_hash,
             locator=document.locator,
             rights_basis=document.rights_basis,
@@ -418,11 +439,15 @@ class ClaimStore:
         if duplicate_id is not None:
             existing_duplicate = self._by_id[duplicate_id]
             existing_key = (
-                existing_duplicate.available_at,
+                max(existing_duplicate.available_at, existing_duplicate.ingested_at),
                 existing_duplicate.published_at,
                 existing_duplicate.claim_id,
             )
-            candidate_key = (claim.available_at, claim.published_at, claim.claim_id)
+            candidate_key = (
+                max(claim.available_at, claim.ingested_at),
+                claim.published_at,
+                claim.claim_id,
+            )
             if candidate_key < existing_key:
                 # Syndication identity is semantic content identity, but causal replay
                 # must retain the earliest observed availability independent of ingest
@@ -451,8 +476,16 @@ class ClaimStore:
         time = _time(cutoff, name="cutoff")
         return tuple(
             sorted(
-                (item for item in self._claims if item.available_at <= time),
-                key=lambda item: (item.available_at, item.published_at, item.claim_id),
+                (
+                    item
+                    for item in self._claims
+                    if item.available_at <= time and item.ingested_at <= time
+                ),
+                key=lambda item: (
+                    max(item.available_at, item.ingested_at),
+                    item.published_at,
+                    item.claim_id,
+                ),
             )
         )
 
@@ -469,7 +502,11 @@ class ClaimStore:
                     for item in self._history_by_id.values()
                     if item.source_id == identifier
                 ),
-                key=lambda item: (item.available_at, item.source_revision, item.claim_id),
+                key=lambda item: (
+                    max(item.available_at, item.ingested_at),
+                    item.source_revision,
+                    item.claim_id,
+                ),
             )
         )
 

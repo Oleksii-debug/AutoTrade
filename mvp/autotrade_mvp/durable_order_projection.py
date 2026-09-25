@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Mapping, Sequence
+from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from research.autotrade_research.artifacts.store import (
@@ -91,6 +92,18 @@ def _optional_text(value: str | None, *, name: str) -> str | None:
     return None if value is None else _text(value, name=name)
 
 
+def _canonical_uri(value: object, *, name: str) -> str:
+    text = _text(value, name=name)
+    if any(character.isspace() for character in text):
+        raise ValueError(f"{name} must be an absolute URI")
+    parsed = urlsplit(text)
+    if not parsed.scheme:
+        raise ValueError(f"{name} must be an absolute URI")
+    if parsed.scheme.lower() in {"http", "https"} and not parsed.netloc:
+        raise ValueError(f"{name} must be an absolute URI")
+    return text
+
+
 def _canonical_quantity_value(value: object, *, name: str) -> str:
     """Validate canonical Quantity shape and return its exact decimal value."""
     if not isinstance(value, Mapping):
@@ -147,9 +160,13 @@ def _canonical_evidence_refs(
             "sha256": digest,
             "observed_at": _instant(raw.get("observed_at"), name="observed_at"),
         }
-        for optional in ("source_uri", "rights_id"):
-            if raw.get(optional) is not None:
-                ref[optional] = _text(raw.get(optional), name=optional)
+        if raw.get("source_uri") is not None:
+            ref["source_uri"] = _canonical_uri(
+                raw.get("source_uri"),
+                name="source_uri",
+            )
+        if raw.get("rights_id") is not None:
+            ref["rights_id"] = _text(raw.get("rights_id"), name="rights_id")
         identity = canonical_json(ref)
         if identity in identities:
             raise ValueError("evidence_refs must be unique")

@@ -159,13 +159,38 @@ class KrakenSpotPreparedRequest:
     documentation_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
-        object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
-        object.__setattr__(
-            self,
-            "environment",
-            _text(self.environment, name="environment").upper(),
+        endpoint = _text(self.endpoint, name="endpoint")
+        if endpoint != "/0/private/AddOrder":
+            raise KrakenSpotAdapterError(
+                "prepared endpoint must be the canonical Kraken Spot AddOrder path"
+            )
+        if not isinstance(self.body, Mapping):
+            raise TypeError("body must be a mapping")
+        body = dict(self.body)
+        validate_spot_client_order_id(str(body.get("cl_ord_id", "")))
+        _text(str(body.get("pair", "")), name="pair")
+        account = _text(self.account_id, name="account_id")
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"PAPER", "LIVE"}:
+            raise KrakenSpotAdapterError("environment must be PAPER or LIVE")
+        capability_snapshot_id = _text(
+            self.capability_snapshot_id,
+            name="capability_snapshot_id",
         )
+        if not isinstance(self.documentation_refs, tuple):
+            raise TypeError("documentation_refs must be a tuple")
+        refs = tuple(
+            _text(value, name="documentation_ref")
+            for value in self.documentation_refs
+        )
+        if not refs:
+            raise KrakenSpotAdapterError("documentation_refs must not be empty")
+        object.__setattr__(self, "endpoint", endpoint)
+        object.__setattr__(self, "body", MappingProxyType(body))
+        object.__setattr__(self, "account_id", account)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "capability_snapshot_id", capability_snapshot_id)
+        object.__setattr__(self, "documentation_refs", refs)
 
 
 def prepare_spot_order_request(
@@ -191,6 +216,8 @@ def prepare_spot_order_request(
     client_id = validate_spot_client_order_id(client_order_id)
     account = _text(account_id, name="account_id")
     env = _text(environment, name="environment").upper()
+    if env not in {"PAPER", "LIVE"}:
+        raise KrakenSpotAdapterError("environment must be PAPER or LIVE")
     if capability.provider_id.upper() != "KRAKEN":
         raise KrakenSpotAdapterError("capability belongs to another provider")
     if capability.account_id != account:

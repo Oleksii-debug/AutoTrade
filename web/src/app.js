@@ -307,9 +307,12 @@
     const form = byId("host-command-form");
     const button = form && form.querySelector('button[type="submit"]');
     const action = byId("host-action");
+    const effectiveAction = state.pendingCommand !== null
+      ? state.pendingCommand.action
+      : (action === null ? null : action.value);
     const roleAllowed = state.sessionIdentity !== null &&
-      action !== null &&
-      roleCanSubmitAction(state.sessionIdentity.role, action.value);
+      effectiveAction !== null &&
+      roleCanSubmitAction(state.sessionIdentity.role, effectiveAction);
     if (button) button.disabled = !enabled || !roleAllowed;
   }
 
@@ -770,6 +773,17 @@
         "command-result",
         "Unresolved command scope no longer matches the authenticated host snapshot. " +
           "The original command identity is preserved and will not be retargeted.");
+      byId("command-result").focus();
+      return;
+    }
+    if (recovering && !roleCanSubmitAction(
+        state.sessionIdentity.role,
+        state.pendingCommand.action)) {
+      setCommandAvailability(false);
+      text(
+        "command-result",
+        "The authenticated role no longer permits the unresolved command. " +
+          "Its original identity is preserved, but the browser will not retry it.");
       byId("command-result").focus();
       return;
     }

@@ -176,8 +176,9 @@ def _response_evidence(
             )
         ),
         "sha256": f"sha256:{digest}",
+        # Environment is bound by the environment-specific provider endpoint.
+        # EvidenceRef itself remains the canonical common contract.
         "source_uri": source_uri,
-        "provider_environment": normalized_environment,
         "observed_at": observed_at,
         "rights_id": "provider-observation-bybit",
     }

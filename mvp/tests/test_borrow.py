@@ -4,6 +4,7 @@ import unittest
 
 from mvp.autotrade_mvp.borrow import (
     BorrowLifecycleJournal,
+    BorrowLoanEvidence,
     BorrowLocateEvidence,
     BorrowRecallEvidence,
     BorrowRecallResolutionEvidence,
@@ -11,6 +12,8 @@ from mvp.autotrade_mvp.borrow import (
     borrow_reservation_requirement,
     incremental_short_borrow_quantity,
     locate_capacity,
+    validate_borrow_account_truth,
+    validated_borrow_capacity,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.risk import RiskContext, RiskIntent
@@ -45,6 +48,20 @@ def locate(scope=None, **overrides):
     )
     values.update(overrides)
     return BorrowLocateEvidence(**values)
+
+
+def loan(scope=None, **overrides):
+    values = dict(
+        resource=scope or resource(),
+        provider_revision="loan-rev-1",
+        borrowed_quantity="0",
+        observed_at="2026-09-24T18:00:00Z",
+        effective_at="2026-09-24T17:59:00Z",
+        valid_until="2026-09-24T18:05:00Z",
+        evidence_refs=("provider:loan-rev-1",),
+    )
+    values.update(overrides)
+    return BorrowLoanEvidence(**values)
 
 
 def context(*, position="0", reserved="0"):
@@ -125,6 +142,64 @@ class BorrowResourceTests(unittest.TestCase):
             {resource().resource_key: "5"},
         )
 
+    def test_provider_loan_truth_must_match_current_filled_short(self):
+        scope = resource()
+        state = type("State", (), {})()
+        # Exercise the real immutable state type through journal projection below;
+        # this direct validation uses a minimal value only to make mismatch intent explicit.
+        with TemporaryDirectory() as directory:
+            journal = BorrowLifecycleJournal(
+                JournalStore(f"{directory}/journal.sqlite3"),
+                scope,
+            )
+            journal.record_loan(loan(scope, borrowed_quantity="40"))
+            projected = journal.state()
+            self.assertEqual(
+                validate_borrow_account_truth(
+                    projected,
+                    context(position="-40", reserved="-30"),
+                    symbol="ABC",
+                    now="2026-09-24T18:01:00Z",
+                ),
+                Decimal("40"),
+            )
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                validate_borrow_account_truth(
+                    projected,
+                    context(position="-41", reserved="-30"),
+                    symbol="ABC",
+                    now="2026-09-24T18:01:00Z",
+                )
+
+    def test_existing_short_requires_fresh_provider_loan_truth(self):
+        scope = resource()
+        with TemporaryDirectory() as directory:
+            journal = BorrowLifecycleJournal(
+                JournalStore(f"{directory}/journal.sqlite3"),
+                scope,
+            )
+            with self.assertRaisesRegex(ValueError, "required"):
+                validate_borrow_account_truth(
+                    journal.state(),
+                    context(position="-1"),
+                    symbol="ABC",
+                    now="2026-09-24T18:01:00Z",
+                )
+            journal.record_loan(
+                loan(
+                    scope,
+                    borrowed_quantity="1",
+                    valid_until="2026-09-24T18:00:59Z",
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "expired"):
+                validate_borrow_account_truth(
+                    journal.state(),
+                    context(position="-1"),
+                    symbol="ABC",
+                    now="2026-09-24T18:01:00Z",
+                )
+
     def test_locate_capacity_is_fresh_exact_and_recall_adjusted(self):
         evidence = locate(available_quantity="100.25")
         self.assertEqual(
@@ -149,6 +224,7 @@ class BorrowLifecycleJournalTests(unittest.TestCase):
             scope = resource()
             journal = BorrowLifecycleJournal(store, scope)
             journal.record_locate(locate(scope))
+            journal.record_loan(loan(scope, borrowed_quantity="25"))
             journal.record_recall(
                 BorrowRecallEvidence(
                     resource=scope,
@@ -169,6 +245,43 @@ class BorrowLifecycleJournalTests(unittest.TestCase):
             self.assertTrue(state.blocks_new_short)
             self.assertEqual(state.active_recall_quantity, Decimal("25"))
             self.assertEqual(state.latest_locate.available_quantity, Decimal("100"))
+            self.assertEqual(state.latest_loan.borrowed_quantity, Decimal("25"))
+
+    def test_validated_capacity_blocks_recall_and_loan_mismatch(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            scope = resource()
+            journal = BorrowLifecycleJournal(store, scope)
+            journal.record_locate(locate(scope, available_quantity="50"))
+            journal.record_loan(loan(scope, borrowed_quantity="10"))
+            self.assertEqual(
+                validated_borrow_capacity(
+                    journal.state(),
+                    context(position="-10", reserved="-5"),
+                    symbol="ABC",
+                    now="2026-09-24T18:01:00Z",
+                ),
+                {scope.resource_key: "50"},
+            )
+
+            journal.record_recall(
+                BorrowRecallEvidence(
+                    resource=scope,
+                    recall_id="recall-block",
+                    provider_revision="recall-block-rev-1",
+                    recalled_quantity="2",
+                    observed_at="2026-09-24T18:01:30Z",
+                    effective_at="2026-09-24T18:01:00Z",
+                    evidence_refs=("provider:recall-block:rev-1",),
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "recall"):
+                validated_borrow_capacity(
+                    journal.state(),
+                    context(position="-10"),
+                    symbol="ABC",
+                    now="2026-09-24T18:02:00Z",
+                )
 
     def test_partial_resolution_requires_affirmative_provider_evidence(self):
         with TemporaryDirectory() as directory:

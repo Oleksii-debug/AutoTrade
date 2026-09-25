@@ -70,7 +70,7 @@ class ProviderWireClient(Protocol):
     def send(
         self,
         request: "SignedHttpRequest | AuthenticatedReadHttpRequest",
-    ) -> "bytes | AuthenticatedReadWireResponse": ...
+    ) -> "bytes | TradingWireResponse | AuthenticatedReadWireResponse": ...
 
 
 QuotaGate = Callable[[str, str, str, str], None]
@@ -448,6 +448,27 @@ class AuthenticatedReadHttpRequest:
 
 
 @dataclass(frozen=True)
+class TradingWireResponse:
+    """Definitive HTTP response observed after one guarded write send."""
+
+    http_status: int
+    body: bytes
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.http_status, bool)
+            or not isinstance(self.http_status, int)
+            or self.http_status < 100
+            or self.http_status > 599
+        ):
+            raise ProviderTransportScopeError("HTTP status must be an integer 100..599")
+        if type(self.body) is not bytes or not self.body:
+            raise ProviderTransportError(
+                "provider returned an empty or non-byte trading response"
+            )
+
+
+@dataclass(frozen=True)
 class AuthenticatedReadWireResponse:
     http_status: int
     body: bytes
@@ -480,7 +501,7 @@ class UrllibJsonWireClient:
     def send(
         self,
         request: SignedHttpRequest | AuthenticatedReadHttpRequest,
-    ) -> bytes:
+    ) -> bytes | TradingWireResponse | AuthenticatedReadWireResponse:
         if not isinstance(
             request,
             (SignedHttpRequest, AuthenticatedReadHttpRequest),
@@ -530,6 +551,10 @@ class UrllibJsonWireClient:
                     http_status=int(error.code),
                     body=raw,
                 )
+            return TradingWireResponse(
+                http_status=int(error.code),
+                body=raw,
+            )
         if type(raw) is not bytes or not raw:
             raise ProviderTransportError(
                 "provider returned an empty or non-byte response"
@@ -543,10 +568,37 @@ class UrllibJsonWireClient:
                 http_status=http_status,
                 body=raw,
             )
-        return raw
+        if http_status is None:
+            raise ProviderTransportError(
+                "trading HTTP status is unavailable"
+            )
+        return TradingWireResponse(
+            http_status=http_status,
+            body=raw,
+        )
 
 
 @dataclass(frozen=True)
+def _exact_trading_response(
+    value: object,
+) -> ExactJsonTransportResponse:
+    """Preserve HTTP status when the wire client can prove a definitive response.
+
+    Raw bytes remain accepted for injected legacy/test wire clients. Production
+    UrllibJsonWireClient always returns TradingWireResponse for guarded writes.
+    """
+    if isinstance(value, TradingWireResponse):
+        return ExactJsonTransportResponse(
+            value.body,
+            http_status=value.http_status,
+        )
+    if type(value) is bytes:
+        return ExactJsonTransportResponse(value)
+    raise ProviderTransportError(
+        "trading wire client returned an unsupported response contract"
+    )
+
+
 class WhiteBitCredential:
     api_key: str
     api_secret: str
@@ -1510,8 +1562,8 @@ class BinanceSpotHttpTransport:
         # point. A wire exception after the guard is intentionally propagated so
         # GuardedDispatcher records UNKNOWN and requires reconciliation.
         final_guard()
-        raw = self.wire_client.send(signed)
-        return ExactJsonTransportResponse(raw)
+        wire_response = self.wire_client.send(signed)
+        return _exact_trading_response(wire_response)
 
 
 class BinanceSpotAuthenticatedReadSigner:

@@ -100,6 +100,28 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             with self.assertRaisesRegex(ProtocolViolation, "ISO calendar dates"):
                 registry.register_protocol(malformed)
 
+    def test_causal_dates_reject_noncanonical_iso_aliases(self):
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+
+            basic_protocol = protocol()
+            basic_protocol["train_period"] = {
+                "start": "20240101",
+                "end": "2024-12-31",
+            }
+            with self.assertRaisesRegex(ProtocolViolation, "canonical YYYY-MM-DD"):
+                registry.register_protocol(basic_protocol)
+
+            registered = registry.register_protocol(protocol())
+            basic_holdout = holdout_identity(start="20260101")
+            with self.assertRaisesRegex(ProtocolViolation, "canonical YYYY-MM-DD"):
+                registry.record_holdout_access(
+                    registered.protocol_id,
+                    holdout_id="basic-date-alias",
+                    holdout_identity=basic_holdout,
+                    purpose="manual-inspection",
+                )
+
     def test_failed_and_discarded_trials_consume_registered_budget(self):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")

@@ -126,6 +126,12 @@ class SupplyChainQualificationTests(unittest.TestCase):
                 advisory_status="ALLOWLISTED",
                 advisory_exception_id="risk-acceptance-17",
             )
+        with self.assertRaisesRegex(ValueError, "surrounding whitespace"):
+            component(
+                advisory_status="ALLOWLISTED",
+                advisory_exception_id=" risk-acceptance-17 ",
+                advisory_exception_hash=H2,
+            )
 
         allowlisted = component(
             advisory_status="ALLOWLISTED",

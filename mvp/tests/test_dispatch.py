@@ -545,5 +545,101 @@ class DispatchTests(unittest.TestCase):
 
 
 
+    def test_initial_authority_exception_is_blocked_without_send(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            outbound = 0
+
+            def authority(intent_hash, current_time):
+                raise RuntimeError("authority unavailable")
+
+            def transport(client_id, request, final_guard):
+                nonlocal outbound
+                outbound += 1
+                raise AssertionError("transport must not run")
+
+            result = dispatcher.dispatch(
+                attempt_id="authority-error-initial",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "authority_check_failed_before_send")
+            self.assertEqual(outbound, 0)
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("authority-error-initial"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "authority_check_failed_before_send:RuntimeError",
+            )
+
+    def test_final_authority_exception_is_blocked_without_outbound_request(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            calls = 0
+            outbound = 0
+
+            def authority(intent_hash, current_time):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return True, "allowed"
+                raise RuntimeError("authority unavailable at barrier")
+
+            def transport(client_id, request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            result = dispatcher.dispatch(
+                attempt_id="authority-error-final",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=authority,
+                transport_send=transport,
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(
+                result.reason,
+                "authority_check_failed_at_final_barrier:RuntimeError",
+            )
+            self.assertEqual(outbound, 0)
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("authority-error-final"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

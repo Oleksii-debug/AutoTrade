@@ -44,6 +44,10 @@ def _amounts(values: Mapping[str, Decimal | str | int], *, allow_zero: bool = Fa
     normalized: dict[str, Decimal] = {}
     for resource, raw in values.items():
         key = _text(resource, name="resource")
+        if key in normalized:
+            raise ValueError(
+                f"duplicate normalized resource identity: {key}"
+            )
         amount = _decimal(raw, name=f"amount[{key}]")
         if amount < 0 or (amount == 0 and not allow_zero):
             raise ValueError("resource amounts must be positive")

@@ -417,6 +417,34 @@ class SettlementBookTests(unittest.TestCase):
         self.assertEqual(book.snapshot("USD").unsettled_receivable, Decimal("50"))
         self.assertEqual(book.available_to_spend("USD"), Decimal("100"))
 
+    def test_settle_due_rejects_unknown_or_malformed_evidence_identity(self):
+        book = SettlementBook(settled_cash={"USD": "0"})
+        book.add(
+            SettlementObligation(
+                "cash-1",
+                "fill-1",
+                "USD",
+                Decimal("10"),
+                date(2026, 9, 20),
+                date(2026, 9, 22),
+            )
+        )
+        with self.assertRaisesRegex(SettlementConflict, "unknown obligation"):
+            book.settle_due(
+                as_of=date(2026, 9, 22),
+                settlement_evidence={"cash-typo": "provider:statement:1"},
+            )
+        with self.assertRaises(ValueError):
+            book.settle_due(
+                as_of=date(2026, 9, 22),
+                settlement_evidence={"": "provider:statement:1"},
+            )
+        with self.assertRaises(ValueError):
+            book.settle_due(
+                as_of=date(2026, 9, 22),
+                settlement_evidence={"cash-1": " "},
+            )
+
     def test_settlement_retry_with_different_evidence_fails_closed(self):
         book = SettlementBook(settled_cash={"USD": "0"})
         book.add(

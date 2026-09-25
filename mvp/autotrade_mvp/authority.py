@@ -408,7 +408,9 @@ class AllocationAuthoritySnapshot:
     resolved_evidence: Mapping[str, ImmutableAllocationEvidence]
     provider_id: str
     account_id: str
+    policy_version: str
     instrument_versions: Mapping[str, str]
+    financial_instruments: Mapping[str, InstrumentVersionIdentity]
     capability_snapshot_ids: Mapping[str, str]
     account_snapshot_id: str
     reconciliation_run_id: str
@@ -475,11 +477,37 @@ class AllocationAuthoritySnapshot:
         )
         object.__setattr__(
             self,
+            "policy_version",
+            _text(self.policy_version, name="allocation policy_version"),
+        )
+        object.__setattr__(
+            self,
             "instrument_versions",
             normalized_scope(
                 self.instrument_versions,
                 name="allocation instrument_versions",
             ),
+        )
+        if not isinstance(self.financial_instruments, Mapping):
+            raise TypeError("financial_instruments must be a mapping")
+        normalized_financial_instruments: dict[str, InstrumentVersionIdentity] = {}
+        for raw_symbol, raw_identity in self.financial_instruments.items():
+            symbol = _text(
+                raw_symbol,
+                name="allocation financial_instruments symbol",
+            )
+            if symbol in normalized_financial_instruments:
+                raise ValueError(
+                    "allocation financial_instruments symbols must be unique"
+                )
+            normalized_financial_instruments[symbol] = _instrument_identity(
+                raw_identity,
+                name=f"allocation financial instrument {symbol}",
+            )
+        object.__setattr__(
+            self,
+            "financial_instruments",
+            MappingProxyType(dict(sorted(normalized_financial_instruments.items()))),
         )
         object.__setattr__(
             self,
@@ -1420,7 +1448,6 @@ class AuthorityService:
         *,
         allocation_result: EvidenceBoundObjectiveAllocationResult,
         existing: AdmissionRecord | None,
-        policy: AuthorityPolicy,
         risk_intent: RiskIntent,
         risk_context: RiskContext,
         reservation_book: DurableReservationBook,
@@ -1428,6 +1455,8 @@ class AuthorityService:
         account_id: str,
         environment: str,
         capability_snapshot_id: str,
+        instrument_id: str,
+        instrument_version: int,
         now: str,
     ) -> dict[str, Any]:
         """Re-resolve and bind one allocation immediately before Transaction A."""
@@ -1521,7 +1550,7 @@ class AuthorityService:
                 resolved_evidence=current.resolved_evidence,
                 environment=env,
                 as_of=now,
-                current_policy_version=str(policy.version),
+                current_policy_version=current.policy_version,
                 current_provider_id=current.provider_id,
                 current_instrument_versions=current.instrument_versions,
                 current_capability_snapshot_ids=current.capability_snapshot_ids,
@@ -1536,6 +1565,18 @@ class AuthorityService:
             raise AuthorityConflict(
                 "allocation evidence is stale, mismatched, or non-authoritative"
             ) from error
+
+        admission_instrument = InstrumentVersionIdentity(
+            instrument_id,
+            instrument_version,
+        )
+        bound_financial_instrument = current.financial_instruments.get(
+            risk_intent.symbol
+        )
+        if bound_financial_instrument != admission_instrument:
+            raise AuthorityConflict(
+                "allocation instrument does not match admitted instrument version"
+            )
 
         capability = dict(
             allocation_result.capability_snapshot_ids
@@ -1604,6 +1645,10 @@ class AuthorityService:
             "account_snapshot_id": allocation_result.account_snapshot_id,
             "reconciliation_run_id": allocation_result.reconciliation_run_id,
             "account_state_version": current.account_state_version,
+            "financial_instrument": {
+                "instrument_id": admission_instrument.instrument_id,
+                "version": admission_instrument.version,
+            },
             "reservation_state_version": reservation_book.version,
             "reservation_state_digest": reservation_book.state_digest,
             "target": {
@@ -1951,7 +1996,6 @@ class AuthorityService:
             allocation_binding = self._allocation_binding_for_admission(
                 allocation_result=allocation_result,
                 existing=existing,
-                policy=policy,
                 risk_intent=risk_intent,
                 risk_context=risk_context,
                 reservation_book=reservation_book,
@@ -1959,6 +2003,8 @@ class AuthorityService:
                 account_id=account_id,
                 environment=environment,
                 capability_snapshot_id=capability,
+                instrument_id=instrument_id,
+                instrument_version=instrument_version,
                 now=now,
             )
 

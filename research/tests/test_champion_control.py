@@ -7,6 +7,8 @@ import unittest
 from research.autotrade_research.learning.champion import (
     CandidateApproval,
     ChampionRegistry,
+    OnlineEnvelope,
+    ParameterBound,
     PromotionConflict,
 )
 from autotrade_research.science.registry import (
@@ -125,6 +127,21 @@ def approval(
         protocol_hash=registered.protocol_hash,
         evaluation_id=locked["evaluation_id"],
         evaluation_result_hash=locked["result_hash"],
+    )
+
+
+def online_envelope(candidate="candidate-a", *, interval=60, max_cost="2"):
+    return OnlineEnvelope.create(
+        envelope_id="online-envelope-v1",
+        champion_artifact_hash=digest(candidate),
+        authority_scope_id="paper-scope",
+        parameter_bounds=(
+            ParameterBound.create(name="threshold", minimum="0.1", maximum="0.9"),
+            ParameterBound.create(name="weight", minimum="0", maximum="1"),
+        ),
+        minimum_update_interval_seconds=interval,
+        maximum_update_cost=max_cost,
+        eligible_label_refs=("label:reconciled-outcome",),
     )
 
 
@@ -506,6 +523,268 @@ class ChampionRegistryTests(unittest.TestCase):
                 [row["action"] for row in registry.history()],
                 ["PROMOTE", "PROMOTE", "ROLLBACK"],
             )
+
+    def test_online_update_inside_envelope_is_recorded_without_route_change(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            state = registry.promote(
+                approval(science),
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            row = registry.record_online_update(
+                envelope=online_envelope(),
+                update_id="update-1",
+                expected_generation=state.generation,
+                updates={"threshold": "0.4"},
+                label_refs=("label:reconciled-outcome",),
+                evidence_refs=("episode:1",),
+                actual_update_cost="1.25",
+                now=BASE + timedelta(minutes=1),
+                drift_gate_passed=True,
+                stop_condition_triggered=False,
+            )
+            self.assertEqual(row["routing_generation"], 1)
+            self.assertEqual(registry.state(), state)
+
+    def test_online_update_outside_parameter_range_requires_new_candidate(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            state = registry.promote(
+                approval(science),
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            with self.assertRaisesRegex(ValueError, "outside the approved online range"):
+                registry.record_online_update(
+                    envelope=online_envelope(),
+                    update_id="outside-range",
+                    expected_generation=state.generation,
+                    updates={"threshold": "0.95"},
+                    label_refs=("label:reconciled-outcome",),
+                    evidence_refs=("episode:2",),
+                    actual_update_cost="1",
+                    now=BASE + timedelta(minutes=1),
+                    drift_gate_passed=True,
+                    stop_condition_triggered=False,
+                )
+
+    def test_online_update_unknown_parameter_is_blocked(self):
+        envelope = online_envelope()
+        with self.assertRaisesRegex(ValueError, "outside the approved online envelope"):
+            envelope.normalize_updates({"unregistered_parameter": "0.2"})
+
+    def test_online_update_uses_exact_decimal_not_float(self):
+        envelope = online_envelope()
+        with self.assertRaises(TypeError):
+            envelope.normalize_updates({"threshold": 0.4})
+
+    def test_online_update_respects_label_and_resource_envelope(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            state = registry.promote(
+                approval(science),
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            with self.assertRaisesRegex(ValueError, "labels outside"):
+                registry.record_online_update(
+                    envelope=online_envelope(),
+                    update_id="bad-label",
+                    expected_generation=state.generation,
+                    updates={"threshold": "0.4"},
+                    label_refs=("label:future-or-unapproved",),
+                    evidence_refs=("episode:3",),
+                    actual_update_cost="1",
+                    now=BASE + timedelta(minutes=1),
+                    drift_gate_passed=True,
+                    stop_condition_triggered=False,
+                )
+            with self.assertRaisesRegex(ValueError, "resource budget"):
+                registry.record_online_update(
+                    envelope=online_envelope(max_cost="1"),
+                    update_id="too-expensive",
+                    expected_generation=state.generation,
+                    updates={"threshold": "0.4"},
+                    label_refs=("label:reconciled-outcome",),
+                    evidence_refs=("episode:4",),
+                    actual_update_cost="1.01",
+                    now=BASE + timedelta(minutes=1),
+                    drift_gate_passed=True,
+                    stop_condition_triggered=False,
+                )
+
+    def test_online_update_drift_and_stop_gates_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            state = registry.promote(
+                approval(science),
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            common = dict(
+                envelope=online_envelope(),
+                expected_generation=state.generation,
+                updates={"threshold": "0.4"},
+                label_refs=("label:reconciled-outcome",),
+                evidence_refs=("episode:5",),
+                actual_update_cost="1",
+                now=BASE + timedelta(minutes=1),
+            )
+            with self.assertRaisesRegex(ValueError, "drift gate"):
+                registry.record_online_update(
+                    update_id="drift-failed",
+                    drift_gate_passed=False,
+                    stop_condition_triggered=False,
+                    **common,
+                )
+            with self.assertRaisesRegex(ValueError, "stop condition"):
+                registry.record_online_update(
+                    update_id="stop-triggered",
+                    drift_gate_passed=True,
+                    stop_condition_triggered=True,
+                    **common,
+                )
+
+    def test_online_update_frequency_is_serialized_and_enforced(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            state = registry.promote(
+                approval(science),
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            envelope = online_envelope(interval=60)
+            def apply(update_id, when):
+                return registry.record_online_update(
+                    envelope=envelope,
+                    update_id=update_id,
+                    expected_generation=state.generation,
+                    updates={"threshold": "0.4"},
+                    label_refs=("label:reconciled-outcome",),
+                    evidence_refs=("episode:frequency",),
+                    actual_update_cost="1",
+                    now=when,
+                    drift_gate_passed=True,
+                    stop_condition_triggered=False,
+                )
+            apply("frequency-1", BASE + timedelta(minutes=1))
+            with self.assertRaisesRegex(ValueError, "update frequency"):
+                apply("frequency-too-soon", BASE + timedelta(seconds=90))
+            apply("frequency-2", BASE + timedelta(minutes=2))
+
+    def test_online_update_retry_is_idempotent_but_changed_payload_conflicts(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            state = registry.promote(
+                approval(science),
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            kwargs = dict(
+                envelope=online_envelope(),
+                update_id="retry-update",
+                expected_generation=state.generation,
+                updates={"threshold": "0.4"},
+                label_refs=("label:reconciled-outcome",),
+                evidence_refs=("episode:retry",),
+                actual_update_cost="1",
+                drift_gate_passed=True,
+                stop_condition_triggered=False,
+            )
+            first = registry.record_online_update(
+                now=BASE + timedelta(minutes=1),
+                **kwargs,
+            )
+            retry = registry.record_online_update(
+                now=BASE + timedelta(minutes=5),
+                **kwargs,
+            )
+            self.assertEqual(retry["request_fingerprint"], first["request_fingerprint"])
+            with self.assertRaises(PromotionConflict):
+                registry.record_online_update(
+                    envelope=kwargs["envelope"],
+                    update_id="retry-update",
+                    expected_generation=state.generation,
+                    updates={"threshold": "0.5"},
+                    label_refs=kwargs["label_refs"],
+                    evidence_refs=kwargs["evidence_refs"],
+                    actual_update_cost="1",
+                    now=BASE + timedelta(minutes=5),
+                    drift_gate_passed=True,
+                    stop_condition_triggered=False,
+                )
+
+    def test_online_envelope_is_bound_to_exact_active_champion_generation(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry = ChampionRegistry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            first = registry.promote(
+                approval(science, "candidate-a"),
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            registry.promote(
+                approval(science, "candidate-b"),
+                expected_generation=first.generation,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+            with self.assertRaises(PromotionConflict):
+                registry.record_online_update(
+                    envelope=online_envelope("candidate-a"),
+                    update_id="stale-envelope",
+                    expected_generation=first.generation,
+                    updates={"threshold": "0.4"},
+                    label_refs=("label:reconciled-outcome",),
+                    evidence_refs=("episode:stale",),
+                    actual_update_cost="1",
+                    now=BASE + timedelta(minutes=1),
+                    drift_gate_passed=True,
+                    stop_condition_triggered=False,
+                )
 
 if __name__ == "__main__":
     unittest.main()

@@ -1790,6 +1790,12 @@ class AuthorityService:
         if policy is None:
             raise KeyError(pid)
 
+        supplied_allocation_binding = (
+            None
+            if allocation_result is None
+            else self._allocation_binding(allocation_result)
+        )
+
         existing = self._admissions.get(aid)
         if existing is None:
             reservation_version = reservation_book.version
@@ -1833,6 +1839,31 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "risk_valid_until changed for an existing financial command"
                 )
+            durable_allocation_binding = payload.get("allocation_binding")
+            if (
+                durable_allocation_binding is None
+                and supplied_allocation_binding is not None
+            ) or (
+                durable_allocation_binding is not None
+                and supplied_allocation_binding is None
+            ):
+                raise AuthorityConflict(
+                    "allocation binding changed for an existing financial command"
+                )
+            if durable_allocation_binding is not None:
+                if (
+                    not isinstance(durable_allocation_binding, Mapping)
+                    or dict(durable_allocation_binding)
+                    != supplied_allocation_binding
+                ):
+                    raise AuthorityConflict(
+                        "allocation binding changed for an existing financial command"
+                    )
+                # Lost-response retries reuse the original immutable financial
+                # cut.  They must not fail merely because Transaction A itself
+                # advanced the reservation journal, but the referenced durable
+                # evidence must still resolve exactly.
+                self._resolve_durable_allocation_evidence(allocation_result)
 
         decision = evaluate_bound_risk(
             risk_intent,
@@ -2050,6 +2081,35 @@ class AuthorityService:
                     },
                 }
 
+        allocation_binding = supplied_allocation_binding
+        if allocation_result is not None:
+            if existing is None and decision.admitted:
+                if availability_evidence is None:
+                    raise AuthorityConflict(
+                        "allocation admission requires reconciliation evidence"
+                    )
+                allocation_binding = self._validate_allocation_admission(
+                    allocation_result,
+                    authority_policy=policy,
+                    risk_policy=risk_policy,
+                    risk_intent=risk_intent,
+                    risk_context=risk_context,
+                    account_id=account_id,
+                    environment=environment,
+                    instrument_id=instrument_id,
+                    instrument_version=instrument_version,
+                    capability_snapshot_id=capability,
+                    notional=notional,
+                    reservation_book=reservation_book,
+                    availability_evidence=availability_evidence,
+                    now=now,
+                )
+            elif existing is None:
+                # A rejected risk decision grants no execution authority, but
+                # any supplied allocation identity is still required to exist
+                # in the canonical durable resolver before it is journaled.
+                self._resolve_durable_allocation_evidence(allocation_result)
+
         return self._admit_bound_risk(
             command_id=command_id,
             idempotency_key=idempotency_key,
@@ -2072,6 +2132,7 @@ class AuthorityService:
             reservation_available=authoritative_available,
             now=now,
             reservation_availability_evidence=availability_evidence,
+            allocation_binding=allocation_binding,
             confirmation_id=confirmation_id,
             risk_reducing=risk_reducing,
         )
@@ -2100,6 +2161,7 @@ class AuthorityService:
         reservation_available,
         now: str,
         reservation_availability_evidence: Mapping[str, Any] | None = None,
+        allocation_binding: Mapping[str, Any] | None = None,
         confirmation_id: str | None = None,
         risk_reducing: bool = False,
     ) -> AdmissionRecord:
@@ -2210,23 +2272,50 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "admission_id already belongs to another financial command"
                 )
-            if reservation_availability_evidence is not None:
-                durable_risk_events = self.store.load_events(
-                    "risk_decision", existing.risk_decision_id
+            durable_risk_events = self.store.load_events(
+                "risk_decision", existing.risk_decision_id
+            )
+            if (
+                len(durable_risk_events) != 1
+                or not isinstance(
+                    durable_risk_events[0].get("payload"), Mapping
                 )
-                if (
-                    len(durable_risk_events) != 1
-                    or not isinstance(
-                        durable_risk_events[0].get("payload"), Mapping
-                    )
-                    or durable_risk_events[0]["payload"].get(
-                        "reservation_availability_evidence"
-                    )
-                    != reservation_availability_evidence
-                ):
-                    raise AuthorityConflict(
-                        "reservation availability evidence changed for an existing financial command"
-                    )
+            ):
+                raise AuthorityConflict(
+                    "existing admission risk evidence is missing or ambiguous"
+                )
+            durable_payload = durable_risk_events[0]["payload"]
+            if (
+                reservation_availability_evidence is not None
+                and durable_payload.get(
+                    "reservation_availability_evidence"
+                )
+                != reservation_availability_evidence
+            ):
+                raise AuthorityConflict(
+                    "reservation availability evidence changed for an existing financial command"
+                )
+            durable_allocation_binding = durable_payload.get(
+                "allocation_binding"
+            )
+            if (
+                durable_allocation_binding is None
+                and allocation_binding is not None
+            ) or (
+                durable_allocation_binding is not None
+                and allocation_binding is None
+            ):
+                raise AuthorityConflict(
+                    "allocation binding changed for an existing financial command"
+                )
+            if durable_allocation_binding is not None and (
+                not isinstance(durable_allocation_binding, Mapping)
+                or dict(durable_allocation_binding)
+                != dict(allocation_binding)
+            ):
+                raise AuthorityConflict(
+                    "allocation binding changed for an existing financial command"
+                )
             return existing
 
         validate_bound_risk_decision(risk_decision, now=now)
@@ -2305,6 +2394,17 @@ class AuthorityService:
             "confirmation_id": candidate.confirmation_id,
             "risk_reducing": risk_reducing,
         }
+        base_risk_fingerprint = risk_decision_fingerprint(risk_decision)
+        if allocation_binding is not None:
+            request["allocation_binding"] = _canonical_financial_value(
+                allocation_binding
+            )
+            request["financial_risk_fingerprint"] = (
+                _financial_risk_fingerprint(
+                    base_risk_fingerprint,
+                    allocation_binding,
+                )
+            )
         request_fingerprint = sha256(
             json.dumps(request, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
@@ -2322,7 +2422,7 @@ class AuthorityService:
 
         risk_payload = {
             "decision_id": risk_decision.decision_id,
-            "fingerprint": risk_decision_fingerprint(risk_decision),
+            "fingerprint": base_risk_fingerprint,
             "intent_hash": risk_decision.intent_hash,
             "state_version": risk_decision.state_version,
             "policy_version": risk_decision.policy_version,
@@ -2350,6 +2450,16 @@ class AuthorityService:
                 for item in risk_decision.rules
             ],
         }
+        if allocation_binding is not None:
+            risk_payload["allocation_binding"] = _canonical_financial_value(
+                allocation_binding
+            )
+            risk_payload["financial_risk_fingerprint"] = (
+                _financial_risk_fingerprint(
+                    base_risk_fingerprint,
+                    allocation_binding,
+                )
+            )
         risk_event = {
             "event_id": _authority_event_id(
                 "RiskDecisionRecorded", risk_decision.decision_id

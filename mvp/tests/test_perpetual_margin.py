@@ -5,7 +5,11 @@ import json
 from tempfile import TemporaryDirectory
 import unittest
 
-from mvp.autotrade_mvp.capabilities import CapabilitySnapshot
+from mvp.autotrade_mvp.capabilities import (
+    CapabilityClaim,
+    EvidenceVerification,
+    derive_capability_snapshot,
+)
 from mvp.autotrade_mvp.perpetual_margin import (
     MarginTier,
     PerpetualMarginError,
@@ -47,12 +51,35 @@ def capability(**overrides):
         native_protection=frozenset(),
         rate_limit_policy_id="test-rate",
         data_entitlements=frozenset({"MARK", "INDEX", "MARGIN"}),
-        evidence=(),
-        status="VERIFIED",
-        sources=frozenset({"DOCUMENTED"}),
     )
     values.update(overrides)
-    return CapabilitySnapshot(**values)
+    observed_at = values["observed_at"]
+    claim_fields = {
+        key: value
+        for key, value in values.items()
+        if key != "snapshot_id"
+    }
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            **claim_fields,
+            evidence_ref={
+                "artifact_id": str(__import__("uuid").uuid4()),
+                "sha256": "sha256:" + "f" * 64,
+                "observed_at": observed_at.astimezone(timezone.utc).isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "source_uri": "https://example.invalid/perpetual-capability-fixture",
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    return derive_capability_snapshot(
+        snapshot_id=values["snapshot_id"],
+        claims=claims,
+        observed_at=observed_at,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    )
 
 
 def evidence(**overrides):

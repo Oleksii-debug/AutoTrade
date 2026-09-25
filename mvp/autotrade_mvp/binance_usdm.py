@@ -443,6 +443,9 @@ def parse_account_trades(
                 "trade id and orderId must be non-negative integers"
             )
 
+        side = _text(raw.get("side"), name=f"trade[{index}].side").upper()
+        if side not in {"BUY", "SELL"}:
+            raise BinanceUsdmAdapterError("trade side must be BUY or SELL")
         position_side = _text(
             raw.get("positionSide"), name=f"trade[{index}].positionSide"
         ).upper()
@@ -463,6 +466,8 @@ def parse_account_trades(
             instrument=_text(
                 normalized_instruments[symbol], name="instrument_version"
             ),
+            side=side,
+            position_side=position_side,
             quantity=raw.get("qty"),
             price=raw.get("price"),
             fee_amount=raw.get("commission"),

@@ -1080,6 +1080,7 @@ class WhiteBitExecutionDeal:
             provider_execution_id=self.provider_execution_id,
             client_order_id=self.client_order_id,
             instrument=self.market,
+            side=self.side,
             quantity=self.quantity,
             price=self.price,
             fee_amount=self.fee_amount,

@@ -357,23 +357,9 @@ class RecoveryController:
                     )
                 reported_unresolved.add(attempt_id.strip())
 
-        self.unresolved_attempts = (
-            self._unresolved_send_attempts | reported_unresolved
-        )
-        complete = (
-            payload.get("complete") is True
-            and payload.get("snapshot_consistent") is True
-            and payload.get("activity_coverage_complete") is True
-        )
-        self.provider_reconciled = bool(complete and not self.unresolved_attempts)
-        if self.provider_reconciled:
-            self.reason_codes.discard("startup_reconciliation_required")
-            self.reason_codes.discard("clock_requalification_required")
-            self.reason_codes.discard("provider_uncertainty")
-        else:
-            self.reason_codes.add("provider_uncertainty")
-        self._recompute_state()
-
+        # Validate the complete durable proof before mutating recovery state.
+        # A malformed checkpoint must fail closed without leaving this controller
+        # READY from a partially accepted proof.
         event_id = checkpoint.get("event_id")
         payload_hash = checkpoint.get("payload_hash")
         journal_sequence = checkpoint.get("journal_sequence")
@@ -382,10 +368,35 @@ class RecoveryController:
             or not event_id
             or not isinstance(payload_hash, str)
             or not payload_hash.startswith("sha256:")
+            or len(payload_hash) != 71
+            or any(ch not in "0123456789abcdef" for ch in payload_hash[7:])
             or type(journal_sequence) is not int
             or journal_sequence <= 0
         ):
             raise RuntimeError("Reconciliation checkpoint durable identity is invalid")
+
+        next_unresolved_attempts = (
+            self._unresolved_send_attempts | reported_unresolved
+        )
+        complete = (
+            payload.get("complete") is True
+            and payload.get("snapshot_consistent") is True
+            and payload.get("activity_coverage_complete") is True
+        )
+        next_provider_reconciled = bool(
+            complete and not next_unresolved_attempts
+        )
+
+        self.unresolved_attempts = next_unresolved_attempts
+        self.provider_reconciled = next_provider_reconciled
+        if self.provider_reconciled:
+            self.reason_codes.discard("startup_reconciliation_required")
+            self.reason_codes.discard("clock_requalification_required")
+            self.reason_codes.discard("provider_uncertainty")
+        else:
+            self.reason_codes.add("provider_uncertainty")
+        self._recompute_state()
+
         return {
             "event_id": event_id,
             "payload_hash": payload_hash,

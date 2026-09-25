@@ -21,7 +21,7 @@ from typing import Any, Sequence
 
 from .diagnostics import build_diagnostic_snapshot
 from .persistence import JournalStore, payload_digest
-from .reconciliation import ReconciliationResult
+from .reconciliation_journal import require_current_reconciliation_checkpoint
 from .recovery import HostState, OwnerFence, RecoveryController
 
 
@@ -190,6 +190,43 @@ def _utc_text(value: object, *, name: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise BackupIntegrityError(f"{name} must include a timezone")
     return parsed.astimezone(timezone.utc)
+
+
+def _recovery_owner_scopes_from_journal(
+    journal_path: Path,
+) -> tuple[str, ...]:
+    """Discover durable recovery-owner scopes without guessing account authority."""
+
+    try:
+        connection = sqlite3.connect(str(journal_path), timeout=5)
+        rows = connection.execute(
+            """
+            SELECT DISTINCT aggregate_id
+            FROM events
+            WHERE aggregate_type = ?
+            ORDER BY aggregate_id
+            """,
+            ("recovery_owner",),
+        ).fetchall()
+    except (sqlite3.Error, OSError) as error:
+        raise BackupIntegrityError(
+            "Recovery owner scope evidence is unreadable"
+        ) from error
+    finally:
+        try:
+            connection.close()
+        except (UnboundLocalError, sqlite3.Error):
+            pass
+
+    scopes: list[str] = []
+    for row in rows:
+        scope = _nonempty_text(row[0], name="recovery owner scope")
+        if scope in scopes:
+            raise BackupIntegrityError(
+                "Recovery owner scope evidence is duplicated"
+            )
+        scopes.append(scope)
+    return tuple(scopes)
 
 
 def _recovery_owner_chain_from_journal(
@@ -430,7 +467,7 @@ def _validate_stored_reconciliation_payload(payload: object) -> dict[str, Any]:
         or payload["blocking_resources"] != []
     ):
         raise BackupIntegrityError(
-            "Reconciliation completion proof is not fully non-blocking"
+            "Reconciliation completion proof must be a complete non-blocking reconciliation"
         )
     if payload["snapshot_mode"] is not None:
         _nonempty_text(payload["snapshot_mode"], name="snapshot_mode")
@@ -543,64 +580,179 @@ def _validate_stored_reconciliation_payload(payload: object) -> dict[str, Any]:
     return payload
 
 
-def _reconciliation_completion_payload(
-    reconciliation: ReconciliationResult,
+def _reconciliation_completion_summary(
+    payload: dict[str, Any],
 ) -> dict[str, Any]:
-    if not isinstance(reconciliation, ReconciliationResult):
-        raise TypeError("reconciliation must be ReconciliationResult")
+    """Validate the economic completeness copied from a journal-issued checkpoint."""
+
+    for field in (
+        "unexpected_execution_ids",
+        "missing_local_execution_ids",
+        "unexpected_working_provider_order_ids",
+        "missing_local_working_client_order_ids",
+        "unexpected_provider_activity_ids",
+        "missing_local_provider_activity_ids",
+        "manual_or_external_activity_ids",
+    ):
+        value = payload.get(field)
+        if not isinstance(value, list):
+            raise BackupIntegrityError(f"{field} must be a list")
+        if value:
+            raise BackupError(
+                "Restore completion requires a complete non-blocking reconciliation"
+            )
+    for field in (
+        "cash_differences",
+        "position_differences",
+        "borrow_differences",
+    ):
+        value = payload.get(field)
+        if not isinstance(value, dict):
+            raise BackupIntegrityError(f"{field} must be an object")
+        if value:
+            raise BackupError(
+                "Restore completion requires a complete non-blocking reconciliation"
+            )
+
+    snapshot = payload.get("snapshot")
+    if snapshot is None:
+        snapshot_mode = None
+        snapshot_started = None
+        snapshot_completed = None
+    else:
+        if not isinstance(snapshot, dict) or set(snapshot) != {
+            "mode",
+            "query_started_at",
+            "query_completed_at",
+        }:
+            raise BackupIntegrityError(
+                "Reconciliation checkpoint snapshot structure is invalid"
+            )
+        snapshot_mode = snapshot["mode"]
+        snapshot_started = snapshot["query_started_at"]
+        snapshot_completed = snapshot["query_completed_at"]
+
+    summary = {
+        "provider_id": payload.get("provider_id"),
+        "account_id": payload.get("account_id"),
+        "environment": payload.get("environment"),
+        "complete": payload.get("complete"),
+        "snapshot_consistent": payload.get("snapshot_consistent"),
+        "snapshot_mode": snapshot_mode,
+        "snapshot_query_started_at": snapshot_started,
+        "snapshot_query_completed_at": snapshot_completed,
+        "activity_coverage_complete": payload.get("activity_coverage_complete"),
+        "matched_execution_ids": payload.get("matched_execution_ids"),
+        "matched_working_client_order_ids": payload.get(
+            "matched_working_client_order_ids"
+        ),
+        "matched_provider_activity_ids": payload.get(
+            "matched_provider_activity_ids"
+        ),
+        "submission_resolutions": payload.get("submission_resolutions"),
+        "blocking_resources": payload.get("blocking_resources"),
+    }
+    return _validate_stored_reconciliation_payload(summary)
+
+
+def _restore_reconciliation_checkpoint_proof(
+    store: JournalStore,
+    *,
+    checkpoint_event_id: str,
+    current_owner: OwnerFence,
+) -> dict[str, Any]:
+    """Load restore authority only from the current owner-bound journal checkpoint."""
+
+    if not isinstance(store, JournalStore):
+        raise TypeError("store must be JournalStore")
+    if not isinstance(current_owner, OwnerFence):
+        raise TypeError("current_owner must be OwnerFence")
+    event_id = _nonempty_text(
+        checkpoint_event_id,
+        name="reconciliation_checkpoint_event_id",
+    )
+    checkpoint = store.get_event(event_id)
+    if checkpoint is None:
+        raise BackupError("Restore reconciliation checkpoint does not exist")
     if (
-        not reconciliation.complete
-        or reconciliation.blocks_new_risk
-        or not reconciliation.snapshot_consistent
-        or not reconciliation.activity_coverage_complete
-        or reconciliation.unexpected_execution_ids
-        or reconciliation.missing_local_execution_ids
-        or reconciliation.unexpected_working_provider_order_ids
-        or reconciliation.missing_local_working_client_order_ids
-        or reconciliation.unexpected_provider_activity_ids
-        or reconciliation.missing_local_provider_activity_ids
-        or reconciliation.manual_or_external_activity_ids
-        or reconciliation.cash_differences
-        or reconciliation.position_differences
-        or reconciliation.borrow_differences
+        checkpoint.get("event_type") != "AccountReconciled"
+        or checkpoint.get("aggregate_type") != "account_reconciliation"
+    ):
+        raise BackupIntegrityError(
+            "Restore reconciliation checkpoint has invalid event authority"
+        )
+    payload = checkpoint.get("payload")
+    if not isinstance(payload, dict):
+        raise BackupIntegrityError(
+            "Restore reconciliation checkpoint payload is invalid"
+        )
+
+    provider_id = _nonempty_text(payload.get("provider_id"), name="provider_id")
+    account_id = _nonempty_text(payload.get("account_id"), name="account_id")
+    environment = _nonempty_text(payload.get("environment"), name="environment")
+    current = require_current_reconciliation_checkpoint(
+        store,
+        checkpoint_event_id=event_id,
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
+    if current.get("event_id") != event_id:
+        raise BackupIntegrityError(
+            "Restore reconciliation checkpoint identity changed while loading"
+        )
+
+    checkpoint_owner = payload.get("checkpoint_owner")
+    if (
+        not isinstance(checkpoint_owner, dict)
+        or set(checkpoint_owner) != {"host_id", "owner_epoch"}
+        or checkpoint_owner.get("host_id") != current_owner.owner_id
+        or checkpoint_owner.get("owner_epoch") != str(current_owner.epoch)
+        or checkpoint.get("host_id") != current_owner.owner_id
+        or checkpoint.get("owner_epoch") != str(current_owner.epoch)
     ):
         raise BackupError(
-            "Restore completion requires a complete non-blocking reconciliation"
+            "Restore reconciliation checkpoint is not bound to current recovery owner"
         )
-    payload = {
-        "provider_id": reconciliation.provider_id,
-        "account_id": reconciliation.account_id,
-        "environment": reconciliation.environment,
-        "complete": True,
-        "snapshot_consistent": True,
-        "snapshot_mode": reconciliation.snapshot_mode,
-        "snapshot_query_started_at": reconciliation.snapshot_query_started_at,
-        "snapshot_query_completed_at": reconciliation.snapshot_query_completed_at,
-        "activity_coverage_complete": True,
-        "matched_execution_ids": list(reconciliation.matched_execution_ids),
-        "matched_working_client_order_ids": list(
-            reconciliation.matched_working_client_order_ids
-        ),
-        "matched_provider_activity_ids": list(
-            reconciliation.matched_provider_activity_ids
-        ),
-        "submission_resolutions": [
-            {
-                "attempt_id": item.attempt_id,
-                "intent_id": item.intent_id,
-                "client_order_id": item.client_order_id,
-                "outcome": item.outcome,
-                "evidence_reason": item.evidence_reason,
-                "provider_order_ids": list(item.provider_order_ids),
-                "provider_execution_ids": list(
-                    item.provider_execution_ids
-                ),
-            }
-            for item in reconciliation.submission_resolutions
-        ],
-        "blocking_resources": list(reconciliation.blocking_resources),
+
+    payload_hash = _canonical_sha256_ref(
+        checkpoint.get("payload_hash"),
+        name="reconciliation checkpoint payload_hash",
+    )
+    if payload_hash != payload_digest(payload):
+        raise BackupIntegrityError(
+            "Restore reconciliation checkpoint payload hash mismatch"
+        )
+    journal_sequence = checkpoint.get("journal_sequence")
+    aggregate_version = checkpoint.get("aggregate_version")
+    aggregate_id = checkpoint.get("aggregate_id")
+    if (
+        type(journal_sequence) is not int
+        or journal_sequence <= 0
+        or type(aggregate_version) is not int
+        or aggregate_version <= 0
+        or not isinstance(aggregate_id, str)
+        or not aggregate_id
+    ):
+        raise BackupIntegrityError(
+            "Restore reconciliation checkpoint durable identity is invalid"
+        )
+    _utc_text(payload.get("observed_at"), name="reconciliation observed_at")
+    summary = _reconciliation_completion_summary(payload)
+    return {
+        "checkpoint_event_id": event_id,
+        "checkpoint_payload_hash": payload_hash,
+        "checkpoint_journal_sequence": journal_sequence,
+        "checkpoint_aggregate_id": aggregate_id,
+        "checkpoint_aggregate_version": aggregate_version,
+        "checkpoint_owner_id": current_owner.owner_id,
+        "checkpoint_owner_epoch": current_owner.epoch,
+        "provider_id": provider_id,
+        "account_id": account_id,
+        "environment": environment,
+        "summary": summary,
     }
-    return _validate_stored_reconciliation_payload(payload)
+
 
 def _safe_relative_path(raw: str) -> Path:
     if not isinstance(raw, str) or not raw:
@@ -1146,9 +1298,16 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
             if _sha256_file(target) != item["sha256"].removeprefix("sha256:"):
                 raise BackupIntegrityError("Restored payload digest mismatch")
 
-        owner_scope = "default"
+        journal_path = stage / "state" / "journal.sqlite3"
+        owner_scopes = _recovery_owner_scopes_from_journal(journal_path)
+        if len(owner_scopes) > 1:
+            raise BackupIntegrityError(
+                "Restore journal has multiple recovery owner scopes; "
+                "explicit scoped restore is required"
+            )
+        owner_scope = owner_scopes[0] if owner_scopes else "default"
         owner_chain = _recovery_owner_chain_from_journal(
-            stage / "state" / "journal.sqlite3",
+            journal_path,
             owner_scope=owner_scope,
         )
         source_owner = owner_chain[-1] if owner_chain else None
@@ -1183,16 +1342,16 @@ def complete_restore_reconciliation(
     destination_root: str | Path,
     *,
     controller: RecoveryController,
-    reconciliation: ReconciliationResult,
+    reconciliation_checkpoint_event_id: str,
     fencing_evidence: Sequence[str],
     completed_at: str,
 ) -> dict[str, Any]:
-    """Durably clear a restore gate only from reconciliation and fence evidence.
+    """Durably clear a restore gate from journal-issued reconciliation and fence evidence.
 
-    This function does not make the controller READY and does not transfer
-    ownership.  Those actions must already have occurred through the canonical
-    journal-backed RecoveryController.  Completion only records proof that the
-    restored runtime reached a safe, reconciled, externally fenced state.
+    Reconciliation authority is recovered from the exact current AccountReconciled
+    event for the current recovery owner. Callers cannot supply a copied
+    ReconciliationResult. Sender-fence issuer authenticity is validated separately
+    by the fencing evidence boundary.
     """
 
     root = Path(destination_root)
@@ -1259,6 +1418,12 @@ def complete_restore_reconciliation(
             "Recovery controller is not READY with reconciled durable state"
         )
 
+    reconciliation_proof = _restore_reconciliation_checkpoint_proof(
+        JournalStore(expected_journal),
+        checkpoint_event_id=reconciliation_checkpoint_event_id,
+        current_owner=current_owner,
+    )
+
     if isinstance(fencing_evidence, (str, bytes)) or not isinstance(
         fencing_evidence, Sequence
     ):
@@ -1294,11 +1459,8 @@ def complete_restore_reconciliation(
             )
         evidence.append(item)
 
-    reconciliation_payload = _reconciliation_completion_payload(
-        reconciliation
-    )
     proof = {
-        "schema_version": 1,
+        "schema_version": 2,
         "backup_manifest_sha256": marker["backup_manifest_sha256"],
         "restored_at": marker["restored_at"],
         "completed_at": completed.isoformat().replace("+00:00", "Z"),
@@ -1308,7 +1470,7 @@ def complete_restore_reconciliation(
         "current_owner_id": current_owner.owner_id,
         "current_owner_epoch": current_owner.epoch,
         "fencing_evidence": evidence,
-        "reconciliation": reconciliation_payload,
+        "reconciliation": reconciliation_proof,
     }
     proof_bytes = _canonical_json(proof)
     proof_hash = "sha256:" + _sha256_bytes(proof_bytes)
@@ -1332,7 +1494,7 @@ def complete_restore_reconciliation(
 
 
 def restore_requires_reconciliation(destination_root: str | Path) -> bool:
-    """Return False only while the durable completion proof still verifies."""
+    """Return False only while all durable completion identities still verify."""
 
     root = Path(destination_root)
     try:
@@ -1381,7 +1543,7 @@ def restore_requires_reconciliation(destination_root: str | Path) -> bool:
         if not isinstance(proof, dict) or set(proof) != expected_keys:
             return True
         if (
-            proof["schema_version"] != 1
+            proof["schema_version"] != 2
             or proof["backup_manifest_sha256"]
             != marker["backup_manifest_sha256"]
             or proof["restored_at"] != marker["restored_at"]
@@ -1397,22 +1559,34 @@ def restore_requires_reconciliation(destination_root: str | Path) -> bool:
         restored = _utc_text(proof["restored_at"], name="restored_at")
         if completed < restored:
             return True
-        _validate_stored_reconciliation_payload(proof["reconciliation"])
 
         chain = _recovery_owner_chain_from_journal(
             root / "state" / "journal.sqlite3",
             owner_scope=proof["owner_scope"],
         )
         source_epoch = proof["source_owner_epoch"]
+        current_owner = OwnerFence(current_owner_id, current_owner_epoch)
         if (
             not chain
             or source_epoch > len(chain)
             or chain[source_epoch - 1]
             != OwnerFence(proof["source_owner_id"], source_epoch)
-            or chain[-1]
-            != OwnerFence(current_owner_id, current_owner_epoch)
+            or chain[-1] != current_owner
         ):
             return True
+
+        stored_reconciliation = proof["reconciliation"]
+        if not isinstance(stored_reconciliation, dict):
+            return True
+        checkpoint_event_id = stored_reconciliation.get("checkpoint_event_id")
+        loaded_reconciliation = _restore_reconciliation_checkpoint_proof(
+            JournalStore(root / "state" / "journal.sqlite3"),
+            checkpoint_event_id=checkpoint_event_id,
+            current_owner=current_owner,
+        )
+        if loaded_reconciliation != stored_reconciliation:
+            return True
+
         transition_chain = chain[source_epoch - 1 :]
         stored_evidence = proof["fencing_evidence"]
         if (

@@ -320,15 +320,18 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         self.assertEqual(coverage.surface, "EXECUTIONS")
         self.assertFalse(coverage.provider_semantics_exclude_execution)
         self.assertFalse(coverage.proves_absence_for(NOW))
-        qualified = coverage_evidence(
-            surface="executions",
-            coverage_start="2026-09-24T19:00:00Z",
-            coverage_end="2026-09-24T21:00:00Z",
-            pagination_complete=True,
-            consistency_horizon_satisfied=True,
-            qualified_exclusion_semantics=True,
-        )
-        self.assertTrue(qualified.proves_absence_for(NOW))
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "cannot self-assert provider exclusion semantics",
+        ):
+            coverage_evidence(
+                surface="executions",
+                coverage_start="2026-09-24T19:00:00Z",
+                coverage_end="2026-09-24T21:00:00Z",
+                pagination_complete=True,
+                consistency_horizon_satisfied=True,
+                qualified_exclusion_semantics=True,
+            )
 
 
 

@@ -226,6 +226,8 @@ def build_provider_fill_transaction(
         price=provider_fill.price,
         fee=provider_fill.fee_amount,
         fee_currency=provider_fill.fee_currency,
+        economic_effective_at=provider_fill.trade_time,
+        economic_order_key=projected_fill.fill_id,
     )
 
 
@@ -334,6 +336,8 @@ def build_provider_fill_correction_transactions(
         price=corrected_provider_fill.price,
         fee=corrected_provider_fill.fee_amount,
         fee_currency=corrected_provider_fill.fee_currency,
+        economic_effective_at=committed_original.economic_effective_at,
+        economic_order_key=committed_original.economic_order_key,
     )
     return reversal, replacement
 

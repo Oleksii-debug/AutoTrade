@@ -536,6 +536,27 @@ class DurableReservationBook:
         events = self._events()
         return 0 if not events else int(events[-1]["aggregate_version"])
 
+    @property
+    def state_digest(self) -> str:
+        """Content identity for the exact durable reservation journal cut."""
+
+        events = self._events()
+        payload = {
+            "environment": self.environment,
+            "account_id": self.account_id,
+            "scope_id": self.scope_id,
+            "version": 0 if not events else int(events[-1]["aggregate_version"]),
+            "events": [
+                {
+                    "event_id": event["event_id"],
+                    "aggregate_version": int(event["aggregate_version"]),
+                    "payload_hash": event["payload_hash"],
+                }
+                for event in events
+            ],
+        }
+        return payload_digest(payload).removeprefix("sha256:")
+
     def reserve(
         self,
         *,

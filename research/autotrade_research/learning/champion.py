@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from hashlib import sha256
+import json
 import re
 import sqlite3
 
@@ -32,6 +34,16 @@ def _digest(value: str, *, name: str) -> str:
     if _SHA256.fullmatch(normalized) is None:
         raise ValueError(f"{name} must be a canonical sha256 digest")
     return normalized
+
+
+def _request_fingerprint(value: dict) -> str:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return "sha256:" + sha256(payload.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -118,6 +130,7 @@ class ChampionRegistry:
                     evidence_id TEXT NOT NULL,
                     authority_scope_id TEXT NOT NULL,
                     existing_position_policy TEXT,
+                    request_fingerprint TEXT,
                     created_at TEXT NOT NULL
                 );
                 INSERT OR IGNORE INTO routing_state(
@@ -187,10 +200,48 @@ class ChampionRegistry:
         if open_position_count > 0 and not policy:
             raise ValueError("open positions require an explicit compatible management/exit policy")
         current_time = _time(now, name="now").isoformat()
+        request_fingerprint = _request_fingerprint(
+            {
+                "action": "PROMOTE",
+                "expected_generation": expected_generation,
+                "candidate_id": approval.candidate_id,
+                "artifact_hash": approval.artifact_hash,
+                "evidence_id": approval.evidence_id,
+                "evidence_valid_until": approval.evidence_valid_until.isoformat(),
+                "evaluation_status": approval.evaluation_status,
+                "retention_passed": approval.retention_passed,
+                "risk_passed": approval.risk_passed,
+                "authority_scope_id": approval.authority_scope_id,
+                "protocol_id": approval.protocol_id,
+                "protocol_hash": approval.protocol_hash,
+                "evaluation_id": approval.evaluation_id,
+                "evaluation_result_hash": approval.evaluation_result_hash,
+                "open_position_count": open_position_count,
+                "existing_position_policy": policy,
+            }
+        )
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute("SELECT * FROM routing_state WHERE singleton=1").fetchone()
-            if int(row["generation"]) != expected_generation:
+            current_generation = int(row["generation"])
+            if current_generation != expected_generation:
+                if current_generation == expected_generation + 1:
+                    latest = con.execute(
+                        "SELECT * FROM promotion_history WHERE generation=?",
+                        (current_generation,),
+                    ).fetchone()
+                    if (
+                        latest is not None
+                        and latest["action"] == "PROMOTE"
+                        and latest["request_fingerprint"] == request_fingerprint
+                    ):
+                        return RoutingState(
+                            generation=current_generation,
+                            champion_candidate_id=row["champion_candidate_id"],
+                            champion_artifact_hash=row["champion_artifact_hash"],
+                            authority_scope_id=row["authority_scope_id"],
+                            existing_position_policy=row["existing_position_policy"],
+                        )
                 raise PromotionConflict("routing generation changed before promotion")
             generation = expected_generation + 1
             con.execute(
@@ -202,10 +253,11 @@ class ChampionRegistry:
             con.execute(
                 """INSERT INTO promotion_history(
                     generation,action,candidate_id,artifact_hash,evidence_id,authority_scope_id,
-                    existing_position_policy,created_at
-                ) VALUES(?,?,?,?,?,?,?,?)""",
+                    existing_position_policy,request_fingerprint,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?)""",
                 (generation,"PROMOTE",approval.candidate_id,approval.artifact_hash,
-                 approval.evidence_id,approval.authority_scope_id,policy,current_time),
+                 approval.evidence_id,approval.authority_scope_id,policy,
+                 request_fingerprint,current_time),
             )
             con.commit()
         return self.state()
@@ -234,10 +286,37 @@ class ChampionRegistry:
         if open_position_count > 0 and not policy:
             raise ValueError("rollback with open positions requires an explicit management/exit policy")
         current_time = _time(now, name="now").isoformat()
+        request_fingerprint = _request_fingerprint(
+            {
+                "action": "ROLLBACK",
+                "target_generation": target_generation,
+                "expected_generation": expected_generation,
+                "open_position_count": open_position_count,
+                "existing_position_policy": policy,
+            }
+        )
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             current = con.execute("SELECT * FROM routing_state WHERE singleton=1").fetchone()
-            if int(current["generation"]) != expected_generation:
+            current_generation = int(current["generation"])
+            if current_generation != expected_generation:
+                if current_generation == expected_generation + 1:
+                    latest = con.execute(
+                        "SELECT * FROM promotion_history WHERE generation=?",
+                        (current_generation,),
+                    ).fetchone()
+                    if (
+                        latest is not None
+                        and latest["action"] == "ROLLBACK"
+                        and latest["request_fingerprint"] == request_fingerprint
+                    ):
+                        return RoutingState(
+                            generation=current_generation,
+                            champion_candidate_id=current["champion_candidate_id"],
+                            champion_artifact_hash=current["champion_artifact_hash"],
+                            authority_scope_id=current["authority_scope_id"],
+                            existing_position_policy=current["existing_position_policy"],
+                        )
                 raise PromotionConflict("routing generation changed before rollback")
             target = con.execute(
                 "SELECT * FROM promotion_history WHERE generation=? AND action='PROMOTE'",
@@ -255,10 +334,11 @@ class ChampionRegistry:
             con.execute(
                 """INSERT INTO promotion_history(
                     generation,action,candidate_id,artifact_hash,evidence_id,authority_scope_id,
-                    existing_position_policy,created_at
-                ) VALUES(?,?,?,?,?,?,?,?)""",
+                    existing_position_policy,request_fingerprint,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?)""",
                 (generation,"ROLLBACK",target["candidate_id"],target["artifact_hash"],
-                 target["evidence_id"],target["authority_scope_id"],policy,current_time),
+                 target["evidence_id"],target["authority_scope_id"],policy,
+                 request_fingerprint,current_time),
             )
             con.commit()
         return self.state()

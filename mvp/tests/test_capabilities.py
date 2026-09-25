@@ -497,6 +497,7 @@ class CapabilityFoundationTests(unittest.TestCase):
         )
         rebuilt = replace(
             snapshot,
+            status="UNVERIFIED",
             supported_order_types=[" LIMIT ", "MARKET"],
             sources={" documented ", "api", "ACCOUNT", "instrument"},
         )

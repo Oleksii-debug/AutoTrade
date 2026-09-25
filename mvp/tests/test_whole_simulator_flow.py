@@ -15,6 +15,7 @@ from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.reconciliation import (
     ProviderFillEvidence,
+    ResourceAvailabilityEvidence,
     SnapshotConsistencyEvidence,
     UnknownSubmission,
     reconcile_account,
@@ -140,6 +141,22 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 pagination_complete=True,
                 provider_activity_provider_id="SIMULATED",
                 provider_activity_account_id="sim-account",
+                resource_availability=ResourceAvailabilityEvidence(
+                    provider_id="SIMULATED",
+                    account_id="sim-account",
+                    environment="SIMULATION",
+                    snapshot_id=initial_snapshot["snapshot_id"],
+                    query_started_at=NOW,
+                    query_completed_at=NOW,
+                    valid_until=LATER,
+                    available_resources={
+                        "CASH:USD": initial_snapshot["balances"][0]["available"]
+                    },
+                    provider_as_of=initial_snapshot["provider_as_of"],
+                    evidence_refs=(
+                        f"provider:snapshot:{initial_snapshot['snapshot_id']}",
+                    ),
+                ),
             )
             availability_checkpoint = record_reconciliation_checkpoint(
                 journal,

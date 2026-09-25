@@ -10,6 +10,7 @@ from mvp.autotrade_mvp.authority import (
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reconciliation import (
+    ResourceAvailabilityEvidence,
     SnapshotConsistencyEvidence,
     reconcile_account,
 )
@@ -74,7 +75,9 @@ def _risk_policy():
     )
 
 
-def _checkpoint(store, *, cash="1000"):
+def _checkpoint(store, *, cash="1000", available_cash=None):
+    if available_cash is None:
+        available_cash = cash
     result = reconcile_account(
         provider_id=PROVIDER_ID,
         account_id=ACCOUNT_ID,
@@ -98,6 +101,18 @@ def _checkpoint(store, *, cash="1000"):
         pagination_complete=True,
         provider_activity_provider_id=PROVIDER_ID,
         provider_activity_account_id=ACCOUNT_ID,
+        resource_availability=ResourceAvailabilityEvidence(
+            provider_id=PROVIDER_ID,
+            account_id=ACCOUNT_ID,
+            environment=ENVIRONMENT,
+            snapshot_id="availability-snapshot",
+            query_started_at="2026-09-24T18:00:00Z",
+            query_completed_at="2026-09-24T18:00:30Z",
+            valid_until="2026-09-24T18:02:00Z",
+            available_resources={"CASH:USD": available_cash},
+            provider_as_of="2026-09-24T18:00:30Z",
+            evidence_refs=("provider:availability-snapshot",),
+        ),
     )
     return record_reconciliation_checkpoint(
         store,
@@ -186,6 +201,10 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 evidence["availability"],
                 {"CASH:USD": "1000"},
             )
+            self.assertEqual(
+                evidence["resource_snapshot_id"],
+                "availability-snapshot",
+            )
 
             restarted_store = JournalStore(path)
             restarted_authority = AuthorityService(restarted_store)
@@ -220,7 +239,11 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = AuthorityService(store)
             authority.register_policy(_policy())
-            checkpoint = _checkpoint(store, cash="100")
+            checkpoint = _checkpoint(
+                store,
+                cash="1000",
+                available_cash="100",
+            )
             reservations = DurableReservationBook(
                 store,
                 environment=ENVIRONMENT,

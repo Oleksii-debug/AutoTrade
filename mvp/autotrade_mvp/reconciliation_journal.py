@@ -542,21 +542,83 @@ def load_account_resource_availability_evidence(
     if age_seconds > max_age:
         raise ValueError("availability checkpoint is stale")
 
-    raw_cash = payload.get("provider_cash")
-    if not isinstance(raw_cash, Mapping):
-        raise ValueError("availability checkpoint lacks provider cash truth")
-    provider_cash: dict[str, Decimal] = {}
-    for raw_currency, raw_amount in raw_cash.items():
-        currency = _text(raw_currency, name="provider_cash currency")
+    resource_evidence = payload.get("resource_availability")
+    if not isinstance(resource_evidence, Mapping):
+        raise ValueError(
+            "availability checkpoint lacks explicit provider resource availability"
+        )
+    provider, account, scope = _scope(
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
+    if (
+        resource_evidence.get("provider_id") != provider
+        or resource_evidence.get("account_id") != account
+        or resource_evidence.get("environment") != scope
+    ):
+        raise ValueError("resource availability evidence scope mismatch")
+
+    snapshot_started_text = _instant(
+        snapshot.get("query_started_at"),
+        name="snapshot.query_started_at",
+    )
+    resource_started_text = _instant(
+        resource_evidence.get("query_started_at"),
+        name="resource_availability.query_started_at",
+    )
+    resource_completed_text = _instant(
+        resource_evidence.get("query_completed_at"),
+        name="resource_availability.query_completed_at",
+    )
+    if (
+        resource_started_text != snapshot_started_text
+        or resource_completed_text != completed_text
+    ):
+        raise ValueError(
+            "resource availability snapshot cut differs from reconciliation"
+        )
+
+    valid_until_text = _instant(
+        resource_evidence.get("valid_until"),
+        name="resource_availability.valid_until",
+    )
+    valid_until = datetime.fromisoformat(
+        valid_until_text.replace("Z", "+00:00")
+    )
+    if current >= valid_until:
+        raise ValueError("resource availability evidence is expired")
+
+    raw_available = resource_evidence.get("available_resources")
+    if not isinstance(raw_available, Mapping) or not raw_available:
+        raise ValueError(
+            "availability checkpoint lacks explicit available resources"
+        )
+    canonical_available: dict[str, Decimal] = {}
+    for raw_resource, raw_amount in raw_available.items():
+        resource = _text(
+            raw_resource,
+            name="resource_availability resource",
+        )
+        if resource in canonical_available:
+            raise ValueError(
+                "resource availability keys must be unique after normalization"
+            )
         if isinstance(raw_amount, bool) or isinstance(raw_amount, float):
-            raise TypeError("provider cash must use exact decimal encoding")
+            raise TypeError(
+                "resource availability must use exact decimal encoding"
+            )
         try:
             amount = Decimal(raw_amount)
         except Exception as error:
-            raise ValueError("provider cash must be a finite decimal") from error
-        if not amount.is_finite():
-            raise ValueError("provider cash must be a finite decimal")
-        provider_cash[currency] = amount
+            raise ValueError(
+                "resource availability must be a finite decimal"
+            ) from error
+        if not amount.is_finite() or amount < 0:
+            raise ValueError(
+                "resource availability must be a non-negative finite decimal"
+            )
+        canonical_available[resource] = amount
 
     requested = tuple(_text(value, name="resource") for value in resources)
     if not requested or len(requested) != len(set(requested)):
@@ -567,13 +629,11 @@ def load_account_resource_availability_evidence(
             raise ValueError(
                 "resource availability semantics are not canonically supported"
             )
-        currency = _text(resource.removeprefix("CASH:"), name="cash currency")
-        if currency not in provider_cash:
-            raise ValueError("provider snapshot does not contain requested cash resource")
-        amount = provider_cash[currency]
-        if amount < 0:
-            raise ValueError("negative provider cash cannot authorize new reservation")
-        availability[resource] = amount
+        if resource not in canonical_available:
+            raise ValueError(
+                "provider snapshot does not contain requested available resource"
+            )
+        availability[resource] = canonical_available[resource]
 
     aggregate_version = checkpoint.get("aggregate_version")
     if type(aggregate_version) is not int or aggregate_version <= 0:
@@ -594,6 +654,19 @@ def load_account_resource_availability_evidence(
         "environment": _text(payload.get("environment"), name="environment").upper(),
         "snapshot_mode": _text(snapshot.get("mode"), name="snapshot.mode").upper(),
         "snapshot_query_completed_at": completed_text,
+        "resource_snapshot_id": _text(
+            resource_evidence.get("snapshot_id"),
+            name="resource_availability.snapshot_id",
+        ),
+        "resource_valid_until": valid_until_text,
+        "resource_evidence_refs": tuple(
+            _text(value, name="resource_availability.evidence_ref")
+            for value in (
+                resource_evidence.get("evidence_refs")
+                if isinstance(resource_evidence.get("evidence_refs"), list)
+                else ()
+            )
+        ),
         "observed_at": _instant(payload.get("observed_at"), name="observed_at"),
         "age_seconds": str(age_seconds),
         "availability": {

@@ -13,7 +13,11 @@ from mvp.autotrade_mvp.authority import (
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
-from mvp.autotrade_mvp.reconciliation import SnapshotConsistencyEvidence, reconcile_account
+from mvp.autotrade_mvp.reconciliation import (
+    ResourceAvailabilityEvidence,
+    SnapshotConsistencyEvidence,
+    reconcile_account,
+)
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.autotrade_mvp.risk import (
     RiskContext,
@@ -171,6 +175,18 @@ def public_financial_kwargs(store, **overrides):
         pagination_complete=True,
         provider_activity_provider_id=provider_id,
         provider_activity_account_id="paper-1",
+        resource_availability=ResourceAvailabilityEvidence(
+            provider_id=provider_id,
+            account_id="paper-1",
+            environment="PAPER",
+            snapshot_id="authority-account-snapshot",
+            query_started_at="2026-09-24T18:00:00Z",
+            query_completed_at="2026-09-24T18:00:30Z",
+            valid_until="2026-09-24T18:02:00Z",
+            available_resources={"CASH:USD": "1000"},
+            provider_as_of="2026-09-24T18:00:30Z",
+            evidence_refs=("provider:authority-account-snapshot",),
+        ),
     )
     checkpoint = record_reconciliation_checkpoint(
         store,

@@ -271,7 +271,7 @@ class ReconciliationJournalTests(unittest.TestCase):
             checkpoint = record_reconciliation_checkpoint(
                 store,
                 reconciliation_id="acct-availability",
-                result=reconciliation(),
+                result=reconciliation(resource_availability=availability()),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
                 owner_epoch="epoch-1",
@@ -288,7 +288,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 now="2026-09-24T19:00:30Z",
                 max_age_seconds="60",
             )
-            self.assertEqual(evidence["availability"], {"CASH:USD": "900"})
+            self.assertEqual(evidence["availability"], {"CASH:USD": "850"})
             self.assertEqual(
                 evidence["checkpoint_event_id"],
                 checkpoint["event_id"],
@@ -318,6 +318,29 @@ class ReconciliationJournalTests(unittest.TestCase):
                     account_id="test-account",
                     environment="PAPER",
                     resources=("MARGIN:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                )
+
+            no_explicit_availability = record_reconciliation_checkpoint(
+                reopened,
+                reconciliation_id="acct-no-explicit-availability",
+                result=reconciliation(),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "lacks explicit provider resource availability",
+            ):
+                load_account_resource_availability_evidence(
+                    reopened,
+                    checkpoint_event_id=no_explicit_availability["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("CASH:USD",),
                     now="2026-09-24T19:00:30Z",
                     max_age_seconds="60",
                 )

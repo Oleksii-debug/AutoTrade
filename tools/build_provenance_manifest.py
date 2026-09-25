@@ -199,7 +199,14 @@ def normalize_inspected_components(
 
 
 def git_blob_sha(path: Path) -> str:
-    data = path.read_bytes()
+    """Return the canonical Git blob identity for repository UTF-8 text.
+
+    Git normalizes tracked text to LF in the object database while a Windows
+    checkout may materialize CRLF. Hashing working-tree bytes therefore makes
+    the release manifest platform-dependent. Universal-newline text reads
+    restore the canonical LF payload before applying Git's blob framing.
+    """
+    data = path.read_text(encoding="utf-8").encode("utf-8")
     return sha1(b"blob " + str(len(data)).encode("ascii") + b"\0" + data).hexdigest()
 
 

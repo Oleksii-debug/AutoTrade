@@ -2,7 +2,11 @@ import json
 import re
 import unittest
 from datetime import datetime
+from hashlib import sha1
 from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from tools.build_provenance_manifest import git_blob_sha
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPONENTS = ROOT / "provenance" / "components.json"
@@ -18,6 +22,20 @@ class ProvenanceComponentTests(unittest.TestCase):
     def setUpClass(cls):
         cls.document = json.loads(COMPONENTS.read_text(encoding="utf-8"))
         cls.components = cls.document["components"]
+
+    def test_git_blob_identity_is_stable_across_lf_and_crlf_checkouts(self):
+        canonical = b'{\n  "schema_version": "1.0.0"\n}\n'
+        expected = sha1(
+            b"blob " + str(len(canonical)).encode("ascii") + b"\0" + canonical
+        ).hexdigest()
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            lf = root / "lf.json"
+            crlf = root / "crlf.json"
+            lf.write_bytes(canonical)
+            crlf.write_bytes(canonical.replace(b"\n", b"\r\n"))
+            self.assertEqual(git_blob_sha(lf), expected)
+            self.assertEqual(git_blob_sha(crlf), expected)
 
     def test_inventory_has_unique_component_and_repository_identity(self):
         names = [component["name"] for component in self.components]

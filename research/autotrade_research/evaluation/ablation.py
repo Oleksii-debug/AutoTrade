@@ -554,6 +554,22 @@ class AblationEvidenceBundle:
             decoded = json.loads(self.payload)
         except json.JSONDecodeError as error:
             raise ValueError("payload must be valid canonical JSON") from error
+        if not isinstance(decoded, dict):
+            raise ValueError("payload must be a canonical JSON object")
+        try:
+            canonical_payload = json.dumps(
+                decoded,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError("payload must be valid canonical JSON") from error
+        if canonical_payload != self.payload:
+            raise ValueError("payload must use canonical JSON serialization")
+        if decoded.get("evaluation") != _evaluation_payload(self.evaluation):
+            raise ValueError("payload evaluation does not match bundle evaluation")
         policy = decoded.get("evaluation_policy", {})
         if (
             decoded.get("schema_version") != "1.0.0"

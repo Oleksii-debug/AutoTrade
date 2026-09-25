@@ -116,7 +116,7 @@ def _checkpoint(store):
             snapshot_id="availability-snapshot",
             query_started_at="2026-09-24T18:00:00Z",
             query_completed_at="2026-09-24T18:00:30Z",
-            valid_until=VALID_UNTIL,
+            valid_until="2026-09-24T18:03:00Z",
             available_resources={"CASH:USD": "1000"},
             provider_as_of="2026-09-24T18:00:30Z",
             evidence_refs=("provider:availability-snapshot",),
@@ -304,7 +304,7 @@ def _admit(authority, reservations, checkpoint, allocation_result, **overrides):
         reservation_available={"CASH:USD": "1000"},
         reservation_checkpoint_event_id=checkpoint["event_id"],
         reservation_provider_id=PROVIDER_ID,
-        reservation_max_age_seconds="60",
+        reservation_max_age_seconds="120",
         now=NOW,
         allocation_result=allocation_result,
     )

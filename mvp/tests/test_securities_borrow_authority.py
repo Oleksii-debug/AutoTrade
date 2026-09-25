@@ -222,6 +222,7 @@ def _admit_short(
     reserved="-30",
     quantity="20",
     requirement="20",
+    max_age_seconds="60",
 ):
     key = _borrow_key()
     return authority.admit(
@@ -255,7 +256,7 @@ def _admit_short(
         reservation_available={key: "100"},
         reservation_checkpoint_event_id=checkpoint["event_id"],
         reservation_provider_id=PROVIDER_ID,
-        reservation_max_age_seconds="60",
+        reservation_max_age_seconds=max_age_seconds,
         now=NOW,
     )
 
@@ -426,6 +427,7 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 checkpoint,
                 suffix="dispatch-recall",
                 reserved=None,
+                max_age_seconds="120",
             )
             self.assertEqual(admitted.outcome, "ADMITTED")
             authority._validate_durable_financial_evidence(

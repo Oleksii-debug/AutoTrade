@@ -1860,7 +1860,7 @@ class AuthorityTests(unittest.TestCase):
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
-                now="2026-09-24T18:02:00Z",
+                now="2026-09-24T18:01:15Z",
             )
             self.assertEqual(
                 authority.dispatch_allowed(admitted.admission_id, **common),
@@ -1939,7 +1939,7 @@ class AuthorityTests(unittest.TestCase):
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
                     action="ORDER.SUBMIT",
-                    now="2026-09-24T18:02:00Z",
+                    now="2026-09-24T18:01:15Z",
                     capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
                 ),
                 (False, "reservation_state_changed"),

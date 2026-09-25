@@ -199,17 +199,26 @@ class AlpacaOrderIntent:
 class AlpacaPreparedRequest:
     endpoint: str
     body: Mapping[str, object]
+    account_id: str
+    environment: str
     capability_snapshot_id: str
     documentation_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
+        object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"PAPER", "LIVE"}:
+            raise AlpacaAdapterError("environment must be PAPER or LIVE")
+        object.__setattr__(self, "environment", environment)
 
 
 def prepare_order_request(
     intent: AlpacaOrderIntent,
     *,
     client_order_id: str,
+    account_id: str,
+    environment: str,
     capability: CapabilitySnapshot,
     at: datetime,
 ) -> AlpacaPreparedRequest:
@@ -219,8 +228,16 @@ def prepare_order_request(
         raise TypeError("capability must be CapabilitySnapshot")
     point = _instant(at, name="at")
     client_id = validate_client_order_id(client_order_id)
+    account = _text(account_id, name="account_id")
+    environment_value = _text(environment, name="environment").upper()
+    if environment_value not in {"PAPER", "LIVE"}:
+        raise AlpacaAdapterError("environment must be PAPER or LIVE")
     if capability.provider_id.upper() != "ALPACA":
         raise AlpacaAdapterError("capability belongs to another provider")
+    if capability.account_id != account:
+        raise AlpacaAdapterError("capability account does not match target account")
+    if capability.environment.upper() != environment_value:
+        raise AlpacaAdapterError("capability environment does not match target environment")
     if capability.instrument_version != intent.instrument_version:
         raise AlpacaAdapterError("capability instrument version does not match intent")
     if not capability.admits(
@@ -253,6 +270,8 @@ def prepare_order_request(
     return AlpacaPreparedRequest(
         endpoint="/v2/orders",
         body=body,
+        account_id=account,
+        environment=environment_value,
         capability_snapshot_id=capability.snapshot_id,
         documentation_refs=tuple(ALPACA_DOCS.values()),
     )

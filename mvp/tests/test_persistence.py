@@ -3,7 +3,12 @@ import json
 import sqlite3
 import unittest
 
-from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.persistence import (
+    JournalStore,
+    _event_envelope_digest,
+    _outbox_envelope_digest,
+    payload_digest,
+)
 
 
 def event(event_id="evt-1", version=1, payload=None):
@@ -32,9 +37,194 @@ class JournalStoreTests(unittest.TestCase):
             pending = store.pending_outbox()
             self.assertEqual(len(pending), 1)
             self.assertEqual(pending[0]["event_id"], "evt-1")
-            self.assertTrue(store.mark_outbox_delivered(pending[0]["outbox_id"]))
-            self.assertFalse(store.mark_outbox_delivered(pending[0]["outbox_id"]))
+            self.assertTrue(
+                store.mark_outbox_delivered(
+                    pending[0]["outbox_id"],
+                    expected_envelope_hash=pending[0]["envelope_hash"],
+                )
+            )
+            self.assertFalse(
+                store.mark_outbox_delivered(
+                    pending[0]["outbox_id"],
+                    expected_envelope_hash=pending[0]["envelope_hash"],
+                )
+            )
             self.assertEqual(store.pending_outbox(), [])
+
+    def test_idempotent_event_replay_rejects_corrupted_outbox_hash(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event(), outbox_topic="events")
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE outbox SET envelope_hash = ? WHERE event_id = ?",
+                    ("sha256:" + "0" * 64, "evt-1"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "conflicts"):
+                store.append_event(event(), outbox_topic="events")
+
+    def test_delivery_ack_is_bound_to_verified_outbox_envelope_across_restart(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event(), outbox_topic="events")
+            pending = store.pending_outbox()[0]
+
+            connection = sqlite3.connect(path)
+            try:
+                payload = json.loads(
+                    connection.execute(
+                        "SELECT payload_json FROM outbox WHERE outbox_id = ?",
+                        (pending["outbox_id"],),
+                    ).fetchone()[0]
+                )
+                payload["aggregate_id"] = "tampered-account"
+                payload_json = json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                replacement_hash = _outbox_envelope_digest(
+                    "events",
+                    payload_json,
+                )
+                connection.execute(
+                    "UPDATE outbox SET payload_json = ?, envelope_hash = ? "
+                    "WHERE outbox_id = ?",
+                    (
+                        payload_json,
+                        replacement_hash,
+                        pending["outbox_id"],
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = JournalStore(path)
+            with self.assertRaisesRegex(ValueError, "acknowledgement is stale"):
+                reopened.mark_outbox_delivered(
+                    pending["outbox_id"],
+                    expected_envelope_hash=pending["envelope_hash"],
+                )
+
+            connection = sqlite3.connect(path)
+            try:
+                delivered_at = connection.execute(
+                    "SELECT delivered_at FROM outbox WHERE outbox_id = ?",
+                    (pending["outbox_id"],),
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertIsNone(delivered_at)
+
+
+    def test_topic_only_tamper_fails_pending_read_and_stale_delivery_ack(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event(), outbox_topic="events")
+            pending = store.pending_outbox()[0]
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE outbox SET topic = ? WHERE outbox_id = ?",
+                    ("rerouted.events", pending["outbox_id"]),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = JournalStore(path)
+            with self.assertRaisesRegex(ValueError, "envelope hash"):
+                reopened.pending_outbox()
+            with self.assertRaisesRegex(ValueError, "envelope hash"):
+                reopened.mark_outbox_delivered(
+                    pending["outbox_id"],
+                    expected_envelope_hash=pending["envelope_hash"],
+                )
+
+    def test_current_v5_extra_envelope_field_fails_even_with_recomputed_hash(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event(), outbox_topic="events")
+            pending = store.pending_outbox()[0]
+
+            connection = sqlite3.connect(path)
+            try:
+                raw = connection.execute(
+                    "SELECT payload_json FROM outbox WHERE outbox_id = ?",
+                    (pending["outbox_id"],),
+                ).fetchone()[0]
+                payload = json.loads(raw)
+                payload["unexpected"] = "forged"
+                payload_json = json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                forged_hash = _outbox_envelope_digest("events", payload_json)
+                connection.execute(
+                    "UPDATE outbox SET payload_json = ?, envelope_hash = ? "
+                    "WHERE outbox_id = ?",
+                    (payload_json, forged_hash, pending["outbox_id"]),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = JournalStore(path)
+            with self.assertRaisesRegex(ValueError, "authoritative journal event"):
+                reopened.pending_outbox()
+            with self.assertRaisesRegex(ValueError, "authoritative journal event"):
+                reopened.mark_outbox_delivered(
+                    pending["outbox_id"],
+                    expected_envelope_hash=forged_hash,
+                )
+
+    def test_delivery_ack_revalidates_authoritative_event(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event(), outbox_topic="events")
+            pending = store.pending_outbox()[0]
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE events SET payload_json = ? WHERE event_id = ?",
+                    ('{"kind":"fill","quantity":"999"}', "evt-1"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "payload hash"):
+                JournalStore(path).mark_outbox_delivered(
+                    pending["outbox_id"],
+                    expected_envelope_hash=pending["envelope_hash"],
+                )
+
+            connection = sqlite3.connect(path)
+            try:
+                delivered_at = connection.execute(
+                    "SELECT delivered_at FROM outbox WHERE outbox_id = ?",
+                    (pending["outbox_id"],),
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertIsNone(delivered_at)
 
     def test_outbox_envelope_metadata_tamper_fails_closed(self):
         with TemporaryDirectory() as directory:
@@ -313,9 +503,17 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(saved, result)
             self.assertEqual([item.event_id for item in appended], ["evt-1", "evt-2"])
             self.assertEqual(len(store.load_events("account", "paper-1")), 2)
-            self.assertEqual(len(store.pending_outbox()), 1)
 
-            replayed, inserted, appended = store.commit_command(
+            # The atomic path must persist the same integrity evidence as
+            # append_event.  Reopening here exercises the crash/restart
+            # boundary instead of relying on in-process state.
+            reopened = JournalStore(path)
+            pending = reopened.pending_outbox()
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(pending[0]["event_id"], "evt-1")
+            self.assertEqual(pending[0]["topic"], "events")
+
+            replayed, inserted, appended = reopened.commit_command(
                 actor="alice",
                 environment="PAPER",
                 command_id="cmd-retry",
@@ -328,7 +526,78 @@ class JournalStoreTests(unittest.TestCase):
             self.assertFalse(inserted)
             self.assertEqual(replayed, result)
             self.assertEqual(appended, ())
+            self.assertEqual(len(reopened.pending_outbox()), 1)
             self.assertEqual(len(store.load_events("account", "paper-1")), 2)
+
+    def test_atomic_command_rolls_back_if_outbox_write_fails_then_retries_after_restart(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TRIGGER reject_outbox_insert
+                    BEFORE INSERT ON outbox
+                    BEGIN
+                        SELECT RAISE(ABORT, 'simulated outbox failure');
+                    END
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "simulated outbox failure",
+            ):
+                store.commit_command(
+                    actor="alice",
+                    environment="PAPER",
+                    command_id="cmd-outbox-failure",
+                    idempotency_key="key-outbox-failure",
+                    request={"action": "ORDER.SUBMIT", "intent_id": "i-failure"},
+                    result={"status": "ACCEPTED"},
+                    state_version=1,
+                    events=[(event(), "events")],
+                )
+
+            connection = sqlite3.connect(path)
+            try:
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM command_dedupe").fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM events").fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM outbox").fetchone()[0],
+                    0,
+                )
+                connection.execute("DROP TRIGGER reject_outbox_insert")
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = JournalStore(path)
+            saved, inserted, appended = reopened.commit_command(
+                actor="alice",
+                environment="PAPER",
+                command_id="cmd-outbox-failure",
+                idempotency_key="key-outbox-failure",
+                request={"action": "ORDER.SUBMIT", "intent_id": "i-failure"},
+                result={"status": "ACCEPTED"},
+                state_version=1,
+                events=[(event(), "events")],
+            )
+            self.assertTrue(inserted)
+            self.assertEqual(saved, {"status": "ACCEPTED"})
+            self.assertEqual([item.event_id for item in appended], ["evt-1"])
+            self.assertEqual(len(reopened.pending_outbox()), 1)
 
     def test_atomic_command_rolls_back_on_event_version_gap(self):
         with TemporaryDirectory() as directory:
@@ -433,7 +702,7 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(legacy.current_schema_version(), 1)
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 4)
+            self.assertEqual(upgraded.current_schema_version(), 5)
             self.assertEqual(
                 upgraded.load_events("account", "paper-1")[0]["event_id"],
                 "evt-1",
@@ -470,7 +739,7 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 4)
+            self.assertEqual(upgraded.current_schema_version(), 5)
             with self.assertRaisesRegex(ValueError, "legacy unscoped"):
                 upgraded.record_command(
                     actor="alice",
@@ -494,13 +763,336 @@ class JournalStoreTests(unittest.TestCase):
             self.assertTrue(inserted)
             self.assertEqual(saved, {"status": "ACCEPTED"})
 
+    def test_v4_upgrade_hashes_command_results_and_repairs_missing_outbox_hash(self):
+        class V4JournalStore(JournalStore):
+            SCHEMA_VERSION = 4
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            legacy = V4JournalStore(path)
+            legacy.append_event(event(), outbox_topic="events")
+
+            request = {"action": "A"}
+            result_json = '{"status":"ACCEPTED"}'
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO command_dedupe(
+                        command_id, actor, environment, idempotency_key,
+                        request_hash, result_json, state_version, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "v4-command",
+                        "alice",
+                        "PAPER",
+                        "v4-key",
+                        payload_digest(request),
+                        result_json,
+                        1,
+                        "2026-09-24T16:00:00Z",
+                    ),
+                )
+                connection.execute(
+                    "UPDATE outbox SET envelope_hash = NULL WHERE event_id = ?",
+                    ("evt-1",),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            upgraded = JournalStore(path)
+            self.assertEqual(upgraded.current_schema_version(), 5)
+            replayed, inserted = upgraded.record_command(
+                actor="alice",
+                environment="PAPER",
+                command_id="ignored-on-replay",
+                idempotency_key="v4-key",
+                request=request,
+                result={"status": "MUST_NOT_REPLACE"},
+                state_version=999,
+            )
+            self.assertFalse(inserted)
+            self.assertEqual(replayed, {"status": "ACCEPTED"})
+            self.assertEqual(upgraded.pending_outbox()[0]["event_id"], "evt-1")
+
+
+    def test_v4_non_null_payload_hash_upgrades_to_topic_bound_v5_hash(self):
+        class V4JournalStore(JournalStore):
+            SCHEMA_VERSION = 4
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            legacy = V4JournalStore(path)
+            legacy_event = event()
+            legacy_event.update(
+                {
+                    "schema_version": "1.0.0",
+                    "host_id": "legacy-host",
+                    "owner_epoch": "1",
+                    "environment": "SIMULATION",
+                    "occurred_at": "2026-09-24T16:00:00+00:00",
+                    "observed_at": "2026-09-24T16:00:00+00:00",
+                    "correlation_id": "corr-legacy-1",
+                    "causation_id": None,
+                    "evidence_refs": [],
+                }
+            )
+            legacy.append_event(legacy_event, outbox_topic="events")
+
+            connection = sqlite3.connect(path)
+            try:
+                legacy_row = connection.execute(
+                    "SELECT topic, payload_json FROM outbox WHERE event_id = ?",
+                    ("evt-1",),
+                ).fetchone()
+                legacy_payload = legacy_row[1]
+                legacy_hash = payload_digest(json.loads(legacy_payload))
+                connection.execute(
+                    "UPDATE outbox SET envelope_hash = ? WHERE event_id = ?",
+                    (legacy_hash, "evt-1"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            upgraded = JournalStore(path)
+            pending = upgraded.pending_outbox()[0]
+            expected_v5 = _outbox_envelope_digest("events", legacy_payload)
+            self.assertEqual(pending["envelope_hash"], expected_v5)
+            self.assertNotEqual(pending["envelope_hash"], legacy_hash)
+            self.assertEqual(pending["payload"]["host_id"], "legacy-host")
+            self.assertEqual(pending["payload"]["schema_version"], "1.0.0")
+            connection = sqlite3.connect(path)
+            try:
+                event_envelope_json, event_envelope_hash = connection.execute(
+                    "SELECT envelope_json, envelope_hash FROM events WHERE event_id = ?",
+                    ("evt-1",),
+                ).fetchone()
+            finally:
+                connection.close()
+            self.assertEqual(
+                event_envelope_hash,
+                _event_envelope_digest(event_envelope_json),
+            )
+            self.assertTrue(
+                upgraded.mark_outbox_delivered(
+                    pending["outbox_id"],
+                    expected_envelope_hash=expected_v5,
+                )
+            )
+
+    def test_v4_upgrade_rejects_malformed_command_result_before_hash_backfill(self):
+        class V4JournalStore(JournalStore):
+            SCHEMA_VERSION = 4
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            V4JournalStore(path)
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO command_dedupe(
+                        command_id, actor, environment, idempotency_key,
+                        request_hash, result_json, state_version, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "v4-corrupt-command",
+                        "alice",
+                        "PAPER",
+                        "v4-corrupt-key",
+                        payload_digest({"action": "A"}),
+                        '{"status":',
+                        1,
+                        "2026-09-24T16:00:00Z",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "legacy command result is not valid JSON"):
+                JournalStore(path)
+
+            connection = sqlite3.connect(path)
+            try:
+                versions = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT version FROM schema_migrations ORDER BY version"
+                    )
+                ]
+                columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(command_dedupe)")
+                }
+            finally:
+                connection.close()
+            self.assertEqual(versions, [1, 2, 3, 4])
+            self.assertNotIn("result_hash", columns)
+
+    def test_v4_upgrade_rejects_unverifiable_extra_hashless_outbox_fields(self):
+        class V4JournalStore(JournalStore):
+            SCHEMA_VERSION = 4
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            legacy = V4JournalStore(path)
+            legacy.append_event(event(), outbox_topic="events")
+
+            connection = sqlite3.connect(path)
+            try:
+                payload = json.loads(
+                    connection.execute(
+                        "SELECT payload_json FROM outbox WHERE event_id = ?",
+                        ("evt-1",),
+                    ).fetchone()[0]
+                )
+                # The legacy journal row does not contain this field. With no
+                # pre-existing envelope_hash there is no authority from which
+                # migration can prove its historical value.
+                payload["host_id"] = "possibly-tampered-host"
+                connection.execute(
+                    "UPDATE outbox SET payload_json = ?, envelope_hash = NULL "
+                    "WHERE event_id = ?",
+                    (
+                        json.dumps(
+                            payload,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        ),
+                        "evt-1",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "not exactly reconstructable"):
+                JournalStore(path)
+
+            connection = sqlite3.connect(path)
+            try:
+                versions = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT version FROM schema_migrations ORDER BY version"
+                    )
+                ]
+                envelope_hash = connection.execute(
+                    "SELECT envelope_hash FROM outbox WHERE event_id = ?",
+                    ("evt-1",),
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(versions, [1, 2, 3, 4])
+            self.assertIsNone(envelope_hash)
+
+    def test_v4_upgrade_rejects_mismatched_hashless_outbox_before_backfill(self):
+        class V4JournalStore(JournalStore):
+            SCHEMA_VERSION = 4
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            legacy = V4JournalStore(path)
+            legacy.append_event(event(), outbox_topic="events")
+
+            connection = sqlite3.connect(path)
+            try:
+                payload = json.loads(
+                    connection.execute(
+                        "SELECT payload_json FROM outbox WHERE event_id = ?",
+                        ("evt-1",),
+                    ).fetchone()[0]
+                )
+                payload["aggregate_id"] = "tampered-account"
+                connection.execute(
+                    "UPDATE outbox SET payload_json = ?, envelope_hash = NULL "
+                    "WHERE event_id = ?",
+                    (
+                        json.dumps(
+                            payload,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        ),
+                        "evt-1",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "legacy outbox payload is not exactly reconstructable from authoritative journal event",
+            ):
+                JournalStore(path)
+
+            connection = sqlite3.connect(path)
+            try:
+                versions = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT version FROM schema_migrations ORDER BY version"
+                    )
+                ]
+                envelope_hash = connection.execute(
+                    "SELECT envelope_hash FROM outbox WHERE event_id = ?",
+                    ("evt-1",),
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(versions, [1, 2, 3, 4])
+            self.assertIsNone(envelope_hash)
+
+    def test_command_result_tamper_fails_closed_on_replay(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.record_command(
+                actor="alice",
+                environment="PAPER",
+                command_id="cmd-integrity",
+                idempotency_key="key-integrity",
+                request={"action": "A"},
+                result={"status": "ACCEPTED"},
+                state_version=1,
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE command_dedupe SET result_json = ? WHERE command_id = ?",
+                    ('{"status":"FABRICATED"}', "cmd-integrity"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = JournalStore(path)
+            with self.assertRaisesRegex(ValueError, "command result hash"):
+                reopened.record_command(
+                    actor="alice",
+                    environment="PAPER",
+                    command_id="cmd-replay",
+                    idempotency_key="key-integrity",
+                    request={"action": "A"},
+                    result={"status": "OTHER"},
+                    state_version=2,
+                )
+
     def test_failed_migration_rolls_back_schema_and_data_changes(self):
         class BrokenMigrationStore(JournalStore):
-            SCHEMA_VERSION = 5
+            SCHEMA_VERSION = 6
 
             @classmethod
             def _migration_statements(cls, version):
-                if version == 5:
+                if version == 6:
                     return (
                         "CREATE TABLE migration_probe(value TEXT NOT NULL)",
                         "CREATE TABL definitely_invalid(statement TEXT)",
@@ -511,7 +1103,7 @@ class JournalStoreTests(unittest.TestCase):
             path = f"{directory}/journal.sqlite3"
             healthy = JournalStore(path)
             healthy.append_event(event())
-            self.assertEqual(healthy.current_schema_version(), 4)
+            self.assertEqual(healthy.current_schema_version(), 5)
 
             with self.assertRaises(sqlite3.OperationalError):
                 BrokenMigrationStore(path)
@@ -534,7 +1126,7 @@ class JournalStoreTests(unittest.TestCase):
             finally:
                 connection.close()
 
-            self.assertEqual(versions, [1, 2, 3, 4])
+            self.assertEqual(versions, [1, 2, 3, 4, 5])
             self.assertIsNone(probe)
             self.assertEqual(event_count, 1)
 
@@ -721,6 +1313,83 @@ class JournalStoreTests(unittest.TestCase):
 
 
 
+    def test_non_outbox_event_envelope_integrity_is_verified_on_reads(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            envelope = event()
+            envelope.update(
+                {
+                    "schema_version": "1.0.0",
+                    "host_id": "host-a",
+                    "owner_epoch": "1",
+                    "environment": "SIMULATION",
+                    "occurred_at": "2026-09-24T16:00:00+00:00",
+                    "observed_at": "2026-09-24T16:00:00+00:00",
+                    "correlation_id": "corr-1",
+                    "causation_id": None,
+                    "evidence_refs": [],
+                }
+            )
+            store.append_event(envelope)
+
+            self.assertEqual(store.get_event("evt-1")["event_id"], "evt-1")
+            self.assertEqual(len(store.load_events("account", "paper-1")), 1)
+
+            connection = sqlite3.connect(path)
+            try:
+                raw = connection.execute(
+                    "SELECT envelope_json FROM events WHERE event_id = ?",
+                    ("evt-1",),
+                ).fetchone()[0]
+                mutated = json.loads(raw)
+                mutated["host_id"] = "host-forged"
+                mutated_json = json.dumps(
+                    mutated,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                connection.execute(
+                    "UPDATE events SET envelope_json = ? WHERE event_id = ?",
+                    (mutated_json, "evt-1"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = JournalStore(path)
+            with self.assertRaisesRegex(ValueError, "event envelope hash"):
+                reopened.get_event("evt-1")
+            with self.assertRaisesRegex(ValueError, "event envelope hash"):
+                reopened.load_events("account", "paper-1")
+
+            connection = sqlite3.connect(path)
+            try:
+                mutated = json.loads(mutated_json)
+                mutated["event_type"] = "ForgedEventType"
+                forged_json = json.dumps(
+                    mutated,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                connection.execute(
+                    "UPDATE events SET envelope_json = ?, envelope_hash = ? "
+                    "WHERE event_id = ?",
+                    (
+                        forged_json,
+                        _event_envelope_digest(forged_json),
+                        "evt-1",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "conflicts with core journal event"):
+                reopened.get_event("evt-1")
+
     def test_event_reads_fail_closed_after_payload_tamper(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
@@ -758,9 +1427,19 @@ class JournalStoreTests(unittest.TestCase):
                 ).fetchone()[0]
                 envelope = json.loads(raw)
                 envelope["aggregate_id"] = "other-account"
+                forged_payload = json.dumps(
+                    envelope,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
                 connection.execute(
-                    "UPDATE outbox SET payload_json = ? WHERE event_id = ?",
-                    (json.dumps(envelope, sort_keys=True, separators=(",", ":")), "evt-1"),
+                    "UPDATE outbox SET payload_json = ?, envelope_hash = ? "
+                    "WHERE event_id = ?",
+                    (
+                        forged_payload,
+                        _outbox_envelope_digest("events", forged_payload),
+                        "evt-1",
+                    ),
                 )
                 connection.commit()
             finally:

@@ -15,6 +15,7 @@ from .persistence import JournalStore, canonical_json, payload_digest
 
 
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
+SenderCheck = Callable[[str, int], None]
 TransportSend = Callable[[str, Mapping[str, Any], Callable[[], None]], Any]
 
 
@@ -31,6 +32,18 @@ class DispatchBlocked(RuntimeError):
     """Raised inside a provider wrapper when the final send barrier rejects."""
 
 
+def _validated_authority_result(result: Any) -> tuple[bool, str]:
+    """Fail closed unless authority returns the exact typed decision contract."""
+    if not isinstance(result, tuple) or len(result) != 2:
+        return False, "authority_check_invalid_result"
+    allowed, reason = result
+    if not isinstance(allowed, bool):
+        return False, "authority_check_invalid_allowed"
+    if not isinstance(reason, str) or not reason.strip():
+        return False, "authority_check_invalid_reason"
+    return allowed, reason.strip()
+
+
 @dataclass(frozen=True)
 class DispatchOutcome:
     status: str
@@ -42,6 +55,32 @@ class DispatchOutcome:
 def _identity_digest(*parts: str) -> str:
     """Hash a canonical tuple without delimiter-boundary ambiguity."""
     return sha256(canonical_json(list(parts)).encode("utf-8")).hexdigest()
+
+
+def submission_attempt_aggregate_id(
+    *,
+    environment: str,
+    account_id: str,
+    attempt_id: str,
+) -> str:
+    """Return the canonical durable aggregate identity for one send attempt."""
+
+    normalized_environment = (
+        environment.strip().upper() if isinstance(environment, str) else ""
+    )
+    if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+        raise ValueError(
+            "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
+        )
+    if not isinstance(account_id, str) or not account_id.strip():
+        raise ValueError("account_id is required")
+    if not isinstance(attempt_id, str) or not attempt_id.strip():
+        raise ValueError("attempt_id is required")
+    return "submission-attempt:" + _identity_digest(
+        normalized_environment,
+        account_id.strip(),
+        attempt_id.strip(),
+    )
 
 
 def stable_client_order_id(
@@ -111,6 +150,7 @@ def _envelope(
     version: int,
     payload: dict[str, Any],
     now: str,
+    owner_epoch: int,
 ) -> dict[str, Any]:
     timestamp = _instant(now).isoformat().replace("+00:00", "Z")
     return {
@@ -121,7 +161,7 @@ def _envelope(
         "aggregate_id": aggregate_id,
         "aggregate_version": str(version),
         "host_id": "local-mvp",
-        "owner_epoch": "1",
+        "owner_epoch": str(owner_epoch),
         "environment": environment,
         "occurred_at": timestamp,
         "observed_at": timestamp,
@@ -154,6 +194,7 @@ class GuardedDispatcher:
         environment: str,
         account_id: str,
         owner_token: str | None = None,
+        owner_epoch: int = 1,
         prepared_lease_seconds: int = 60,
     ):
         self.store = store
@@ -168,15 +209,18 @@ class GuardedDispatcher:
         self.account_id = account_id.strip()
         self.scope_key = _identity_digest(self.environment, self.account_id)
         self.owner_token = owner_token or str(uuid4())
+        if not isinstance(owner_epoch, int) or isinstance(owner_epoch, bool) or owner_epoch < 1:
+            raise ValueError("owner_epoch must be a positive integer")
+        self.owner_epoch = owner_epoch
         if not isinstance(prepared_lease_seconds, int) or isinstance(prepared_lease_seconds, bool) or prepared_lease_seconds < 1:
             raise ValueError("prepared_lease_seconds must be a positive integer")
         self.prepared_lease_seconds = prepared_lease_seconds
 
     def _aggregate_id(self, attempt_id: str) -> str:
-        return "submission-attempt:" + _identity_digest(
-            self.environment,
-            self.account_id,
-            attempt_id,
+        return submission_attempt_aggregate_id(
+            environment=self.environment,
+            account_id=self.account_id,
+            attempt_id=attempt_id,
         )
 
     def _events(self, attempt_id: str) -> list[dict[str, Any]]:
@@ -204,6 +248,7 @@ class GuardedDispatcher:
                 version=version,
                 payload=payload,
                 now=now,
+                owner_epoch=self.owner_epoch,
             ),
             outbox_topic="autotrade.submission.events",
         )
@@ -278,6 +323,7 @@ class GuardedDispatcher:
         transport_send: TransportSend,
         client_id_max_length: int = 32,
         final_barrier_clock: Callable[[], str] | None = None,
+        sender_check: SenderCheck | None = None,
     ) -> DispatchOutcome:
         for value, name in (
             (attempt_id, "attempt_id"),
@@ -331,6 +377,7 @@ class GuardedDispatcher:
             "environment": self.environment,
             "account_id": self.account_id,
             "owner_token": self.owner_token,
+            "owner_epoch": self.owner_epoch,
             "prepared_at": _instant(now).isoformat().replace("+00:00", "Z"),
         }
         prepared = self._append(
@@ -348,7 +395,7 @@ class GuardedDispatcher:
             )
 
         try:
-            allowed, reason = authority_check(intent_hash, now)
+            authority_result = authority_check(intent_hash, now)
         except Exception as error:
             reason = f"authority_check_failed_before_send:{type(error).__name__}"
             self._append(
@@ -364,6 +411,7 @@ class GuardedDispatcher:
                 None,
                 "authority_check_failed_before_send",
             )
+        allowed, reason = _validated_authority_result(authority_result)
         if not allowed:
             self._append(
                 attempt_id=attempt_id,
@@ -375,10 +423,11 @@ class GuardedDispatcher:
             return DispatchOutcome("BLOCKED", client_order_id, None, reason)
 
         guard_called = False
+        barrier_passed = False
         barrier_now = now
 
         def final_guard() -> None:
-            nonlocal guard_called, barrier_now
+            nonlocal guard_called, barrier_passed, barrier_now
             if guard_called:
                 raise RuntimeError("final send guard may be consumed only once")
             guard_called = True
@@ -419,8 +468,41 @@ class GuardedDispatcher:
                         now=barrier_now,
                     )
                     raise DispatchBlocked("final_barrier_clock_moved_backwards")
+            if self.environment in {"PAPER", "LIVE"} and sender_check is None:
+                barrier_reason = "sender_fence_required"
+                self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionBlocked",
+                    version=2,
+                    payload={
+                        "client_order_id": client_order_id,
+                        "reason": barrier_reason,
+                        "owner_token": self.owner_token,
+                        "owner_epoch": self.owner_epoch,
+                    },
+                    now=barrier_now,
+                )
+                raise DispatchBlocked(barrier_reason)
+            if sender_check is not None:
+                try:
+                    sender_check(self.owner_token, self.owner_epoch)
+                except Exception as error:
+                    barrier_reason = f"sender_fence_rejected:{type(error).__name__}"
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionBlocked",
+                        version=2,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": barrier_reason,
+                            "owner_token": self.owner_token,
+                            "owner_epoch": self.owner_epoch,
+                        },
+                        now=barrier_now,
+                    )
+                    raise DispatchBlocked(barrier_reason) from error
             try:
-                allowed_now, barrier_reason = authority_check(intent_hash, barrier_now)
+                authority_result = authority_check(intent_hash, barrier_now)
             except Exception as error:
                 barrier_reason = (
                     "authority_check_failed_at_final_barrier:"
@@ -434,6 +516,7 @@ class GuardedDispatcher:
                     now=barrier_now,
                 )
                 raise DispatchBlocked(barrier_reason) from error
+            allowed_now, barrier_reason = _validated_authority_result(authority_result)
             if not allowed_now:
                 self._append(
                     attempt_id=attempt_id,
@@ -450,10 +533,12 @@ class GuardedDispatcher:
                 payload={
                     "client_order_id": client_order_id,
                     "owner_token": self.owner_token,
+                    "owner_epoch": self.owner_epoch,
                     "reason": "final_send_barrier_passed",
                 },
                 now=barrier_now,
             )
+            barrier_passed = True
 
         try:
             response = transport_send(client_order_id, request_frozen, final_guard)
@@ -486,6 +571,32 @@ class GuardedDispatcher:
                     now=now,
                 )
                 return DispatchOutcome("BLOCKED", client_order_id, None, "transport_failed_before_send")
+            if not barrier_passed:
+                # The provider wrapper invoked a guard that rejected, but did
+                # not propagate DispatchBlocked. Once it masks that rejection
+                # and raises something else, we can no longer prove that it
+                # refrained from an outbound side effect after the guard.
+                # Preserve worst-case exposure and force reconciliation.
+                next_version = int(last["aggregate_version"]) + 1
+                self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionUnknown",
+                    version=next_version,
+                    payload={
+                        "client_order_id": client_order_id,
+                        "reason": (
+                            "provider_wrapper_masked_final_guard_failure:"
+                            + type(error).__name__
+                        ),
+                    },
+                    now=barrier_now,
+                )
+                return DispatchOutcome(
+                    "UNKNOWN",
+                    client_order_id,
+                    None,
+                    "provider_guard_contract_violation",
+                )
             raise
 
         if not guard_called:
@@ -500,6 +611,32 @@ class GuardedDispatcher:
                 now=now,
             )
             return DispatchOutcome("UNKNOWN", client_order_id, None, "provider_guard_contract_violation")
+
+        if not barrier_passed:
+            # A wrapper that catches DispatchBlocked (or any final-guard
+            # failure) and then returns has violated the only safe outbound
+            # contract. We cannot prove that it refrained from sending after
+            # swallowing the barrier, so preserve worst-case exposure and force
+            # reconciliation instead of fabricating SENT or safe-to-retry.
+            events = self._events(attempt_id)
+            last = events[-1]
+            next_version = int(last["aggregate_version"]) + 1
+            self._append(
+                attempt_id=attempt_id,
+                event_type="SubmissionUnknown",
+                version=next_version,
+                payload={
+                    "client_order_id": client_order_id,
+                    "reason": "provider_wrapper_swallowed_final_guard_failure",
+                },
+                now=barrier_now,
+            )
+            return DispatchOutcome(
+                "UNKNOWN",
+                client_order_id,
+                None,
+                "provider_guard_contract_violation",
+            )
 
         try:
             self._append(

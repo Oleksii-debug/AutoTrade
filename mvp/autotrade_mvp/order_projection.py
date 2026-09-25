@@ -305,6 +305,15 @@ class OrderProjection:
             self._oco_violation = True
 
     @property
+    def historical_execution_observed(self) -> bool:
+        """Whether immutable history ever contained positive execution evidence."""
+
+        return any(
+            observation.active and observation.quantity > 0
+            for observation in self._history
+        )
+
+    @property
     def filled_quantity(self) -> Decimal:
         return sum(
             (fill.quantity for fill in self._fills.values() if fill.active),
@@ -340,11 +349,8 @@ class OrderProjection:
         remaining = self.requested_quantity - self.filled_quantity
         return remaining if remaining > 0 else Decimal("0")
 
-    @property
-    def state(self) -> str:
+    def _state_without_oco(self) -> str:
         filled = self.filled_quantity
-        if self._oco_violation:
-            return "OCO_VIOLATION"
         if filled > self.requested_quantity:
             if self.cancelled:
                 return "OVERFILLED_AFTER_CANCEL"
@@ -375,13 +381,28 @@ class OrderProjection:
             return "UNKNOWN"
         return "PENDING"
 
-    def snapshot(self) -> OrderSnapshot:
+    @property
+    def state(self) -> str:
+        if self._oco_violation:
+            return "OCO_VIOLATION"
+        return self._state_without_oco()
+
+    def snapshot(self, *, oco_violation: bool | None = None) -> OrderSnapshot:
+        violation = (
+            self._oco_violation
+            if oco_violation is None
+            else bool(oco_violation)
+        )
         return OrderSnapshot(
             client_order_id=self.client_order_id,
             instrument=self.instrument,
             side=self.side,
             requested_quantity=self.requested_quantity,
-            state=self.state,
+            state=(
+                "OCO_VIOLATION"
+                if violation
+                else self._state_without_oco()
+            ),
             filled_quantity=self.filled_quantity,
             open_quantity=self.open_quantity,
             overfill_quantity=max(
@@ -391,7 +412,7 @@ class OrderProjection:
             average_fill_price=self.average_fill_price,
             provider_order_id=self.provider_order_id,
             oco_group_id=self.oco_group_id,
-            oco_violation=self._oco_violation,
+            oco_violation=violation,
             fill_count=len(self.active_fills),
             observation_count=len(self._history),
             cancel_requested=self.cancel_requested,
@@ -484,20 +505,59 @@ class OrderBookProjection:
             fills.extend(order.active_fills)
         return tuple(fills)
 
+    def _oco_breaches(
+        self,
+        *,
+        historical: bool,
+    ) -> dict[str, tuple[str, ...]]:
+        groups: dict[str, list[OrderProjection]] = {}
+        for order in self._orders.values():
+            if order.oco_group_id is None:
+                continue
+            observed = (
+                order.historical_execution_observed
+                if historical
+                else order.filled_quantity > 0
+            )
+            if not observed:
+                continue
+            groups.setdefault(order.oco_group_id, []).append(order)
+
+        return {
+            group: tuple(
+                sorted(order.client_order_id for order in orders)
+            )
+            for group, orders in groups.items()
+            if len(orders) > 1
+        }
+
     def snapshots(self) -> tuple[OrderSnapshot, ...]:
-        return tuple(order.snapshot() for order in self._orders.values())
+        # OCO breach is historical provider-observation truth. Derive it from
+        # immutable fill/revision history without mutating orders during reads;
+        # a later bust may reverse current economics but cannot erase the fact
+        # that both peers were previously observed as executed.
+        breaches = self._oco_breaches(historical=True)
+        violated = {
+            order_id
+            for order_ids in breaches.values()
+            for order_id in order_ids
+        }
+        return tuple(
+            order.snapshot(
+                oco_violation=order.client_order_id in violated
+            )
+            for order in self._orders.values()
+        )
 
     def oco_breaches(self) -> Mapping[str, tuple[str, ...]]:
-        groups: dict[str, list[str]] = {}
-        for order in self._orders.values():
-            if order.oco_group_id is None or order.filled_quantity <= 0:
-                continue
-            groups.setdefault(order.oco_group_id, []).append(order.client_order_id)
-        return {
-            group: tuple(sorted(order_ids))
-            for group, order_ids in groups.items()
-            if len(order_ids) > 1
-        }
+        """Historical OCO races derived from immutable observations."""
+
+        return self._oco_breaches(historical=True)
+
+    def active_oco_breaches(self) -> Mapping[str, tuple[str, ...]]:
+        """Current double-filled OCO exposure after corrections/busts."""
+
+        return self._oco_breaches(historical=False)
 
 
 class OcoGroupProjection:
@@ -516,12 +576,10 @@ class OcoGroupProjection:
         self._orders[order.client_order_id] = order
 
     def refresh(self) -> bool:
-        filled_orders = [
+        # Legacy compatibility query only. OCO truth is derived from immutable
+        # observation history and reads must not mutate order state.
+        observed_orders = [
             order for order in self._orders.values()
-            if order.filled_quantity > 0
+            if order.historical_execution_observed
         ]
-        violation = len(filled_orders) > 1
-        if violation:
-            for order in filled_orders:
-                order.mark_oco_peer_filled()
-        return violation
+        return len(observed_orders) > 1

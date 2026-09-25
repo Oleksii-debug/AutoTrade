@@ -315,8 +315,10 @@ class OrderProjectionTests(unittest.TestCase):
             price="11",
         )
         self.assertTrue(group.refresh())
-        self.assertEqual(first.state, "OCO_VIOLATION")
-        self.assertEqual(second.state, "OCO_VIOLATION")
+        # A group query must not mutate either order. Group-level OCO truth is
+        # rendered by the canonical aggregate projection.
+        self.assertEqual(first.state, "FILLED")
+        self.assertEqual(second.state, "FILLED")
         self.assertEqual(first.filled_quantity, Decimal("1"))
         self.assertEqual(second.filled_quantity, Decimal("1"))
 
@@ -523,6 +525,127 @@ class OrderProjectionTests(unittest.TestCase):
         )
         self.assertEqual(len(book.effective_fills()), 2)
         self.assertEqual(book.oco_breaches()["g1"], ("stop", "take"))
+
+    def test_order_book_snapshots_surface_observed_oco_breach(self):
+        book = OrderBookProjection()
+        first = book.create(
+            client_order_id="oco-a",
+            instrument="ABC",
+            side="SELL",
+            requested_quantity="1",
+            oco_group_id="g-snapshot",
+        )
+        second = book.create(
+            client_order_id="oco-b",
+            instrument="ABC",
+            side="SELL",
+            requested_quantity="1",
+            oco_group_id="g-snapshot",
+        )
+        first.record_fill(
+            fill_id="fill-a",
+            provider_execution_id="exec-a-snapshot",
+            quantity="1",
+            price="110",
+        )
+        second.record_fill(
+            fill_id="fill-b",
+            provider_execution_id="exec-b-snapshot",
+            quantity="1",
+            price="90",
+        )
+
+        snapshots = {
+            snapshot.client_order_id: snapshot
+            for snapshot in book.snapshots()
+        }
+
+        self.assertEqual(snapshots["oco-a"].state, "OCO_VIOLATION")
+        self.assertEqual(snapshots["oco-b"].state, "OCO_VIOLATION")
+        self.assertTrue(snapshots["oco-a"].oco_violation)
+        self.assertTrue(snapshots["oco-b"].oco_violation)
+        self.assertEqual(
+            book.oco_breaches()["g-snapshot"],
+            ("oco-a", "oco-b"),
+        )
+        self.assertEqual(
+            book.active_oco_breaches()["g-snapshot"],
+            ("oco-a", "oco-b"),
+        )
+        # Rendering the aggregate must not mutate local order state.
+        self.assertEqual(first.state, "FILLED")
+        self.assertEqual(second.state, "FILLED")
+
+    def test_oco_history_is_query_order_independent_after_bust(self):
+        def build(*, read_before_bust):
+            book = OrderBookProjection()
+            first = book.create(
+                client_order_id="oco-a",
+                instrument="ABC",
+                side="SELL",
+                requested_quantity="1",
+                oco_group_id="g-race",
+            )
+            second = book.create(
+                client_order_id="oco-b",
+                instrument="ABC",
+                side="SELL",
+                requested_quantity="1",
+                oco_group_id="g-race",
+            )
+            first.record_fill(
+                fill_id="fill-a",
+                provider_execution_id="exec-a-race",
+                quantity="1",
+                price="110",
+            )
+            second.record_fill(
+                fill_id="fill-b",
+                provider_execution_id="exec-b-race",
+                quantity="1",
+                price="90",
+            )
+            if read_before_bust:
+                before = {
+                    item.client_order_id: item
+                    for item in book.snapshots()
+                }
+                self.assertTrue(before["oco-a"].oco_violation)
+                self.assertTrue(before["oco-b"].oco_violation)
+            second.bust_fill(
+                "fill-b",
+                provider_revision="bust-1",
+            )
+            snapshots = {
+                item.client_order_id: item
+                for item in book.snapshots()
+            }
+            return (
+                snapshots,
+                dict(book.oco_breaches()),
+                dict(book.active_oco_breaches()),
+                first.state,
+                second.state,
+            )
+
+        read_first = build(read_before_bust=True)
+        rebuild_without_intermediate_read = build(read_before_bust=False)
+
+        self.assertEqual(read_first, rebuild_without_intermediate_read)
+        snapshots, historical, active, first_state, second_state = read_first
+        self.assertEqual(
+            historical["g-race"],
+            ("oco-a", "oco-b"),
+        )
+        self.assertEqual(active, {})
+        self.assertTrue(snapshots["oco-a"].oco_violation)
+        self.assertTrue(snapshots["oco-b"].oco_violation)
+        self.assertEqual(snapshots["oco-a"].state, "OCO_VIOLATION")
+        self.assertEqual(snapshots["oco-b"].state, "OCO_VIOLATION")
+        self.assertEqual(snapshots["oco-a"].filled_quantity, Decimal("1"))
+        self.assertEqual(snapshots["oco-b"].filled_quantity, Decimal("0"))
+        self.assertEqual(first_state, "FILLED")
+        self.assertEqual(second_state, "PENDING")
 
 
 if __name__ == "__main__":

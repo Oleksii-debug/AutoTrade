@@ -39,6 +39,21 @@ def _required_text(value: object, *, name: str) -> str:
     return value.strip()
 
 
+def _workflow_requirement_digest(workflow: dict[str, object]) -> str:
+    workflow_id = _required_text(workflow.get("id"), name="requirements.workflow.id")
+    description = _required_text(
+        workflow.get("description"),
+        name=f"requirements.workflow[{workflow_id}].description",
+    )
+    payload = json.dumps(
+        {"description": description, "id": workflow_id},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return "sha256:" + sha256(payload).hexdigest()
+
+
 def validate_evidence(
     evidence: dict[str, object],
     requirements: dict[str, object],
@@ -47,11 +62,11 @@ def validate_evidence(
         raise NvdaQualificationError("unsupported NVDA requirements schema_version")
     if evidence.get("schema_version") != requirements["schema_version"]:
         raise NvdaQualificationError("evidence schema_version does not match requirements")
-    source_sha = _required_text(evidence.get("source_sha"), name="source_sha").lower()
+    source_sha = _required_text(evidence.get("source_sha"), name="source_sha")
     artifact_sha = _required_text(
         evidence.get("artifact_sha256"),
         name="artifact_sha256",
-    ).lower()
+    )
     if GIT_SHA.fullmatch(source_sha) is None:
         raise NvdaQualificationError("source_sha must be an exact 40-character Git SHA")
     if SHA256.fullmatch(artifact_sha) is None:
@@ -78,7 +93,11 @@ def validate_evidence(
     )
     if environment.get("input_mode") != required_input:
         raise NvdaQualificationError(f"qualification must be {required_input}")
-    if not str(environment.get("windows_version")).startswith(required_os):
+    windows_version = _required_text(
+        environment.get("windows_version"),
+        name="environment.windows_version",
+    )
+    if windows_version != required_os and not windows_version.startswith(required_os + " "):
         raise NvdaQualificationError(f"qualification must run on {required_os}")
     if environment.get("assistive_technology") != required_at:
         raise NvdaQualificationError(
@@ -102,7 +121,15 @@ def validate_evidence(
             raise NvdaQualificationError(f"workflow did not pass: {workflow_id}")
         _required_text(item.get("keyboard_steps"), name=f"{workflow_id}.keyboard_steps")
         _required_text(item.get("nvda_observation"), name=f"{workflow_id}.nvda_observation")
-        evidence_ref = _required_text(item.get("evidence_ref"), name=f"{workflow_id}.evidence_ref").lower()
+        requirement_sha = _required_text(
+            item.get("requirement_sha256"),
+            name=f"{workflow_id}.requirement_sha256",
+        )
+        if SHA256.fullmatch(requirement_sha) is None:
+            raise NvdaQualificationError(
+                f"{workflow_id}.requirement_sha256 must be an immutable sha256 digest"
+            )
+        evidence_ref = _required_text(item.get("evidence_ref"), name=f"{workflow_id}.evidence_ref")
         if SHA256.fullmatch(evidence_ref) is None:
             raise NvdaQualificationError(
                 f"{workflow_id}.evidence_ref must be an immutable sha256 digest"
@@ -116,12 +143,13 @@ def validate_evidence(
     if not isinstance(required, list) or not required:
         raise NvdaQualificationError("requirements contain no workflows")
     required_id_list: list[str] = []
+    requirement_digests: dict[str, str] = {}
     for item in required:
         if not isinstance(item, dict):
             raise NvdaQualificationError("requirements.workflow must be an object")
-        required_id_list.append(
-            _required_text(item.get("id"), name="requirements.workflow.id")
-        )
+        workflow_id = _required_text(item.get("id"), name="requirements.workflow.id")
+        required_id_list.append(workflow_id)
+        requirement_digests[workflow_id] = _workflow_requirement_digest(item)
     if len(required_id_list) != len(set(required_id_list)):
         raise NvdaQualificationError("requirements.workflow ids must be unique")
     required_ids = set(required_id_list)
@@ -131,6 +159,11 @@ def validate_evidence(
         raise NvdaQualificationError(
             f"workflow evidence mismatch; missing={missing}; extra={extra}"
         )
+    for workflow_id in required_id_list:
+        if by_id[workflow_id].get("requirement_sha256") != requirement_digests[workflow_id]:
+            raise NvdaQualificationError(
+                f"workflow evidence is stale for requirement: {workflow_id}"
+            )
 
     reviewer = _required_text(evidence.get("reviewer"), name="reviewer")
     observed_at = _required_text(evidence.get("observed_at"), name="observed_at")
@@ -212,10 +245,10 @@ def _release_bundle_source_sha(release_artifact: Path) -> str:
     source_sha = _required_text(
         manifest.get("source_sha"),
         name="bundle-manifest.source_sha",
-    ).lower()
+    )
     if GIT_SHA.fullmatch(source_sha) is None:
         raise NvdaQualificationError(
-            "bundle-manifest.source_sha must be an exact 40-character Git SHA"
+            "bundle-manifest.source_sha must be an exact 40-character lowercase Git SHA"
         )
     return source_sha
 
@@ -227,7 +260,11 @@ def validate_release_artifact_binding(
     declared = _required_text(
         evidence.get("artifact_sha256"),
         name="artifact_sha256",
-    ).lower()
+    )
+    if SHA256.fullmatch(declared) is None:
+        raise NvdaQualificationError(
+            "artifact_sha256 must be canonical sha256:<64 lowercase hex>"
+        )
     actual = release_artifact_digest(release_artifact)
     if declared != actual:
         raise NvdaQualificationError(
@@ -237,7 +274,11 @@ def validate_release_artifact_binding(
     evidence_source_sha = _required_text(
         evidence.get("source_sha"),
         name="source_sha",
-    ).lower()
+    )
+    if GIT_SHA.fullmatch(evidence_source_sha) is None:
+        raise NvdaQualificationError(
+            "source_sha must be an exact 40-character lowercase Git SHA"
+        )
     if artifact_source_sha != evidence_source_sha:
         raise NvdaQualificationError(
             "release bundle source SHA does not match NVDA evidence"
@@ -275,12 +316,25 @@ def main() -> int:
                     raise NvdaQualificationError(
                         "status evidence_file must stay inside qualification/nvda"
                     ) from error
+                if args.release_artifact is None:
+                    raise NvdaQualificationError(
+                        "qualified status requires --release-artifact or a future "
+                        "independently trusted artifact-binding attestation"
+                    )
                 evidence = _load(evidence_path, name="evidence")
                 result = validate_evidence(evidence, requirements)
+                actual_artifact_sha = validate_release_artifact_binding(
+                    evidence,
+                    args.release_artifact,
+                )
                 if result["source_sha"] != status.get("source_sha"):
                     raise NvdaQualificationError("status source SHA does not match evidence")
                 if result["artifact_sha256"] != status.get("artifact_sha256"):
                     raise NvdaQualificationError("status artifact SHA does not match evidence")
+                if actual_artifact_sha != status.get("artifact_sha256"):
+                    raise NvdaQualificationError(
+                        "status artifact SHA does not match observed release artifact"
+                    )
                 if status.get("evidence_sha256") != evidence_digest(evidence_path):
                     raise NvdaQualificationError("status evidence digest is stale")
             else:

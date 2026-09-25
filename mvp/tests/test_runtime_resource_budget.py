@@ -177,7 +177,7 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
             )
 
     def test_exact_evidence_identity_is_validated(self):
-        with self.assertRaisesRegex(RuntimeBudgetError, "40-hex"):
+        with self.assertRaisesRegex(RuntimeBudgetError, "40- or 64-character"):
             self.spec(release_sha="main")
         with self.assertRaisesRegex(RuntimeBudgetError, "sha256"):
             self.observation(configuration_hash="config")
@@ -200,7 +200,7 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
                     "event_type": "FINANCIAL_PROBE",
                     "aggregate_type": "PERFORMANCE_PROBE",
                     "aggregate_id": "burst-a",
-                    "aggregate_version": index + 1,
+                    "aggregate_version": str(index + 1),
                     "payload": payload,
                     "payload_hash": payload_digest(payload),
                     "committed_at": datetime.now(timezone.utc).isoformat(),

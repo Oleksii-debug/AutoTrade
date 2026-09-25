@@ -44,6 +44,7 @@ class KrakenFuturesContractTests(unittest.TestCase):
                 "sendStatus": {"order_id": "provider-order-1", "status": "placed"},
             },
         )
+        self.assertNotIn("provider_received_at", acknowledged)
         self.validate_submission(acknowledged)
 
         unknown = parse_submission_response(
@@ -54,6 +55,8 @@ class KrakenFuturesContractTests(unittest.TestCase):
             response=None,
             transport_ambiguous=True,
         )
+        self.assertNotIn("provider_received_at", unknown)
+        self.assertNotIn("observed_at", unknown)
         self.validate_submission(unknown)
 
 

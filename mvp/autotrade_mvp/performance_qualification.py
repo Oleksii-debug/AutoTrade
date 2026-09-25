@@ -29,20 +29,34 @@ def _positive_int(value: int, *, name: str, allow_zero: bool = False) -> int:
 
 
 def _git_sha(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or len(value) != 40 or any(
-        char not in "0123456789abcdef" for char in value.lower()
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or value != value.lower()
+        or len(value) not in {40, 64}
+        or any(char not in "0123456789abcdef" for char in value)
     ):
-        raise RuntimeBudgetError(f"{name} must be a 40-hex commit SHA")
-    return value.lower()
+        raise RuntimeBudgetError(
+            f"{name} must be a canonical lowercase 40- or 64-character Git object id"
+        )
+    return value
 
 
 def _sha256_identity(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.startswith("sha256:"):
-        raise RuntimeBudgetError(f"{name} must use sha256:<64 hex>")
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or not value.startswith("sha256:")
+    ):
+        raise RuntimeBudgetError(f"{name} must use canonical lowercase sha256:<64 hex>")
     digest = value[7:]
-    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest.lower()):
-        raise RuntimeBudgetError(f"{name} must use sha256:<64 hex>")
-    return "sha256:" + digest.lower()
+    if (
+        len(digest) != 64
+        or digest != digest.lower()
+        or any(char not in "0123456789abcdef" for char in digest)
+    ):
+        raise RuntimeBudgetError(f"{name} must use canonical lowercase sha256:<64 hex>")
+    return value
 
 
 def _series(values: Sequence[int], *, name: str) -> tuple[int, ...]:
@@ -155,6 +169,77 @@ class RuntimeLoadObservation:
     financial_staleness_us: tuple[int, ...]
     research_interference_us: tuple[int, ...]
     reconnect_backlog_remaining: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.scenario_id, str) or not self.scenario_id.strip():
+            raise RuntimeBudgetError("scenario_id is required")
+        expected = _positive_int(
+            self.expected_financial_events,
+            name="expected_financial_events",
+            allow_zero=True,
+        )
+        recovered = _positive_int(
+            self.recovered_financial_events,
+            name="recovered_financial_events",
+            allow_zero=True,
+        )
+        if recovered > expected:
+            raise RuntimeBudgetError(
+                "recovered_financial_events cannot exceed expected"
+            )
+        object.__setattr__(self, "scenario_id", self.scenario_id.strip())
+        object.__setattr__(
+            self,
+            "spec_digest",
+            _sha256_identity(self.spec_digest, name="spec_digest"),
+        )
+        object.__setattr__(
+            self,
+            "release_sha",
+            _git_sha(self.release_sha, name="release_sha"),
+        )
+        object.__setattr__(
+            self,
+            "configuration_hash",
+            _sha256_identity(
+                self.configuration_hash,
+                name="configuration_hash",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "host_fingerprint",
+            _sha256_identity(self.host_fingerprint, name="host_fingerprint"),
+        )
+        object.__setattr__(self, "expected_financial_events", expected)
+        object.__setattr__(self, "recovered_financial_events", recovered)
+        object.__setattr__(
+            self,
+            "financial_latency_us",
+            _series(self.financial_latency_us, name="financial_latency_us"),
+        )
+        object.__setattr__(
+            self,
+            "financial_staleness_us",
+            _series(self.financial_staleness_us, name="financial_staleness_us"),
+        )
+        object.__setattr__(
+            self,
+            "research_interference_us",
+            _series(
+                self.research_interference_us,
+                name="research_interference_us",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "reconnect_backlog_remaining",
+            _positive_int(
+                self.reconnect_backlog_remaining,
+                name="reconnect_backlog_remaining",
+                allow_zero=True,
+            ),
+        )
 
     @classmethod
     def create(

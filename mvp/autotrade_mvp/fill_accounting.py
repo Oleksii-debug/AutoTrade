@@ -12,6 +12,7 @@ turning a particular in-memory projection module into an accounting dependency.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from .accounting import (
@@ -19,6 +20,7 @@ from .accounting import (
     JournalTransaction,
     ScopedEconomicBook,
     book_equity_fill,
+    reverse_transaction,
 )
 from .persistence import payload_digest
 from .reconciliation import ProviderFillEvidence
@@ -40,6 +42,24 @@ def _decimal(value, *, name: str) -> Decimal:
     if not result.is_finite():
         raise ValueError(f"{name} must be a finite decimal")
     return result
+
+
+def _utc_text(value: str, *, name: str) -> str:
+    text = _text(value, name=name)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{name} must be an ISO timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{name} must include timezone")
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _economic_order_key(provider: str, provider_execution_id: str) -> str:
+    return (
+        f"provider:{_text(provider, name='provider_id').upper()}:"
+        f"execution:{_text(provider_execution_id, name='provider_execution_id')}"
+    )
 
 
 @dataclass(frozen=True)
@@ -125,7 +145,7 @@ class ProjectedFillEvidence:
         )
 
 
-def build_provider_fill_transaction(
+def _validated_fill_evidence(
     *,
     book: ScopedEconomicBook,
     provider_id: str,
@@ -133,7 +153,8 @@ def build_provider_fill_transaction(
     provider_fill: ProviderFillEvidence,
     expected_instrument: str,
     settlement_currency: str,
-) -> JournalTransaction:
+    allow_correction: bool,
+) -> tuple[str, str, str, dict[str, object]]:
     if not isinstance(book, ScopedEconomicBook):
         raise TypeError("book must be ScopedEconomicBook")
     if not isinstance(projected_fill, ProjectedFillEvidence):
@@ -147,9 +168,13 @@ def build_provider_fill_transaction(
     instrument = _text(expected_instrument, name="expected_instrument")
     settlement = _text(settlement_currency, name="settlement_currency").upper()
 
-    if projected_fill.correction_of is not None:
+    if projected_fill.correction_of is not None and not allow_correction:
         raise AccountingConflict(
             "corrected fills require explicit atomic reversal/replacement evidence"
+        )
+    if allow_correction and projected_fill.provider_revision is None:
+        raise AccountingConflict(
+            "corrected fill requires immutable provider_revision evidence"
         )
     if projected_fill.provider_execution_id != provider_fill.provider_execution_id:
         raise AccountingConflict("provider execution identity does not match projection")
@@ -165,7 +190,7 @@ def build_provider_fill_transaction(
     if provider_fill.instrument != instrument:
         raise AccountingConflict("provider instrument does not match expected instrument")
 
-    evidence = {
+    evidence: dict[str, object] = {
         "schema_version": "1.0.0",
         "provider_id": provider,
         "environment": book.environment,
@@ -183,6 +208,28 @@ def build_provider_fill_transaction(
         "trade_time": provider_fill.trade_time,
         "provider_revision": projected_fill.provider_revision,
     }
+    return provider, instrument, settlement, evidence
+
+
+def build_provider_fill_transaction(
+    *,
+    book: ScopedEconomicBook,
+    provider_id: str,
+    projected_fill: ProjectedFillEvidence,
+    provider_fill: ProviderFillEvidence,
+    expected_instrument: str,
+    settlement_currency: str,
+    observed_at: str | None = None,
+) -> JournalTransaction:
+    provider, _instrument, settlement, evidence = _validated_fill_evidence(
+        book=book,
+        provider_id=provider_id,
+        projected_fill=projected_fill,
+        provider_fill=provider_fill,
+        expected_instrument=expected_instrument,
+        settlement_currency=settlement_currency,
+        allow_correction=False,
+    )
     evidence_digest = payload_digest(evidence)
     transaction_id = "provider-fill:" + evidence_digest.removeprefix("sha256:")
     cause_event_id = (
@@ -199,9 +246,242 @@ def build_provider_fill_transaction(
         price=provider_fill.price,
         fee=provider_fill.fee_amount,
         fee_currency=provider_fill.fee_currency,
+        economic_effective_at=provider_fill.trade_time,
+        economic_order_key=_economic_order_key(
+            provider,
+            provider_fill.provider_execution_id,
+        ),
+        observed_at=(
+            _utc_text(observed_at, name="observed_at")
+            if observed_at is not None
+            else None
+        ),
     )
 
 
+def _transaction_matches_provider_fill(
+    transaction: JournalTransaction,
+    *,
+    projected_fill: ProjectedFillEvidence,
+    provider_fill: ProviderFillEvidence,
+    settlement_currency: str,
+    economic_order_key: str,
+) -> bool:
+    expected = book_equity_fill(
+        transaction_id=transaction.transaction_id,
+        cause_event_id=transaction.cause_event_id,
+        instrument=provider_fill.instrument,
+        settlement_currency=settlement_currency,
+        side=projected_fill.side,
+        quantity=provider_fill.quantity,
+        price=provider_fill.price,
+        fee=provider_fill.fee_amount,
+        fee_currency=provider_fill.fee_currency,
+        economic_effective_at=transaction.economic_effective_at,
+        economic_order_key=economic_order_key,
+        observed_at=transaction.observed_at,
+        corrects_transaction_id=transaction.corrects_transaction_id,
+    )
+    return expected == transaction
+
+
+def build_provider_fill_correction_transactions(
+    *,
+    book: ScopedEconomicBook,
+    provider_id: str,
+    original_projected_fill: ProjectedFillEvidence,
+    original_provider_fill: ProviderFillEvidence,
+    corrected_projected_fill: ProjectedFillEvidence,
+    corrected_provider_fill: ProviderFillEvidence,
+    expected_instrument: str,
+    settlement_currency: str,
+    correction_observed_at: str,
+) -> tuple[JournalTransaction, JournalTransaction]:
+    if corrected_projected_fill.correction_of != original_projected_fill.fill_id:
+        raise AccountingConflict("corrected fill does not identify the original fill")
+    if corrected_projected_fill.fill_id == original_projected_fill.fill_id:
+        raise AccountingConflict("corrected fill_id must differ from original fill_id")
+
+    provider, instrument, settlement, original_evidence = _validated_fill_evidence(
+        book=book,
+        provider_id=provider_id,
+        projected_fill=original_projected_fill,
+        provider_fill=original_provider_fill,
+        expected_instrument=expected_instrument,
+        settlement_currency=settlement_currency,
+        allow_correction=original_projected_fill.correction_of is not None,
+    )
+    corrected_provider, corrected_instrument, corrected_settlement, corrected_evidence = (
+        _validated_fill_evidence(
+            book=book,
+            provider_id=provider_id,
+            projected_fill=corrected_projected_fill,
+            provider_fill=corrected_provider_fill,
+            expected_instrument=expected_instrument,
+            settlement_currency=settlement_currency,
+            allow_correction=True,
+        )
+    )
+    if (provider, instrument, settlement) != (
+        corrected_provider,
+        corrected_instrument,
+        corrected_settlement,
+    ):
+        raise AccountingConflict("correction scope does not match original fill scope")
+    if corrected_projected_fill.provider_execution_id != original_projected_fill.provider_execution_id:
+        raise AccountingConflict("correction provider execution identity changed")
+    if corrected_projected_fill.intent_id != original_projected_fill.intent_id:
+        raise AccountingConflict("correction intent identity changed")
+    if corrected_projected_fill.client_order_id != original_projected_fill.client_order_id:
+        raise AccountingConflict("correction client order identity changed")
+    if corrected_projected_fill.side != original_projected_fill.side:
+        raise AccountingConflict("correction side changed")
+
+    observation = _utc_text(correction_observed_at, name="correction_observed_at")
+    order_key = _economic_order_key(
+        provider,
+        original_provider_fill.provider_execution_id,
+    )
+    reversed_ids = {
+        item.reverses_transaction_id
+        for item in book.transactions
+        if item.reverses_transaction_id is not None
+    }
+    active = [
+        item
+        for item in book.transactions
+        if item.economic_order_key == order_key
+        and item.reverses_transaction_id is None
+        and item.transaction_id not in reversed_ids
+    ]
+    if len(active) != 1:
+        raise AccountingConflict(
+            "original provider fill has not been booked as one active economic fact"
+        )
+    committed_original = active[0]
+
+    if _transaction_matches_provider_fill(
+        committed_original,
+        projected_fill=corrected_projected_fill,
+        provider_fill=corrected_provider_fill,
+        settlement_currency=settlement,
+        economic_order_key=order_key,
+    ):
+        corrected_id = committed_original.corrects_transaction_id
+        if corrected_id is None:
+            raise AccountingConflict(
+                "active corrected economics lacks immutable correction lineage"
+            )
+        prior = next(
+            (item for item in book.transactions if item.transaction_id == corrected_id),
+            None,
+        )
+        reversal = next(
+            (
+                item
+                for item in book.transactions
+                if item.reverses_transaction_id == corrected_id
+            ),
+            None,
+        )
+        if (
+            prior is None
+            or reversal is None
+            or reversal.observed_at != observation
+            or committed_original.observed_at != observation
+            or not _transaction_matches_provider_fill(
+                prior,
+                projected_fill=original_projected_fill,
+                provider_fill=original_provider_fill,
+                settlement_currency=settlement,
+                economic_order_key=order_key,
+            )
+        ):
+            raise AccountingConflict(
+                "existing correction lineage conflicts with supplied evidence"
+            )
+        retry_evidence = {
+            "schema_version": "1.1.0",
+            "provider_id": provider,
+            "environment": book.environment,
+            "account_id": book.account_id,
+            "correction_of": corrected_projected_fill.correction_of,
+            "correction_observed_at": observation,
+            "original_transaction_id": prior.transaction_id,
+            "original": original_evidence,
+            "corrected": {
+                **corrected_evidence,
+                "correction_of": corrected_projected_fill.correction_of,
+            },
+        }
+        retry_digest = payload_digest(retry_evidence).removeprefix("sha256:")
+        retry_prefix = (
+            f"provider:{provider}:environment:{book.environment}:"
+            f"account:{book.account_id}:correction:{retry_digest}"
+        )
+        if (
+            reversal.transaction_id
+            != f"provider-fill-correction-reversal:{retry_digest}"
+            or reversal.cause_event_id != f"{retry_prefix}:reversal"
+            or committed_original.transaction_id
+            != f"provider-fill-correction-replacement:{retry_digest}"
+            or committed_original.cause_event_id != f"{retry_prefix}:replacement"
+        ):
+            raise AccountingConflict(
+                "existing correction lineage conflicts with immutable correction evidence"
+            )
+        return reversal, committed_original
+
+    if not _transaction_matches_provider_fill(
+        committed_original,
+        projected_fill=original_projected_fill,
+        provider_fill=original_provider_fill,
+        settlement_currency=settlement,
+        economic_order_key=order_key,
+    ):
+        raise AccountingConflict("original provider fill evidence conflicts with ledger")
+
+    correction_evidence = {
+        "schema_version": "1.1.0",
+        "provider_id": provider,
+        "environment": book.environment,
+        "account_id": book.account_id,
+        "correction_of": corrected_projected_fill.correction_of,
+        "correction_observed_at": observation,
+        "original_transaction_id": committed_original.transaction_id,
+        "original": original_evidence,
+        "corrected": {
+            **corrected_evidence,
+            "correction_of": corrected_projected_fill.correction_of,
+        },
+    }
+    correction_digest = payload_digest(correction_evidence).removeprefix("sha256:")
+    cause_prefix = (
+        f"provider:{provider}:environment:{book.environment}:"
+        f"account:{book.account_id}:correction:{correction_digest}"
+    )
+    reversal = reverse_transaction(
+        committed_original,
+        transaction_id=f"provider-fill-correction-reversal:{correction_digest}",
+        cause_event_id=f"{cause_prefix}:reversal",
+        observed_at=observation,
+    )
+    replacement = book_equity_fill(
+        transaction_id=f"provider-fill-correction-replacement:{correction_digest}",
+        cause_event_id=f"{cause_prefix}:replacement",
+        instrument=corrected_provider_fill.instrument,
+        settlement_currency=settlement,
+        side=corrected_projected_fill.side,
+        quantity=corrected_provider_fill.quantity,
+        price=corrected_provider_fill.price,
+        fee=corrected_provider_fill.fee_amount,
+        fee_currency=corrected_provider_fill.fee_currency,
+        economic_effective_at=committed_original.economic_effective_at,
+        economic_order_key=order_key,
+        observed_at=observation,
+        corrects_transaction_id=committed_original.transaction_id,
+    )
+    return reversal, replacement
 def book_provider_fill(
     *,
     book: ScopedEconomicBook,
@@ -210,6 +490,7 @@ def book_provider_fill(
     provider_fill: ProviderFillEvidence,
     expected_instrument: str,
     settlement_currency: str,
+    observed_at: str | None = None,
 ) -> bool:
     transaction = build_provider_fill_transaction(
         book=book,
@@ -218,5 +499,32 @@ def book_provider_fill(
         provider_fill=provider_fill,
         expected_instrument=expected_instrument,
         settlement_currency=settlement_currency,
+        observed_at=observed_at,
     )
     return book.append(transaction)
+
+def book_provider_fill_correction(
+    *,
+    book: ScopedEconomicBook,
+    provider_id: str,
+    original_projected_fill: ProjectedFillEvidence,
+    original_provider_fill: ProviderFillEvidence,
+    corrected_projected_fill: ProjectedFillEvidence,
+    corrected_provider_fill: ProviderFillEvidence,
+    expected_instrument: str,
+    settlement_currency: str,
+    correction_observed_at: str,
+) -> bool:
+    reversal, replacement = build_provider_fill_correction_transactions(
+        book=book,
+        provider_id=provider_id,
+        original_projected_fill=original_projected_fill,
+        original_provider_fill=original_provider_fill,
+        corrected_projected_fill=corrected_projected_fill,
+        corrected_provider_fill=corrected_provider_fill,
+        expected_instrument=expected_instrument,
+        settlement_currency=settlement_currency,
+        correction_observed_at=correction_observed_at,
+    )
+    return book.append_batch((reversal, replacement))
+

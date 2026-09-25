@@ -1,13 +1,122 @@
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
+import json
 import unittest
+from uuid import NAMESPACE_URL, uuid5
 
 from mvp.autotrade_mvp.risk import (
+    LiquidationHeadroomEvidence,
+    LiquidationScope,
     RiskContext,
     RiskIntent,
     RiskPolicy,
     evaluate_risk,
     risk_decision_fingerprint,
+    stress_scenario_digest,
+    tail_scenario_set_digest,
 )
+
+
+LIQUIDATION_BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+class _LiquidationEvidenceStore:
+    def __init__(self):
+        self._manifests = {}
+        self._objects = {}
+
+    def add(self, evidence, payload):
+        raw = json.dumps(
+            payload,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        actual = "sha256:" + sha256(raw).hexdigest()
+        if actual != evidence.sha256:
+            raise AssertionError("test evidence digest mismatch")
+        self._objects[evidence.artifact_id] = raw
+        self._manifests[evidence.artifact_id] = {
+            "artifact_id": evidence.artifact_id,
+            "sha256": evidence.sha256,
+            "manifest_hash": "sha256:" + "f" * 64,
+            "metadata": dict(payload),
+        }
+
+    def load_manifest(self, artifact_id):
+        return dict(self._manifests[artifact_id])
+
+    def read_bytes(self, artifact_id):
+        return self._objects[artifact_id]
+
+
+def liquidation_evidence(
+    store,
+    *,
+    headroom="0.25",
+    provider_id="BYBIT",
+    account_id="acct-1",
+    environment="PAPER",
+    margin_mode="CROSS",
+    risk_tier_version="tier-v1",
+    state_version=7,
+    observed_at=LIQUIDATION_BASE,
+    expires_at=None,
+):
+    expires = expires_at or (observed_at + timedelta(hours=1))
+    payload = {
+        "artifact_kind": "LIQUIDATION_HEADROOM_EVIDENCE",
+        "schema_version": 1,
+        "provider_id": provider_id,
+        "account_id": account_id,
+        "environment": environment,
+        "margin_mode": margin_mode,
+        "risk_tier_version": risk_tier_version,
+        "state_version": state_version,
+        "observed_at": observed_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "expires_at": expires.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "headroom": (
+            "0"
+            if Decimal(headroom) == 0
+            else format(Decimal(headroom).normalize(), "f")
+        ),
+    }
+    raw = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    digest = "sha256:" + sha256(raw).hexdigest()
+    artifact_id = str(uuid5(NAMESPACE_URL, digest))
+    evidence = LiquidationHeadroomEvidence.create(
+        headroom=headroom,
+        state_version=state_version,
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+        margin_mode=margin_mode,
+        risk_tier_version=risk_tier_version,
+        observed_at=observed_at,
+        expires_at=expires,
+        artifact_id=artifact_id,
+        sha256=digest,
+    )
+    store.add(evidence, payload)
+    scope = LiquidationScope(
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+        margin_mode=margin_mode,
+        risk_tier_version=risk_tier_version,
+    )
+    return {
+        "liquidation_headroom": headroom,
+        "liquidation_scope": scope,
+        "liquidation_headroom_evidence": evidence,
+        "decision_time": observed_at + timedelta(minutes=1),
+    }
 
 
 def policy(**overrides):
@@ -149,6 +258,29 @@ class IndependentRiskTests(unittest.TestCase):
         decision = evaluate_risk(intent, context(positions={"ABC": "2"}), policy())
         self.assertFalse(decision.admitted)
         self.assertIn("reduce_only", {r.rule for r in decision.rules if not r.passed})
+
+    def test_reduce_only_cannot_use_pending_reservation_to_increase_current_position(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="4",
+                price="100",
+                expected_state_version=7,
+                reduce_only=True,
+            ),
+            context(
+                positions={"ABC": "10"},
+                reserved_position_delta={"ABC": "-15"},
+                stress_scenarios=({"ABC": "-0.10"},),
+            ),
+            policy(),
+        )
+        self.assertEqual(decision.resulting_position, Decimal("-1"))
+        reduce_rule = next(item for item in decision.rules if item.rule == "reduce_only")
+        self.assertFalse(reduce_rule.passed)
+        self.assertIn("current=14", reduce_rule.observed)
+        self.assertFalse(decision.admitted)
 
     def test_genuine_reduce_only_can_decrease_risk_while_account_is_over_limits(self):
         decision = evaluate_risk(
@@ -900,6 +1032,634 @@ class IndependentRiskTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             policy(min_futures_delivery_headroom_seconds=3600.0)
 
+    def test_configured_stress_regimes_require_explicit_labeled_coverage(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        configured = policy(
+            required_stress_scenario_labels=(
+                "price_gap",
+                "correlation_one",
+                "venue_loss",
+            ),
+            required_stress_scenario_digests={
+                "price_gap": stress_scenario_digest({"ABC": "-0.10"}),
+                "correlation_one": stress_scenario_digest({"ABC": "-0.20"}),
+                "venue_loss": stress_scenario_digest({"ABC": "-0.30"}),
+            },
+        )
+        decision = evaluate_risk(
+            intent,
+            context(
+                stress_scenarios=(
+                    {"ABC": "-0.10"},
+                    {"ABC": "-0.20"},
+                    {"ABC": "-0.30"},
+                ),
+                stress_scenario_labels=(
+                    "price_gap",
+                    "correlation_one",
+                    "venue_loss",
+                ),
+            ),
+            configured,
+        )
+        rule = next(x for x in decision.rules if x.rule == "stress_regime_coverage")
+        self.assertTrue(rule.passed)
+
+        missing = evaluate_risk(
+            intent,
+            context(
+                stress_scenarios=(
+                    {"ABC": "-0.10"},
+                    {"ABC": "-0.20"},
+                ),
+                stress_scenario_labels=("price_gap", "correlation_one"),
+            ),
+            configured,
+        )
+        missing_rule = next(
+            x for x in missing.rules if x.rule == "stress_regime_coverage"
+        )
+        self.assertFalse(missing_rule.passed)
+        self.assertEqual(missing_rule.observed, "MISSING:venue_loss")
+        self.assertFalse(missing.admitted)
+
+        substituted = evaluate_risk(
+            intent,
+            context(
+                stress_scenarios=(
+                    {"ABC": "-0.10"},
+                    {"ABC": "-0.01"},
+                    {"ABC": "-0.30"},
+                ),
+                stress_scenario_labels=(
+                    "price_gap",
+                    "correlation_one",
+                    "venue_loss",
+                ),
+            ),
+            configured,
+        )
+        substituted_rule = next(
+            x for x in substituted.rules if x.rule == "stress_regime_coverage"
+        )
+        self.assertFalse(substituted_rule.passed)
+        self.assertEqual(substituted_rule.observed, "MISMATCH:correlation_one")
+        self.assertFalse(substituted.admitted)
+
+    def test_full_liquidation_does_not_require_artificial_stress_regime_labels(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="SELL",
+                quantity="2",
+                price="100",
+                expected_state_version=7,
+                reduce_only=True,
+            ),
+            context(
+                positions={"ABC": "2"},
+                stress_scenarios=(),
+                stress_scenario_labels=(),
+            ),
+            policy(
+                required_stress_scenario_labels=("price_gap", "correlation_one"),
+                required_stress_scenario_digests={
+                    "price_gap": stress_scenario_digest({"ABC": "-0.10"}),
+                    "correlation_one": stress_scenario_digest({"ABC": "-0.20"}),
+                },
+                max_expected_shortfall="0",
+                expected_shortfall_tail_fraction="1",
+                required_tail_scenario_set_digest=tail_scenario_set_digest(
+                    ({"ABC": "-0.10"},)
+                ),
+            ),
+        )
+        regime = next(
+            x for x in decision.rules if x.rule == "stress_regime_coverage"
+        )
+        expected_shortfall = next(
+            x for x in decision.rules if x.rule == "expected_shortfall"
+        )
+        self.assertTrue(regime.passed)
+        self.assertEqual(regime.observed, "NO_PROJECTED_RISK")
+        self.assertTrue(expected_shortfall.passed)
+        self.assertEqual(expected_shortfall.observed, "0")
+        self.assertTrue(decision.admitted)
+
+    def test_stress_scenario_labels_are_unique_and_align_with_scenarios(self):
+        with self.assertRaisesRegex(ValueError, "unique"):
+            context(
+                stress_scenarios=({"ABC": "-0.10"}, {"ABC": "-0.20"}),
+                stress_scenario_labels=("gap", "gap"),
+            )
+        with self.assertRaisesRegex(ValueError, "one-to-one"):
+            context(
+                stress_scenarios=({"ABC": "-0.10"}, {"ABC": "-0.20"}),
+                stress_scenario_labels=("gap",),
+            )
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            policy(required_stress_scenario_labels=())
+        with self.assertRaisesRegex(ValueError, "configured together"):
+            policy(required_stress_scenario_labels=("gap",))
+        with self.assertRaisesRegex(ValueError, "exactly match"):
+            policy(
+                required_stress_scenario_labels=("gap",),
+                required_stress_scenario_digests={
+                    "other": stress_scenario_digest({"ABC": "-0.10"}),
+                },
+            )
+
+    def test_expected_shortfall_uses_complete_projected_tail_distribution(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        tail = (
+            {"ABC": "-0.10"},
+            {"ABC": "-0.20"},
+            {"ABC": "0.05"},
+            {"ABC": "-0.40"},
+        )
+        boundary = evaluate_risk(
+            intent,
+            context(tail_scenarios=tail),
+            policy(
+                max_expected_shortfall="90",
+                expected_shortfall_tail_fraction="0.50",
+                required_tail_scenario_set_digest=tail_scenario_set_digest(tail),
+            ),
+        )
+        rule = next(x for x in boundary.rules if x.rule == "expected_shortfall")
+        self.assertTrue(rule.passed)
+        self.assertEqual(rule.observed, "90")
+
+        blocked = evaluate_risk(
+            intent,
+            context(tail_scenarios=tail),
+            policy(
+                max_expected_shortfall="89.99",
+                expected_shortfall_tail_fraction="0.50",
+                required_tail_scenario_set_digest=tail_scenario_set_digest(tail),
+            ),
+        )
+        self.assertFalse(blocked.admitted)
+        blocked_rule = next(x for x in blocked.rules if x.rule == "expected_shortfall")
+        self.assertFalse(blocked_rule.passed)
+        self.assertEqual(blocked_rule.observed, "90")
+
+    def test_expected_shortfall_fails_closed_without_complete_tail_evidence(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        frozen_tail = ({"ABC": "-0.10", "XYZ": "-0.10"},)
+        configured = policy(
+            max_expected_shortfall="500",
+            expected_shortfall_tail_fraction="0.25",
+            required_tail_scenario_set_digest=tail_scenario_set_digest(frozen_tail),
+        )
+        missing = evaluate_risk(
+            intent,
+            context(tail_scenarios=()),
+            configured,
+        )
+        self.assertFalse(missing.admitted)
+        self.assertFalse(next(x for x in missing.rules if x.rule == "tail_coverage").passed)
+        self.assertEqual(
+            next(x for x in missing.rules if x.rule == "expected_shortfall").observed,
+            "UNKNOWN",
+        )
+
+        incomplete = evaluate_risk(
+            intent,
+            context(
+                positions={"ABC": "2", "XYZ": "1"},
+                tail_scenarios=({"ABC": "-0.10"},),
+                stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.10"},),
+            ),
+            configured,
+        )
+        coverage = next(x for x in incomplete.rules if x.rule == "tail_coverage")
+        self.assertFalse(coverage.passed)
+        self.assertEqual(coverage.observed, "XYZ")
+
+        cherry_picked = evaluate_risk(
+            intent,
+            context(
+                positions={"ABC": "2", "XYZ": "1"},
+                tail_scenarios=({"ABC": "-0.01", "XYZ": "-0.01"},),
+                stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.10"},),
+            ),
+            configured,
+        )
+        cherry_coverage = next(
+            x for x in cherry_picked.rules if x.rule == "tail_coverage"
+        )
+        self.assertFalse(cherry_coverage.passed)
+        self.assertEqual(cherry_coverage.observed, "DISTRIBUTION_MISMATCH")
+        self.assertFalse(cherry_picked.admitted)
+
+    def test_expected_shortfall_policy_requires_explicit_tail_fraction(self):
+        with self.assertRaisesRegex(ValueError, "configured together"):
+            policy(max_expected_shortfall="100")
+        with self.assertRaisesRegex(ValueError, "configured together"):
+            policy(expected_shortfall_tail_fraction="0.05")
+        with self.assertRaises(ValueError):
+            policy(
+                max_expected_shortfall="100",
+                expected_shortfall_tail_fraction="1.01",
+            )
+        with self.assertRaisesRegex(ValueError, "frozen tail distribution digest"):
+            policy(
+                max_expected_shortfall="100",
+                expected_shortfall_tail_fraction="0.05",
+            )
+
+    def test_liquidation_headroom_is_fail_closed_and_exact_at_boundary(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        configured = policy(min_liquidation_headroom="0.25")
+        missing = evaluate_risk(
+            intent,
+            context(liquidation_headroom=None),
+            configured,
+        )
+        missing_rule = next(
+            x for x in missing.rules if x.rule == "liquidation_headroom"
+        )
+        self.assertFalse(missing_rule.passed)
+        self.assertEqual(missing_rule.observed, "UNKNOWN")
+
+        # A numerically valid caller value is no longer financial authority.
+        bare = evaluate_risk(
+            intent,
+            context(liquidation_headroom="0.25"),
+            configured,
+        )
+        bare_rule = next(
+            x for x in bare.rules if x.rule == "liquidation_headroom"
+        )
+        self.assertFalse(bare_rule.passed)
+        self.assertEqual(bare_rule.observed, "UNVERIFIED")
+
+        store = _LiquidationEvidenceStore()
+        bound = liquidation_evidence(store, headroom="0.25")
+        exact = evaluate_risk(
+            intent,
+            context(**bound),
+            configured,
+            evidence_store=store,
+        )
+        exact_rule = next(
+            x for x in exact.rules if x.rule == "liquidation_headroom"
+        )
+        self.assertTrue(exact_rule.passed)
+        self.assertEqual(exact_rule.observed, "0.25")
+        self.assertTrue(exact.admitted)
+
+    def test_negative_liquidation_headroom_is_evidence_not_a_parse_failure(self):
+        configured = policy(min_liquidation_headroom="0.25")
+        store = _LiquidationEvidenceStore()
+        bound = liquidation_evidence(store, headroom="-0.10")
+        increasing = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+            ),
+            context(**bound),
+            configured,
+            evidence_store=store,
+        )
+        increasing_rule = next(
+            x for x in increasing.rules if x.rule == "liquidation_headroom"
+        )
+        self.assertFalse(increasing_rule.passed)
+        self.assertEqual(increasing_rule.observed, "-0.10")
+        self.assertFalse(increasing.admitted)
+
+        protective = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="SELL",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                reduce_only=True,
+            ),
+            context(
+                positions={"ABC": "2"},
+                stress_scenarios=({"ABC": "-0.10"},),
+                **bound,
+            ),
+            configured,
+            evidence_store=store,
+        )
+        protective_rule = next(
+            x for x in protective.rules if x.rule == "liquidation_headroom"
+        )
+        self.assertTrue(protective_rule.passed)
+        self.assertEqual(protective_rule.observed, "-0.10")
+        self.assertTrue(protective.admitted)
+
+    def test_reduce_only_cannot_use_exception_when_tail_risk_worsens(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="SELL",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                reduce_only=True,
+            ),
+            context(
+                positions={"ABC": "10", "XYZ": "10"},
+                marks={"ABC": "100", "XYZ": "50"},
+                stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.10"},),
+                tail_scenarios=({"ABC": "0.10", "XYZ": "-1.00"},),
+                liquidation_headroom="0.10",
+            ),
+            policy(
+                max_abs_position="5",
+                max_expected_shortfall="405",
+                expected_shortfall_tail_fraction="1",
+                required_tail_scenario_set_digest=tail_scenario_set_digest(
+                    ({"ABC": "0.10", "XYZ": "-1.00"},)
+                ),
+                min_liquidation_headroom="0.25",
+            ),
+        )
+        failed = {item.rule for item in decision.rules if not item.passed}
+        self.assertIn("expected_shortfall", failed)
+        self.assertIn("liquidation_headroom", failed)
+        self.assertIn("position_limit", failed)
+        self.assertEqual(
+            next(x for x in decision.rules if x.rule == "expected_shortfall").observed,
+            "410.00",
+        )
+        self.assertFalse(decision.admitted)
+
+    def test_reduce_only_exception_requires_base_scenario_coverage_for_removed_hedge(self):
+        intent = RiskIntent.create(
+            symbol="HEDGE",
+            side="SELL",
+            quantity="1",
+            price="100",
+            expected_state_version=7,
+            reduce_only=True,
+        )
+        configured = policy(
+            max_abs_position="0.5",
+            max_expected_shortfall="10",
+            expected_shortfall_tail_fraction="1",
+            required_tail_scenario_set_digest=tail_scenario_set_digest(
+                ({"HEDGE": "0.50", "CORE": "-0.50"},)
+            ),
+            min_liquidation_headroom="0.25",
+            max_stress_loss="10",
+        )
+        # HEDGE is fully removed by the intent while CORE remains projected.
+        # A scenario that omits HEDGE cannot prove that removing it is
+        # non-worsening: the omitted base position may have been the hedge.
+        incomplete = evaluate_risk(
+            intent,
+            context(
+                positions={"HEDGE": "1", "CORE": "1"},
+                marks={"HEDGE": "100", "CORE": "100"},
+                stress_scenarios=({"CORE": "-0.50"},),
+                tail_scenarios=({"CORE": "-0.50"},),
+                liquidation_headroom="0.10",
+            ),
+            configured,
+        )
+        self.assertFalse(incomplete.admitted)
+        failed = {item.rule for item in incomplete.rules if not item.passed}
+        self.assertIn("position_limit", failed)
+        self.assertIn("expected_shortfall", failed)
+        self.assertIn("liquidation_headroom", failed)
+
+        # With complete base coverage we can actually evaluate the hedge
+        # removal. Here HEDGE offsets CORE in the base portfolio, so removing
+        # it worsens tail loss and the protective exception still must not fire.
+        complete = evaluate_risk(
+            intent,
+            context(
+                positions={"HEDGE": "1", "CORE": "1"},
+                marks={"HEDGE": "100", "CORE": "100"},
+                stress_scenarios=({"HEDGE": "0.50", "CORE": "-0.50"},),
+                tail_scenarios=({"HEDGE": "0.50", "CORE": "-0.50"},),
+                liquidation_headroom="0.10",
+            ),
+            configured,
+        )
+        self.assertFalse(complete.admitted)
+        self.assertEqual(
+            next(x for x in complete.rules if x.rule == "expected_shortfall").observed,
+            "50.00",
+        )
+
+    def test_strict_reduce_only_can_pass_known_liquidation_breach_when_tail_improves(self):
+        store = _LiquidationEvidenceStore()
+        bound = liquidation_evidence(store, headroom="0.10")
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="SELL",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                reduce_only=True,
+            ),
+            context(
+                positions={"ABC": "10"},
+                marks={"ABC": "100"},
+                stress_scenarios=({"ABC": "-0.50"},),
+                tail_scenarios=({"ABC": "-0.50"},),
+                **bound,
+            ),
+            policy(
+                max_abs_position="5",
+                max_expected_shortfall="100",
+                expected_shortfall_tail_fraction="1",
+                required_tail_scenario_set_digest=tail_scenario_set_digest(
+                    ({"ABC": "-0.50"},)
+                ),
+                min_liquidation_headroom="0.25",
+                max_stress_loss="100",
+            ),
+            evidence_store=store,
+        )
+        self.assertTrue(decision.admitted)
+        self.assertTrue(
+            next(x for x in decision.rules if x.rule == "liquidation_headroom").passed
+        )
+
+
+    def test_liquidation_evidence_scope_cannot_cross_account_environment_or_margin(self):
+        store = _LiquidationEvidenceStore()
+        bound = liquidation_evidence(
+            store,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="PAPER",
+            margin_mode="CROSS",
+            risk_tier_version="tier-v1",
+        )
+        evidence = bound["liquidation_headroom_evidence"]
+        mismatches = (
+            LiquidationScope("KRAKEN", "acct-1", "PAPER", "CROSS", "tier-v1"),
+            LiquidationScope("BYBIT", "acct-2", "PAPER", "CROSS", "tier-v1"),
+            LiquidationScope("BYBIT", "acct-1", "LIVE", "CROSS", "tier-v1"),
+            LiquidationScope("BYBIT", "acct-1", "PAPER", "ISOLATED", "tier-v1"),
+            LiquidationScope("BYBIT", "acct-1", "PAPER", "CROSS", "tier-v2"),
+        )
+        for bad_scope in mismatches:
+            with self.subTest(scope=bad_scope):
+                with self.assertRaisesRegex(ValueError, "scope differs"):
+                    context(
+                        liquidation_headroom=evidence.headroom,
+                        liquidation_scope=bad_scope,
+                        liquidation_headroom_evidence=evidence,
+                        decision_time=bound["decision_time"],
+                    )
+
+    def test_liquidation_evidence_future_stale_or_tampered_fails_closed(self):
+        configured = policy(min_liquidation_headroom="0.25")
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="100",
+            expected_state_version=7,
+        )
+
+        future_store = _LiquidationEvidenceStore()
+        future = liquidation_evidence(
+            future_store,
+            headroom="0.50",
+            observed_at=LIQUIDATION_BASE + timedelta(minutes=10),
+        )
+        future["decision_time"] = LIQUIDATION_BASE + timedelta(minutes=9)
+        future_decision = evaluate_risk(
+            intent,
+            context(**future),
+            configured,
+            evidence_store=future_store,
+        )
+        self.assertFalse(
+            next(
+                x for x in future_decision.rules
+                if x.rule == "liquidation_headroom"
+            ).passed
+        )
+
+        stale_store = _LiquidationEvidenceStore()
+        stale = liquidation_evidence(
+            stale_store,
+            headroom="0.50",
+            observed_at=LIQUIDATION_BASE,
+            expires_at=LIQUIDATION_BASE + timedelta(minutes=2),
+        )
+        stale["decision_time"] = LIQUIDATION_BASE + timedelta(minutes=3)
+        stale_decision = evaluate_risk(
+            intent,
+            context(**stale),
+            configured,
+            evidence_store=stale_store,
+        )
+        self.assertFalse(
+            next(
+                x for x in stale_decision.rules
+                if x.rule == "liquidation_headroom"
+            ).passed
+        )
+
+        tampered_store = _LiquidationEvidenceStore()
+        tampered = liquidation_evidence(tampered_store, headroom="0.50")
+        artifact_id = tampered["liquidation_headroom_evidence"].artifact_id
+        tampered_store._objects[artifact_id] = b"{}"
+        tampered_decision = evaluate_risk(
+            intent,
+            context(**tampered),
+            configured,
+            evidence_store=tampered_store,
+        )
+        tampered_rule = next(
+            x for x in tampered_decision.rules if x.rule == "liquidation_headroom"
+        )
+        self.assertFalse(tampered_rule.passed)
+        self.assertEqual(tampered_rule.observed, "UNVERIFIED")
+
+    def test_liquidation_evidence_identity_is_in_risk_fingerprint(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="100",
+            expected_state_version=7,
+        )
+        configured = policy(min_liquidation_headroom="0.25")
+
+        store_a = _LiquidationEvidenceStore()
+        tier_a = liquidation_evidence(
+            store_a,
+            headroom="0.50",
+            risk_tier_version="tier-v1",
+        )
+        decision_a = evaluate_risk(
+            intent,
+            context(**tier_a),
+            configured,
+            evidence_store=store_a,
+        )
+
+        store_b = _LiquidationEvidenceStore()
+        tier_b = liquidation_evidence(
+            store_b,
+            headroom="0.50",
+            risk_tier_version="tier-v2",
+        )
+        decision_b = evaluate_risk(
+            intent,
+            context(**tier_b),
+            configured,
+            evidence_store=store_b,
+        )
+
+        self.assertTrue(decision_a.admitted)
+        self.assertTrue(decision_b.admitted)
+        self.assertNotEqual(
+            decision_a.input_fingerprint,
+            decision_b.input_fingerprint,
+        )
+        self.assertNotEqual(
+            risk_decision_fingerprint(decision_a),
+            risk_decision_fingerprint(decision_b),
+        )
+
+    def test_tail_and_liquidation_inputs_reject_binary_float(self):
+        with self.assertRaises(TypeError):
+            context(tail_scenarios=({"ABC": -0.10},))
+        with self.assertRaises(TypeError):
+            context(liquidation_headroom=0.25)
+        with self.assertRaises(TypeError):
+            policy(
+                max_expected_shortfall=100.0,
+                expected_shortfall_tail_fraction="0.05",
+            )
+        with self.assertRaises(TypeError):
+            policy(
+                max_expected_shortfall="100",
+                expected_shortfall_tail_fraction=0.05,
+            )
+
     def test_evaluate_risk_revalidates_direct_dataclass_construction(self):
         good_context = context()
         good_policy = policy()
@@ -966,6 +1726,52 @@ class IndependentRiskTests(unittest.TestCase):
             evaluate_risk(valid_intent, {}, policy())
         with self.assertRaisesRegex(TypeError, "policy must be RiskPolicy"):
             evaluate_risk(valid_intent, context(), {})
+
+    def test_risk_input_fingerprint_distinguishes_equal_decisions_from_different_evidence(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        first_tail = (
+            {"ABC": "-0.10"},
+            {"ABC": "-0.20"},
+        )
+        changed_tail = (
+            {"ABC": "-0.05"},
+            {"ABC": "-0.20"},
+        )
+        first = evaluate_risk(
+            intent,
+            context(tail_scenarios=first_tail),
+            policy(
+                max_expected_shortfall="100",
+                expected_shortfall_tail_fraction="0.50",
+                required_tail_scenario_set_digest=tail_scenario_set_digest(first_tail),
+            ),
+        )
+        changed_evidence = evaluate_risk(
+            intent,
+            context(tail_scenarios=changed_tail),
+            policy(
+                max_expected_shortfall="100",
+                expected_shortfall_tail_fraction="0.50",
+                required_tail_scenario_set_digest=tail_scenario_set_digest(changed_tail),
+            ),
+        )
+        first_es = next(x for x in first.rules if x.rule == "expected_shortfall")
+        changed_es = next(
+            x for x in changed_evidence.rules if x.rule == "expected_shortfall"
+        )
+        self.assertEqual(first_es.observed, changed_es.observed)
+        self.assertNotEqual(
+            first.input_fingerprint,
+            changed_evidence.input_fingerprint,
+        )
+        self.assertNotEqual(
+            risk_decision_fingerprint(first),
+            risk_decision_fingerprint(changed_evidence),
+        )
+        self.assertEqual(len(first.input_fingerprint), 64)
 
     def test_risk_decision_fingerprint_is_deterministic_and_evidence_sensitive(self):
         intent = RiskIntent.create(

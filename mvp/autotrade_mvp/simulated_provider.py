@@ -136,6 +136,7 @@ class SimulatedProvider:
         currency: str = "USD",
         initial_cash="100000",
         fee_rate="0.001",
+        transport_faults: Mapping[str, str] | None = None,
     ) -> None:
         self.account_id = _text(account_id, name="account_id")
         self.currency = _text(currency, name="currency").upper()
@@ -149,6 +150,18 @@ class SimulatedProvider:
         self._attempts: dict[str, SimulatedOrder] = {}
         self.fills: list[dict[str, Any]] = []
         self.outbound_request_count = 0
+        allowed_faults = {"BEFORE_SEND_OUTAGE", "AFTER_ACCEPT_RESPONSE_LOST"}
+        raw_faults = {} if transport_faults is None else dict(transport_faults)
+        if any(
+            not isinstance(key, str)
+            or not key.strip()
+            or value not in allowed_faults
+            for key, value in raw_faults.items()
+        ):
+            raise ValueError(
+                "transport_faults contains an unsupported deterministic fault"
+            )
+        self._transport_faults = dict(raw_faults)
 
     @staticmethod
     def _validate_attempt_id(value: str) -> str:
@@ -312,9 +325,12 @@ class SimulatedProvider:
 
         if not isinstance(request, Mapping):
             raise TypeError("request must be a mapping")
+        fault = self._transport_faults.get(client_order_id)
+        if fault == "BEFORE_SEND_OUTAGE":
+            raise ConnectionError("simulated outage before final send guard")
         final_guard()
         self.outbound_request_count += 1
-        return self.submit_order(
+        result = self.submit_order(
             attempt_id=request["attempt_id"],
             client_order_id=client_order_id,
             instrument_version=request["instrument_version"],
@@ -324,6 +340,11 @@ class SimulatedProvider:
             now=request["now"],
             fill_immediately=request.get("fill_immediately", True),
         )
+        if fault == "AFTER_ACCEPT_RESPONSE_LOST":
+            raise TimeoutError(
+                "simulated provider accepted order but response was lost"
+            )
+        return result
 
     def activity_fills(self) -> tuple[dict[str, Any], ...]:
         return tuple(self.fills)

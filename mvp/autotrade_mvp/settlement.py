@@ -8,7 +8,7 @@ future proceeds cannot be silently reused before their settlement date.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Iterable, Mapping
 
@@ -33,6 +33,14 @@ def _text(value: str, *, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
+
+
+def _utc(value: datetime, *, name: str) -> datetime:
+    if not isinstance(value, datetime):
+        raise TypeError(f"{name} must be a datetime")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware")
+    return value.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +73,85 @@ class SettlementObligation:
 
 
 @dataclass(frozen=True, slots=True)
+class SettlementEvidence:
+    """Immutable evidence that a settlement fact became available locally."""
+
+    obligation_id: str
+    evidence_ref: str
+    observed_at: datetime
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "obligation_id",
+            _text(self.obligation_id, name="evidence obligation_id"),
+        )
+        object.__setattr__(
+            self,
+            "evidence_ref",
+            _text(self.evidence_ref, name="settlement_evidence_ref"),
+        )
+        object.__setattr__(
+            self,
+            "observed_at",
+            _utc(self.observed_at, name="evidence observed_at"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SettlementCheckpoint:
+    """Explicit restart boundary: cash plus the exact evidence prefix it includes."""
+
+    checkpoint_id: str
+    settled_cash: tuple[tuple[str, Decimal], ...]
+    settled_obligation_evidence: tuple[SettlementEvidence, ...]
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        checkpoint_id: str,
+        settled_cash: Mapping[str, Decimal | str | int],
+        settled_obligation_evidence: Mapping[str, SettlementEvidence],
+    ) -> "SettlementCheckpoint":
+        cash: dict[str, Decimal] = {}
+        for raw_currency, raw_amount in settled_cash.items():
+            currency = _text(raw_currency, name="checkpoint currency").upper()
+            if currency in cash:
+                raise SettlementConflict(
+                    "checkpoint contains duplicate normalized currency codes"
+                )
+            cash[currency] = _decimal(raw_amount, name="checkpoint settled_cash")
+
+        evidence: dict[str, SettlementEvidence] = {}
+        for raw_id, record in settled_obligation_evidence.items():
+            obligation_id = _text(raw_id, name="checkpoint obligation_id")
+            if not isinstance(record, SettlementEvidence):
+                raise TypeError("checkpoint settlement evidence must be SettlementEvidence")
+            if record.obligation_id != obligation_id:
+                raise SettlementConflict(
+                    "checkpoint evidence key does not match evidence obligation_id"
+                )
+            if obligation_id in evidence:
+                raise SettlementConflict(
+                    "checkpoint contains duplicate normalized obligation ids"
+                )
+            evidence[obligation_id] = record
+
+        return cls(
+            checkpoint_id=_text(checkpoint_id, name="checkpoint_id"),
+            settled_cash=tuple(sorted(cash.items())),
+            settled_obligation_evidence=tuple(evidence[k] for k in sorted(evidence)),
+        )
+
+    def cash_dict(self) -> dict[str, Decimal]:
+        return dict(self.settled_cash)
+
+    def evidence_dict(self) -> dict[str, SettlementEvidence]:
+        return {record.obligation_id: record for record in self.settled_obligation_evidence}
+
+
+@dataclass(frozen=True, slots=True)
 class SettlementSnapshot:
     currency: str
     settled_cash: Decimal
@@ -93,7 +180,7 @@ class SettlementBook:
         *,
         settled_cash: dict[str, Decimal | str | int] | None = None,
         obligations: Iterable[SettlementObligation] = (),
-        settled_obligation_evidence: Mapping[str, str] | None = None,
+        settled_obligation_evidence: Mapping[str, SettlementEvidence] | None = None,
     ) -> None:
         self._settled_cash: dict[str, Decimal] = {}
         for currency, amount in (settled_cash or {}).items():
@@ -106,12 +193,17 @@ class SettlementBook:
         self._obligations: dict[str, SettlementObligation] = {}
         self._by_cause_component: dict[tuple[str, str], SettlementObligation] = {}
         self._settled_ids: set[str] = set()
-        self._settlement_evidence: dict[str, str] = {}
+        self._settlement_evidence: dict[str, SettlementEvidence] = {}
         for obligation in obligations:
             self.add(obligation)
-        for obligation_id, evidence_ref in (settled_obligation_evidence or {}).items():
+        for obligation_id, record in (settled_obligation_evidence or {}).items():
             key = _text(obligation_id, name="settled_obligation_id")
-            evidence = _text(evidence_ref, name="settlement_evidence_ref")
+            if not isinstance(record, SettlementEvidence):
+                raise TypeError("settled obligation evidence must be SettlementEvidence")
+            if record.obligation_id != key:
+                raise SettlementConflict(
+                    "settlement evidence key does not match evidence obligation_id"
+                )
             if key not in self._obligations:
                 raise SettlementConflict(
                     "settled obligation evidence cannot reference an unknown obligation"
@@ -120,12 +212,106 @@ class SettlementBook:
                 raise SettlementConflict(
                     "settled obligation evidence contains duplicate normalized obligation ids"
                 )
+            obligation = self._obligations[key]
+            if record.observed_at.date() < obligation.settlement_date:
+                raise SettlementConflict(
+                    "settlement evidence predates contractual settlement date"
+                )
             self._settled_ids.add(key)
-            self._settlement_evidence[key] = evidence
+            self._settlement_evidence[key] = record
 
     @property
     def obligations(self) -> tuple[SettlementObligation, ...]:
         return tuple(self._obligations.values())
+
+    @property
+    def settled_obligation_evidence(self) -> dict[str, SettlementEvidence]:
+        """Copy of durable settlement evidence bound to settled obligations."""
+
+        return dict(self._settlement_evidence)
+
+    def checkpoint(self, checkpoint_id: str) -> SettlementCheckpoint:
+        """Capture the exact restart boundary without re-applying its history."""
+
+        return SettlementCheckpoint.create(
+            checkpoint_id=checkpoint_id,
+            settled_cash=self._settled_cash,
+            settled_obligation_evidence=self._settlement_evidence,
+        )
+
+    @classmethod
+    def from_history(
+        cls,
+        *,
+        checkpoint: SettlementCheckpoint,
+        obligations: Iterable[SettlementObligation] = (),
+        settled_obligation_evidence: Mapping[str, SettlementEvidence] | None = None,
+    ) -> "SettlementBook":
+        """Restore checkpoint state and replay only the strict evidence suffix.
+
+        The checkpoint carries the exact settled-history prefix already reflected
+        in its cash. Full retained history is accepted only when that prefix
+        matches exactly; this prevents current cash + full history from being
+        applied twice after restart.
+        """
+
+        if not isinstance(checkpoint, SettlementCheckpoint):
+            raise TypeError("checkpoint must be SettlementCheckpoint")
+
+        obligations_tuple = tuple(obligations)
+        validation = cls(
+            settled_cash=checkpoint.cash_dict(),
+            obligations=obligations_tuple,
+            settled_obligation_evidence=checkpoint.evidence_dict(),
+        )
+        normalized: dict[str, SettlementEvidence] = {}
+        for raw_id, record in (settled_obligation_evidence or {}).items():
+            obligation_id = _text(raw_id, name="settled_obligation_id")
+            if not isinstance(record, SettlementEvidence):
+                raise TypeError("settled obligation evidence must be SettlementEvidence")
+            if record.obligation_id != obligation_id:
+                raise SettlementConflict(
+                    "settlement evidence key does not match evidence obligation_id"
+                )
+            if obligation_id in normalized:
+                raise SettlementConflict(
+                    "settled obligation evidence contains duplicate normalized obligation ids"
+                )
+            if obligation_id not in validation._obligations:
+                raise SettlementConflict(
+                    "settled obligation evidence cannot reference an unknown obligation"
+                )
+            normalized[obligation_id] = record
+
+        ordered_ids = sorted(
+            normalized,
+            key=lambda key: (
+                validation._obligations[key].settlement_date,
+                key,
+            ),
+        )
+        checkpoint_evidence = checkpoint.evidence_dict()
+        prefix_ids = ordered_ids[: len(checkpoint_evidence)]
+        if set(prefix_ids) != set(checkpoint_evidence):
+            raise SettlementConflict(
+                "checkpoint settled history is not the exact retained-history prefix"
+            )
+        for obligation_id in prefix_ids:
+            if normalized[obligation_id] != checkpoint_evidence[obligation_id]:
+                raise SettlementConflict(
+                    "checkpoint settlement evidence conflicts with retained history"
+                )
+
+        book = validation
+        for obligation_id in ordered_ids[len(prefix_ids) :]:
+            obligation = book._obligations[obligation_id]
+            record = normalized[obligation_id]
+            book.settle(
+                obligation_id,
+                as_of=max(obligation.settlement_date, record.observed_at.date()),
+                settlement_evidence=record,
+            )
+        return book
 
     def add(self, obligation: SettlementObligation) -> bool:
         if not isinstance(obligation, SettlementObligation):
@@ -155,43 +341,63 @@ class SettlementBook:
         obligation_id: str,
         *,
         as_of: date,
-        settlement_evidence_ref: str,
+        settlement_evidence: SettlementEvidence,
     ) -> bool:
         key = _text(obligation_id, name="obligation_id")
-        evidence = _text(settlement_evidence_ref, name="settlement_evidence_ref")
+        if type(as_of) is not date:
+            raise TypeError("as_of must be a date value")
+        if not isinstance(settlement_evidence, SettlementEvidence):
+            raise TypeError("settlement_evidence must be SettlementEvidence")
+        if settlement_evidence.obligation_id != key:
+            raise SettlementConflict(
+                "settlement evidence obligation_id does not match requested obligation"
+            )
         obligation = self._obligations.get(key)
         if obligation is None:
             raise SettlementConflict("Cannot settle an unknown obligation")
         if key in self._settled_ids:
-            if self._settlement_evidence[key] != evidence:
+            if self._settlement_evidence[key] != settlement_evidence:
                 raise SettlementConflict(
                     "settlement retry used different settlement evidence"
                 )
             return False
         if as_of < obligation.settlement_date:
             raise SettlementConflict("Cannot settle before contractual settlement date")
+        if settlement_evidence.observed_at.date() < obligation.settlement_date:
+            raise SettlementConflict(
+                "settlement evidence predates contractual settlement date"
+            )
+        if settlement_evidence.observed_at.date() > as_of:
+            raise SettlementConflict(
+                "settlement evidence was not yet available as of projection date"
+            )
         current = self._settled_cash.get(obligation.currency, Decimal("0"))
         self._settled_cash[obligation.currency] = current + obligation.amount
         self._settled_ids.add(key)
-        self._settlement_evidence[key] = evidence
+        self._settlement_evidence[key] = settlement_evidence
         return True
 
     def settle_due(
         self,
         *,
         as_of: date,
-        settlement_evidence: Mapping[str, str],
+        settlement_evidence: Mapping[str, SettlementEvidence],
     ) -> tuple[str, ...]:
-        """Settle only due obligations that carry explicit provider/reconciliation evidence.
+        """Settle only due obligations whose evidence was already observed by as_of."""
 
-        Contractual due date alone never makes a receivable spendable.
-        """
+        if type(as_of) is not date:
+            raise TypeError("as_of must be a date value")
         if not isinstance(settlement_evidence, Mapping):
             raise TypeError("settlement_evidence must be a mapping")
-        normalized_evidence: dict[str, str] = {}
-        for raw_id, raw_ref in settlement_evidence.items():
+        normalized_evidence: dict[str, SettlementEvidence] = {}
+        for raw_id, record in settlement_evidence.items():
             obligation_id = _text(raw_id, name="settlement_evidence obligation_id")
-            evidence_ref = _text(raw_ref, name="settlement_evidence_ref")
+            if not isinstance(record, SettlementEvidence):
+                raise TypeError("settlement evidence values must be SettlementEvidence")
+            if record.obligation_id != obligation_id:
+                raise SettlementConflict(
+                    "settlement evidence key does not match evidence obligation_id"
+                )
             if obligation_id not in self._obligations:
                 raise SettlementConflict(
                     "settlement evidence references an unknown obligation"
@@ -200,22 +406,24 @@ class SettlementBook:
                 raise SettlementConflict(
                     "settlement evidence contains duplicate normalized obligation ids"
                 )
-            normalized_evidence[obligation_id] = evidence_ref
+            normalized_evidence[obligation_id] = record
+
         settled: list[str] = []
         for obligation in sorted(
             self._obligations.values(),
             key=lambda item: (item.settlement_date, item.obligation_id),
         ):
-            evidence_ref = normalized_evidence.get(obligation.obligation_id)
+            record = normalized_evidence.get(obligation.obligation_id)
             if (
                 obligation.obligation_id not in self._settled_ids
                 and obligation.settlement_date <= as_of
-                and evidence_ref is not None
+                and record is not None
+                and record.observed_at.date() <= as_of
             ):
                 self.settle(
                     obligation.obligation_id,
                     as_of=as_of,
-                    settlement_evidence_ref=evidence_ref,
+                    settlement_evidence=record,
                 )
                 settled.append(obligation.obligation_id)
         return tuple(settled)

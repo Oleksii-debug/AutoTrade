@@ -94,8 +94,8 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "UNKNOWN")
         self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
         self.assertEqual(result["evidence"], [])
-        self.assertIsNone(result["provider_received_at"])
-        self.assertEqual(result["observed_at"], NOW)
+        self.assertNotIn("provider_received_at", result)
+        self.assertNotIn("observed_at", result)
 
     def test_explicit_provider_error_is_rejected(self):
         result = parse_submission_response(

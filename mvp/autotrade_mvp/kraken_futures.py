@@ -226,12 +226,12 @@ def parse_submission_response(
     if transport_ambiguous:
         if response is not None:
             raise ProviderCoreError("ambiguous transport must not fabricate a provider response")
+        # The durable SubmissionAttempt owns local observed_at/environment.
+        # No provider response exists, so provider_received_at must be omitted.
         return {
             "attempt_id": aid,
             "outcome": "UNKNOWN",
             "client_order_id": cid,
-            "provider_received_at": None,
-            "observed_at": when,
             "reason_code": "KRAKEN_FUTURES_TRANSPORT_AMBIGUOUS",
             "evidence": [],
             "retry_disposition": "RECONCILE_FIRST",
@@ -256,7 +256,6 @@ def parse_submission_response(
             "attempt_id": aid,
             "outcome": "REJECTED",
             "client_order_id": cid,
-            "provider_received_at": when,
             "reason_code": "KRAKEN_FUTURES_" + str(error),
             "evidence": evidence,
             "retry_disposition": "NEVER",
@@ -278,7 +277,6 @@ def parse_submission_response(
         "outcome": "ACKNOWLEDGED",
         "provider_order_id": provider_order_id,
         "client_order_id": cid,
-        "provider_received_at": when,
         "evidence": evidence,
         "retry_disposition": "NEVER",
     }

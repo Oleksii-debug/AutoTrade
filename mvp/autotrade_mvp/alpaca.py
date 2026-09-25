@@ -19,7 +19,11 @@ from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .capabilities import CapabilitySnapshot
-from .provider_core import ProviderResponseObservation, Surface
+from .provider_core import (
+    ProviderResponseObservation,
+    ProviderSubmissionObservation,
+    Surface,
+)
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
@@ -478,36 +482,48 @@ def _uuid_text(value: object, *, name: str) -> str:
 
 
 def _response_evidence(
-    response: Mapping[str, object],
+    observation: ProviderSubmissionObservation,
     *,
-    observed_at: str,
-    environment: str,
+    prepared_request: AlpacaPreparedRequest,
 ) -> dict[str, str]:
-    encoded = json.dumps(
-        response,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
-    digest = sha256(encoded).hexdigest()
-    env = _text(environment, name="environment").upper()
+    if not isinstance(observation, ProviderSubmissionObservation):
+        raise TypeError("observation must be ProviderSubmissionObservation")
+    if not isinstance(prepared_request, AlpacaPreparedRequest):
+        raise TypeError("prepared_request must be AlpacaPreparedRequest")
+    cid = validate_client_order_id(
+        _text(
+            prepared_request.body.get("client_order_id"),
+            name="prepared_request.client_order_id",
+        )
+    )
+    observation.require_scope(
+        provider_id="ALPACA",
+        endpoint=prepared_request.endpoint,
+        prepared_request_sha256=prepared_request.body_sha256,
+        capability_snapshot_ids=prepared_request.capability_snapshot_ids,
+        instrument_versions=prepared_request.instrument_versions,
+        account_id=prepared_request.account_id,
+        environment=prepared_request.environment,
+        client_order_id=cid,
+    )
+    env = prepared_request.environment
     if env == "PAPER":
         host = "paper-api.alpaca.markets"
     elif env == "LIVE":
         host = "api.alpaca.markets"
     else:
         raise AlpacaAdapterError("response environment must be PAPER or LIVE")
+    source = f"https://{host}/v2/orders"
     return {
         "artifact_id": str(
             uuid5(
                 NAMESPACE_URL,
-                f"https://{host}/v2/orders#sha256:{digest}",
+                f"{source}#{observation.evidence_ref}",
             )
         ),
-        "sha256": "sha256:" + digest,
-        "source_uri": f"https://{host}/v2/orders",
-        "observed_at": _utc_text(observed_at, name="observed_at"),
+        "sha256": observation.response_sha256,
+        "source_uri": source,
+        "observed_at": observation.observed_at,
         "rights_id": "provider-observation-alpaca",
     }
 
@@ -515,33 +531,33 @@ def _response_evidence(
 def parse_submission_response(
     *,
     attempt_id: str,
-    client_order_id: str,
-    response: Mapping[str, object] | None,
-    observed_at: str,
-    environment: str,
+    prepared_request: AlpacaPreparedRequest,
+    observation: ProviderSubmissionObservation | None = None,
     transport_ambiguous: bool = False,
 ) -> dict[str, object]:
-    """Map a recorded successful create-order response to SubmissionResult.
+    """Map one durable exact create-order response to SubmissionResult.
 
-    A returned Order object is acknowledgement only. Even if its status says
-    filled, unique execution economics must come from activity evidence.
+    Acknowledgement/rejection authority comes only from exact response bytes
+    already bound to the canonical guarded SubmissionSent journal event. A
+    decoded mapping supplied by a caller is never a write-evidence authority.
     """
 
     aid = _uuid_text(attempt_id, name="attempt_id")
-    cid = validate_client_order_id(client_order_id)
-    when = _utc_text(observed_at, name="observed_at")
-    env = _text(environment, name="environment").upper()
-    if env not in {"PAPER", "LIVE"}:
-        raise AlpacaAdapterError("response environment must be PAPER or LIVE")
+    if not isinstance(prepared_request, AlpacaPreparedRequest):
+        raise TypeError("prepared_request must be AlpacaPreparedRequest")
+    cid = validate_client_order_id(
+        _text(
+            prepared_request.body.get("client_order_id"),
+            name="prepared_request.client_order_id",
+        )
+    )
     if type(transport_ambiguous) is not bool:
         raise TypeError("transport_ambiguous must be boolean")
     if transport_ambiguous:
-        if response is not None:
+        if observation is not None:
             raise AlpacaAdapterError(
                 "ambiguous transport must not fabricate a provider response"
             )
-        # Scope/time remain on the durable SubmissionAttempt. Transport
-        # ambiguity has no authoritative provider receive timestamp.
         return {
             "attempt_id": aid,
             "outcome": "UNKNOWN",
@@ -550,8 +566,19 @@ def parse_submission_response(
             "evidence": [],
             "retry_disposition": "RECONCILE_FIRST",
         }
+    if not isinstance(observation, ProviderSubmissionObservation):
+        raise TypeError(
+            "observation must be durable ProviderSubmissionObservation"
+        )
+    if observation.response_binding.attempt_id != aid:
+        raise AlpacaAdapterError("submission observation attempt_id mismatch")
+    evidence = _response_evidence(
+        observation,
+        prepared_request=prepared_request,
+    )
+    response = observation.payload
     if not isinstance(response, Mapping):
-        raise TypeError("response must be a mapping")
+        raise AlpacaAdapterError("provider response payload must be an object")
     provider_order_id = _uuid_text(response.get("id"), name="response.id")
     echoed = validate_client_order_id(
         _text(response.get("client_order_id"), name="response.client_order_id")
@@ -565,13 +592,7 @@ def parse_submission_response(
         "outcome": "ACKNOWLEDGED",
         "provider_order_id": provider_order_id,
         "client_order_id": cid,
-        "evidence": [
-            _response_evidence(
-                response,
-                observed_at=when,
-                environment=env,
-            )
-        ],
+        "evidence": [evidence],
         "retry_disposition": "NEVER",
     }
 

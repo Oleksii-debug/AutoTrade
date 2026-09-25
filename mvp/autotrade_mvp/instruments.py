@@ -140,7 +140,7 @@ def _evidence_ref(value: Mapping[str, object]) -> Mapping[str, object]:
 
     artifact_id = _text(value["artifact_id"], "artifact_id")
     try:
-        UUID(artifact_id)
+        artifact_id = str(UUID(artifact_id))
     except (ValueError, TypeError, AttributeError) as error:
         raise InstrumentRegistryError("metadata artifact_id must be a UUID") from error
 
@@ -303,9 +303,10 @@ class InstrumentVersion:
 
     def __post_init__(self) -> None:
         try:
-            UUID(self.instrument_id)
+            canonical_instrument_id = str(UUID(self.instrument_id))
         except (ValueError, TypeError, AttributeError) as error:
             raise InstrumentRegistryError("instrument_id must be a UUID") from error
+        object.__setattr__(self, "instrument_id", canonical_instrument_id)
         if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version < 1:
             raise InstrumentRegistryError("version must be a positive integer")
 

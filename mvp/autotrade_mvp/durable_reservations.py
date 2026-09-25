@@ -22,6 +22,7 @@ from research.autotrade_research.artifacts.store import (
 )
 from research.autotrade_research.io.strict_json import strict_json_loads
 
+from .dispatch import submission_attempt_aggregate_id
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reservations import (
     ReservationBook,
@@ -255,8 +256,10 @@ class DurableReservationBook:
 
             try:
                 if operation == "MARK_TERMINAL":
+                    current = book.get(request.get("reservation_id"))
                     self._verify_resolution_evidence(
                         reservation_id=request.get("reservation_id"),
+                        intent_id=current.intent_id,
                         outcome=request.get("outcome"),
                         provider=request.get("provider"),
                         attempt_id=request.get("attempt_id"),
@@ -596,12 +599,14 @@ class DurableReservationBook:
         self,
         *,
         reservation_id: object,
+        intent_id: object,
         outcome: object,
         provider: object,
         attempt_id: object,
         resolution_evidence: object,
     ) -> str:
         rid = _text(reservation_id, name="reservation_id")
+        intent = _text(intent_id, name="intent_id")
         terminal_outcome = _text(outcome, name="outcome").upper()
         provider_name = _text(provider, name="provider").upper()
         attempt = _text(attempt_id, name="attempt_id")
@@ -614,6 +619,15 @@ class DurableReservationBook:
             )
         try:
             manifest = self.resolution_artifact_store.load_manifest(artifact_id)
+            manifest_hash = manifest.get("manifest_hash")
+            if (
+                not isinstance(manifest_hash, str)
+                or not manifest_hash.startswith("sha256:")
+                or len(manifest_hash) != 71
+            ):
+                raise ArtifactIntegrityError(
+                    "resolution evidence manifest lacks canonical integrity binding"
+                )
             if manifest.get("sha256") != f"sha256:{digest}":
                 raise ArtifactIntegrityError(
                     "resolution evidence reference digest does not match manifest"
@@ -645,18 +659,68 @@ class DurableReservationBook:
             "environment": self.environment,
             "account_id": self.account_id,
             "reservation_id": rid,
+            "intent_id": intent,
             "provider": provider_name,
             "attempt_id": attempt,
             "outcome": terminal_outcome,
             "reconciliation_complete": True,
         }
-        if receipt != expected:
+        receipt_canonical = canonical_json(receipt)
+        expected_canonical = canonical_json(expected)
+        if receipt_canonical != expected_canonical:
             raise ReservationConflict(
                 "resolution evidence receipt does not match reservation scope"
             )
-        if raw != canonical_json(receipt).encode("utf-8"):
+        if raw != receipt_canonical.encode("utf-8"):
             raise ReservationConflict(
                 "resolution evidence receipt must use canonical JSON bytes"
+            )
+
+        aggregate_id = submission_attempt_aggregate_id(
+            environment=self.environment,
+            account_id=self.account_id,
+            attempt_id=attempt,
+        )
+        attempt_events = self.store.load_events(
+            "submission_attempt",
+            aggregate_id,
+        )
+        if not attempt_events:
+            raise ReservationConflict(
+                "resolution evidence is not bound to a durable submission attempt"
+            )
+        prepared = attempt_events[0]
+        if prepared.get("event_type") != "SubmissionPrepared":
+            raise ReservationConflict(
+                "submission attempt does not start with durable preparation"
+            )
+        prepared_payload = prepared.get("payload")
+        if not isinstance(prepared_payload, dict):
+            raise ReservationConflict(
+                "submission attempt preparation payload is invalid"
+            )
+        if (
+            prepared_payload.get("environment") != self.environment
+            or prepared_payload.get("account_id") != self.account_id
+            or _text(
+                prepared_payload.get("provider"),
+                name="submission provider",
+            ).upper()
+            != provider_name
+            or prepared_payload.get("intent_id") != intent
+        ):
+            raise ReservationConflict(
+                "resolution evidence does not match durable submission scope"
+            )
+        if (
+            terminal_outcome == "PROVEN_ABSENT"
+            and not any(
+                event.get("event_type") == "SubmissionUnknown"
+                for event in attempt_events
+            )
+        ):
+            raise ReservationConflict(
+                "PROVEN_ABSENT requires a durable UNKNOWN submission state"
             )
         return evidence
 
@@ -672,11 +736,13 @@ class DurableReservationBook:
         resolution_evidence: str,
     ) -> ReservationSnapshot:
         rid = _text(reservation_id, name="reservation_id")
+        current = self.get(rid)
         terminal_outcome = _text(outcome, name="outcome").upper()
         provider_name = _text(provider, name="provider").upper()
         attempt = _text(attempt_id, name="attempt_id")
         evidence = self._verify_resolution_evidence(
             reservation_id=rid,
+            intent_id=current.intent_id,
             outcome=terminal_outcome,
             provider=provider_name,
             attempt_id=attempt,

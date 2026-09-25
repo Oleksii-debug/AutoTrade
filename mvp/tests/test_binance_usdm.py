@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import json
 import unittest
 from uuid import uuid4
 
@@ -12,8 +13,9 @@ from mvp.autotrade_mvp.binance_usdm import (
     prepare_order_request,
 )
 from mvp.autotrade_mvp.provider_core import (
-    ProviderReadObservation,
-    ProviderReadQuery,
+    Surface,
+    observe_authenticated_json_response,
+    prepare_authenticated_read_query,
 )
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
@@ -31,24 +33,32 @@ def execution_observation(
     *,
     account_id="paper-1",
     environment="PAPER",
-    surface="EXECUTIONS",
+    surface=Surface.AUTHENTICATED_READ,
 ):
-    query = ProviderReadQuery.prepare(
-        provider_id="BINANCE",
-        account_id=account_id,
-        environment=environment,
+    query = prepare_authenticated_read_query(
+        capability=capability(
+            account_id=account_id,
+            environment=environment,
+            instrument_version="BTCUSDT-PERP:v1",
+        ),
         surface=surface,
         endpoint="/fapi/v1/userTrades",
         query={"symbol": "BTCUSDT"},
-        prepared_at=NOW,
+        at=NOW,
+        permission_scope="ORDER.READ",
     )
-    return ProviderReadObservation.capture(
-        query=query,
-        response=rows,
-        observed_at=NOW + timedelta(seconds=1),
-        source_uri="https://provider.invalid/fapi/v1/userTrades",
+    raw = json.dumps(
+        rows,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return observe_authenticated_json_response(
+        query_binding=query,
+        response_bytes=raw,
+        observed_at=NOW,
     )
-
 
 def capability(
     *,
@@ -56,21 +66,23 @@ def capability(
     order_types=("LIMIT", "MARKET"),
     tif=("GTC", "IOC", "FOK", "NONE"),
     provider_id="BINANCE",
+    account_id="account-1",
+    environment="PAPER",
     instrument_version="BTCUSDT-PERP:v1",
     status="VERIFIED",
 ):
     observed_at = NOW - timedelta(hours=1)
     common = dict(
         provider_id=provider_id,
-        account_id="account-1",
+        account_id=account_id,
         entity_id="global",
-        environment="PAPER",
+        environment=environment,
         instrument_version=instrument_version,
         observed_at=observed_at,
         expires_at=NOW + timedelta(hours=1),
         supported_order_types=frozenset(order_types),
         time_in_force=frozenset(tif),
-        permission_scopes=frozenset({"ORDER_WRITE"}),
+        permission_scopes=frozenset({"ORDER_WRITE", "ORDER.READ"}),
         position_mode=position_mode,
         native_protection=frozenset(),
         rate_limit_policy_id="binance-usdm-foundation",

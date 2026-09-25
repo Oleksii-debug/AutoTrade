@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import json
 import unittest
 from uuid import uuid4
 
@@ -10,8 +11,9 @@ from mvp.autotrade_mvp.capabilities import (
 )
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
-    ProviderReadObservation,
-    ProviderReadQuery,
+    Surface,
+    observe_authenticated_json_response,
+    prepare_authenticated_read_query,
 )
 from mvp.autotrade_mvp.kraken_spot import (
     KrakenSpotAbsenceEvidence,
@@ -35,24 +37,31 @@ def trade_history_observation(
     *,
     account_id="paper-1",
     environment="PAPER",
-    surface="EXECUTIONS",
+    surface=Surface.AUTHENTICATED_READ,
 ):
-    query = ProviderReadQuery.prepare(
-        provider_id="KRAKEN",
-        account_id=account_id,
-        environment=environment,
+    query = prepare_authenticated_read_query(
+        capability=capability(
+            account_id=account_id,
+            environment=environment,
+        ),
         surface=surface,
         endpoint="/0/private/TradesHistory",
-        query={"ofs": 0},
-        prepared_at=NOW,
+        query={"ofs": "0"},
+        at=NOW,
+        permission_scope="ORDER.READ",
     )
-    return ProviderReadObservation.capture(
-        query=query,
-        response=response,
-        observed_at=NOW + timedelta(seconds=1),
-        source_uri="https://api.kraken.com/0/private/TradesHistory",
+    raw = json.dumps(
+        response,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return observe_authenticated_json_response(
+        query_binding=query,
+        response_bytes=raw,
+        observed_at=NOW,
     )
-
 
 def capability(
     *,
@@ -74,7 +83,7 @@ def capability(
             expires_at=NOW + timedelta(hours=1),
             supported_order_types=frozenset(order_types),
             time_in_force=frozenset(tif),
-            permission_scopes=frozenset({"ORDER_WRITE"}),
+            permission_scopes=frozenset({"ORDER_WRITE", "ORDER.READ"}),
             position_mode="CASH",
             native_protection=frozenset(),
             rate_limit_policy_id="kraken-spot-test",
@@ -483,8 +492,13 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 }
             },
         }
-        with self.assertRaisesRegex(ProviderCoreError, "binary float"):
-            trade_history_observation(base)
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "exact decimal"):
+            parse_trade_history(
+                trade_history_observation(base),
+                instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
+                client_ids_by_provider_order={},
+                fee_currency_by_pair={"XXBTZUSD": "USD"},
+            )
         base["result"]["trades"]["T-EXEC-1"]["time"] = "1790280001.1234567"
         with self.assertRaisesRegex(KrakenSpotAdapterError, "microsecond"):
             parse_trade_history(
@@ -524,13 +538,13 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         )[0]
         self.assertEqual(fill.account_id, "bound-account")
         self.assertEqual(fill.environment, "PAPER")
-        self.assertEqual(fill.evidence_refs, (observation.evidence_reference,))
+        self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
 
         wrong_surface = trade_history_observation(
             response,
             account_id="bound-account",
             environment="PAPER",
-            surface="ORDER_HISTORY",
+            surface=Surface.ACTIVITIES,
         )
         with self.assertRaisesRegex(ProviderCoreError, "surface mismatch"):
             parse_trade_history(

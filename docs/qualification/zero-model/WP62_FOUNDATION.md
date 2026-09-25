@@ -22,7 +22,7 @@ The qualification deliberately uses `RoutingMode.ZERO`. A passing run requires:
 - the economic report to remain `UNPROVEN_SIMULATION_ONLY`;
 - a small-capital run to be risk-rejected before order/fill creation, remain
   restart/replay safe, and still produce a reconciled zero-trade economic report;
-- evidence to name the exact 40-character source commit SHA.
+- evidence to name the exact canonical lowercase 40- or 64-character Git object id.
 
 The workflow writes `zero-model-evidence.json` as an exact-head artifact. The
 artifact is qualification evidence, not financial authority.

@@ -1,4 +1,6 @@
+import hashlib
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -174,6 +176,127 @@ class ArtifactStoreTests(unittest.TestCase):
                     rights={"storage": False, "export": False},
                 )
             self.assertEqual(store.audit().objects, 0)
+
+
+    def test_legacy_manifest_must_be_rebound_before_read(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"evidence",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                source_refs=["source:fixture"],
+                metadata={"kind": "legacy-read-upgrade"},
+            )
+            path = store._manifest_path(artifact_id)
+            legacy = dict(manifest)
+            legacy.pop("manifest_hash")
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+            with self.assertRaisesRegex(ArtifactIntegrityError, "lacks integrity binding"):
+                store.read_bytes(artifact_id)
+            rebound = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"evidence",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                source_refs=["source:fixture"],
+                metadata={"kind": "legacy-read-upgrade"},
+            )
+            self.assertIn("manifest_hash", rebound)
+            self.assertEqual(store.read_bytes(artifact_id), b"evidence")
+
+    def test_legacy_rebind_does_not_seal_untrusted_fields(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"legacy",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                source_refs=["source:fixture"],
+                metadata={"kind": "legacy-rebind"},
+            )
+            path = store._manifest_path(artifact_id)
+            legacy = dict(manifest)
+            legacy.pop("manifest_hash")
+            legacy["created_at"] = "2000-01-01T00:00:00Z"
+            legacy["untrusted_extra"] = "claim"
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+            rebound = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"legacy",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                source_refs=["source:fixture"],
+                metadata={"kind": "legacy-rebind"},
+            )
+            self.assertNotEqual(rebound["created_at"], "2000-01-01T00:00:00Z")
+            self.assertNotIn("untrusted_extra", rebound)
+            self.assertEqual(store.read_bytes(artifact_id), b"legacy")
+
+    @unittest.skipIf(os.name == "nt", "symlink creation is not reliable on Windows CI")
+    def test_object_symlink_is_never_accepted(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            data = b"external-evidence"
+            digest = hashlib.sha256(data).hexdigest()
+            canonical = store._object_path(digest)
+            canonical.parent.mkdir(parents=True, exist_ok=True)
+            external = Path(directory) / "outside.bin"
+            external.write_bytes(data)
+            canonical.symlink_to(external)
+            with self.assertRaisesRegex(ArtifactIntegrityError, "symlink"):
+                store.publish_bytes(
+                    artifact_id=str(uuid4()),
+                    data=data,
+                    media_type="application/octet-stream",
+                    rights={"storage": True, "export": True},
+                )
+
+    def test_publish_and_export_sync_parent_directory(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            with patch("autotrade_research.artifacts.store.sync_parent_directory") as sync:
+                store.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=b"durable",
+                    media_type="text/plain",
+                    rights={"storage": True, "export": True},
+                )
+                sync.assert_any_call(store._object_path(hashlib.sha256(b"durable").hexdigest()))
+                target = Path(directory) / "out" / "durable.txt"
+                store.export(artifact_id, target)
+                sync.assert_any_call(target)
+
+    def test_recovery_preserves_malformed_and_misplaced_objects_for_inspection(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            malformed = store.objects / "gg" / ("g" * 64)
+            malformed.parent.mkdir(parents=True, exist_ok=True)
+            malformed.write_bytes(b"malformed")
+            data = b"misplaced"
+            digest = hashlib.sha256(data).hexdigest()
+            wrong_prefix = "00" if digest[:2] != "00" else "ff"
+            misplaced = store.objects / wrong_prefix / digest
+            misplaced.parent.mkdir(parents=True, exist_ok=True)
+            misplaced.write_bytes(data)
+            orphan_data = b"valid-orphan"
+            orphan_digest = hashlib.sha256(orphan_data).hexdigest()
+            orphan = store._object_path(orphan_digest)
+            orphan.parent.mkdir(parents=True, exist_ok=True)
+            orphan.write_bytes(orphan_data)
+            before = store.audit()
+            self.assertIn(orphan_digest, before.unreferenced_objects)
+            self.assertTrue(any(item.startswith("object:") for item in before.corrupt_objects))
+            after = store.recover_orphans()
+            self.assertFalse(orphan.exists())
+            self.assertTrue(malformed.exists())
+            self.assertTrue(misplaced.exists())
+            self.assertEqual(after.unreferenced_objects, ())
 
 
 if __name__ == "__main__":

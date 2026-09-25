@@ -684,6 +684,52 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("100"))
             self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("20"))
             self.assertEqual(economics.position("ABC"), Decimal("1"))
+            bindings = store.load_events_by_aggregate_type(
+                "provider_fill_financial_binding"
+            )
+            self.assertEqual(len(bindings), 1)
+            binding = bindings[0]["payload"]["request"]
+            self.assertEqual(binding["reservation_id"], "reservation-1")
+            self.assertEqual(binding["intent_id"], "intent-1")
+            self.assertEqual(
+                binding["provider_execution_id"], "provider-execution-1"
+            )
+            self.assertEqual(binding["fill_id"], "fill-1")
+            self.assertEqual(binding["derived_usage"], {"CASH:USD": "100"})
+            self.assertTrue(binding["plan_digest"].startswith("sha256:"))
+            self.assertTrue(binding["transaction_digest"].startswith("sha256:"))
+
+    def test_binding_is_not_left_behind_when_atomic_commit_fails(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            original_commit = store.commit_command
+
+            def fail_before_commit(**kwargs):
+                raise RuntimeError("injected provider-fill binding failure")
+
+            store.commit_command = fail_before_commit
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError, "provider-fill binding failure"
+                ):
+                    self.commit_evidenced_fill(economics, reservations)
+            finally:
+                store.commit_command = original_commit
+
+            self.assertEqual(
+                store.load_events_by_aggregate_type(
+                    "provider_fill_financial_binding"
+                ),
+                [],
+            )
+            self.assertEqual(economics.transactions, ())
+            snapshot = reservations.get("reservation-1")
+            self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("0"))
+            self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("120"))
 
     def test_two_partial_fills_accumulate_exact_reservation_consumption(self):
         with TemporaryDirectory() as directory:
@@ -737,6 +783,31 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("20.0"))
             self.assertEqual(economics.position("ABC"), Decimal("1.0"))
             self.assertEqual(len(economics.transactions), 2)
+            bindings = store.load_events_by_aggregate_type(
+                "provider_fill_financial_binding"
+            )
+            self.assertEqual(len(bindings), 2)
+            self.assertEqual(
+                {
+                    event["payload"]["request"]["provider_execution_id"]
+                    for event in bindings
+                },
+                {
+                    "provider-execution-partial-1",
+                    "provider-execution-partial-2",
+                },
+            )
+            self.assertEqual(
+                {
+                    event["payload"]["request"]["derived_usage"]["CASH:USD"]
+                    for event in bindings
+                },
+                {"40.0", "60.0"},
+            )
+            self.assertEqual(
+                len({event["aggregate_id"] for event in bindings}),
+                2,
+            )
 
     def test_fill_cannot_consume_beyond_admitted_reservation(self):
         with TemporaryDirectory() as directory:
@@ -950,6 +1021,14 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("100"))
             self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("20"))
             self.assertEqual(len(reopened_economics.transactions), 1)
+            bindings = reopened.load_events_by_aggregate_type(
+                "provider_fill_financial_binding"
+            )
+            self.assertEqual(len(bindings), 1)
+            self.assertEqual(
+                bindings[0]["payload"]["request"]["provider_execution_id"],
+                "provider-execution-1",
+            )
 
 
 

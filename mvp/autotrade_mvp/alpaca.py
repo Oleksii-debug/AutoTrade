@@ -8,7 +8,7 @@ network requests or granting financial authority.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
@@ -195,21 +195,112 @@ class AlpacaOrderIntent:
         )
 
 
+_ALPACA_PREPARED_REQUEST_FACTORY_TOKEN = object()
+
+
 @dataclass(frozen=True)
 class AlpacaPreparedRequest:
     endpoint: str
     body: Mapping[str, object]
+    account_id: str
+    environment: str
     capability_snapshot_id: str
     documentation_refs: tuple[str, ...]
+    instrument_versions: tuple[str, ...] = ()
+    capability_snapshot_ids: tuple[str, ...] = ()
+    body_sha256: str = field(init=False)
+    _factory_token: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
+        if self._factory_token is not _ALPACA_PREPARED_REQUEST_FACTORY_TOKEN:
+            raise AlpacaAdapterError(
+                "AlpacaPreparedRequest must be created by a canonical preparation factory"
+            )
+        endpoint = _text(self.endpoint, name="endpoint")
+        if endpoint != "/v2/orders":
+            raise AlpacaAdapterError("prepared order endpoint must be /v2/orders")
+        if not isinstance(self.body, Mapping):
+            raise TypeError("body must be a mapping")
+        body = dict(self.body)
+        body["client_order_id"] = validate_client_order_id(body.get("client_order_id"))
+        try:
+            rendered_body = json.dumps(
+                body,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as error:
+            raise AlpacaAdapterError(
+                "prepared order body must be canonical JSON"
+            ) from error
+        account = _text(self.account_id, name="account_id")
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"PAPER", "LIVE"}:
+            raise AlpacaAdapterError("environment must be PAPER or LIVE")
+        capability_snapshot_id = _text(
+            self.capability_snapshot_id,
+            name="capability_snapshot_id",
+        )
+        refs = tuple(
+            _text(value, name="documentation_ref")
+            for value in self.documentation_refs
+        )
+        if not refs:
+            raise AlpacaAdapterError("documentation_refs must not be empty")
+        if not isinstance(self.instrument_versions, tuple):
+            raise TypeError("instrument_versions must be a tuple")
+        instrument_versions = tuple(
+            _text(value, name="instrument_version")
+            for value in self.instrument_versions
+        )
+        if not instrument_versions:
+            raise AlpacaAdapterError("instrument_versions must not be empty")
+        if len(instrument_versions) != len(set(instrument_versions)):
+            raise AlpacaAdapterError("instrument_versions must be unique")
+        raw_snapshot_ids = (
+            self.capability_snapshot_ids
+            if self.capability_snapshot_ids
+            else (capability_snapshot_id,)
+        )
+        if not isinstance(raw_snapshot_ids, tuple):
+            raise TypeError("capability_snapshot_ids must be a tuple")
+        snapshot_ids = tuple(
+            _text(value, name="capability_snapshot_id")
+            for value in raw_snapshot_ids
+        )
+        if len(snapshot_ids) != len(set(snapshot_ids)):
+            raise AlpacaAdapterError("capability_snapshot_ids must be unique")
+        if capability_snapshot_id not in snapshot_ids:
+            raise AlpacaAdapterError(
+                "primary capability_snapshot_id must be included in capability_snapshot_ids"
+            )
+        if len(snapshot_ids) != len(instrument_versions):
+            raise AlpacaAdapterError(
+                "capability snapshot identities must match instrument versions one-for-one"
+            )
+        object.__setattr__(self, "endpoint", endpoint)
+        object.__setattr__(self, "body", MappingProxyType(body))
+        object.__setattr__(
+            self,
+            "body_sha256",
+            "sha256:" + sha256(rendered_body.encode("utf-8")).hexdigest(),
+        )
+        object.__setattr__(self, "account_id", account)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "capability_snapshot_id", capability_snapshot_id)
+        object.__setattr__(self, "documentation_refs", refs)
+        object.__setattr__(self, "instrument_versions", instrument_versions)
+        object.__setattr__(self, "capability_snapshot_ids", snapshot_ids)
 
 
 def prepare_order_request(
     intent: AlpacaOrderIntent,
     *,
     client_order_id: str,
+    account_id: str,
+    environment: str,
     capability: CapabilitySnapshot,
     at: datetime,
 ) -> AlpacaPreparedRequest:
@@ -219,8 +310,16 @@ def prepare_order_request(
         raise TypeError("capability must be CapabilitySnapshot")
     point = _instant(at, name="at")
     client_id = validate_client_order_id(client_order_id)
+    account = _text(account_id, name="account_id")
+    environment_value = _text(environment, name="environment").upper()
+    if environment_value not in {"PAPER", "LIVE"}:
+        raise AlpacaAdapterError("environment must be PAPER or LIVE")
     if capability.provider_id.upper() != "ALPACA":
         raise AlpacaAdapterError("capability belongs to another provider")
+    if capability.account_id != account:
+        raise AlpacaAdapterError("capability account does not match target account")
+    if capability.environment.upper() != environment_value:
+        raise AlpacaAdapterError("capability environment does not match target environment")
     if capability.instrument_version != intent.instrument_version:
         raise AlpacaAdapterError("capability instrument version does not match intent")
     if not capability.admits(
@@ -253,8 +352,12 @@ def prepare_order_request(
     return AlpacaPreparedRequest(
         endpoint="/v2/orders",
         body=body,
+        account_id=account,
+        environment=environment_value,
         capability_snapshot_id=capability.snapshot_id,
         documentation_refs=tuple(ALPACA_DOCS.values()),
+        instrument_versions=(intent.instrument_version,),
+        _factory_token=_ALPACA_PREPARED_REQUEST_FACTORY_TOKEN,
     )
 
 
@@ -822,6 +925,14 @@ def prepare_mleg_order_request(
     return AlpacaPreparedRequest(
         endpoint="/v2/orders",
         body=body,
+        account_id=first_capability.account_id,
+        environment=first_capability.environment,
         capability_snapshot_id=first_capability.snapshot_id,
         documentation_refs=tuple(ALPACA_DOCS.values()) + (_ALPACA_MLEG_DOC,),
+        instrument_versions=tuple(leg.instrument_version for leg in intent.legs),
+        capability_snapshot_ids=tuple(
+            capabilities[leg.instrument_version].snapshot_id
+            for leg in intent.legs
+        ),
+        _factory_token=_ALPACA_PREPARED_REQUEST_FACTORY_TOKEN,
     )

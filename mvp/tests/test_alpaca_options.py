@@ -76,6 +76,18 @@ class AlpacaOptionEvidenceTests(unittest.TestCase):
                 at=NOW,
             )
 
+    def test_entitlement_expires_before_exact_expiry_instant(self):
+        evidence = account(expires_at=NOW)
+        with self.assertRaisesRegex(AlpacaAdapterError, "does not admit"):
+            require_option_entitlement(
+                option_intent(),
+                account=evidence,
+                account_id="paper-account",
+                environment="PAPER",
+                required_level=2,
+                at=NOW,
+            )
+
     def test_insufficient_option_level_fails_closed(self):
         with self.assertRaisesRegex(AlpacaAdapterError, "does not admit"):
             require_option_entitlement(

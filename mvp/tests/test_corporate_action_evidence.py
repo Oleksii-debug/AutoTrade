@@ -37,6 +37,7 @@ def canonical_instrument(
     instrument_id=INSTRUMENT_ID,
     version=1,
     provider_id="BINANCE",
+    effective_from=None,
 ):
     return InstrumentVersion(
         instrument_id=instrument_id,
@@ -55,7 +56,11 @@ def canonical_instrument(
         minimum_quantity=Decimal("0.00000001"),
         calendar_id="CONTINUOUS_24_7",
         timezone_id="UTC",
-        effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        effective_from=(
+            datetime(2026, 1, 1, tzinfo=timezone.utc)
+            if effective_from is None
+            else effective_from
+        ),
         status="ACTIVE",
     )
 
@@ -267,20 +272,30 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
 
     def test_canonical_instrument_registry_binding_is_required(self):
         source = sealed_dividend()
-        bad_versions = (
-            canonical_instrument(
-                instrument_id="22222222-2222-4222-8222-222222222222"
+        bad_registries = (
+            canonical_registry(
+                canonical_instrument(
+                    instrument_id="22222222-2222-4222-8222-222222222222"
+                )
             ),
-            canonical_instrument(version=2),
-            canonical_instrument(provider_id="ALPACA"),
+            canonical_registry(
+                canonical_instrument(),
+                canonical_instrument(
+                    version=2,
+                    effective_from=READ_NOW,
+                ),
+            ),
+            canonical_registry(
+                canonical_instrument(provider_id="ALPACA")
+            ),
         )
-        for version in bad_versions:
-            with self.subTest(version=version), self.assertRaises(
+        for registry in bad_registries:
+            with self.subTest(registry=registry), self.assertRaises(
                 CorporateActionEvidenceError
             ):
                 resolve(
                     source,
-                    instrument_registry=canonical_registry(version),
+                    instrument_registry=registry,
                 )
 
     def test_caller_instrument_resolver_is_rejected(self):
@@ -345,12 +360,35 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
         ):
             resolve(source, permission_scope="CORPORATE.READ")
 
-    def test_binary_float_in_sealed_financial_payload_is_rejected(self):
-        source = sealed_dividend(per_share=1.25)
+    def test_direct_binary_float_payload_is_rejected_before_normalization(self):
+        source = sealed_dividend()
         with self.assertRaisesRegex(
             CorporateActionEvidenceError, "exact"
         ):
-            resolve(source)
+            CorporateActionObservation(
+                provider_id="BINANCE",
+                account_id="acct-1",
+                environment="PAPER",
+                provider_instrument_version=source.query_binding.instrument_version,
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                external_event_id="corp-float",
+                provider_revision="1",
+                kind="CASH_DIVIDEND",
+                effective_at=READ_NOW + timedelta(seconds=1),
+                observed_at=READ_NOW + timedelta(seconds=2),
+                raw_evidence_digest=source.response_sha256,
+                payload={"per_share": 1.25, "currency": "USDT"},
+                complete=True,
+            )
+
+    def test_sealed_json_number_is_canonicalized_to_exact_decimal_text(self):
+        source = sealed_dividend(per_share=1.25)
+        accepted = resolve(source)
+        self.assertEqual(
+            accepted.event.payload,
+            {"per_share": "1.25", "currency": "USDT"},
+        )
 
     def test_observation_carries_provider_lifecycle_and_correction_identity(self):
         effective = READ_NOW + timedelta(seconds=1)

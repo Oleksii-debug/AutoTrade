@@ -1,23 +1,31 @@
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from uuid import NAMESPACE_URL, uuid5
 
 from mvp.autotrade_mvp.accounting import AccountingConflict, book_equity_fill
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.durable_settlement import (
     DurableSettlementBook,
+    SETTLEMENT_EVIDENCE_MEDIA_TYPE,
     SettlementRuleEvidence,
     commit_fill_with_settlement_obligations,
+    settlement_completion_evidence_metadata,
+    settlement_completion_evidence_receipt,
+    settlement_rule_evidence_metadata,
+    settlement_rule_evidence_receipt,
 )
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.settlement import (
     SettlementConflict,
     SettlementEvidence,
     equity_cash_obligation,
 )
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 
 PROVIDER = "PROVIDER-A"
@@ -56,6 +64,9 @@ class DurableSettlementCapitalTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / "journal.sqlite3"
         self.store = JournalStore(self.path)
+        self.artifacts = ArtifactStore(
+            Path(self.directory.name) / "settlement-evidence"
+        )
 
     def economics(self, store=None):
         return DurableProviderEconomicBook(
@@ -88,6 +99,7 @@ class DurableSettlementCapitalTests(unittest.TestCase):
             account_id=ACCOUNT,
             environment=ENVIRONMENT,
             opening_settled_cash={"USD": opening},
+            evidence_artifact_store=self.artifacts,
         )
 
     @staticmethod
@@ -118,6 +130,64 @@ class DurableSettlementCapitalTests(unittest.TestCase):
             settlement_date=date(2026, 9, 26),
         )
 
+    def bind_rule(self, value):
+        receipt = settlement_rule_evidence_receipt(value)
+        raw = canonical_json(receipt).encode("utf-8")
+        artifact_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                "https://evidence.autotrade.local/settlement-rule/"
+                + canonical_json(receipt),
+            )
+        )
+        manifest = self.artifacts.publish_bytes(
+            artifact_id=artifact_id,
+            data=raw,
+            media_type=SETTLEMENT_EVIDENCE_MEDIA_TYPE,
+            rights={"storage": True, "export": False},
+            source_refs=("provider-doc:test-settlement-rule",),
+            metadata=settlement_rule_evidence_metadata(value),
+        )
+        return replace(
+            value,
+            evidence_ref=f"artifact:{artifact_id}@{manifest['sha256']}",
+        )
+
+    def bind_completion(self, value, obligation):
+        receipt = settlement_completion_evidence_receipt(
+            provider_id=PROVIDER,
+            account_id=ACCOUNT,
+            environment=ENVIRONMENT,
+            obligation=obligation,
+            evidence=value,
+        )
+        raw = canonical_json(receipt).encode("utf-8")
+        artifact_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                "https://evidence.autotrade.local/settlement-completion/"
+                + canonical_json(receipt),
+            )
+        )
+        manifest = self.artifacts.publish_bytes(
+            artifact_id=artifact_id,
+            data=raw,
+            media_type=SETTLEMENT_EVIDENCE_MEDIA_TYPE,
+            rights={"storage": True, "export": False},
+            source_refs=("provider-read:test-settlement",),
+            metadata=settlement_completion_evidence_metadata(
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+                obligation=obligation,
+                evidence=value,
+            ),
+        )
+        return replace(
+            value,
+            evidence_ref=f"artifact:{artifact_id}@{manifest['sha256']}",
+        )
+
     def commit(self, economics, reservations, settlement, *, side="BUY", price="100"):
         return commit_fill_with_settlement_obligations(
             economics,
@@ -129,7 +199,10 @@ class DurableSettlementCapitalTests(unittest.TestCase):
             usage={"CASH:USD": "100"},
             transactions=(self.transaction(side=side, price=price),),
             settlement_obligations=(
-                (self.obligation(side=side, price=price), rule()),
+                (
+                    self.obligation(side=side, price=price),
+                    self.bind_rule(rule()),
+                ),
             ),
             committed_at="2026-09-24T09:00:02Z",
         )
@@ -177,13 +250,17 @@ class DurableSettlementCapitalTests(unittest.TestCase):
         self.assertEqual(before.available_cash, Decimal("1000"))
         self.assertTrue(before.settlement_state_digest.startswith("sha256:"))
 
+        bound_settlement_evidence = self.bind_completion(
+            settlement_evidence("cash-1"),
+            self.obligation(side="SELL"),
+        )
         self.assertTrue(
             settlement.settle(
                 command_id="settle-sale-1",
                 idempotency_key="settle-sale-idem-1",
                 obligation_id="cash-1",
                 as_of=date(2026, 9, 26),
-                evidence=settlement_evidence("cash-1"),
+                evidence=bound_settlement_evidence,
                 committed_at="2026-09-26T10:00:01Z",
             )
         )
@@ -199,7 +276,7 @@ class DurableSettlementCapitalTests(unittest.TestCase):
                 idempotency_key="settle-sale-idem-1",
                 obligation_id="cash-1",
                 as_of=date(2026, 9, 26),
-                evidence=settlement_evidence("cash-1"),
+                evidence=bound_settlement_evidence,
                 committed_at="2026-09-26T10:00:01Z",
             )
         )
@@ -319,7 +396,7 @@ class DurableSettlementCapitalTests(unittest.TestCase):
                 reservation_id="reservation-1",
                 usage={"CASH:USD": "100"},
                 transactions=(self.transaction(price="100"),),
-                settlement_obligations=((wrong, rule()),),
+                settlement_obligations=((wrong, self.bind_rule(rule())),),
                 committed_at="2026-09-24T09:00:02Z",
             )
 
@@ -361,20 +438,28 @@ class DurableSettlementCapitalTests(unittest.TestCase):
         economics = self.economics()
         settlement = self.settlement()
         self.assertTrue(self.commit(economics, reservations, settlement, side="SELL"))
+        obligation = self.obligation(side="SELL")
+        original_evidence = self.bind_completion(
+            settlement_evidence("cash-1"),
+            obligation,
+        )
         self.assertTrue(
             settlement.settle(
                 command_id="settle-sale-1",
                 idempotency_key="settle-sale-idem-1",
                 obligation_id="cash-1",
                 as_of=date(2026, 9, 26),
-                evidence=settlement_evidence("cash-1"),
+                evidence=original_evidence,
                 committed_at="2026-09-26T10:00:01Z",
             )
         )
-        changed = SettlementEvidence(
-            obligation_id="cash-1",
-            evidence_ref="provider-read:sha256:" + "c" * 64,
-            observed_at=datetime(2026, 9, 26, 10, tzinfo=timezone.utc),
+        changed = self.bind_completion(
+            SettlementEvidence(
+                obligation_id="cash-1",
+                evidence_ref=SETTLEMENT_REF,
+                observed_at=datetime(2026, 9, 26, 10, 1, tzinfo=timezone.utc),
+            ),
+            obligation,
         )
         with self.assertRaisesRegex(SettlementConflict, "different settlement request"):
             settlement.settle(
@@ -385,6 +470,60 @@ class DurableSettlementCapitalTests(unittest.TestCase):
                 evidence=changed,
                 committed_at="2026-09-26T10:00:01Z",
             )
+
+    def test_fabricated_hash_shaped_provider_read_cannot_release_receivable(self):
+        reservations = self.reservations()
+        economics = self.economics()
+        settlement = self.settlement()
+        self.assertTrue(self.commit(economics, reservations, settlement, side="SELL"))
+        before = settlement.capital_snapshot("USD")
+        fabricated = settlement_evidence("cash-1")
+
+        with self.assertRaisesRegex(
+            SettlementConflict,
+            "trusted ArtifactStore",
+        ):
+            settlement.settle(
+                command_id="fabricated-settlement",
+                idempotency_key="fabricated-settlement",
+                obligation_id="cash-1",
+                as_of=date(2026, 9, 26),
+                evidence=fabricated,
+                committed_at="2026-09-26T10:00:01Z",
+            )
+
+        after = settlement.capital_snapshot("USD")
+        self.assertEqual(after.settled_cash, before.settled_cash)
+        self.assertEqual(after.unsettled_receivable, Decimal("100"))
+        self.assertEqual(after.available_cash, Decimal("1000"))
+
+    def test_missing_but_well_formed_rule_artifact_cannot_create_obligation(self):
+        reservations = self.reservations()
+        economics = self.economics()
+        settlement = self.settlement()
+
+        with self.assertRaisesRegex(
+            SettlementConflict,
+            "artifact verification failed",
+        ):
+            commit_fill_with_settlement_obligations(
+                economics,
+                reservations,
+                settlement,
+                command_id="fill-command-1",
+                idempotency_key="fill-idem-1",
+                reservation_id="reservation-1",
+                usage={"CASH:USD": "100"},
+                transactions=(self.transaction(),),
+                settlement_obligations=((self.obligation(), rule()),),
+                committed_at="2026-09-24T09:00:02Z",
+            )
+        self.assertEqual(economics.transactions, ())
+        self.assertEqual(settlement.obligations, ())
+        self.assertEqual(
+            reservations.get("reservation-1").consumed["CASH:USD"],
+            Decimal("0"),
+        )
 
     def test_opening_cash_is_bound_into_durable_history_and_cannot_change_on_restart(self):
         reservations = self.reservations()

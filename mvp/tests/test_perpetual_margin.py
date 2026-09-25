@@ -237,8 +237,15 @@ def evaluate(**overrides):
         collateral_haircut_fraction=Decimal("0"),
     )
     values.update(overrides)
-    values.setdefault("artifact_store", EvidenceArtifactStore(values["evidence"]))
-    return evaluate_perpetual_margin(**values)
+    if "artifact_store" in overrides:
+        return evaluate_perpetual_margin(**values)
+    with TemporaryDirectory() as directory:
+        artifact_store = ArtifactStore(directory)
+        publish_margin_artifacts(artifact_store, values["evidence"])
+        return evaluate_perpetual_margin(
+            **values,
+            artifact_store=artifact_store,
+        )
 
 
 class PerpetualMarginTests(unittest.TestCase):
@@ -443,41 +450,54 @@ class PerpetualMarginTests(unittest.TestCase):
 
     def test_same_tier_ref_cannot_authorize_altered_tier_economics(self):
         trusted = evidence()
-        store = EvidenceArtifactStore(trusted)
         altered = evidence(
             margin_tiers=(
                 tier("10000", "0.001"),
                 tier("50000", "0.002", "0", "ADD"),
             )
         )
-        with self.assertRaisesRegex(
-            PerpetualMarginError,
-            "artifact content does not match supplied economics",
-        ):
-            evaluate(evidence=altered, artifact_store=store)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish_margin_artifacts(store, trusted)
+            with self.assertRaisesRegex(
+                PerpetualMarginError,
+                "artifact content does not match supplied economics",
+            ):
+                evaluate(evidence=altered, artifact_store=store)
 
     def test_same_bundle_ref_cannot_authorize_mixed_mark_index_fx_content(self):
         trusted = evidence()
-        store = EvidenceArtifactStore(trusted)
         mixed = evidence(
             mark_price=Decimal("101"),
             collateral_fx_to_settlement=Decimal("0.99"),
         )
-        with self.assertRaisesRegex(
-            PerpetualMarginError,
-            "artifact content does not match supplied economics",
-        ):
-            evaluate(evidence=mixed, artifact_store=store)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish_margin_artifacts(store, trusted)
+            with self.assertRaisesRegex(
+                PerpetualMarginError,
+                "artifact content does not match supplied economics",
+            ):
+                evaluate(evidence=mixed, artifact_store=store)
 
     def test_margin_evaluation_requires_resolvable_immutable_artifacts(self):
         trusted = evidence()
-        missing = EvidenceArtifactStore(trusted)
-        missing._records.pop(trusted.tier_table_evidence_ref)
+        with TemporaryDirectory() as directory:
+            missing = ArtifactStore(directory)
+            with self.assertRaisesRegex(
+                PerpetualMarginError,
+                "artifact is missing or corrupt",
+            ):
+                evaluate(evidence=trusted, artifact_store=missing)
+
+    def test_duck_typed_evidence_store_cannot_be_financial_authority(self):
+        trusted = evidence()
+        fake_store = EvidenceArtifactStore(trusted)
         with self.assertRaisesRegex(
             PerpetualMarginError,
-            "artifact is missing or corrupt",
+            "canonical ArtifactStore",
         ):
-            evaluate(evidence=trusted, artifact_store=missing)
+            evaluate(evidence=trusted, artifact_store=fake_store)
 
     def test_float_money_and_rates_are_rejected(self):
         with self.assertRaises(TypeError):

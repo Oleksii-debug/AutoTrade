@@ -337,6 +337,8 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                     pnl="410.10",
                 ),
             ),
+            tests_run=("greeks-unit", "scenario-stress"),
+            unresolved_limits=(),
         )
 
     def test_greeks_are_versioned_estimates_and_stress_is_explicit(self):
@@ -386,6 +388,8 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                 theta="0",
                 rho="0",
                 scenarios=(),
+                tests_run=("scenario-stress",),
+                unresolved_limits=(),
             )
         with self.assertRaises(OptionError):
             OptionScenarioResult(
@@ -420,6 +424,8 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                 theta="0",
                 rho="0",
                 scenarios=(scenario, scenario),
+                tests_run=("scenario-stress",),
+                unresolved_limits=(),
             )
         with self.assertRaisesRegex(OptionError, "source_sha"):
             OptionRiskEvidence(
@@ -439,6 +445,8 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                 theta="0",
                 rho="0",
                 scenarios=(scenario,),
+                tests_run=("scenario-stress",),
+                unresolved_limits=(),
             )
 
         with self.assertRaisesRegex(OptionError, "40-character"):
@@ -459,6 +467,76 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                 theta="0",
                 rho="0",
                 scenarios=(scenario,),
+                tests_run=("scenario-stress",),
+                unresolved_limits=(),
+            )
+
+    def test_option_risk_evidence_records_tests_and_unresolved_limits(self):
+        evidence = self._risk()
+        self.assertEqual(
+            evidence.tests_run,
+            ("greeks-unit", "scenario-stress"),
+        )
+        self.assertEqual(evidence.unresolved_limits, ())
+
+        with self.assertRaisesRegex(OptionError, "tests_run"):
+            OptionRiskEvidence(
+                instrument="OPT:CALL",
+                model_id="model",
+                model_version="1",
+                source_sha="a" * 40,
+                input_digest="sha256:" + "b" * 64,
+                schema_version=1,
+                market_as_of=at(17),
+                calculated_at=at(18),
+                expires_at=at(19),
+                maximum_market_age=timedelta(hours=2),
+                delta="0",
+                gamma="0",
+                vega="0",
+                theta="0",
+                rho="0",
+                scenarios=(
+                    OptionScenarioResult(
+                        scenario_id="stress",
+                        underlying_price="100",
+                        implied_volatility="0.3",
+                        pnl="-1",
+                    ),
+                ),
+                tests_run=(),
+                unresolved_limits=(),
+            )
+
+    def test_unresolved_option_risk_limits_block_consumer_use(self):
+        base = self._risk()
+        unresolved = OptionRiskEvidence(
+            instrument=base.instrument,
+            model_id=base.model_id,
+            model_version=base.model_version,
+            source_sha=base.source_sha,
+            input_digest=base.input_digest,
+            schema_version=base.schema_version,
+            market_as_of=base.market_as_of,
+            calculated_at=base.calculated_at,
+            expires_at=base.expires_at,
+            maximum_market_age=base.maximum_market_age,
+            delta=base.delta,
+            gamma=base.gamma,
+            vega=base.vega,
+            theta=base.theta,
+            rho=base.rho,
+            scenarios=base.scenarios,
+            tests_run=base.tests_run,
+            unresolved_limits=("vol-surface provenance not independently qualified",),
+        )
+        with self.assertRaisesRegex(OptionError, "unresolved limits"):
+            require_current_option_risk(
+                unresolved,
+                instrument="OPT:CALL",
+                at=datetime(2026, 9, 25, 18, 30, tzinfo=timezone.utc),
+                maximum_calculation_age=timedelta(hours=2),
+                maximum_market_age=timedelta(hours=2),
             )
 
     def test_future_stale_and_cross_instrument_evidence_are_blocked(self):
@@ -514,6 +592,8 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                     pnl="-725.25",
                 ),
             ),
+            tests_run=("greeks-unit", "scenario-stress"),
+            unresolved_limits=(),
         )
         require_current_option_risk(
             evidence,
@@ -556,6 +636,8 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                     pnl="-725.25",
                 ),
             ),
+            tests_run=("greeks-unit", "scenario-stress"),
+            unresolved_limits=(),
         )
         with self.assertRaisesRegex(OptionError, "calculation exceeds independent policy age"):
             require_current_option_risk(
@@ -619,6 +701,8 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                         pnl="-1",
                     ),
                 ),
+                tests_run=("scenario-stress",),
+                unresolved_limits=(),
             )
 
 

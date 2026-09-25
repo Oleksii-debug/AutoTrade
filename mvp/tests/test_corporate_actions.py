@@ -62,7 +62,7 @@ def bound_book(state_value, *, current=None, registry=None):
 def corporate_event(**kwargs):
     kwargs.setdefault("instrument_id", INSTRUMENT_ID)
     kwargs.setdefault("instrument_version", 1)
-    return corporate_event(**kwargs)
+    return CorporateEvent.create(**kwargs)
 
 
 def state(**overrides):

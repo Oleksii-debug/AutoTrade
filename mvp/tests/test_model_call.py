@@ -667,6 +667,73 @@ class ModelCallLifecycleTests(unittest.TestCase):
                     now_utc=NOW,
                 )
 
+    def test_unverified_or_mismatched_pricing_fails_before_reservation(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+
+            def wrong_currency(call_spec, descriptors):
+                sealed = _pricing_evidence(call_spec, descriptors)
+                return PricingEvidenceSnapshot(
+                    evidence_id=sealed.evidence_id,
+                    evidence_digest=sealed.evidence_digest,
+                    as_of=sealed.as_of,
+                    valid_until=sealed.valid_until,
+                    cost_currency="EUR",
+                    quotes=sealed.quotes,
+                )
+
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+                pricing_evidence_resolver=wrong_currency,
+            )
+            call_spec = spec()
+            request = request_for(orchestrator, call_spec)
+            with self.assertRaisesRegex(ModelCallError, "currency"):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request,
+                    descriptors=[descriptor()],
+                    call=lambda *_args: self.fail("must not call"),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+            snap = budget.snapshot()
+            self.assertEqual(snap.reserved, Decimal("0"))
+            self.assertEqual(snap.incurred, Decimal("0"))
+
+    def test_usage_observation_without_authenticated_evidence_stays_unknown(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+
+            def reject_observation(_observation, _binding):
+                raise ValueError("raw adapter assertion is not sealed")
+
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+                observation_evidence_resolver=reject_observation,
+            )
+            call_spec = spec()
+            request = request_for(orchestrator, call_spec)
+            outcome = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request,
+                descriptors=[descriptor()],
+                call=lambda *_args: observation(
+                    incurred="0.01",
+                    unbilled="0",
+                ),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+            self.assertEqual(outcome.status, "UNKNOWN")
+            snap = budget.snapshot()
+            self.assertEqual(snap.incurred, Decimal("0"))
+            self.assertEqual(snap.estimated_unbilled, Decimal("1.2"))
+
     def test_schema_invalid_result_still_settles_observed_cost(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
@@ -823,6 +890,82 @@ class ModelCallLifecycleTests(unittest.TestCase):
                     billing_id="other-line",
                     billed="0.25",
                 )
+
+    def test_self_authored_billing_line_cannot_reconcile_unbilled_cost(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+
+            def reject_billing(_attempt, _billing, _billed, _observed):
+                raise ValueError("invoice line is not issuer-authenticated")
+
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+                billing_evidence_resolver=reject_billing,
+            )
+            call_spec = spec()
+            request = request_for(orchestrator, call_spec)
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request,
+                descriptors=[descriptor()],
+                call=lambda *_args: observation(
+                    incurred="0.3",
+                    unbilled="0.4",
+                    billing_id="invoice-self-authored",
+                ),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+            before = budget.snapshot()
+            with self.assertRaisesRegex(ModelCallError, "could not be authenticated"):
+                orchestrator.reconcile_observed_billing(
+                    attempt_id=result.attempt_id,
+                    billing_id="invoice-self-authored",
+                    billed="0.25",
+                )
+            after = budget.snapshot()
+            self.assertEqual(after.incurred, before.incurred)
+            self.assertEqual(after.estimated_unbilled, before.estimated_unbilled)
+
+    def test_reused_billing_identity_with_changed_amount_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            request = request_for(orchestrator, call_spec)
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request,
+                descriptors=[descriptor()],
+                call=lambda *_args: observation(
+                    incurred="0.3",
+                    unbilled="0.5",
+                    billing_id="invoice-stable",
+                ),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+            self.assertTrue(
+                orchestrator.reconcile_observed_billing(
+                    attempt_id=result.attempt_id,
+                    billing_id="invoice-stable",
+                    billed="0.2",
+                )
+            )
+            before = budget.snapshot()
+            with self.assertRaisesRegex(ModelCallError, "conflicting immutable evidence"):
+                orchestrator.reconcile_observed_billing(
+                    attempt_id=result.attempt_id,
+                    billing_id="invoice-stable",
+                    billed="0.3",
+                )
+            self.assertEqual(budget.snapshot(), before)
 
     def test_fallback_lineage_remains_local_only_when_policy_is_local_only(self):
         with TemporaryDirectory() as directory:

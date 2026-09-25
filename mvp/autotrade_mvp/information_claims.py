@@ -111,6 +111,29 @@ class SourceDocument:
     rights_basis: str
     locator: str
 
+    def __post_init__(self) -> None:
+        for field in (
+            "source_id",
+            "source_revision",
+            "title",
+            "passage",
+            "rights_basis",
+            "locator",
+        ):
+            object.__setattr__(self, field, _text(getattr(self, field), name=field))
+
+        kind = _text(self.source_kind, name="source_kind").upper()
+        if kind not in {"NEWS", "MACRO", "CORPORATE", "OFFICIAL"}:
+            raise ValueError("unsupported source_kind")
+        object.__setattr__(self, "source_kind", kind)
+
+        published = _time(self.published_at, name="published_at")
+        available = _time(self.available_at, name="available_at")
+        if available < published:
+            raise ValueError("available_at cannot precede published_at")
+        object.__setattr__(self, "published_at", published)
+        object.__setattr__(self, "available_at", available)
+
     @classmethod
     def create(
         cls,
@@ -328,6 +351,8 @@ class ClaimStore:
         predicate: str,
         value: str,
     ) -> InformationClaim:
+        if not isinstance(document, SourceDocument):
+            raise ValueError("document must be a SourceDocument")
         normalized_subject = _text(subject, name="subject")
         normalized_predicate = _text(predicate, name="predicate")
         normalized_value = _text(value, name="value")

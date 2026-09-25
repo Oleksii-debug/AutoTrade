@@ -1,3 +1,4 @@
+from functools import partial
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import unittest
@@ -48,6 +49,11 @@ def capability(*, order_types=("MARKET", "LIMIT"), tif=("GTC", "IOC")):
         sources=frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}),
     )
 
+
+
+# Bind only test fixtures; production APIs require explicit account/environment scope.
+parse_trade_history = partial(parse_trade_history, account_id="acct-kraken-spot", environment="PAPER")
+coverage_evidence = partial(coverage_evidence, account_id="acct-kraken-spot", environment="PAPER")
 
 class KrakenSpotAdapterTests(unittest.TestCase):
     def test_limit_request_preserves_exact_decimal_and_has_no_nonce(self):

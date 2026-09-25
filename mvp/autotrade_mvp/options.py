@@ -7,7 +7,7 @@ model-dependent and deliberately outside this deterministic settlement layer.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Iterable, Literal, Mapping
 
@@ -71,6 +71,7 @@ class OptionContract:
     exercise_cutoff: datetime
     deliverable: tuple[DeliverableLeg, ...] = ()
     exercise_opens_at: datetime | None = None
+    exercise_cash_per_contract: Decimal | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "instrument", _text(self.instrument, "instrument"))
@@ -106,11 +107,38 @@ class OptionContract:
             if opens > self.exercise_cutoff:
                 raise OptionError("exercise_opens_at cannot be after exercise_cutoff")
             object.__setattr__(self, "exercise_opens_at", opens)
-        object.__setattr__(self, "deliverable", tuple(self.deliverable))
-        if self.settlement_method == "PHYSICAL" and not self.deliverable:
-            raise OptionError("physical option requires explicit adjusted deliverable")
-        if self.settlement_method == "CASH" and self.deliverable:
-            raise OptionError("cash-settled option cannot silently carry physical deliverables")
+        deliverable = tuple(self.deliverable)
+        if any(not isinstance(leg, DeliverableLeg) for leg in deliverable):
+            raise OptionError("deliverable must contain DeliverableLeg values")
+        asset_ids = [leg.asset_id for leg in deliverable]
+        if len(asset_ids) != len(set(asset_ids)):
+            raise OptionError("deliverable asset_id values must be unique")
+        object.__setattr__(self, "deliverable", deliverable)
+        if self.settlement_method == "PHYSICAL":
+            if not self.deliverable:
+                raise OptionError("physical option requires explicit adjusted deliverable")
+            if self.exercise_cash_per_contract is None:
+                raise OptionError(
+                    "physical option requires explicit exercise_cash_per_contract"
+                )
+            object.__setattr__(
+                self,
+                "exercise_cash_per_contract",
+                _decimal(
+                    self.exercise_cash_per_contract,
+                    "exercise_cash_per_contract",
+                    positive=True,
+                ),
+            )
+        else:
+            if self.deliverable:
+                raise OptionError(
+                    "cash-settled option cannot silently carry physical deliverables"
+                )
+            if self.exercise_cash_per_contract is not None:
+                raise OptionError(
+                    "cash-settled option cannot carry physical exercise cash"
+                )
 
 
 @dataclass(frozen=True)
@@ -181,7 +209,9 @@ def physical_exercise_obligation(
         (leg.asset_id, direction * leg.quantity_per_contract)
         for leg in contract.deliverable
     )
-    cash = -(direction * contract.strike * contract.multiplier)
+    if contract.exercise_cash_per_contract is None:
+        raise OptionError("physical exercise cash is not evidenced")
+    cash = -(direction * contract.exercise_cash_per_contract)
     return ExerciseObligation(
         asset_quantities=assets,
         settlement_cash=cash,
@@ -310,3 +340,140 @@ def book_physical_option_settlement(
     )
     validate_transaction(transaction)
     return transaction
+def _source_sha(value: str) -> str:
+    text = _text(value, "source_sha")
+    if len(text) not in {40, 64} or any(ch not in "0123456789abcdef" for ch in text):
+        raise OptionError("source_sha must be a canonical lowercase Git digest")
+    return text
+
+
+def _input_digest(value: str) -> str:
+    text = _text(value, "input_digest")
+    if (
+        not text.startswith("sha256:")
+        or len(text) != 71
+        or any(ch not in "0123456789abcdef" for ch in text[7:])
+    ):
+        raise OptionError("input_digest must be sha256:<64 lowercase hex>")
+    return text
+
+
+@dataclass(frozen=True)
+class OptionScenarioResult:
+    """One deterministic stress evaluation, not a probability forecast."""
+
+    scenario_id: str
+    underlying_price: Decimal
+    implied_volatility: Decimal
+    pnl: Decimal
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "scenario_id", _text(self.scenario_id, "scenario_id"))
+        object.__setattr__(
+            self,
+            "underlying_price",
+            _decimal(self.underlying_price, "underlying_price", positive=True),
+        )
+        volatility = _decimal(self.implied_volatility, "implied_volatility")
+        if volatility < 0:
+            raise OptionError("implied_volatility cannot be negative")
+        object.__setattr__(self, "implied_volatility", volatility)
+        object.__setattr__(self, "pnl", _decimal(self.pnl, "scenario pnl"))
+
+
+@dataclass(frozen=True)
+class OptionRiskEvidence:
+    """Versioned model evidence for Greeks plus explicit scenario stress.
+
+    Greeks are estimates tied to a model and market timestamp. They do not grant
+    trading authority and do not replace scenario stress.
+    """
+
+    instrument: str
+    model_id: str
+    model_version: str
+    source_sha: str
+    input_digest: str
+    schema_version: int
+    market_as_of: datetime
+    calculated_at: datetime
+    expires_at: datetime
+    maximum_market_age: timedelta
+    delta: Decimal
+    gamma: Decimal
+    vega: Decimal
+    theta: Decimal
+    rho: Decimal
+    scenarios: tuple[OptionScenarioResult, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "instrument", _text(self.instrument, "instrument"))
+        object.__setattr__(self, "model_id", _text(self.model_id, "model_id"))
+        object.__setattr__(
+            self, "model_version", _text(self.model_version, "model_version")
+        )
+        object.__setattr__(self, "source_sha", _source_sha(self.source_sha))
+        object.__setattr__(self, "input_digest", _input_digest(self.input_digest))
+        if type(self.schema_version) is not int or self.schema_version <= 0:
+            raise OptionError("schema_version must be a positive integer")
+
+        market = _utc(self.market_as_of, "market_as_of")
+        calculated = _utc(self.calculated_at, "calculated_at")
+        expires = _utc(self.expires_at, "expires_at")
+        if market > calculated:
+            raise OptionError("market_as_of cannot be after calculated_at")
+        if expires <= calculated:
+            raise OptionError("risk evidence must expire after calculation")
+        if (
+            not isinstance(self.maximum_market_age, timedelta)
+            or self.maximum_market_age <= timedelta(0)
+        ):
+            raise OptionError("maximum_market_age must be a positive timedelta")
+        if calculated - market > self.maximum_market_age:
+            raise OptionError("market evidence is stale at calculation")
+        object.__setattr__(self, "market_as_of", market)
+        object.__setattr__(self, "calculated_at", calculated)
+        object.__setattr__(self, "expires_at", expires)
+
+        for field in ("delta", "gamma", "vega", "theta", "rho"):
+            object.__setattr__(
+                self, field, _decimal(getattr(self, field), field)
+            )
+
+        scenarios = tuple(self.scenarios)
+        if not scenarios:
+            raise OptionError("option risk evidence requires scenario stress")
+        if any(not isinstance(item, OptionScenarioResult) for item in scenarios):
+            raise OptionError("scenarios must contain OptionScenarioResult values")
+        ids = [item.scenario_id for item in scenarios]
+        if len(ids) != len(set(ids)):
+            raise OptionError("scenario_id values must be unique")
+        object.__setattr__(self, "scenarios", scenarios)
+
+    @property
+    def worst_scenario_loss(self) -> Decimal:
+        return max(
+            (max(-scenario.pnl, Decimal("0")) for scenario in self.scenarios),
+            default=Decimal("0"),
+        )
+
+
+def require_current_option_risk(
+    evidence: OptionRiskEvidence,
+    *,
+    instrument: str,
+    at: datetime,
+) -> None:
+    if not isinstance(evidence, OptionRiskEvidence):
+        raise TypeError("evidence must be OptionRiskEvidence")
+    expected = _text(instrument, "instrument")
+    if evidence.instrument != expected:
+        raise OptionError("option risk evidence belongs to another instrument")
+    point = _utc(at, "at")
+    if point < evidence.calculated_at:
+        raise OptionError("option risk evidence is from the future")
+    if point >= evidence.expires_at:
+        raise OptionError("option risk evidence is stale")
+    if point - evidence.market_as_of > evidence.maximum_market_age:
+        raise OptionError("option risk market evidence is stale")
+

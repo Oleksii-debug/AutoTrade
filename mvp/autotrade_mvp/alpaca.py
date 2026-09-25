@@ -8,7 +8,7 @@ network requests or granting financial authority.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
@@ -195,6 +195,9 @@ class AlpacaOrderIntent:
         )
 
 
+_ALPACA_PREPARED_REQUEST_FACTORY_TOKEN = object()
+
+
 @dataclass(frozen=True)
 class AlpacaPreparedRequest:
     endpoint: str
@@ -203,14 +206,37 @@ class AlpacaPreparedRequest:
     environment: str
     capability_snapshot_id: str
     documentation_refs: tuple[str, ...]
+    instrument_versions: tuple[str, ...] = ()
     capability_snapshot_ids: tuple[str, ...] = ()
+    body_sha256: str = field(init=False)
+    _factory_token: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if self._factory_token is not _ALPACA_PREPARED_REQUEST_FACTORY_TOKEN:
+            raise AlpacaAdapterError(
+                "AlpacaPreparedRequest must be created by a canonical preparation factory"
+            )
         endpoint = _text(self.endpoint, name="endpoint")
         if endpoint != "/v2/orders":
             raise AlpacaAdapterError("prepared order endpoint must be /v2/orders")
         if not isinstance(self.body, Mapping):
             raise TypeError("body must be a mapping")
+        body = dict(self.body)
+        body["client_order_id"] = validate_client_order_id(
+            body.get("client_order_id")
+        )
+        try:
+            rendered_body = json.dumps(
+                body,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as error:
+            raise AlpacaAdapterError(
+                "prepared order body must be canonical JSON"
+            ) from error
         account = _text(self.account_id, name="account_id")
         environment = _text(self.environment, name="environment").upper()
         if environment not in {"PAPER", "LIVE"}:
@@ -225,6 +251,16 @@ class AlpacaPreparedRequest:
         )
         if not refs:
             raise AlpacaAdapterError("documentation_refs must not be empty")
+        if not isinstance(self.instrument_versions, tuple):
+            raise TypeError("instrument_versions must be a tuple")
+        instrument_versions = tuple(
+            _text(value, name="instrument_version")
+            for value in self.instrument_versions
+        )
+        if not instrument_versions:
+            raise AlpacaAdapterError("instrument_versions must not be empty")
+        if len(instrument_versions) != len(set(instrument_versions)):
+            raise AlpacaAdapterError("instrument_versions must be unique")
         raw_snapshot_ids = (
             self.capability_snapshot_ids
             if self.capability_snapshot_ids
@@ -242,8 +278,18 @@ class AlpacaPreparedRequest:
             raise AlpacaAdapterError(
                 "primary capability_snapshot_id must be included in capability_snapshot_ids"
             )
+        if len(snapshot_ids) != len(instrument_versions):
+            raise AlpacaAdapterError(
+                "capability snapshot identities must match instrument versions one-for-one"
+            )
         object.__setattr__(self, "endpoint", endpoint)
-        object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
+        object.__setattr__(self, "body", MappingProxyType(body))
+        object.__setattr__(
+            self,
+            "body_sha256",
+            "sha256:" + sha256(rendered_body.encode("utf-8")).hexdigest(),
+        )
+        object.__setattr__(self, "instrument_versions", instrument_versions)
         object.__setattr__(self, "account_id", account)
         object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "capability_snapshot_id", capability_snapshot_id)
@@ -312,6 +358,8 @@ def prepare_order_request(
         environment=environment_value,
         capability_snapshot_id=capability.snapshot_id,
         documentation_refs=tuple(ALPACA_DOCS.values()),
+        instrument_versions=(intent.instrument_version,),
+        _factory_token=_ALPACA_PREPARED_REQUEST_FACTORY_TOKEN,
     )
 
 
@@ -875,8 +923,10 @@ def prepare_mleg_order_request(
         environment=first_capability.environment,
         capability_snapshot_id=first_capability.snapshot_id,
         documentation_refs=tuple(ALPACA_DOCS.values()) + (_ALPACA_MLEG_DOC,),
+        instrument_versions=tuple(leg.instrument_version for leg in intent.legs),
         capability_snapshot_ids=tuple(
             capabilities[leg.instrument_version].snapshot_id
             for leg in intent.legs
         ),
+        _factory_token=_ALPACA_PREPARED_REQUEST_FACTORY_TOKEN,
     )

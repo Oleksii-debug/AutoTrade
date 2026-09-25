@@ -249,6 +249,7 @@ def _dividend_transaction(
     order_key: str,
     corrects_transaction_id: str | None = None,
     economic_effective_at: str | None = None,
+    observed_at: str | None = None,
 ) -> JournalTransaction | None:
     amount = transition.after.unsettled_cash - transition.before.unsettled_cash
     if amount == 0:
@@ -271,7 +272,7 @@ def _dividend_transaction(
             or accepted.event.effective_at.isoformat().replace("+00:00", "Z")
         ),
         economic_order_key=order_key,
-        observed_at=accepted.observed_at,
+        observed_at=observed_at or accepted.observed_at,
         corrects_transaction_id=corrects_transaction_id,
     )
     validate_transaction(transaction)
@@ -303,6 +304,7 @@ def _correction_transactions(
     transition: Transition,
     *,
     exact_retry: bool,
+    transaction_observed_at: str | None = None,
 ) -> tuple[JournalTransaction, ...]:
     target_id = accepted.corrects_external_event_id
     if target_id is None:
@@ -428,6 +430,7 @@ def _economic_transactions(
         accepted,
         transition,
         order_key=order_key,
+        observed_at=transaction_observed_at,
     )
     active = _active_for_order_key(economic_book, order_key)
     if active and not exact_retry:
@@ -522,13 +525,14 @@ def commit_authoritative_corporate_action(
     )
     evidence_plan = evidence_store.prepare_record_mutation(accepted)
     candidate, transition = _candidate_book(corporate_book, accepted)
+    activation_text = activation_cut.isoformat().replace("+00:00", "Z")
     transactions = _economic_transactions(
         economic_book,
         accepted,
         transition,
         exact_retry=evidence_plan.already_committed,
+        transaction_observed_at=activation_text,
     )
-    activation_text = activation_cut.isoformat().replace("+00:00", "Z")
     economic_plan = (
         economic_book.prepare_batch_mutation(
             transactions,

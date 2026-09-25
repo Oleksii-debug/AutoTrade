@@ -394,7 +394,11 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js,
         )
         self.assertIn(
-            "roleCanSubmitAction(state.sessionIdentity.role, action.value)",
+            "const effectiveAction = state.pendingCommand !== null",
+            js,
+        )
+        self.assertIn(
+            "roleCanSubmitAction(state.sessionIdentity.role, effectiveAction)",
             js,
         )
         self.assertIn(
@@ -402,6 +406,29 @@ class SemanticWebClientContractTests(unittest.TestCase):
             "state.sessionIdentity !== null);",
             js,
         )
+
+    def test_pending_owner_command_is_not_retried_after_role_downgrade(self):
+        js = APP.read_text(encoding="utf-8")
+        submit = js.index("async function submitCommand(event)")
+        payload = js.index("const payload = commandForSubmission(action)", submit)
+        role_fence = js.index(
+            "if (recovering && !roleCanSubmitAction(",
+            submit,
+        )
+        self.assertLess(role_fence, payload)
+        self.assertIn(
+            "state.pendingCommand.action",
+            js[role_fence:payload],
+        )
+        self.assertIn(
+            "The authenticated role no longer permits the unresolved command.",
+            js[role_fence:payload],
+        )
+        self.assertIn(
+            "the browser will not retry it.",
+            js[role_fence:payload],
+        )
+        self.assertIn("setCommandAvailability(false)", js[role_fence:payload])
 
     def test_keyboard_and_high_contrast_rules_are_explicit(self):
         css = CSS.read_text(encoding="utf-8")

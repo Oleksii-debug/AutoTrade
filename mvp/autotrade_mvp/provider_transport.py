@@ -69,6 +69,14 @@ def _text(value: object, *, name: str) -> str:
     return value.strip()
 
 
+def _canonical_text(value: object, *, name: str) -> str:
+    """Require exact non-empty text when bytes are bound to durable request identity."""
+    text = _text(value, name=name)
+    if value != text:
+        raise ProviderTransportScopeError(f"{name} must be canonical text")
+    return text
+
+
 def _canonical_environment(value: object) -> str:
     environment = _text(value, name="environment").upper()
     if environment not in {"PAPER", "LIVE"}:
@@ -150,7 +158,7 @@ class ProviderEndpointPolicy:
         object.__setattr__(self, "allowed_hosts", hosts)
 
     def absolute_url(self, endpoint: object) -> str:
-        path = _text(endpoint, name="endpoint")
+        path = _canonical_text(endpoint, name="endpoint")
         if (
             not path.startswith("/")
             or path.startswith("//")
@@ -347,7 +355,7 @@ class BinanceSpotSigner:
             )
         canonical: dict[str, str] = {}
         for raw_key, raw_value in body.items():
-            key = _text(raw_key, name="order parameter")
+            key = _canonical_text(raw_key, name="order parameter")
             if not isinstance(raw_value, str) or raw_value != raw_value.strip():
                 raise ProviderTransportScopeError(
                     "Binance order parameters must be canonical strings"
@@ -473,7 +481,9 @@ class BinanceSpotHttpTransport:
 
         self.policy = policy
         self.account_id = account
-        self.capability_snapshot_id = capability
+        self.capability_snapshot_id = _canonical_text(
+            capability_snapshot_id, name="capability_snapshot_id"
+        )
         self.secret_resolver = secret_resolver
         self.credential_handle = credential_handle
         self.session_token = _text(session_token, name="session_token")
@@ -502,9 +512,9 @@ class BinanceSpotHttpTransport:
             raise ProviderTransportScopeError(
                 "prepared Binance request fields are not canonical"
             )
-        endpoint = _text(request["endpoint"], name="endpoint")
+        endpoint = _canonical_text(request["endpoint"], name="endpoint")
         body = request["body"]
-        capability = _text(
+        capability = _canonical_text(
             request["capability_snapshot_id"],
             name="capability_snapshot_id",
         )
@@ -514,7 +524,7 @@ class BinanceSpotHttpTransport:
             )
         normalized: dict[str, str] = {}
         for raw_key, raw_value in body.items():
-            key = _text(raw_key, name="order parameter")
+            key = _canonical_text(raw_key, name="order parameter")
             if not isinstance(raw_value, str) or raw_value != raw_value.strip():
                 raise ProviderTransportScopeError(
                     "prepared Binance body values must be canonical strings"
@@ -530,7 +540,7 @@ class BinanceSpotHttpTransport:
     ) -> ExactJsonTransportResponse:
         if not callable(final_guard):
             raise TypeError("final_guard must be callable")
-        client_id = _text(client_order_id, name="client_order_id")
+        client_id = _canonical_text(client_order_id, name="client_order_id")
         endpoint, body, capability = self._prepared_fields(request)
         if capability != self.capability_snapshot_id:
             raise ProviderTransportScopeError(

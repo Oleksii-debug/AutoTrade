@@ -29,6 +29,8 @@
     stopped: false,
     announcementTimer: null,
     pendingAnnouncements: [],
+    urgentAnnouncementTimer: null,
+    pendingUrgentAnnouncements: [],
     restoreFocusId: null
   };
 
@@ -345,7 +347,16 @@
     }
 
     if (urgent) {
-      announceLiveText("urgent-status", message);
+      state.pendingUrgentAnnouncements.push(message);
+      if (state.urgentAnnouncementTimer !== null) return;
+      state.urgentAnnouncementTimer = window.setTimeout(() => {
+        const pending = state.pendingUrgentAnnouncements;
+        state.pendingUrgentAnnouncements = [];
+        state.urgentAnnouncementTimer = null;
+        // Preserve every urgent event in the burst, including identical ones,
+        // while producing one stable assertive live-region mutation for NVDA.
+        announceLiveText("urgent-status", pending.join(" "));
+      }, 0);
       return;
     }
 

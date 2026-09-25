@@ -216,6 +216,8 @@ class AblationPair:
             raise ValueError("matched outcomes must use the same deadline budget")
         if self.full.input_cutoff_utc != self.ablated.input_cutoff_utc:
             raise ValueError("matched outcomes must share exact causal input cutoff")
+        if self.full.decision_utc != self.ablated.decision_utc:
+            raise ValueError("matched outcomes must share exact decision time")
         if self.full.outcome_available_utc != self.ablated.outcome_available_utc:
             raise ValueError("matched outcomes must share outcome availability")
         if self.full.population_unit_id != self.ablated.population_unit_id:
@@ -330,13 +332,18 @@ def _validate_pairs(target_component: str, pairs: Iterable[AblationPair]) -> lis
     if any(pair.target_component != target_component for pair in selected):
         raise ValueError("all pairs must target the requested component")
 
-    seen_cases: set[tuple[str, str]] = set()
+    seen_case_ids: set[str] = set()
+    seen_input_fingerprints: set[str] = set()
     seen_population_units: set[str] = set()
     for pair in selected:
-        case_key = (pair.full.case_id, pair.full.input_fingerprint)
-        if case_key in seen_cases:
-            raise ValueError("duplicate matched ablation case")
-        seen_cases.add(case_key)
+        case_id = pair.full.case_id
+        fingerprint = pair.full.input_fingerprint
+        if case_id in seen_case_ids:
+            raise ValueError("duplicate matched ablation case_id")
+        if fingerprint in seen_input_fingerprints:
+            raise ValueError("duplicate matched ablation input_fingerprint")
+        seen_case_ids.add(case_id)
+        seen_input_fingerprints.add(fingerprint)
 
         population_unit = pair.full.population_unit_id
         if population_unit in seen_population_units:

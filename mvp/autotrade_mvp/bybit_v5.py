@@ -325,6 +325,8 @@ def parse_submission_response(
         raise ProviderCoreError(
             "Bybit evidence environment must be MAINNET, TESTNET or DEMO"
         )
+    if type(transport_ambiguous) is not bool:
+        raise ProviderCoreError("transport_ambiguous must be boolean")
     if transport_ambiguous:
         if response is not None:
             raise ProviderCoreError(
@@ -334,6 +336,7 @@ def parse_submission_response(
             raise ProviderCoreError(
                 "ambiguous transport requires explicit local observed_at"
             )
+        _utc_text(observed_at, name="observed_at")
         # Local observed_at and provider environment belong to the durable
         # SubmissionAttempt. With no authoritative provider response there is
         # deliberately no provider_received_at and no response EvidenceRef.

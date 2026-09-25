@@ -311,6 +311,17 @@ class ReleaseCandidateDecision:
     def __post_init__(self) -> None:
         if self.status not in {"FROZEN", "BLOCKED"}:
             raise ReleaseCandidateError("unsupported release-candidate status")
+        if not isinstance(self.reasons, tuple) or any(
+            not isinstance(reason, str) or not reason.strip()
+            for reason in self.reasons
+        ):
+            raise ReleaseCandidateError(
+                "release-candidate reasons must be a tuple of non-empty strings"
+            )
+        if len(set(self.reasons)) != len(self.reasons):
+            raise ReleaseCandidateError(
+                "release-candidate reasons must be unique"
+            )
         if self.status == "FROZEN":
             if self.reasons:
                 raise ReleaseCandidateError(
@@ -320,6 +331,69 @@ class ReleaseCandidateDecision:
                 raise ReleaseCandidateError(
                     "frozen release candidate requires canonical manifest"
                 )
+            digest = _sha256(
+                self.manifest_sha256,
+                name="manifest_sha256",
+            )
+            try:
+                manifest = json.loads(self.manifest_json)
+            except (json.JSONDecodeError, TypeError) as error:
+                raise ReleaseCandidateError(
+                    "frozen release candidate manifest must be valid JSON"
+                ) from error
+            if type(manifest) is not dict:
+                raise ReleaseCandidateError(
+                    "frozen release candidate manifest must be a JSON object"
+                )
+            canonical = json.dumps(
+                manifest,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            if canonical != self.manifest_json:
+                raise ReleaseCandidateError(
+                    "frozen release candidate manifest must use canonical JSON"
+                )
+            actual_digest = (
+                "sha256:" + sha256(canonical.encode("utf-8")).hexdigest()
+            )
+            if digest != actual_digest:
+                raise ReleaseCandidateError(
+                    "frozen release candidate manifest digest does not match manifest"
+                )
+            if set(manifest) != {
+                "release_id",
+                "source_sha",
+                "baseline_hash",
+                "schema_contract_hash",
+                "artifacts",
+            }:
+                raise ReleaseCandidateError(
+                    "frozen release candidate manifest has unsupported structure"
+                )
+            _text(manifest.get("release_id"), name="manifest.release_id")
+            _git_sha(manifest.get("source_sha"), name="manifest.source_sha")
+            _sha256(
+                manifest.get("baseline_hash"),
+                name="manifest.baseline_hash",
+            )
+            _sha256(
+                manifest.get("schema_contract_hash"),
+                name="manifest.schema_contract_hash",
+            )
+            if not isinstance(manifest.get("artifacts"), list):
+                raise ReleaseCandidateError(
+                    "frozen release candidate artifacts must be a list"
+                )
+            # No authenticated role-specific attestation authority is integrated
+            # in this lineage yet.  A caller can always recompute a hash for
+            # caller-authored bytes, so content-addressing alone cannot mint a
+            # durable FROZEN authority object.
+            raise ReleaseCandidateError(
+                "frozen release candidate requires independently verified attestation"
+            )
         else:
             if not self.reasons:
                 raise ReleaseCandidateError(

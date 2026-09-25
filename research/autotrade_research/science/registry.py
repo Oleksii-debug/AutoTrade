@@ -350,6 +350,14 @@ class ScientificRegistry:
             raise ProtocolViolation("candidate approval result_hash does not match locked evaluation")
         if not evidence.untouched or evidence.prior_access_count != 0:
             raise ProtocolViolation("candidate promotion requires an untouched locked holdout evaluation")
+        current_access_count = self.holdout_access_count(
+            evidence.protocol_id,
+            evidence.holdout_id,
+        )
+        if current_access_count != 1:
+            raise ProtocolViolation(
+                "candidate promotion requires holdout to remain untouched after locked evaluation"
+            )
 
         trial_state = self.completeness(expected_protocol)
         if trial_state["recorded_trials"] < 1:

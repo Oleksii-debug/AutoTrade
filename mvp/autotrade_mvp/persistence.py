@@ -1181,6 +1181,21 @@ class JournalStore:
             "updated_at": row["updated_at"],
         }
 
+    def pending_outbox_count(self) -> int:
+        """Return the complete durable undelivered outbox cardinality.
+
+        This read-only count is intentionally unbounded so recovery/performance
+        qualification cannot mistake a page limit for the actual reconnect
+        backlog.
+        """
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS pending_count FROM outbox WHERE delivered_at IS NULL"
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("pending outbox count query returned no row")
+        return int(row["pending_count"])
+
     def pending_outbox(self, *, limit: int = 100) -> list[dict[str, Any]]:
         if not isinstance(limit, int) or limit < 1 or limit > 1000:
             raise ValueError("limit must be between 1 and 1000")

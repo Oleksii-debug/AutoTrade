@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import Any, Iterable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
+from .dispatch import submission_attempt_aggregate_id
 from .persistence import JournalStore, payload_digest
 from .reconciliation import ReconciliationResult, UnknownSubmission
 
@@ -169,6 +170,8 @@ def unknown_submissions_from_dispatch(
     store: JournalStore,
     *,
     attempt_ids: Iterable[str],
+    environment: str,
+    account_id: str,
 ) -> tuple[UnknownSubmission, ...]:
     """Rebuild ambiguous outbound attempts from durable Submission* events.
 
@@ -185,7 +188,12 @@ def unknown_submissions_from_dispatch(
 
     recovered: list[UnknownSubmission] = []
     for attempt_id in normalized:
-        events = store.load_events("submission_attempt", attempt_id)
+        aggregate_id = submission_attempt_aggregate_id(
+            environment=environment,
+            account_id=account_id,
+            attempt_id=attempt_id,
+        )
+        events = store.load_events("submission_attempt", aggregate_id)
         if not events:
             raise KeyError(f"Unknown submission attempt: {attempt_id}")
         first = events[0]

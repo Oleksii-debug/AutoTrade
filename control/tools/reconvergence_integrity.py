@@ -120,9 +120,13 @@ def assess_reconvergence(
     )
 
 
-def _git_lines(*args: str) -> tuple[str, ...]:
+def _git_lines(
+    *args: str,
+    cwd: str | Path | None = None,
+) -> tuple[str, ...]:
     completed = subprocess.run(
         ["git", *args],
+        cwd=cwd,
         check=True,
         text=True,
         stdout=subprocess.PIPE,
@@ -131,9 +135,15 @@ def _git_lines(*args: str) -> tuple[str, ...]:
     return tuple(completed.stdout.splitlines())
 
 
-def _git_is_ancestor(base: str, head: str) -> bool:
+def _git_is_ancestor(
+    base: str,
+    head: str,
+    *,
+    cwd: str | Path | None = None,
+) -> bool:
     completed = subprocess.run(
         ["git", "merge-base", "--is-ancestor", base, head],
+        cwd=cwd,
         check=False,
         text=True,
         stdout=subprocess.PIPE,
@@ -157,11 +167,26 @@ def assess_git_revisions(
     *,
     max_deletions: int = 50,
     max_deleted_fraction: float = 0.35,
+    cwd: str | Path | None = None,
 ) -> IntegrityAssessment:
-    base_is_ancestor = _git_is_ancestor(base, head)
-    base_paths = _git_lines("ls-tree", "-r", "--name-only", base)
+    """Assess revisions inside one explicit Git repository/worktree.
+
+    cwd defaults to the current process directory for the CLI workflow. Tests
+    and library callers can bind revision identity to another repository. Every
+    Git subprocess uses the same repository boundary.
+    """
+
+    base_is_ancestor = _git_is_ancestor(base, head, cwd=cwd)
+    base_paths = _git_lines("ls-tree", "-r", "--name-only", base, cwd=cwd)
     changes = parse_name_status(
-        _git_lines("diff", "--name-status", "--find-renames", base, head)
+        _git_lines(
+            "diff",
+            "--name-status",
+            "--find-renames",
+            base,
+            head,
+            cwd=cwd,
+        )
     )
     return assess_reconvergence(
         base_paths=base_paths,

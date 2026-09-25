@@ -105,7 +105,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                 git("rev-parse", f"{base_sha}^{{tree}}"),
                 git("rev-parse", f"{head_sha}^{{tree}}"),
             )
-            result = assess_git_revisions(base_sha, head_sha)
+            result = assess_git_revisions(base_sha, head_sha, cwd=root)
 
         self.assertFalse(result.allowed)
         self.assertFalse(result.base_is_ancestor)

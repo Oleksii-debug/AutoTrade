@@ -460,6 +460,44 @@ class WhiteBitAdapterTests(unittest.TestCase):
                 reduce_only=True,
             )
 
+    def test_tradfi_futures_market_type_uses_guarded_collateral_route(self):
+        intent = WhiteBitOrderIntent.create(
+            instrument_version="RIVN_PERP:v1",
+            product_family="FUTURES",
+            market="RIVN_PERP",
+            side="BUY",
+            order_type="MARKET",
+            amount="1",
+        )
+        rules = WhiteBitMarketRules.from_provider(
+            {
+                "name": "RIVN_PERP",
+                "type": "tradfiFutures",
+                "isCollateral": False,
+                "tradesEnabled": True,
+                "stepSize": "1",
+                "tickSize": "0.01",
+                "minAmount": "1",
+                "minTotal": "1",
+                "maxTotal": "0",
+                "delistedAt": None,
+            }
+        )
+        request = prepare_order_request(
+            intent,
+            client_order_id="at-tradfi-1",
+            account_id="account-1",
+            environment="PAPER",
+            capability=capability(
+                instrument_version="RIVN_PERP:v1",
+                order_types=("MARKET",),
+            ),
+            market_rules=rules,
+            at=NOW,
+        )
+        self.assertEqual(request.endpoint, "/api/v4/order/collateral/market")
+        self.assertEqual(request.body["market"], "RIVN_PERP")
+
     def test_ioc_and_post_only_conflict_fails_before_send(self):
         with self.assertRaisesRegex(WhiteBitAdapterError, "mutually exclusive"):
             WhiteBitOrderIntent.create(

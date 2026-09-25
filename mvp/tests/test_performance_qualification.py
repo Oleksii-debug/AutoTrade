@@ -9,6 +9,7 @@ from mvp.autotrade_mvp.performance_qualification import (
 
 
 SHA = "a" * 40
+GIT_SHA256 = "d" * 64
 HASH = "sha256:" + ("b" * 64)
 HOST = "sha256:" + ("c" * 64)
 
@@ -62,6 +63,46 @@ class RuntimePerformanceQualificationTests(unittest.TestCase):
                 research_interference_us=(10,),
                 reconnect_backlog_remaining=0,
             )
+
+    def test_identity_fields_reject_aliases_and_accept_git_sha256(self):
+        sha256_spec = RuntimeBudgetSpec(
+            scenario_id="declared-load",
+            release_sha=GIT_SHA256,
+            configuration_hash=HASH,
+            host_fingerprint=HOST,
+            strategy_horizon_us=1000,
+            max_p95_financial_latency_us=500,
+            max_financial_staleness_us=500,
+            max_research_interference_us=500,
+            min_financial_samples=2,
+            min_research_samples=1,
+        )
+        self.assertEqual(sha256_spec.release_sha, GIT_SHA256)
+
+        invalid_cases = (
+            {"release_sha": SHA.upper()},
+            {"release_sha": GIT_SHA256.upper()},
+            {"release_sha": " " + SHA},
+            {"configuration_hash": "sha256:" + ("B" * 64)},
+            {"configuration_hash": HASH + " "},
+            {"host_fingerprint": "SHA256:" + ("c" * 64)},
+        )
+        for overrides in invalid_cases:
+            kwargs = {
+                "scenario_id": "declared-load",
+                "release_sha": SHA,
+                "configuration_hash": HASH,
+                "host_fingerprint": HOST,
+                "strategy_horizon_us": 1000,
+                "max_p95_financial_latency_us": 500,
+                "max_financial_staleness_us": 500,
+                "max_research_interference_us": 500,
+                "min_financial_samples": 2,
+                "min_research_samples": 1,
+            }
+            kwargs.update(overrides)
+            with self.subTest(overrides=overrides), self.assertRaises(RuntimeBudgetError):
+                RuntimeBudgetSpec(**kwargs)
 
     def test_valid_factory_evidence_still_passes_declared_budget(self):
         current = spec()

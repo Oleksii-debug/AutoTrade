@@ -174,6 +174,44 @@ class RecoveryQualificationDecision:
     blockers: tuple[str, ...]
     measured_downtime_ms: Mapping[RecoveryScenario, int]
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.status, RecoveryEvidenceStatus):
+            raise TypeError("status must be RecoveryEvidenceStatus")
+        if not isinstance(self.blockers, tuple):
+            raise TypeError("blockers must be a tuple")
+        blockers = tuple(_text(value, name="blocker") for value in self.blockers)
+        if len(blockers) != len(set(blockers)):
+            raise ValueError("blockers must be unique")
+        if not isinstance(self.measured_downtime_ms, Mapping):
+            raise TypeError("measured_downtime_ms must be a mapping")
+        measured: dict[RecoveryScenario, int] = {}
+        for scenario, value in self.measured_downtime_ms.items():
+            if not isinstance(scenario, RecoveryScenario):
+                raise TypeError("measured_downtime_ms keys must be RecoveryScenario")
+            if scenario in measured:
+                raise ValueError("duplicate measured recovery scenario")
+            measured[scenario] = _nonnegative_int(
+                value,
+                name=f"measured_downtime_ms[{scenario.value}]",
+            )
+
+        if self.status is RecoveryEvidenceStatus.PASS:
+            if blockers:
+                raise ValueError("PASS recovery decision cannot contain blockers")
+            if set(measured) != _REQUIRED_SCENARIOS:
+                raise ValueError(
+                    "PASS recovery decision must measure every required scenario"
+                )
+        elif not blockers:
+            raise ValueError("non-PASS recovery decision requires blockers")
+
+        object.__setattr__(self, "blockers", blockers)
+        object.__setattr__(
+            self,
+            "measured_downtime_ms",
+            MappingProxyType(measured),
+        )
+
     @property
     def authorizes_trading(self) -> bool:
         return False

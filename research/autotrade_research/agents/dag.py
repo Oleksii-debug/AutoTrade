@@ -211,6 +211,9 @@ def aggregate_specialists(
     runs: Iterable[SpecialistRun],
     *,
     plan: DagPlan,
+    input_snapshot_id: str,
+    available_inputs: Iterable[str],
+    total_budget,
     decision_deadline: datetime,
     blocking_critique_terms: Iterable[str] = (),
 ) -> AggregatedProposal:
@@ -226,12 +229,12 @@ def aggregate_specialists(
     if not isinstance(plan, DagPlan):
         raise SpecialistDagError("plan must be a DagPlan")
 
-    snapshot_id = _text(plan.input_snapshot_id, "plan.input_snapshot_id")
+    snapshot_id = _text(input_snapshot_id, "input_snapshot_id")
     canonical_plan = plan_specialists(
         spec_items,
         input_snapshot_id=snapshot_id,
-        available_inputs=plan.available_inputs,
-        total_budget=plan.total_budget,
+        available_inputs=available_inputs,
+        total_budget=total_budget,
     )
     if plan != canonical_plan:
         raise SpecialistDagError(

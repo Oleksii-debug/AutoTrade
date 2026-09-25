@@ -14,6 +14,11 @@ import json
 import re
 from typing import Iterable
 
+from autotrade_research.artifacts.store import ArtifactStore
+from autotrade_research.io.strict_json import strict_json_loads
+from autotrade_research.memory.episodes import ExperienceMemory
+from autotrade_research.science.registry import ScientificRegistry
+
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -673,6 +678,41 @@ def _evaluation_payload(item: AblationEvaluation) -> dict[str, object]:
 
 
 @dataclass(frozen=True)
+class AblationOutcomeArtifactRef:
+    """Immutable reference to one pre-existing canonical ablation outcome artifact."""
+
+    artifact_id: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        from uuid import UUID
+
+        try:
+            canonical_id = str(UUID(self.artifact_id))
+        except (ValueError, AttributeError, TypeError) as error:
+            raise ValueError("artifact_id must be a canonical UUID") from error
+        if canonical_id != self.artifact_id:
+            raise ValueError("artifact_id must use canonical UUID text")
+        object.__setattr__(self, "sha256", _digest(self.sha256, "sha256"))
+
+
+_ABLATION_OUTCOME_MEDIA_TYPE = "application/vnd.autotrade.ablation-outcome+json"
+
+
+def _parse_utc_text(value: object, field: str) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise ValueError(f"{field} must be canonical UTC text")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as error:
+        raise ValueError(f"{field} must be canonical UTC text") from error
+    canonical = parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    if canonical != value:
+        raise ValueError(f"{field} must be canonical UTC text")
+    return parsed.astimezone(timezone.utc)
+
+
+@dataclass(frozen=True)
 class CanonicalAblationOutcomeEvidence:
     """Immutable binding from one matched outcome to canonical economic evidence."""
 
@@ -770,6 +810,189 @@ class RegisteredAblationPopulation:
         object.__setattr__(self, "population_unit_ids", normalized)
         if type(self.complete) is not bool:
             raise TypeError("complete must be a boolean")
+
+
+class AblationQualificationAuthority:
+    """Resolve qualification evidence only through canonical persistent authorities.
+
+    The authority never publishes evidence. It consumes an append-only scientific
+    protocol, recomputes the complete ExperienceMemory population at the frozen
+    causal cutoff, and reads pre-existing immutable outcome artifacts from the
+    canonical ArtifactStore.
+    """
+
+    def __init__(
+        self,
+        *,
+        scientific_registry: ScientificRegistry,
+        experience_memory: ExperienceMemory,
+        artifact_store: ArtifactStore,
+        protocol_id: str,
+        protocol_hash: str,
+        source_revision: str,
+        causal_cutoff: datetime,
+        granted_permissions: set[str],
+        task: str | None = None,
+        instrument_family: str | None = None,
+    ) -> None:
+        if not isinstance(scientific_registry, ScientificRegistry):
+            raise TypeError("scientific_registry must be ScientificRegistry")
+        if not isinstance(experience_memory, ExperienceMemory):
+            raise TypeError("experience_memory must be ExperienceMemory")
+        if not isinstance(artifact_store, ArtifactStore):
+            raise TypeError("artifact_store must be ArtifactStore")
+        if not isinstance(protocol_id, str) or not protocol_id.strip():
+            raise ValueError("protocol_id is required")
+        if not isinstance(protocol_hash, str):
+            raise TypeError("protocol_hash must be text")
+        if not isinstance(source_revision, str) or _GIT_SHA.fullmatch(source_revision) is None:
+            raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
+        if not isinstance(granted_permissions, set) or not granted_permissions:
+            raise ValueError("granted_permissions must be a non-empty set")
+        self.scientific_registry = scientific_registry
+        self.experience_memory = experience_memory
+        self.artifact_store = artifact_store
+        self.protocol_id = protocol_id.strip()
+        self.protocol_hash = _digest(protocol_hash, "protocol_hash")
+        self.source_revision = source_revision
+        self.causal_cutoff = _utc(causal_cutoff, "causal_cutoff")
+        self.granted_permissions = set(granted_permissions)
+        self.task = task
+        self.instrument_family = instrument_family
+
+    def _load_outcome(
+        self,
+        reference: AblationOutcomeArtifactRef,
+        *,
+        population_root: str,
+    ) -> CanonicalAblationOutcomeEvidence:
+        if not isinstance(reference, AblationOutcomeArtifactRef):
+            raise TypeError("outcome_refs must contain AblationOutcomeArtifactRef")
+        manifest = self.artifact_store.load_manifest(reference.artifact_id)
+        if manifest.get("sha256") != reference.sha256:
+            raise ValueError("ablation outcome artifact digest mismatch")
+        if manifest.get("media_type") != _ABLATION_OUTCOME_MEDIA_TYPE:
+            raise ValueError("ablation outcome artifact media type is not qualified")
+        data = self.artifact_store.read_bytes(reference.artifact_id)
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("ablation outcome artifact must be UTF-8 JSON") from error
+        try:
+            payload = strict_json_loads(text)
+        except ValueError as error:
+            raise ValueError("ablation outcome artifact JSON is invalid") from error
+        required = {
+            "schema_version",
+            "case_id",
+            "variant",
+            "population_unit_id",
+            "utility",
+            "cost",
+            "outcome_available_utc",
+            "source_revision",
+            "protocol_id",
+            "protocol_hash",
+            "population_root",
+            "utility_evidence_digest",
+            "cost_evidence_digest",
+            "superseded_at_utc",
+        }
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise ValueError("ablation outcome artifact schema is not canonical")
+        if payload.get("schema_version") != 1:
+            raise ValueError("ablation outcome artifact schema version is unsupported")
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        if canonical != text:
+            raise ValueError("ablation outcome artifact JSON must be canonical")
+        if (
+            payload.get("protocol_id") != self.protocol_id
+            or payload.get("protocol_hash") != self.protocol_hash
+            or payload.get("population_root") != population_root
+            or payload.get("source_revision") != self.source_revision
+        ):
+            raise ValueError("ablation outcome artifact authority binding mismatch")
+        superseded_raw = payload.get("superseded_at_utc")
+        superseded = (
+            None
+            if superseded_raw is None
+            else _parse_utc_text(superseded_raw, "superseded_at_utc")
+        )
+        return CanonicalAblationOutcomeEvidence(
+            case_id=payload.get("case_id"),
+            variant=payload.get("variant"),
+            population_unit_id=payload.get("population_unit_id"),
+            utility=payload.get("utility"),
+            cost=payload.get("cost"),
+            outcome_available_utc=_parse_utc_text(
+                payload.get("outcome_available_utc"),
+                "outcome_available_utc",
+            ),
+            source_revision=payload.get("source_revision"),
+            utility_evidence_digest=payload.get("utility_evidence_digest"),
+            cost_evidence_digest=payload.get("cost_evidence_digest"),
+            evidence_digest=reference.sha256,
+            superseded_at_utc=superseded,
+        )
+
+    def resolve(
+        self,
+        pairs: Iterable[AblationPair],
+        *,
+        outcome_refs: Iterable[AblationOutcomeArtifactRef],
+    ) -> tuple[RegisteredAblationPopulation, tuple[CanonicalAblationOutcomeEvidence, ...]]:
+        selected = tuple(pairs)
+        registration = self.scientific_registry.protocol_registration(self.protocol_id)
+        if registration.protocol_hash != self.protocol_hash:
+            raise ValueError("registered protocol hash does not match qualification binding")
+        registered_at = _parse_utc_text(
+            registration.created_at,
+            "protocol registered_at",
+        )
+        snapshot = self.experience_memory.coverage_population_snapshot(
+            causal_cutoff=self.causal_cutoff,
+            granted_permissions=set(self.granted_permissions),
+            task=self.task,
+            instrument_family=self.instrument_family,
+        )
+        snapshot.verify_integrity()
+        completeness = self.scientific_registry.completeness(self.protocol_id)
+        population = RegisteredAblationPopulation(
+            protocol_digest=self.protocol_hash,
+            population_digest=snapshot.root_hash,
+            stopping_rule_digest=completeness["stopping_rules_hash"],
+            source_revision=self.source_revision,
+            registered_at_utc=registered_at,
+            evaluation_cutoff_utc=self.causal_cutoff,
+            population_unit_ids=tuple(
+                sorted(row["episode_id"] for row in snapshot.rows)
+            ),
+            complete=True,
+        )
+        outcomes = tuple(
+            self._load_outcome(reference, population_root=snapshot.root_hash)
+            for reference in outcome_refs
+        )
+        if selected:
+            earliest_cutoff = min(pair.full.input_cutoff_utc for pair in selected)
+            if registered_at > earliest_cutoff:
+                # Keep the normal evaluator's fail-closed reason deterministic.
+                population = RegisteredAblationPopulation(
+                    protocol_digest=population.protocol_digest,
+                    population_digest=population.population_digest,
+                    stopping_rule_digest=population.stopping_rule_digest,
+                    source_revision=population.source_revision,
+                    registered_at_utc=registered_at,
+                    evaluation_cutoff_utc=population.evaluation_cutoff_utc,
+                    population_unit_ids=population.population_unit_ids,
+                    complete=True,
+                )
+        return population, outcomes
 
 
 def _qualified_inconclusive(

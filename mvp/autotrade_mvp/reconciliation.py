@@ -705,6 +705,7 @@ class ReconciliationResult:
     manual_or_external_activity_ids: tuple[str, ...] = ()
     activity_coverage_complete: bool = True
     resource_availability: ResourceAvailabilityEvidence | None = None
+    borrow_differences: Mapping[str, Decimal] | None = None
 
     @property
     def blocks_new_risk(self) -> bool:
@@ -801,6 +802,9 @@ def reconcile_account(
     cash_tolerance: Mapping[str, object] | None = None,
     position_tolerance: Mapping[str, object] | None = None,
     resource_availability: ResourceAvailabilityEvidence | None = None,
+    local_borrowed_resources: Mapping[str, object] | None = None,
+    provider_borrowed_resources: Mapping[str, object] | None = None,
+    active_borrow_recall_resources: Sequence[str] = (),
 ) -> ReconciliationResult:
     """Compare local and provider truth without inventing absence evidence.
 
@@ -996,6 +1000,54 @@ def reconcile_account(
             raise ValueError(
                 "resource availability snapshot cut differs from reconciliation"
             )
+
+    local_borrowed = _amount_map(
+        local_borrowed_resources or {},
+        name="local_borrowed_resources",
+    )
+    provider_borrowed = _amount_map(
+        provider_borrowed_resources or {},
+        name="provider_borrowed_resources",
+    )
+    active_recalls = tuple(
+        _text(value, name="active_borrow_recall_resource")
+        for value in active_borrow_recall_resources
+    )
+    if len(active_recalls) != len(set(active_recalls)):
+        raise ValueError("active_borrow_recall_resources must be unique")
+
+    borrow_resources = (
+        set(local_borrowed)
+        | set(provider_borrowed)
+        | set(active_recalls)
+    )
+    borrow_details = (
+        {}
+        if resource_availability is None
+        else resource_availability.resource_details
+    )
+    for resource in sorted(borrow_resources):
+        if not resource.startswith("BORROW:"):
+            raise ValueError(
+                "borrow reconciliation resources must use canonical BORROW identity"
+            )
+        detail = borrow_details.get(resource)
+        if (
+            not isinstance(detail, Mapping)
+            or detail.get("resource_type") != "SECURITIES_BORROW"
+        ):
+            raise ValueError(
+                "borrow reconciliation requires typed availability evidence"
+            )
+
+    borrow_differences: dict[str, Decimal] = {}
+    for resource in sorted(set(local_borrowed) | set(provider_borrowed)):
+        difference = provider_borrowed.get(
+            resource,
+            Decimal("0"),
+        ) - local_borrowed.get(resource, Decimal("0"))
+        if difference != 0:
+            borrow_differences[resource] = difference
 
     cash_differences: dict[str, Decimal] = {}
     for currency in sorted(set(local_cash_map) | set(provider_cash_map)):
@@ -1237,6 +1289,18 @@ def reconcile_account(
 
     blocking: set[str] = set()
     reasons: list[str] = []
+    for resource in borrow_differences:
+        blocking.add(resource)
+    if borrow_differences:
+        reasons.append(
+            "provider/local securities-borrow obligation differs"
+        )
+    for resource in active_recalls:
+        blocking.add(resource)
+    if active_recalls:
+        reasons.append(
+            "active provider securities-borrow recall blocks increased short risk"
+        )
     if not snapshot_is_consistent:
         blocking.add("ACCOUNT")
         if snapshot_consistency is None:
@@ -1373,4 +1437,5 @@ def reconcile_account(
         manual_or_external_activity_ids=manual_or_external_activities,
         activity_coverage_complete=activity_coverage_complete,
         resource_availability=resource_availability,
+        borrow_differences=MappingProxyType(borrow_differences),
     )

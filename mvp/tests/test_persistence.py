@@ -1,4 +1,5 @@
 from tempfile import TemporaryDirectory
+import json
 import sqlite3
 import unittest
 

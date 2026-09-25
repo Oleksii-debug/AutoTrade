@@ -17,6 +17,7 @@ import re
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from .capabilities import CapabilityError, CapabilitySnapshot
 from .provider_core import ProviderCoreError
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
@@ -54,6 +55,11 @@ _REST_BASE_BY_ENVIRONMENT: Mapping[str, str] = {
     "MAINNET": "https://api.bybit.com",
     "TESTNET": "https://api-testnet.bybit.com",
     "DEMO": "https://api-demo.bybit.com",
+}
+
+_DERIVATIVE_ORDER_SCOPE_BY_FAMILY: Mapping[str, str] = {
+    "LINEAR_DERIVATIVES": "BYBIT.LINEAR.ORDER.WRITE",
+    "INVERSE_DERIVATIVES": "BYBIT.INVERSE.ORDER.WRITE",
 }
 
 
@@ -213,6 +219,74 @@ def server_time_from_response(response: Mapping[str, Any]) -> str:
     return instant.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
+def _position_idx_from_capability(
+    *,
+    capability: CapabilitySnapshot,
+    at: datetime,
+    account_id: str,
+    instrument_version: str,
+    product_family: str,
+    side: str,
+    order_type: str,
+    time_in_force: str,
+) -> int:
+    """Project verified account-mode authority into Bybit positionIdx.
+
+    The capability is the authority. A caller cannot select a syntactically
+    valid index independently of the verified account/category mode.
+    """
+
+    if not isinstance(capability, CapabilitySnapshot):
+        raise ProviderCoreError(
+            "Bybit derivative orders require a canonical CapabilitySnapshot"
+        )
+    if capability.provider_id.upper() != "BYBIT":
+        raise ProviderCoreError("capability belongs to another provider")
+
+    account = _text(account_id, name="account_id")
+    instrument = _text(instrument_version, name="instrument_version")
+    if capability.account_id != account:
+        raise ProviderCoreError("capability account does not match target account")
+    if capability.instrument_version != instrument:
+        raise ProviderCoreError(
+            "capability instrument version does not match target instrument"
+        )
+
+    family = _text(product_family, name="product_family").upper()
+    try:
+        permission_scope = _DERIVATIVE_ORDER_SCOPE_BY_FAMILY[family]
+    except KeyError as error:
+        raise ProviderCoreError(
+            "position-mode capability is only valid for Bybit derivatives"
+        ) from error
+
+    normalized_side = _text(side, name="side").upper()
+    normalized_type = _text(order_type, name="order_type").upper()
+    tif = _text(time_in_force, name="time_in_force").upper()
+    try:
+        admitted = capability.admits(
+            at=at,
+            order_type=normalized_type,
+            time_in_force=tif,
+            permission_scope=permission_scope,
+        )
+    except CapabilityError as error:
+        raise ProviderCoreError("capability timestamp or shape is invalid") from error
+    if not admitted:
+        raise ProviderCoreError(
+            "Bybit derivative action is not admitted by current verified capability"
+        )
+
+    mode = capability.position_mode.strip().upper()
+    if mode == "ONE_WAY":
+        return 0
+    if mode == "HEDGE":
+        return 1 if normalized_side == "BUY" else 2
+    raise ProviderCoreError(
+        "Bybit position_mode must be explicitly ONE_WAY or HEDGE"
+    )
+
+
 def build_order_payload(
     *,
     product_family: str,
@@ -225,6 +299,10 @@ def build_order_payload(
     price: object | None = None,
     reduce_only: bool = False,
     position_idx: int | None = None,
+    capability: CapabilitySnapshot | None = None,
+    capability_at: datetime | None = None,
+    account_id: str | None = None,
+    instrument_version: str | None = None,
 ) -> dict[str, Any]:
     """Translate a bounded canonical order into a Bybit V5 request payload.
 
@@ -266,15 +344,31 @@ def build_order_payload(
         "LINEAR_DERIVATIVES",
         "INVERSE_DERIVATIVES",
     }
-    if derivative_family and position_idx is None:
-        raise ProviderCoreError(
-            "Bybit derivative orders require explicit position_idx from evidenced account mode"
+    effective_position_idx: int | None = None
+    if derivative_family:
+        if capability_at is None or account_id is None or instrument_version is None:
+            raise ProviderCoreError(
+                "Bybit derivative orders require verified account/category capability context"
+            )
+        effective_position_idx = _position_idx_from_capability(
+            capability=capability,
+            at=capability_at,
+            account_id=account_id,
+            instrument_version=instrument_version,
+            product_family=family,
+            side=normalized_side,
+            order_type=normalized_type,
+            time_in_force=tif,
         )
-    if position_idx is not None:
-        if not derivative_family:
-            raise ProviderCoreError("position_idx is only supported for derivative orders")
-        if type(position_idx) is not int or position_idx not in {0, 1, 2}:
-            raise ProviderCoreError("position_idx must be 0, 1 or 2")
+        if position_idx is not None:
+            if type(position_idx) is not int or position_idx not in {0, 1, 2}:
+                raise ProviderCoreError("position_idx must be 0, 1 or 2")
+            if position_idx != effective_position_idx:
+                raise ProviderCoreError(
+                    "position_idx conflicts with verified account position mode"
+                )
+    elif position_idx is not None:
+        raise ProviderCoreError("position_idx is only supported for derivative orders")
 
     payload: dict[str, Any] = {
         "category": category,
@@ -303,8 +397,7 @@ def build_order_payload(
             payload["marketUnit"] = "baseCoin"
     else:
         payload["reduceOnly"] = reduce_only
-        if position_idx is not None:
-            payload["positionIdx"] = position_idx
+        payload["positionIdx"] = effective_position_idx
 
     return payload
 

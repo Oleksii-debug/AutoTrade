@@ -2,6 +2,7 @@ import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
@@ -82,6 +83,48 @@ class DurableReconciliationAuthorityTests(unittest.TestCase):
                 )
             self.assertEqual(restarted.state, HostState.RECOVERING)
             self.assertFalse(restarted.provider_reconciled)
+
+    def test_invalid_checkpoint_identity_cannot_mutate_controller_ready(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            controller = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:test-account",
+            )
+            owner = controller.start("host-a")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="malformed-readiness",
+                result=reconciliation(),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id=owner.owner_id,
+                owner_epoch=str(owner.epoch),
+            )
+            malformed = dict(checkpoint)
+            malformed["event_id"] = ""
+
+            with patch(
+                "mvp.autotrade_mvp.recovery."
+                "load_reconciliation_checkpoint_for_readiness",
+                return_value=malformed,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "durable identity is invalid",
+                ):
+                    controller.record_reconciliation_checkpoint(
+                        reconciliation_id="malformed-readiness",
+                        provider_id="TEST_PROVIDER",
+                        account_id="test-account",
+                        environment="PAPER",
+                    )
+
+            self.assertFalse(controller.provider_reconciled)
+            self.assertEqual(controller.state, HostState.RECOVERING)
+            self.assertIn(
+                "startup_reconciliation_required",
+                controller.reason_codes,
+            )
 
 
 class RuntimeRecoveryTests(unittest.TestCase):

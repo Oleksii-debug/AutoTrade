@@ -379,6 +379,39 @@ class GateDecision:
     reasons: tuple[str, ...]
     checks: Mapping[str, str]
 
+    def __post_init__(self) -> None:
+        status = self.status.strip() if isinstance(self.status, str) else ""
+        if status not in {"PASS", "FAIL", "INCONCLUSIVE"}:
+            raise ValueError("GateDecision status must be PASS, FAIL or INCONCLUSIVE")
+        if isinstance(self.reasons, (str, bytes)):
+            raise TypeError("GateDecision reasons must be a collection")
+        reasons = tuple(self.reasons)
+        if not reasons or any(
+            not isinstance(reason, str) or not reason.strip()
+            for reason in reasons
+        ):
+            raise ValueError("GateDecision reasons must contain non-empty text")
+        if not isinstance(self.checks, Mapping):
+            raise TypeError("GateDecision checks must be a mapping")
+        frozen_checks: dict[str, str] = {}
+        for raw_name, raw_value in self.checks.items():
+            if not isinstance(raw_name, str) or not raw_name.strip():
+                raise ValueError("GateDecision check name is required")
+            if not isinstance(raw_value, str):
+                raise TypeError("GateDecision check status must be text")
+            name = raw_name.strip()
+            value = raw_value.strip()
+            if name in frozen_checks:
+                raise ValueError("duplicate normalized GateDecision check name")
+            if value not in {"PASS", "FAIL", "INCONCLUSIVE"}:
+                raise ValueError("unsupported GateDecision check status")
+            frozen_checks[name] = value
+        if not frozen_checks:
+            raise ValueError("GateDecision checks cannot be empty")
+        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "reasons", tuple(reason.strip() for reason in reasons))
+        object.__setattr__(self, "checks", MappingProxyType(frozen_checks))
+
 
 def evaluate_gates(profile: GateProfile, evidence: EvaluationEvidence) -> GateDecision:
     checks: dict[str, str] = {}

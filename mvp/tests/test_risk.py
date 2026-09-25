@@ -1035,6 +1035,7 @@ class IndependentRiskTests(unittest.TestCase):
             intent_hash="sha256:" + "a" * 64,
             policy_version=3,
             reservation_version=11,
+            reservation_requirements={"CASH:USD": "100.00"},
             capability_snapshot_id="capability-snapshot-17",
             evaluated_at="2026-09-24T18:00:00Z",
             valid_until="2026-09-24T18:00:30Z",
@@ -1043,6 +1044,10 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertEqual(decision.state_version, 7)
         self.assertEqual(decision.policy_version, 3)
         self.assertEqual(decision.reservation_version, 11)
+        self.assertEqual(
+            decision.reservation_requirements,
+            (("CASH:USD", Decimal("100.00")),),
+        )
         self.assertEqual(
             decision.decision_id,
             "risk:sha256:" + risk_decision_fingerprint(decision),
@@ -1054,6 +1059,50 @@ class IndependentRiskTests(unittest.TestCase):
             validate_bound_risk_decision(
                 decision, now="2026-09-24T18:00:30Z"
             )
+
+    def test_bound_risk_decision_changes_when_reservation_delta_changes(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        first = evaluate_bound_risk(
+            intent,
+            context(),
+            policy(),
+            intent_hash="sha256:" + "b" * 64,
+            policy_version=1,
+            reservation_version=0,
+            reservation_requirements={"CASH:USD": "100"},
+            capability_snapshot_id="cap",
+            evaluated_at="2026-09-24T18:00:00Z",
+            valid_until="2026-09-24T18:00:30Z",
+        )
+        equivalent = evaluate_bound_risk(
+            intent,
+            context(),
+            policy(),
+            intent_hash="sha256:" + "b" * 64,
+            policy_version=1,
+            reservation_version=0,
+            reservation_requirements={"CASH:USD": "100.000"},
+            capability_snapshot_id="cap",
+            evaluated_at="2026-09-24T18:00:00Z",
+            valid_until="2026-09-24T18:00:30Z",
+        )
+        smaller = evaluate_bound_risk(
+            intent,
+            context(),
+            policy(),
+            intent_hash="sha256:" + "b" * 64,
+            policy_version=1,
+            reservation_version=0,
+            reservation_requirements={"CASH:USD": "99.99"},
+            capability_snapshot_id="cap",
+            evaluated_at="2026-09-24T18:00:00Z",
+            valid_until="2026-09-24T18:00:30Z",
+        )
+        self.assertEqual(first.decision_id, equivalent.decision_id)
+        self.assertNotEqual(first.decision_id, smaller.decision_id)
 
     def test_risk_binding_rejects_partial_or_invalid_evidence(self):
         decision = evaluate_risk(
@@ -1071,6 +1120,7 @@ class IndependentRiskTests(unittest.TestCase):
                 state_version=7,
                 policy_version=1,
                 reservation_version=0,
+                reservation_requirements={"CASH:USD": "100"},
                 capability_snapshot_id="cap",
                 evaluated_at="2026-09-24T18:00:30Z",
                 valid_until="2026-09-24T18:00:30Z",

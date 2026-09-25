@@ -220,11 +220,103 @@ public sealed record EmergencyCommandResult
 /// implementation must call the authenticated host API; it must not contain
 /// trading logic or provider credentials.
 /// </summary>
+public enum EmergencyOperationState
+{
+    Accepted,
+    Running,
+    Succeeded,
+    Failed,
+    Unknown,
+}
+
+/// <summary>
+/// Read-only recovery state for the exact emergency operation already accepted by
+/// the canonical host. Reading this state must never create or resubmit a command.
+/// </summary>
+public sealed record EmergencyOperationStatus
+{
+    public string OperationId { get; }
+    public EmergencyOperationState State { get; }
+    public bool DurableBlockConfirmed { get; }
+    public InFlightActionState InFlightActions { get; }
+    public string Message { get; }
+    public string RemainingUncertainty { get; }
+
+    public EmergencyOperationStatus(
+        string operationId,
+        EmergencyOperationState state,
+        bool durableBlockConfirmed,
+        InFlightActionState inFlightActions,
+        string message,
+        string remainingUncertainty)
+    {
+        if (string.IsNullOrWhiteSpace(operationId)
+            || !Guid.TryParse(operationId.Trim(), out Guid parsedOperationId))
+        {
+            throw new ArgumentException(
+                "Emergency operation recovery requires a canonical UUID operation identity.",
+                nameof(operationId));
+        }
+
+        string canonicalOperationId = parsedOperationId.ToString("D");
+        if (!string.Equals(operationId, canonicalOperationId, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Emergency operation recovery identity must use canonical UUID serialization.",
+                nameof(operationId));
+        }
+
+        if (durableBlockConfirmed && state != EmergencyOperationState.Succeeded)
+        {
+            throw new ArgumentException(
+                "A durable block may be confirmed only by a succeeded emergency operation.",
+                nameof(durableBlockConfirmed));
+        }
+
+        if (state == EmergencyOperationState.Succeeded && !durableBlockConfirmed)
+        {
+            throw new ArgumentException(
+                "A succeeded emergency operation must carry durable block confirmation.",
+                nameof(durableBlockConfirmed));
+        }
+
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            throw new ArgumentException(
+                "Emergency operation recovery requires a status message.",
+                nameof(message));
+        }
+
+        if (string.IsNullOrWhiteSpace(remainingUncertainty))
+        {
+            throw new ArgumentException(
+                "Emergency operation recovery must state remaining uncertainty explicitly.",
+                nameof(remainingUncertainty));
+        }
+
+        OperationId = canonicalOperationId;
+        State = state;
+        DurableBlockConfirmed = durableBlockConfirmed;
+        InFlightActions = inFlightActions;
+        Message = message.Trim();
+        RemainingUncertainty = remainingUncertainty.Trim();
+    }
+}
+
+/// <summary>
+/// Narrow desktop dependency for the native safety surface. The production
+/// implementation must call the authenticated host API; it must not contain
+/// trading logic or provider credentials.
+/// </summary>
 public interface IEmergencyHostClient
 {
     Task<EmergencyHostStatus> GetStatusAsync(CancellationToken cancellationToken);
 
     Task<EmergencyCommandResult> BlockNewExposureAsync(CancellationToken cancellationToken);
+
+    Task<EmergencyOperationStatus> GetOperationAsync(
+        string operationId,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -251,5 +343,36 @@ public sealed class DisconnectedEmergencyHostClient : IEmergencyHostClient
                 inFlightActions: InFlightActionState.Unknown,
                 operationId: "Unavailable",
                 message: "Host is not connected. No durable block of new exposure has been confirmed."));
+    }
+
+    public Task<EmergencyOperationStatus> GetOperationAsync(
+        string operationId,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (string.IsNullOrWhiteSpace(operationId)
+            || !Guid.TryParse(operationId.Trim(), out Guid parsedOperationId))
+        {
+            throw new ArgumentException(
+                "Emergency operation recovery requires a canonical UUID operation identity.",
+                nameof(operationId));
+        }
+
+        string canonicalOperationId = parsedOperationId.ToString("D");
+        if (!string.Equals(operationId, canonicalOperationId, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Emergency operation recovery identity must use canonical UUID serialization.",
+                nameof(operationId));
+        }
+
+        return Task.FromResult(
+            new EmergencyOperationStatus(
+                operationId: canonicalOperationId,
+                state: EmergencyOperationState.Unknown,
+                durableBlockConfirmed: false,
+                inFlightActions: InFlightActionState.Unknown,
+                message: "Host is not connected. The accepted operation cannot be recovered from this client.",
+                remainingUncertainty: "The durable block outcome and outstanding in-flight actions remain unknown."));
     }
 }

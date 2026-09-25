@@ -1223,7 +1223,13 @@ class JournalStore:
         if type(journal_sequence) is not int or journal_sequence < 0:
             raise ValueError("journal_sequence must be a non-negative integer")
         state_json = canonical_json(state)
-        state_hash = payload_digest(state)
+        state_hash = payload_digest(
+            {
+                "projection_name": projection_name,
+                "journal_sequence": journal_sequence,
+                "state": state,
+            }
+        )
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")

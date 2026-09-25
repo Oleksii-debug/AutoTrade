@@ -197,56 +197,66 @@ class EvaluationGateTests(unittest.TestCase):
     def test_locked_evaluation_artifact_cannot_forge_holdout_or_walk_forward_pass(self):
         gate_profile = profile()
         base_evidence = evidence()
-        with TemporaryDirectory() as directory:
-            store = ArtifactStore(directory)
-            refs = {}
-            for kind in EVIDENCE_KINDS:
-                artifact_id = str(uuid4())
-                is_report = kind in {
-                    "profile",
-                    "trial_log",
-                    "causal_audit",
-                    "financial_invariants",
-                    "retention",
-                    "locked_evaluation",
-                    "metrics",
-                    "independent_review",
-                }
-                payload = (
-                    gate_report_payload(kind, gate_profile, base_evidence)
-                    if is_report
-                    else f"{gate_profile.profile_id}:{kind}".encode("utf-8")
-                )
-                if kind == "locked_evaluation":
-                    forged = json.loads(payload.decode("utf-8"))
-                    forged["untouched_holdout_passed"] = False
-                    payload = json.dumps(
-                        forged,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                manifest = store.publish_bytes(
-                    artifact_id=artifact_id,
-                    data=payload,
-                    media_type=("application/json" if is_report else "application/octet-stream"),
-                    rights={"storage": True, "export": False},
-                    metadata={
-                        "evidence_kind": kind,
-                        "profile_id": gate_profile.profile_id,
-                    },
-                )
-                refs[kind] = GateEvidenceRef(
-                    artifact_id=artifact_id,
-                    sha256=manifest["sha256"],
-                )
 
-            decision = evaluate_gates(
-                gate_profile,
-                replace(base_evidence, evidence_refs=refs),
-                artifact_store=store,
-            )
-            self.assertEqual(decision.status, "FAIL")
-            self.assertEqual(decision.checks["evidence_bundle"], "FAIL")
+        for forged_field in (
+            "untouched_holdout_passed",
+            "walk_forward_passed",
+        ):
+            with self.subTest(forged_field=forged_field), TemporaryDirectory() as directory:
+                store = ArtifactStore(directory)
+                refs = {}
+                for kind in EVIDENCE_KINDS:
+                    artifact_id = str(uuid4())
+                    is_report = kind in {
+                        "profile",
+                        "trial_log",
+                        "causal_audit",
+                        "financial_invariants",
+                        "retention",
+                        "locked_evaluation",
+                        "metrics",
+                        "independent_review",
+                    }
+                    payload = (
+                        gate_report_payload(kind, gate_profile, base_evidence)
+                        if is_report
+                        else f"{gate_profile.profile_id}:{kind}".encode("utf-8")
+                    )
+                    if kind == "locked_evaluation":
+                        forged = json.loads(payload.decode("utf-8"))
+                        forged[forged_field] = False
+                        payload = json.dumps(
+                            forged,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    manifest = store.publish_bytes(
+                        artifact_id=artifact_id,
+                        data=payload,
+                        media_type=(
+                            "application/json"
+                            if is_report
+                            else "application/octet-stream"
+                        ),
+                        rights={"storage": True, "export": False},
+                        metadata={
+                            "evidence_kind": kind,
+                            "profile_id": gate_profile.profile_id,
+                        },
+                    )
+                    refs[kind] = GateEvidenceRef(
+                        artifact_id=artifact_id,
+                        sha256=manifest["sha256"],
+                    )
+
+                decision = evaluate_gates(
+                    gate_profile,
+                    replace(base_evidence, evidence_refs=refs),
+                    artifact_store=store,
+                )
+                self.assertEqual(decision.status, "FAIL")
+                self.assertEqual(decision.checks["evidence_bundle"], "FAIL")
+
 
     def test_all_true_metrics_without_resolvable_evidence_cannot_pass(self):
         decision = evaluate_gates(profile(), evidence())

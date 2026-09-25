@@ -6,7 +6,6 @@ from collections import deque
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
-import re
 import os
 import re
 from pathlib import Path

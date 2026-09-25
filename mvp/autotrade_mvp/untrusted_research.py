@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
 import json
+from math import isfinite
 from typing import Iterable, Mapping
 
 
@@ -46,7 +47,17 @@ def _freeze_proposal(value: object, *, depth: int = 0) -> object:
         return frozen
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_proposal(item, depth=depth + 1) for item in value)
-    return value
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ResearchBoundaryError(
+                "model proposal numbers must be finite JSON values"
+            )
+        return value
+    raise ResearchBoundaryError(
+        "model proposal values must be JSON-compatible scalars, objects, or arrays"
+    )
 
 
 class ResearchCapability(StrEnum):

@@ -183,6 +183,25 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
             self.assertIn("reconnect_backlog_not_drained", decision.reasons)
             self.assertEqual(evidence.reconnect_backlog_remaining, 1)
 
+    def test_plan_factory_rejects_scalar_text_as_event_or_aggregate_collection(self):
+        spec = runtime_spec(samples=1)
+        with self.assertRaisesRegex(RuntimeBudgetError, "expected_financial_event_ids"):
+            RuntimeCampaignPlan.create(
+                spec=spec,
+                workload_profile_hash=WORKLOAD,
+                declared_duration_ms=1000,
+                expected_financial_event_ids="fin-1",
+                financial_aggregate_types=("financial",),
+            )
+        with self.assertRaisesRegex(RuntimeBudgetError, "financial_aggregate_types"):
+            RuntimeCampaignPlan.create(
+                spec=spec,
+                workload_profile_hash=WORKLOAD,
+                declared_duration_ms=1000,
+                expected_financial_event_ids=("fin-1",),
+                financial_aggregate_types="financial",
+            )
+
     def test_campaign_evidence_cannot_be_directly_self_asserted(self):
         spec = runtime_spec(samples=1)
         with self.assertRaisesRegex(

@@ -47,9 +47,11 @@ class ComponentEvidence:
     license_status: str
     distribution_rights: str
     advisory_status: str
-    notice_required: bool
-    notice_present: bool
-    reviewed_for_release_sha: str
+    advisory_exception_id: str | None = None
+    advisory_exception_hash: str | None = None
+    notice_required: bool = False
+    notice_present: bool = False
+    reviewed_for_release_sha: str = ""
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -69,6 +71,14 @@ class ComponentEvidence:
             raise ValueError("distribution_rights must be explicit")
         if self.advisory_status not in {"CLEAR", "ALLOWLISTED", "BLOCKED", "UNKNOWN"}:
             raise ValueError("advisory_status must be explicit")
+        if self.advisory_status == "ALLOWLISTED":
+            if not isinstance(self.advisory_exception_id, str) or not self.advisory_exception_id.strip():
+                raise ValueError("ALLOWLISTED advisory status requires advisory_exception_id")
+            if self.advisory_exception_hash is None:
+                raise ValueError("ALLOWLISTED advisory status requires advisory_exception_hash")
+            _sha256(self.advisory_exception_hash, "advisory_exception_hash")
+        elif self.advisory_exception_id is not None or self.advisory_exception_hash is not None:
+            raise ValueError("advisory exception evidence is valid only for ALLOWLISTED status")
         _git_sha(self.reviewed_for_release_sha, "reviewed_for_release_sha")
 
 
@@ -271,6 +281,8 @@ def qualify_supply_chain(
                     "license_status": item.license_status,
                     "distribution_rights": item.distribution_rights,
                     "advisory_status": item.advisory_status,
+                    "advisory_exception_id": item.advisory_exception_id,
+                    "advisory_exception_hash": item.advisory_exception_hash,
                     "notice_required": item.notice_required,
                     "notice_present": item.notice_present,
                     "reviewed_for_release_sha": item.reviewed_for_release_sha,

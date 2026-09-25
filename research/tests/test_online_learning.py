@@ -51,6 +51,16 @@ def update(**overrides):
 
 
 class OnlineLearningEnvelopeTests(unittest.TestCase):
+    def test_factory_rejects_normalized_parameter_name_collision(self):
+        with self.assertRaisesRegex(ValueError, "duplicate normalized current"):
+            update(
+                current_parameters={
+                    "alpha": Decimal("0.40"),
+                    " alpha ": Decimal("0.99"),
+                    "beta": Decimal("0.10"),
+                },
+            )
+
     def test_direct_online_update_cannot_bypass_causal_label_invariants(self):
         values = dict(
             current_parameters={"alpha": Decimal("0.40"), "beta": Decimal("0.10")},

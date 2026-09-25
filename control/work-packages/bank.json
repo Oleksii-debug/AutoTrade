@@ -93,8 +93,8 @@
         "Exclusive mutation key: ENGINE / lean-adoption",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Safe LEAN composition/embedding and exact-revision probe are integrated with focused cross-platform workflow evidence. Production engine/brokerage integration, complete callback/shutdown/restart qualification and release composition remain open; no second OMS is introduced."
     },
     {
       "id": "WP-03",
@@ -612,8 +612,8 @@
         "Exclusive mutation key: SIMULATION / execution-realism",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Execution-realism implementation and regressions cover causal BAR boundaries, latency/partial-fill/cost behavior and evidence-bound qualification inputs. Terminal per-asset/provider/data-quality realism qualification and independent economic validation remain open."
     },
     {
       "id": "WP-14",
@@ -1048,8 +1048,8 @@
         "Exclusive mutation key: PROVIDER / bybit-adapter",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Bybit V5 adapter foundation and focused contract/tests are integrated, including fail-closed ambiguous send/environment semantics. Exact account/environment provider qualification, stream/history/reconciliation evidence and any bounded real probe remain open."
     },
     {
       "id": "WP-23",
@@ -1098,8 +1098,8 @@
         "Exclusive mutation key: PROVIDER / kraken-adapter",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Separate Kraken Spot and Futures adapter foundations and focused tests are integrated without collapsing their transports. Exact Spot and Futures environment/account qualification, nonce/session/history/gap/reconciliation evidence remain open."
     },
     {
       "id": "WP-24",
@@ -1151,8 +1151,8 @@
         "Exclusive mutation key: PROVIDER / whitebit-adapter",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "WhiteBIT adapter foundation and focused tests are integrated with exact-Decimal, nonce/send/recovery primitives. Exact capability/environment provider qualification and production-equivalent evidence remain open; no live authority is claimed."
     },
     {
       "id": "WP-25",
@@ -1201,8 +1201,8 @@
         "Exclusive mutation key: PROVIDER / binance-adapter",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Binance Spot and USD-M adapter foundations and focused tests are integrated with guarded send/read semantics. Terminal provider qualification, exact account/environment/history/stream/reconciliation evidence remain open; other Binance product families stay unqualified unless separately scoped."
     },
     {
       "id": "WP-26",
@@ -1252,8 +1252,8 @@
         "Exclusive mutation key: PROVIDER / ibkr-adapter",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "IBKR Web API foundation and focused adapter tests are integrated. Exact paper brokerage-session, entitlement, pacing, reply-flow, history/reconciliation and restart qualification remain open; paper evidence would not prove live execution realism."
     },
     {
       "id": "WP-27",
@@ -1307,8 +1307,8 @@
         "Exclusive mutation key: PROVIDER / alpaca-adapter",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Alpaca equities/crypto/options/MLeg foundation plus option entitlement/lifecycle handling and focused tests are integrated. Exact paper account qualification, leg-level fill/fee economics, lifecycle reconciliation and any live qualification remain open."
     },
     {
       "id": "WP-28",
@@ -2130,8 +2130,8 @@
         "Exclusive mutation key: UI / semantic-web",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Semantic web client implementation and keyboard/accessibility contract coverage are integrated against the canonical host surface. Real browser/host integration and Windows NVDA qualification remain open."
     },
     {
       "id": "WP-45",
@@ -2427,8 +2427,8 @@
         "Exclusive mutation key: RELEASE / windows-packaging",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Windows bundle/install/update/rollback implementation and focused recovery tests are integrated. Signed/frozen release artifact installation, update/rollback/restore qualification on target Windows remains open."
     },
     {
       "id": "WP-51",
@@ -2527,8 +2527,8 @@
         "Exclusive mutation key: SECURITY / untrusted-input-boundaries",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Untrusted research/tool-input boundaries and focused fail-closed tests are integrated, including frozen arguments before execution. Broader hostile-input/red-team and release security qualification remain open."
     },
     {
       "id": "WP-53",
@@ -2670,8 +2670,8 @@
         "Exclusive mutation key: INTEGRATION / whole-simulator-flow",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Whole simulator flow is implemented and exercised across deterministic runtime, persistence, execution, accounting, reconciliation, restart and evidence paths. Simulator success is not provider qualification or evidence of economic edge."
     },
     {
       "id": "WP-56",
@@ -2719,8 +2719,8 @@
         "Exclusive mutation key: QUALIFICATION / scientific-learning",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Scientific-learning foundations are integrated across frozen protocol, causal replay, immutable experience/population evidence, evaluation/champion gates and qualification workflow. Terminal untouched-evidence/holdout/walk-forward qualification and economic-edge proof remain open."
     },
     {
       "id": "WP-57",
@@ -2776,8 +2776,8 @@
         "Exclusive mutation key: QUALIFICATION / forward-paper",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Forward-paper implementation and focused tests are integrated as a causal paper-evidence foundation. Long-running exact-provider paper campaign, complete cost/fill/reconciliation evidence and promotion gates remain open."
     },
     {
       "id": "WP-58",
@@ -2824,8 +2824,8 @@
         "Exclusive mutation key: QUALIFICATION / bounded-real",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Bounded-real qualification machinery and focused tests are integrated, but real-account probes remain separately authorized and unexecuted in this development convergence. No live order authority is granted."
     },
     {
       "id": "WP-59",
@@ -2923,8 +2923,8 @@
         "Exclusive mutation key: QUALIFICATION / whole-product-final",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Fail-closed whole-product completion gate and tests are integrated. The gate remains intentionally unsatisfied while provider, Windows/NVDA, release/supply-chain, recovery/performance and economic-evidence requirements are incomplete."
     },
     {
       "id": "WP-61",
@@ -3026,8 +3026,8 @@
         "Exclusive mutation key: QUALIFICATION / zero-model-economics",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Zero-model economics/qualification implementation, tests and dedicated workflow are integrated; exact-head workflow evidence has passed on the convergence lineage. Final release-condition product-wide qualification with models unavailable remains open."
     },
     {
       "id": "WP-63",
@@ -3175,8 +3175,8 @@
         "Exclusive mutation key: PERFORMANCE / runtime-resource-budget",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "PLANNED",
-      "status_note": "Architecture bank only; readiness/completion must be derived from future live repository evidence."
+      "proposed_status": "IN_PROGRESS",
+      "status_note": "Runtime resource-budget/performance qualification implementation and focused tests are integrated. Measured declared-load throughput/latency, target-host interference and overload qualification remain open."
     }
   ]
 }

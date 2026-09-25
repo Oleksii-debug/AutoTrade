@@ -74,8 +74,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Engine.Lean/ and its contract/qualification evidence.
 - **Forbidden scope:** Greenfield replacement before the adoption evidence; uncontrolled upstream fork; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: ENGINE / lean-adoption; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Safe LEAN composition/embedding and exact-revision probe are integrated with focused cross-platform workflow evidence. Production engine/brokerage integration, complete callback/shutdown/restart qualification and release composition remain open; no second OMS is introduced.
 
 ### WP-03 — dependency-policy
 
@@ -261,8 +261,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Engine.Lean/Simulation/ and its contract/qualification evidence.
 - **Forbidden scope:** Paper/testnet fills labelled proof of live profitability; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: SIMULATION / execution-realism; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Execution-realism implementation and regressions cover causal BAR boundaries, latency/partial-fill/cost behavior and evidence-bound qualification inputs. Terminal per-asset/provider/data-quality realism qualification and independent economic validation remain open.
 
 ### WP-14 — economic-ledger
 
@@ -414,8 +414,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Providers.Bybit/ and its contract/qualification evidence.
 - **Forbidden scope:** Invented sandbox parity; copying unclear-license wrapper; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PROVIDER / bybit-adapter; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Bybit V5 adapter foundation and focused contract/tests are integrated, including fail-closed ambiguous send/environment semantics. Exact account/environment provider qualification, stream/history/reconciliation evidence and any bounded real probe remain open.
 
 ### WP-23 — kraken-adapter
 
@@ -431,8 +431,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Providers.Kraken/ and its contract/qualification evidence.
 - **Forbidden scope:** Assumed public spot sandbox; withdrawals in agent tools; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PROVIDER / kraken-adapter; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Separate Kraken Spot and Futures adapter foundations and focused tests are integrated without collapsing their transports. Exact Spot and Futures environment/account qualification, nonce/session/history/gap/reconciliation evidence remain open.
 
 ### WP-24 — whitebit-adapter
 
@@ -448,8 +448,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Providers.WhiteBIT/ and its contract/qualification evidence.
 - **Forbidden scope:** Country-based product exclusion; unverified universal test environment; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PROVIDER / whitebit-adapter; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** WhiteBIT adapter foundation and focused tests are integrated with exact-Decimal, nonce/send/recovery primitives. Exact capability/environment provider qualification and production-equivalent evidence remain open; no live authority is claimed.
 
 ### WP-25 — binance-adapter
 
@@ -465,8 +465,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Providers.Binance/ and its contract/qualification evidence.
 - **Forbidden scope:** One spot adapter silently advertised as futures/options support; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PROVIDER / binance-adapter; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Binance Spot and USD-M adapter foundations and focused tests are integrated with guarded send/read semantics. Terminal provider qualification, exact account/environment/history/stream/reconciliation evidence remain open; other Binance product families stay unqualified unless separately scoped.
 
 ### WP-26 — ibkr-adapter
 
@@ -482,8 +482,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Providers.IBKR/ and its contract/qualification evidence.
 - **Forbidden scope:** IPC asserted to erase GPL obligations; ticker-only routing; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PROVIDER / ibkr-adapter; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** IBKR Web API foundation and focused adapter tests are integrated. Exact paper brokerage-session, entitlement, pacing, reply-flow, history/reconciliation and restart qualification remain open; paper evidence would not prove live execution realism.
 
 ### WP-27 — alpaca-adapter
 
@@ -499,8 +499,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Providers.Alpaca/ and its contract/qualification evidence.
 - **Forbidden scope:** Assuming assignment always arrives on order WebSocket; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PROVIDER / alpaca-adapter; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Alpaca equities/crypto/options/MLeg foundation plus option entitlement/lifecycle handling and focused tests are integrated. Exact paper account qualification, leg-level fill/fee economics, lifecycle reconciliation and any live qualification remain open.
 
 ### WP-28 — futures-lifecycle
 
@@ -788,8 +788,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through web/src/ and its contract/qualification evidence.
 - **Forbidden scope:** Custom inaccessible grid/visual-only risk status; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: UI / semantic-web; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Semantic web client implementation and keyboard/accessibility contract coverage are integrated against the canonical host surface. Real browser/host integration and Windows NVDA qualification remain open.
 
 ### WP-45 — windows-shell
 
@@ -890,8 +890,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through packaging/windows/ and its contract/qualification evidence.
 - **Forbidden scope:** Release claimed from source-only build; old binary on incompatible DB; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: RELEASE / windows-packaging; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Windows bundle/install/update/rollback implementation and focused recovery tests are integrated. Signed/frozen release artifact installation, update/rollback/restore qualification on target Windows remains open.
 
 ### WP-51 — quality-pipeline
 
@@ -924,8 +924,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through tests/Security/ and its contract/qualification evidence.
 - **Forbidden scope:** Executing arbitrary serialized models in financial host; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: SECURITY / untrusted-input-boundaries; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Untrusted research/tool-input boundaries and focused fail-closed tests are integrated, including frozen arguments before execution. Broader hostile-input/red-team and release security qualification remain open.
 
 ### WP-53 — nvda-qualification
 
@@ -975,8 +975,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through tests/Integration/WholeFlow/ and its contract/qualification evidence.
 - **Forbidden scope:** Mocked-away risk/persistence presented as integrated product; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: INTEGRATION / whole-simulator-flow; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Whole simulator flow is implemented and exercised across deterministic runtime, persistence, execution, accounting, reconciliation, restart and evidence paths. Simulator success is not provider qualification or evidence of economic edge.
 
 ### WP-56 — scientific-learning
 
@@ -992,8 +992,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through docs/qualification/science/ and its contract/qualification evidence.
 - **Forbidden scope:** Promoting a visually good backtest despite invalid protocol; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: QUALIFICATION / scientific-learning; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Scientific-learning foundations are integrated across frozen protocol, causal replay, immutable experience/population evidence, evaluation/champion gates and qualification workflow. Terminal untouched-evidence/holdout/walk-forward qualification and economic-edge proof remain open.
 
 ### WP-57 — forward-paper
 
@@ -1009,8 +1009,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through docs/qualification/paper/ and its contract/qualification evidence.
 - **Forbidden scope:** Universal fixed duration/trade-count replacing registered power/coverage; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: QUALIFICATION / forward-paper; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Forward-paper implementation and focused tests are integrated as a causal paper-evidence foundation. Long-running exact-provider paper campaign, complete cost/fill/reconciliation evidence and promotion gates remain open.
 
 ### WP-58 — bounded-real
 
@@ -1026,8 +1026,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through docs/qualification/live/ and its contract/qualification evidence.
 - **Forbidden scope:** Architecture task authorizes real trades; withdrawals; unbounded live experiment; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: QUALIFICATION / bounded-real; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Bounded-real qualification machinery and focused tests are integrated, but real-account probes remain separately authorized and unexecuted in this development convergence. No live order authority is granted.
 
 ### WP-59 — recovery-release
 
@@ -1060,8 +1060,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through docs/qualification/final/ and its contract/qualification evidence.
 - **Forbidden scope:** Calling one trade, green CI, source pass or a document set the finished program; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: QUALIFICATION / whole-product-final; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Fail-closed whole-product completion gate and tests are integrated. The gate remains intentionally unsatisfied while provider, Windows/NVDA, release/supply-chain, recovery/performance and economic-evidence requirements are incomplete.
 
 ### WP-61 — asset-provider-crosswalk
 
@@ -1094,8 +1094,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through docs/qualification/zero-model/ and its contract/qualification evidence.
 - **Forbidden scope:** Echo mock counted as a trading strategy; hidden paid fallback; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: QUALIFICATION / zero-model-economics; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Zero-model economics/qualification implementation, tests and dedicated workflow are integrated; exact-head workflow evidence has passed on the convergence lineage. Final release-condition product-wide qualification with models unavailable remains open.
 
 ### WP-63 — source-agent-value
 
@@ -1145,6 +1145,6 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through tests/Integration/Performance/ and its contract/qualification evidence.
 - **Forbidden scope:** Unmeasured universal throughput or HFT claims; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PERFORMANCE / runtime-resource-budget; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Runtime resource-budget/performance qualification implementation and focused tests are integrated. Measured declared-load throughput/latency, target-host interference and overload qualification remain open.
 

@@ -33,6 +33,7 @@ WHITEBIT_OFFICIAL_DOCS = MappingProxyType(
         "api": "https://docs.whitebit.com/api-reference/overview",
         "order_types": "https://docs.whitebit.com/concepts/order-types",
         "client_order_id": "https://docs.whitebit.com/guides/client-order-id",
+        "websocket": "https://docs.whitebit.com/websocket/overview",
     }
 )
 
@@ -2100,6 +2101,7 @@ def websocket_recovery_policy(channel: str) -> WhiteBitStreamRecoveryPolicy:
 
 
 def validate_websocket_endpoint(endpoint: str) -> str:
+    """Admit only the current host from WhiteBIT's official migration contract."""
     value = _text(endpoint, name="endpoint")
     if value == WHITEBIT_DEPRECATED_WEBSOCKET_ENDPOINT:
         raise WhiteBitAdapterError(

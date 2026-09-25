@@ -44,7 +44,7 @@ def _freeze_evidence(value: Mapping[str, object]) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise CapabilityError("evidence_ref must be an object")
     required = {"artifact_id", "sha256", "observed_at"}
-    allowed = required | {"source_uri", "rights_id"}
+    allowed = required | {"source_uri", "rights_id", "issuer_ref", "issuer_sha256"}
     keys = set(value)
     if required - keys:
         raise CapabilityError("evidence_ref is missing required fields")
@@ -98,6 +98,31 @@ def _freeze_evidence(value: Mapping[str, object]) -> Mapping[str, object]:
         normalized["source_uri"] = source_uri
     if "rights_id" in value:
         normalized["rights_id"] = _text(value["rights_id"], "rights_id")
+    issuer_ref = value.get("issuer_ref")
+    issuer_sha256 = value.get("issuer_sha256")
+    if (issuer_ref is None) != (issuer_sha256 is None):
+        raise CapabilityError(
+            "evidence issuer_ref and issuer_sha256 must be provided together"
+        )
+    if issuer_ref is not None:
+        normalized_issuer_ref = _text(issuer_ref, "issuer_ref")
+        if re.fullmatch(
+            r"[a-z][a-z0-9-]*:sha256:[0-9a-f]{64}",
+            normalized_issuer_ref,
+        ) is None:
+            raise CapabilityError(
+                "evidence issuer_ref must be a canonical namespaced SHA-256 identity"
+            )
+        if (
+            not isinstance(issuer_sha256, str)
+            or issuer_sha256 != issuer_sha256.strip()
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", issuer_sha256) is None
+        ):
+            raise CapabilityError(
+                "evidence issuer_sha256 must be a canonical SHA-256 digest"
+            )
+        normalized["issuer_ref"] = normalized_issuer_ref
+        normalized["issuer_sha256"] = issuer_sha256
     return MappingProxyType(normalized)
 
 
@@ -191,13 +216,35 @@ _CAPABILITY_PRODUCER_TYPES = {
 
 def artifact_store_evidence_verifier(
     store: object,
+    *,
+    issuer_verifiers: Mapping[
+        str,
+        Callable[[CapabilityClaim, str, str], EvidenceVerification],
+    ]
+    | None = None,
 ) -> Callable[[CapabilityClaim], EvidenceVerification]:
-    """Bind capability claims to the canonical immutable artifact store.
+    """Verify artifact integrity and independent source-specific issuer authority.
 
-    The adapter relies only on the existing store public load_manifest and
-    read_bytes methods so capability authority does not create a second
-    evidence repository.
+    ArtifactStore is an immutable byte/integrity store, not an issuer trust
+    root. A capability source can verify only when the claim carries an
+    immutable issuer identity/digest and a separately supplied verifier for
+    that exact source validates the upstream authority record.
     """
+
+    normalized_issuers: dict[
+        str,
+        Callable[[CapabilityClaim, str, str], EvidenceVerification],
+    ] = {}
+    if issuer_verifiers is not None:
+        if not isinstance(issuer_verifiers, Mapping):
+            raise TypeError("issuer_verifiers must be a mapping")
+        for source, verifier in issuer_verifiers.items():
+            normalized_source = _text(source, "issuer source").upper()
+            if normalized_source not in SOURCES:
+                raise CapabilityError("issuer_verifiers contains unsupported source")
+            if not callable(verifier):
+                raise TypeError("issuer verifier must be callable")
+            normalized_issuers[normalized_source] = verifier
 
     def verify(claim: CapabilityClaim) -> EvidenceVerification:
         artifact_id = str(claim.evidence_ref["artifact_id"])
@@ -300,7 +347,45 @@ def artifact_store_evidence_verifier(
                     reason="evidence artifact rights identity does not match the claim",
                 )
 
-        return EvidenceVerification(valid=True)
+        issuer_ref = claim.evidence_ref.get("issuer_ref")
+        issuer_sha256 = claim.evidence_ref.get("issuer_sha256")
+        if issuer_ref is None or issuer_sha256 is None:
+            return EvidenceVerification(
+                valid=False,
+                reason="trusted issuer provenance is missing",
+            )
+        if (
+            metadata.get("issuer_ref") != issuer_ref
+            or metadata.get("issuer_sha256") != issuer_sha256
+        ):
+            return EvidenceVerification(
+                valid=False,
+                conflicted=True,
+                reason="artifact issuer provenance does not match the claim",
+            )
+
+        issuer_verifier = normalized_issuers.get(claim.source)
+        if issuer_verifier is None:
+            return EvidenceVerification(
+                valid=False,
+                reason="trusted source-specific issuer verifier is unavailable",
+            )
+        try:
+            issuer_result = issuer_verifier(
+                claim,
+                str(issuer_ref),
+                str(issuer_sha256),
+            )
+        except Exception:
+            return EvidenceVerification(
+                valid=False,
+                reason="trusted issuer provenance verification failed",
+            )
+        if not isinstance(issuer_result, EvidenceVerification):
+            raise TypeError(
+                "issuer verifier must return EvidenceVerification"
+            )
+        return issuer_result
 
     return verify
 

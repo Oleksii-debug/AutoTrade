@@ -252,6 +252,17 @@ class OptionLifecycleTests(unittest.TestCase):
             ),
             Decimal("20"),
         )
+        for invalid in (0, 1, "true", None):
+            with self.subTest(atomic_package_guaranteed=invalid):
+                with self.assertRaisesRegex(
+                    OptionError,
+                    "atomic_package_guaranteed must be a boolean",
+                ):
+                    interim_multi_leg_reservation(
+                        ["100", "60"],
+                        atomic_package_guaranteed=invalid,
+                        package_worst_case_loss="20" if invalid else None,
+                    )
 
     def test_exercise_cutoff_expiry_and_provider_window_are_hard_gates(self):
         contract = self._cash_call()

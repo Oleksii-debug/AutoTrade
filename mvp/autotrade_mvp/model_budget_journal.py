@@ -16,12 +16,21 @@ from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 
 
 _AGGREGATE_TYPE = "model_budget"
+_COMMAND_ACTOR = "autotrade-model-budget"
+_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 
 
 def _text(value: str, *, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
+
+
+def _environment(value: str) -> str:
+    normalized = value.strip().upper() if isinstance(value, str) else ""
+    if normalized not in _ENVIRONMENTS:
+        raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
+    return normalized
 
 
 def _now() -> str:
@@ -52,12 +61,14 @@ class DurableModelBudget:
         journal: JournalStore,
         budget_id: str,
         ceiling,
+        environment: str,
         clock: Callable[[], str] | None = None,
     ) -> None:
         if not isinstance(journal, JournalStore):
             raise TypeError("journal must be JournalStore")
         self.journal = journal
         self.budget_id = _text(budget_id, name="budget_id")
+        self.environment = _environment(environment)
         self._clock = clock or _now
 
         candidate = BudgetLedger(ceiling)
@@ -193,6 +204,8 @@ class DurableModelBudget:
         try:
             _, inserted, _ = self.journal.commit_command(
                 command_id=command_id,
+                actor=_COMMAND_ACTOR,
+                environment=self.environment,
                 idempotency_key=idempotency_key,
                 request=request,
                 result=result,
@@ -217,6 +230,8 @@ class DurableModelBudget:
             )
             _, inserted, _ = self.journal.commit_command(
                 command_id=command_id,
+                actor=_COMMAND_ACTOR,
+                environment=self.environment,
                 idempotency_key=idempotency_key,
                 request=request,
                 result=result,

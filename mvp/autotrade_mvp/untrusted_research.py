@@ -18,6 +18,37 @@ class ResearchBoundaryError(ValueError):
     pass
 
 
+class _FrozenDict(dict):
+    """JSON-compatible dict that cannot be mutated after construction."""
+
+    @staticmethod
+    def _blocked(*args, **kwargs):
+        raise TypeError("model proposal is immutable")
+
+    __setitem__ = _blocked
+    __delitem__ = _blocked
+    clear = _blocked
+    pop = _blocked
+    popitem = _blocked
+    setdefault = _blocked
+    update = _blocked
+
+
+def _freeze_proposal(value: object, *, depth: int = 0) -> object:
+    if depth > 32:
+        raise ResearchBoundaryError("model proposal exceeds maximum nesting depth")
+    if isinstance(value, Mapping):
+        frozen = _FrozenDict()
+        for key, nested in value.items():
+            if not isinstance(key, str):
+                raise ResearchBoundaryError("model proposal object keys must be strings")
+            dict.__setitem__(frozen, key, _freeze_proposal(nested, depth=depth + 1))
+        return frozen
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_proposal(item, depth=depth + 1) for item in value)
+    return value
+
+
 class ResearchCapability(StrEnum):
     READ_MARKET_EVIDENCE = "READ_MARKET_EVIDENCE"
     READ_RESEARCH_ARTIFACT = "READ_RESEARCH_ARTIFACT"
@@ -170,7 +201,7 @@ class ResearchModelResult:
         object.__setattr__(self, "result_id", _text(self.result_id, name="result_id"))
         if not isinstance(self.proposal, Mapping):
             raise ResearchBoundaryError("proposal must be an object")
-        object.__setattr__(self, "proposal", dict(self.proposal))
+        object.__setattr__(self, "proposal", _freeze_proposal(self.proposal))
         refs = tuple(_text(item, name="evidence_ref") for item in self.evidence_refs)
         if not refs:
             raise ResearchBoundaryError("model result requires evidence references")

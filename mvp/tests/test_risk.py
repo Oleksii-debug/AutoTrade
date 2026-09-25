@@ -1157,6 +1157,38 @@ class IndependentRiskTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot be zero"):
             context(equivalent_exposure_per_unit={"ABC": "0"})
 
+    def test_cash_instrument_cannot_reduce_risk_with_equivalent_exposure_override(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                instrument_type="EQUITY",
+            ),
+            context(
+                equity="1000",
+                positions={"ABC": "0"},
+                marks={"ABC": "100"},
+                equivalent_exposure_per_unit={"ABC": "1"},
+                stress_scenarios=({"ABC": "-0.10"},),
+            ),
+            policy(
+                max_single_notional="50",
+                max_gross_leverage="10",
+                max_net_leverage="10",
+            ),
+        )
+        self.assertEqual(decision.gross_leverage, Decimal("0.1"))
+        self.assertEqual(decision.net_leverage, Decimal("0.1"))
+        single_notional = next(
+            item for item in decision.rules if item.rule == "single_notional"
+        )
+        self.assertFalse(single_notional.passed)
+        self.assertEqual(single_notional.observed, "100")
+        self.assertFalse(decision.admitted)
+
     def test_future_new_risk_requires_delivery_headroom_evidence(self):
         intent = RiskIntent.create(
             symbol="ABC", side="BUY", quantity="1", price="100",

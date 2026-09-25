@@ -23,6 +23,14 @@ DECISION = datetime(2026, 9, 25, 12, tzinfo=timezone.utc)
 CUTOFF = datetime(2030, 1, 1, tzinfo=timezone.utc)
 
 
+def correction_evidence_time(evidence_ref):
+    evidence_times = {
+        "artifact:late-correction": datetime(2031, 1, 1, tzinfo=timezone.utc),
+        "artifact:correction": datetime(2029, 1, 1, tzinfo=timezone.utc),
+    }
+    return evidence_times[evidence_ref]
+
+
 def episode_payload(outcome_class, *, side="BUY", label_mature=True, label="observed"):
     return {
         "evidence_refs": ["artifact:evidence"],
@@ -54,7 +62,10 @@ def retention_policy():
 
 class PopulationCoverageTests(unittest.TestCase):
     def _store_with_negative_and_no_trade(self, directory):
-        store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+        store = ExperienceMemory(
+            Path(directory) / "memory.sqlite3",
+            correction_evidence_resolver=correction_evidence_time,
+        )
         negative, _ = store.append_episode(
             episode_id="11111111-1111-4111-8111-111111111111",
             decision_time=DECISION,

@@ -413,9 +413,9 @@ def parse_account_trades(
             client_id = validate_client_order_id(client_id)
 
         fill = ProviderFillEvidence.create(
-        fill =     provider_id="BINANCE",
-        fill =     account_id=account_id,
-        fill =     environment=environment,
+            provider_id="BINANCE",
+            account_id=account_id,
+            environment=environment,
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=_text(

@@ -1,3 +1,4 @@
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -446,7 +447,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 store.load_events("FUTURES_VARIATION_MARGIN", aggregate_id),
                 [],
             )
-            with sqlite3.connect(store.path) as connection:
+            with closing(sqlite3.connect(store.path)) as connection:
                 self.assertEqual(
                     connection.execute(
                         "SELECT COUNT(*) FROM command_dedupe WHERE actor = ?",

@@ -437,6 +437,26 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                 theta="0",
                 rho="0",
                 scenarios=(scenario,),
+
+        with self.assertRaisesRegex(OptionError, "40-character"):
+            OptionRiskEvidence(
+                instrument="OPT:CALL",
+                model_id="model",
+                model_version="1",
+                source_sha="c" * 64,
+                input_digest="sha256:" + "b" * 64,
+                schema_version=1,
+                market_as_of=at(17),
+                calculated_at=at(18),
+                expires_at=at(19),
+                maximum_market_age=timedelta(hours=2),
+                delta="0",
+                gamma="0",
+                vega="0",
+                theta="0",
+                rho="0",
+                scenarios=(scenario,),
+            )
             )
 
     def test_future_stale_and_cross_instrument_evidence_are_blocked(self):

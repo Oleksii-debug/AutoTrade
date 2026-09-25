@@ -192,6 +192,7 @@ def bound_execution_response(
     ).encode("utf-8")
     return observe_authenticated_json_response(
         query_binding=query,
+        http_status=200,
         response_bytes=raw,
         observed_at=READ_AT,
     )

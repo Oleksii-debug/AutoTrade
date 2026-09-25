@@ -68,6 +68,7 @@ def trade_history_observation(
     ).encode("utf-8")
     return observe_authenticated_json_response(
         query_binding=query,
+        http_status=200,
         response_bytes=raw,
         observed_at=NOW,
     )
@@ -627,7 +628,7 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 fee_currency_by_pair={},
             )
 
-    def test_trade_timestamp_rejects_binary_float_and_sub_microsecond_precision(self):
+    def test_trade_timestamp_preserves_exact_json_decimal_and_rejects_sub_microsecond_precision(self):
         base = {
             "error": [],
             "result": {
@@ -643,13 +644,13 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 }
             },
         }
-        with self.assertRaisesRegex(KrakenSpotAdapterError, "exact decimal"):
-            parse_trade_history(
-                trade_history_observation(base),
-                instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
-                client_ids_by_provider_order={},
-                fee_currency_by_pair={"XXBTZUSD": "USD"},
-            )
+        fills = parse_trade_history(
+            trade_history_observation(base),
+            instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
+            client_ids_by_provider_order={},
+            fee_currency_by_pair={"XXBTZUSD": "USD"},
+        )
+        self.assertEqual(fills[0].trade_time, "2026-09-24T20:00:01.250000Z")
         base["result"]["trades"]["T-EXEC-1"]["time"] = "1790280001.1234567"
         with self.assertRaisesRegex(KrakenSpotAdapterError, "microsecond"):
             parse_trade_history(

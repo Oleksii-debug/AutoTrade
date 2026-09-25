@@ -33,7 +33,7 @@ def execution_observation(
     account_id="paper-1",
     environment="PAPER",
     instrument_version="BTCUSDT:v1",
-    surface=Surface.AUTHENTICATED_READ,
+    surface=Surface.ACTIVITIES,
 ):
     query = prepare_authenticated_read_query(
         capability=capability(
@@ -45,7 +45,7 @@ def execution_observation(
         endpoint="/api/v3/myTrades",
         query={"symbol": "BTCUSDT"},
         at=NOW,
-        permission_scope="ORDER.READ",
+        permission_scope="TRADE.READ",
     )
     raw = json.dumps(
         rows,
@@ -56,6 +56,7 @@ def execution_observation(
     ).encode("utf-8")
     return observe_authenticated_json_response(
         query_binding=query,
+        http_status=200,
         response_bytes=raw,
         observed_at=NOW,
     )
@@ -81,7 +82,7 @@ def capability(
             expires_at=NOW + timedelta(hours=1),
             supported_order_types=frozenset(order_types),
             time_in_force=frozenset(tif),
-            permission_scopes=frozenset({"ORDER_WRITE", "ORDER.READ"}),
+            permission_scopes=frozenset({"ORDER_WRITE", "ORDER.READ", "TRADE.READ"}),
             position_mode="NET",
             native_protection=frozenset(),
             rate_limit_policy_id="binance-spot-foundation",
@@ -225,6 +226,27 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         self.assertEqual(fills[0].evidence_refs, (observation.evidence_ref,))
         self.assertEqual(fills[0].quantity, Decimal("0.2"))
         self.assertEqual(fills[0].fee_currency, "BNB")
+
+    def test_execution_parser_rejects_wrong_authenticated_read_surface(self):
+        row = {
+            "symbol": "BTCUSDT",
+            "id": 7,
+            "orderId": 42,
+            "price": "100.25",
+            "qty": "0.2",
+            "commission": "0.001",
+            "commissionAsset": "BNB",
+            "time": 1790272800123,
+        }
+        wrong_surface = execution_observation(
+            [row],
+            surface=Surface.AUTHENTICATED_READ,
+        )
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "scope"):
+            parse_account_trades(
+                wrong_surface,
+                instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
+            )
 
     def test_conflicting_duplicate_trade_id_fails_closed(self):
         first = {

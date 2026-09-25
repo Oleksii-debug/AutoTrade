@@ -293,7 +293,7 @@ class DurableReservationBookTests(unittest.TestCase):
         )
         self.assertEqual(restarted.total_reserved("CASH:USD"), Decimal("0"))
 
-    def test_evidenced_filled_releases_unused_worst_case_buffer_across_restart(self):
+    def test_observed_execution_does_not_prove_full_fill_or_release_buffer(self):
         book = self.book()
         self.reserve(book, amount="70")
         book.consume(
@@ -314,26 +314,29 @@ class DurableReservationBookTests(unittest.TestCase):
             outcome="FILLED",
             reconciliation_event=reconciliation,
         )
-        terminal = book.mark_terminal(
-            command_id="cmd-terminal-filled",
-            idempotency_key="idem-terminal-filled",
-            reservation_id="r1",
-            outcome="FILLED",
-            provider="SIMULATED",
-            attempt_id="attempt-r1",
-            resolution_evidence=filled_evidence,
-        )
-        self.assertEqual(terminal.state, "FILLED")
-        self.assertEqual(terminal.consumed["CASH:USD"], Decimal("60"))
-        self.assertEqual(terminal.remaining["CASH:USD"], Decimal("0"))
-        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("0"))
+        before = book.total_reserved("CASH:USD")
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "lacks canonical reconciliation semantics",
+        ):
+            book.mark_terminal(
+                command_id="cmd-terminal-filled",
+                idempotency_key="idem-terminal-filled",
+                reservation_id="r1",
+                outcome="FILLED",
+                provider="SIMULATED",
+                attempt_id="attempt-r1",
+                resolution_evidence=filled_evidence,
+            )
+        self.assertEqual(book.get("r1").state, "UNKNOWN")
+        self.assertEqual(book.get("r1").consumed["CASH:USD"], Decimal("60"))
+        self.assertEqual(book.total_reserved("CASH:USD"), before)
 
         restarted = self.book()
         restored = restarted.get("r1")
-        self.assertEqual(restored.state, "FILLED")
+        self.assertEqual(restored.state, "UNKNOWN")
         self.assertEqual(restored.consumed["CASH:USD"], Decimal("60"))
-        self.assertEqual(restored.remaining["CASH:USD"], Decimal("0"))
-        self.assertEqual(restarted.total_reserved("CASH:USD"), Decimal("0"))
+        self.assertEqual(restarted.total_reserved("CASH:USD"), before)
 
     def test_restart_does_not_make_reserved_cash_available_again(self):
         first = self.book()

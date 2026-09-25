@@ -370,12 +370,10 @@ def _prepare_provider_fill_binding(
         ),
         "derived_usage": usage,
     }
-    request_digest = payload_digest(request)
     events = economic_book.store.load_events(
         _PROVIDER_FILL_BINDING_AGGREGATE_TYPE,
         aggregate_id,
     )
-    matching = []
     for event in events:
         if event.get("event_type") != _PROVIDER_FILL_BINDING_EVENT_TYPE:
             raise AccountingConflict(
@@ -395,37 +393,83 @@ def _prepare_provider_fill_binding(
             raise AccountingConflict(
                 "provider fill financial binding scope is invalid"
             )
-        if payload.get("request_digest") == request_digest:
-            matching.append(event)
 
-    if matching:
-        if len(matching) != 1:
+    if events:
+        if len(events) != 1:
             raise AccountingConflict(
                 "provider fill financial binding identity is duplicated"
             )
-        event = matching[0]
+        event = events[0]
         payload = event["payload"]
-        if payload.get("request") != request:
+        stored_request = payload.get("request")
+        if not isinstance(stored_request, Mapping):
             raise AccountingConflict(
-                "provider fill financial binding digest conflicts with content"
+                "provider fill financial binding request is invalid"
+            )
+        if set(stored_request) != set(request):
+            raise AccountingConflict(
+                "provider fill financial binding request shape changed"
+            )
+        stored_request = dict(stored_request)
+        if payload.get("request_digest") != payload_digest(stored_request):
+            raise AccountingConflict(
+                "provider fill financial binding request digest is invalid"
+            )
+
+        stable_keys = set(request) - {
+            "reservation_cut_digest",
+            "plan_digest",
+        }
+        if any(
+            stored_request.get(key) != request.get(key)
+            for key in stable_keys
+        ):
+            raise AccountingConflict(
+                "provider execution already has a different financial binding"
+            )
+
+        stored_cut = stored_request.get("reservation_cut_digest")
+        if (
+            not isinstance(stored_cut, str)
+            or not stored_cut.startswith("sha256:")
+            or len(stored_cut) != 71
+            or any(ch not in "0123456789abcdef" for ch in stored_cut[7:])
+        ):
+            raise AccountingConflict(
+                "provider fill financial binding reservation cut is invalid"
+            )
+        stored_plan_digest = stored_request.get("plan_digest")
+        expected_plan_digest = payload_digest(
+            {
+                "schema_version": "1.1.0",
+                "provider_id": economic_book.provider_id,
+                "account_id": economic_book.account_id,
+                "environment": economic_book.environment,
+                "reservation_id": plan.reservation_id,
+                "intent_id": plan.intent_id,
+                "provider_execution_id": plan.provider_execution_id,
+                "reservation_cut_digest": stored_cut,
+                "transaction": canonical_transaction(plan.transaction),
+                "derived_usage": usage,
+            }
+        )
+        if stored_plan_digest != expected_plan_digest:
+            raise AccountingConflict(
+                "provider fill financial binding plan digest is invalid"
             )
         return PreparedProviderFillBinding(
             aggregate_id=aggregate_id,
             envelope=None,
-            request=request,
+            request=stored_request,
             result={
                 "binding_event_id": event["event_id"],
-                "plan_digest": plan.plan_digest,
+                "plan_digest": stored_plan_digest,
             },
             aggregate_version=int(event["aggregate_version"]),
             already_committed=True,
         )
 
-    if events:
-        raise AccountingConflict(
-            "provider execution already has a different financial binding"
-        )
-
+    request_digest = payload_digest(request)
     event_id = str(
         uuid5(
             NAMESPACE_URL,

@@ -345,15 +345,9 @@ def build_provider_fill_financial_plan(
         raise AccountingConflict(
             "provider fill intent does not match admitted reservation"
         )
-    if provider_fill.side != "BUY":
-        raise AccountingConflict(
-            "cash-equity reservation consumption is qualified only for BUY fills"
-        )
-    if provider_fill.position_side is not None:
-        raise AccountingConflict(
-            "cash-equity reservation consumption rejects derivative position_side"
-        )
 
+    # Validate the complete independent provider/projection identity first.
+    # Asset-family admission must never mask contradictory provider truth.
     transaction = build_provider_fill_transaction(
         book=book,
         provider_id=provider_id,
@@ -363,6 +357,15 @@ def build_provider_fill_financial_plan(
         settlement_currency=settlement_currency,
         observed_at=observed_at,
     )
+
+    if provider_fill.side != "BUY":
+        raise AccountingConflict(
+            "cash-equity reservation consumption is qualified only for BUY fills"
+        )
+    if provider_fill.position_side is not None:
+        raise AccountingConflict(
+            "cash-equity reservation consumption rejects derivative position_side"
+        )
 
     settlement = _text(settlement_currency, name="settlement_currency").upper()
     usage: dict[str, Decimal] = {

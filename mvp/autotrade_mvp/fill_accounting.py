@@ -22,8 +22,9 @@ from .accounting import (
     book_equity_fill,
     reverse_transaction,
 )
-from .persistence import payload_digest
-from .reconciliation import ProviderFillEvidence, ReconciliationResult
+from .persistence import JournalStore, payload_digest
+from .reconciliation import ProviderFillEvidence
+from .reconciliation_journal import require_current_reconciliation_checkpoint
 
 
 def _text(value: str, *, name: str) -> str:
@@ -241,37 +242,100 @@ def _validated_fill_evidence(
 
 
 
+def _current_unexpected_execution_checkpoint(
+    *,
+    store: JournalStore,
+    checkpoint_event_id: str,
+    provider_fill: ProviderFillEvidence,
+) -> dict[str, object]:
+    if not isinstance(store, JournalStore):
+        raise TypeError("store must be JournalStore")
+    checkpoint = require_current_reconciliation_checkpoint(
+        store,
+        checkpoint_event_id=_text(
+            checkpoint_event_id,
+            name="checkpoint_event_id",
+        ),
+        provider_id=provider_fill.provider_id,
+        account_id=provider_fill.account_id,
+        environment=provider_fill.environment,
+    )
+    payload = checkpoint.get("payload")
+    if not isinstance(payload, dict):
+        raise AccountingConflict("reconciliation checkpoint payload is invalid")
+    raw_unexpected = payload.get("unexpected_execution_ids")
+    if not isinstance(raw_unexpected, list):
+        raise AccountingConflict(
+            "reconciliation checkpoint unexpected executions are invalid"
+        )
+    unexpected = tuple(
+        _text(value, name="unexpected_execution_id")
+        for value in raw_unexpected
+    )
+    if len(unexpected) != len(set(unexpected)):
+        raise AccountingConflict(
+            "reconciliation checkpoint unexpected executions are not unique"
+        )
+    if provider_fill.provider_execution_id not in unexpected:
+        raise AccountingConflict(
+            "provider execution is not proven unexpected by current reconciliation checkpoint"
+        )
+    payload_hash = checkpoint.get("payload_hash")
+    journal_sequence = checkpoint.get("journal_sequence")
+    if (
+        not isinstance(payload_hash, str)
+        or not payload_hash.startswith("sha256:")
+        or len(payload_hash) != 71
+    ):
+        raise AccountingConflict(
+            "reconciliation checkpoint lacks canonical payload identity"
+        )
+    if type(journal_sequence) is not int or journal_sequence <= 0:
+        raise AccountingConflict(
+            "reconciliation checkpoint lacks durable journal sequence"
+        )
+    return {
+        "event_id": _text(checkpoint.get("event_id"), name="checkpoint_event_id"),
+        "payload_hash": payload_hash,
+        "journal_sequence": journal_sequence,
+    }
+
+
 def build_unexpected_provider_fill_transaction(
     *,
+    store: JournalStore,
+    checkpoint_event_id: str,
     book: ScopedEconomicBook,
-    reconciliation: ReconciliationResult,
     provider_fill: ProviderFillEvidence,
     expected_instrument: str,
     settlement_currency: str,
     observed_at: str | None = None,
 ) -> JournalTransaction:
-    """Build canonical economics for one provider fill proven unexpected.
+    """Build economics only from current durable reconciliation evidence.
 
-    This is intentionally downstream of the existing reconciliation authority.
-    It does not infer direction from local state and it does not support hedge
-    legs until the canonical economic book becomes leg-aware.
+    The caller cannot authorize an external/manual execution by constructing a
+    ReconciliationResult. The execution identity must be present in the latest
+    JournalStore-issued AccountReconciled checkpoint for the exact provider,
+    account and environment.
     """
     if not isinstance(book, ScopedEconomicBook):
         raise TypeError("book must be ScopedEconomicBook")
-    if not isinstance(reconciliation, ReconciliationResult):
-        raise TypeError("reconciliation must be ReconciliationResult")
     if not isinstance(provider_fill, ProviderFillEvidence):
         raise TypeError("provider_fill must be ProviderFillEvidence")
 
-    provider = provider_fill.provider_id
-    if (
-        reconciliation.provider_id != provider
-        or reconciliation.account_id != provider_fill.account_id
-        or reconciliation.environment != provider_fill.environment
-    ):
+    durable_store = getattr(book, "store", None)
+    if durable_store is not store:
         raise AccountingConflict(
-            "unexpected provider fill scope does not match reconciliation"
+            "unexpected provider fill requires the economic book and reconciliation checkpoint "
+            "to share one JournalStore"
         )
+
+    checkpoint = _current_unexpected_execution_checkpoint(
+        store=store,
+        checkpoint_event_id=checkpoint_event_id,
+        provider_fill=provider_fill,
+    )
+    provider = provider_fill.provider_id
     if (
         book.account_id != provider_fill.account_id
         or book.environment != provider_fill.environment
@@ -279,11 +343,10 @@ def build_unexpected_provider_fill_transaction(
         raise AccountingConflict(
             "unexpected provider fill scope does not match economic book"
         )
-    if provider_fill.provider_execution_id not in set(
-        reconciliation.unexpected_execution_ids
-    ):
+    durable_provider = getattr(book, "provider_id", None)
+    if durable_provider is not None and durable_provider != provider:
         raise AccountingConflict(
-            "provider execution is not proven unexpected by reconciliation"
+            "unexpected provider fill provider scope does not match durable economic book"
         )
     if provider_fill.side is None:
         raise AccountingConflict(
@@ -301,8 +364,11 @@ def build_unexpected_provider_fill_transaction(
         )
     settlement = _text(settlement_currency, name="settlement_currency").upper()
     evidence = {
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
         "origin": "EXTERNAL_RECONCILED",
+        "reconciliation_checkpoint_event_id": checkpoint["event_id"],
+        "reconciliation_checkpoint_payload_hash": checkpoint["payload_hash"],
+        "reconciliation_checkpoint_journal_sequence": checkpoint["journal_sequence"],
         "provider_id": provider,
         "environment": provider_fill.environment,
         "account_id": provider_fill.account_id,
@@ -350,16 +416,18 @@ def build_unexpected_provider_fill_transaction(
 
 def book_unexpected_provider_fill(
     *,
+    store: JournalStore,
+    checkpoint_event_id: str,
     book: ScopedEconomicBook,
-    reconciliation: ReconciliationResult,
     provider_fill: ProviderFillEvidence,
     expected_instrument: str,
     settlement_currency: str,
     observed_at: str | None = None,
 ) -> bool:
     transaction = build_unexpected_provider_fill_transaction(
+        store=store,
+        checkpoint_event_id=checkpoint_event_id,
         book=book,
-        reconciliation=reconciliation,
         provider_fill=provider_fill,
         expected_instrument=expected_instrument,
         settlement_currency=settlement_currency,

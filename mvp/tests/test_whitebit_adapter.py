@@ -68,6 +68,7 @@ def capability(
     tif=("GTC", "IOC"),
     account_id="account-1",
     environment="PAPER",
+    instrument_version="BTC_USDT:v1",
 ):
     observed_at = NOW - timedelta(hours=1)
     claims = tuple(
@@ -77,7 +78,7 @@ def capability(
             account_id=account_id,
             entity_id="global",
             environment=environment,
-            instrument_version="BTC_USDT:v1",
+            instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=NOW + timedelta(hours=1),
             supported_order_types=frozenset(order_types),

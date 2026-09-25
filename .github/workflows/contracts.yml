@@ -58,8 +58,12 @@ jobs:
       - run: node tests/Contracts.TypeScript/common-scalars.test.cjs
       - if: github.event_name == 'pull_request'
         run: python tools/contract_version_guard.py --base-ref origin/${{ github.base_ref }}
-      - name: Write exact-head contracts evidence
+      - name: Write exact-head contracts evidence for pull request
+        if: github.event_name == 'pull_request'
         run: python tools/write_ci_evidence.py --suite contracts --command "json-schema + dotnet + typescript + contract-version-guard" --output "artifacts/contracts-${{ runner.os }}.json"
+      - name: Write exact-head contracts evidence for non-PR run
+        if: github.event_name != 'pull_request'
+        run: python tools/write_ci_evidence.py --suite contracts --command "json-schema + dotnet + typescript" --output "artifacts/contracts-${{ runner.os }}.json"
       - name: Upload exact-head contracts evidence
         uses: actions/upload-artifact@v4
         with:

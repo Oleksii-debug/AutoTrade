@@ -97,6 +97,20 @@ class HostPrincipal:
 
 
 @dataclass(frozen=True)
+class SnapshotPrincipal:
+    actor: str
+    session: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.actor, str) or not self.actor.strip():
+            raise ValueError("snapshot principal actor is required")
+        if not isinstance(self.session, str) or not self.session.strip():
+            raise ValueError("snapshot principal session is required")
+        object.__setattr__(self, "actor", self.actor.strip())
+        object.__setattr__(self, "session", self.session.strip())
+
+
+@dataclass(frozen=True)
 class TransportResponse:
     status: int
     content_type: str
@@ -106,7 +120,7 @@ class TransportResponse:
 
 PrincipalResolver = Callable[[Mapping[str, str], str], HostPrincipal]
 SnapshotProvider = Callable[
-    [Mapping[str, object], HostPrincipal], Mapping[str, object]
+    [Mapping[str, object], SnapshotPrincipal], Mapping[str, object]
 ]
 
 
@@ -259,12 +273,21 @@ class AuthenticatedHostApplication:
         )
 
     def _principal(self, headers: Mapping[str, str]) -> HostPrincipal:
-        principal = self._principal_resolver(headers, self.public_origin)
+        request_origin = self.public_origin
+        supplied_origin = headers.get("origin")
+        if supplied_origin is not None:
+            try:
+                request_origin = _authenticated_origin(supplied_origin)
+            except (TypeError, ValueError) as error:
+                raise PermissionError("Request origin is invalid") from error
+            if request_origin != self.public_origin:
+                raise PermissionError("Request origin is not allowed")
+        principal = self._principal_resolver(headers, request_origin)
         if not isinstance(principal, HostPrincipal):
             raise TypeError("principal_resolver must return HostPrincipal")
         session = self.security_boundary.validate_session(
             principal.token,
-            origin=self.public_origin,
+            origin=request_origin,
         )
         if session.subject != principal.actor:
             raise PermissionError("Authenticated actor mismatch")
@@ -272,9 +295,13 @@ class AuthenticatedHostApplication:
 
     def _snapshot(self, principal: HostPrincipal) -> Mapping[str, object]:
         durable = self.store.snapshot()
+        public_principal = SnapshotPrincipal(
+            actor=principal.actor,
+            session=principal.session,
+        )
         projected = self._snapshot_provider(
             MappingProxyType(dict(durable)),
-            principal,
+            public_principal,
         )
         if not isinstance(projected, Mapping):
             raise TypeError("snapshot_provider must return a mapping")
@@ -321,7 +348,9 @@ class AuthenticatedHostApplication:
             is None
         ):
             raise ValueError("UiSnapshot server_time must be a canonical UTC instant")
-        _json_bytes(payload)
+        rendered = _json_bytes(payload)
+        if principal.token.encode("utf-8") in rendered:
+            raise ValueError("UiSnapshot must not contain the bearer token")
         return MappingProxyType(payload)
 
     @staticmethod

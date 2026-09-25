@@ -179,6 +179,19 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 transport_ambiguous=True,
             )
 
+    def test_submission_environment_must_be_canonical_even_when_result_omits_it(self):
+        for payload, ambiguous in (
+            ({"error": [], "result": {"txid": ["OABC-D123-E456"]}}, False),
+            (None, True),
+        ):
+            with self.subTest(transport_ambiguous=ambiguous):
+                with self.assertRaisesRegex(KrakenSpotAdapterError, "environment"):
+                    self._parse_submission(
+                        payload,
+                        environment="MARS",
+                        transport_ambiguous=ambiguous,
+                    )
+
     def test_submission_provenance_requires_exact_https_add_order_endpoint(self):
         with self.assertRaisesRegex(KrakenSpotAdapterError, "source_uri"):
             self._parse_submission(

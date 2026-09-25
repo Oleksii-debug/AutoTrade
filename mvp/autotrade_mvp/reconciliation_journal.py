@@ -844,6 +844,42 @@ def load_account_resource_availability_evidence(
                 raise ValueError(
                     "resource availability snapshot predates settlement financial truth"
                 )
+
+        # Option exercise/assignment/expiry is also account-scoped financial truth.
+        # It can retire option inventory and create cash/delivery obligations, so a
+        # provider cash snapshot taken before the lifecycle fact must not authorize
+        # fresh capital reuse.  Reuse this single availability authority rather
+        # than teaching reservation or option accounting a second freshness rule.
+        for lifecycle_event in store.load_events_by_aggregate_type(
+            "option_lifecycle"
+        ):
+            lifecycle_sequence = lifecycle_event.get("journal_sequence")
+            lifecycle_payload = lifecycle_event.get("payload")
+            if (
+                type(lifecycle_sequence) is not int
+                or not isinstance(lifecycle_payload, Mapping)
+            ):
+                continue
+            if (
+                lifecycle_payload.get("provider_id") != provider
+                or lifecycle_payload.get("account_id") != account
+                or lifecycle_payload.get("environment") != scope
+            ):
+                continue
+            if lifecycle_sequence >= checkpoint_sequence:
+                raise ValueError(
+                    "availability checkpoint predates option lifecycle financial truth"
+                )
+            lifecycle_committed = datetime.fromisoformat(
+                _instant(
+                    lifecycle_event.get("committed_at"),
+                    name="option_lifecycle.committed_at",
+                ).replace("Z", "+00:00")
+            )
+            if resource_started < lifecycle_committed:
+                raise ValueError(
+                    "resource availability snapshot predates option lifecycle financial truth"
+                )
     if "ACCOUNT" in blocking_resources or any(
         resource in blocking_resources for resource in requested
     ):

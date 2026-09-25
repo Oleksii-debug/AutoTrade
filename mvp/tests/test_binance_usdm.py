@@ -12,9 +12,25 @@ from mvp.autotrade_mvp.binance_usdm import (
     prepare_order_request,
 )
 from mvp.autotrade_mvp.capabilities import CapabilitySnapshot
+from mvp.autotrade_mvp.provider_core import (
+    BoundReconciliationResponse,
+    PreparedReconciliationRead,
+)
 
 
 NOW = datetime(2026, 9, 25, 0, tzinfo=timezone.utc)
+
+def bound_account_trades(payload, *, account_id="paper-1", environment="PAPER"):
+    read = PreparedReconciliationRead.create(
+        provider_id="BINANCE",
+        account_id=account_id,
+        environment=environment,
+        surface="EXECUTIONS",
+        endpoint="/fapi/v1/userTrades",
+        request={"limit": 100},
+    )
+    return BoundReconciliationResponse.bind(read, payload)
+
 
 
 def capability(
@@ -286,12 +302,10 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             "time": 1569514978020,
         }
         fills = parse_account_trades(
-            [row, dict(row)],
+            bound_account_trades([row, dict(row)]),
             instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
             client_ids_by_order_id={25851813: "at-usdm-fill"},
-        
-            account_id="paper-1",
-            environment="PAPER",)
+        )
         self.assertEqual(len(fills), 1)
         fill = fills[0]
         self.assertEqual(fill.provider_execution_id, "BINANCE-USDM:BTCUSDT:698759")
@@ -316,11 +330,9 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
         changed = dict(first, qty="0.3")
         with self.assertRaisesRegex(BinanceUsdmAdapterError, "conflicting"):
             parse_account_trades(
-                [first, changed],
+                bound_account_trades([first, changed]),
                 instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
-            
-                account_id="paper-1",
-                environment="PAPER",)
+            )
 
     def test_empty_order_history_never_proves_absence_by_default(self):
         evidence = coverage_evidence(
@@ -364,7 +376,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(BinanceUsdmAdapterError, "positionSide"):
             parse_account_trades(
-                [
+                bound_account_trades([
                     {
                         "commission": "0.01",
                         "commissionAsset": "USDT",
@@ -376,11 +388,9 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                         "symbol": "BTCUSDT",
                         "time": 1790272800123,
                     }
-                ],
+                ]),
                 instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
-            
-                account_id="paper-1",
-                environment="PAPER",)
+            )
 
 
 if __name__ == "__main__":

@@ -114,6 +114,39 @@ class InformationClaimTests(unittest.TestCase):
         store.add(new)
         self.assertEqual(store.revisions("corp"), (old, new))
 
+    def test_syndication_dedupe_does_not_erase_source_revision_history(self):
+        store = ClaimStore()
+        first = store.build_claim(
+            doc("corp", "r1", "unchanged disclosure", available=0),
+            subject="X",
+            predicate="guidance",
+            value="10",
+        )
+        revised_metadata = store.build_claim(
+            doc("corp", "r2", "unchanged disclosure", available=2),
+            subject="X",
+            predicate="guidance",
+            value="10",
+        )
+        mirror = store.build_claim(
+            doc("wire", "wire-r1", "unchanged disclosure", available=1),
+            subject="X",
+            predicate="guidance",
+            value="10",
+        )
+
+        store.add(first)
+        accepted_revision, inserted_revision = store.add(revised_metadata)
+        accepted_mirror, inserted_mirror = store.add(mirror)
+
+        self.assertFalse(inserted_revision)
+        self.assertFalse(inserted_mirror)
+        self.assertEqual(accepted_revision.claim_id, first.claim_id)
+        self.assertEqual(accepted_mirror.claim_id, first.claim_id)
+        self.assertEqual(store.claims, (first,))
+        self.assertEqual(store.revisions("corp"), (first, revised_metadata))
+        self.assertEqual(store.revisions("wire"), (mirror,))
+
     def test_direct_source_document_cannot_bypass_provenance_invariants(self):
         with self.assertRaisesRegex(ValueError, "unsupported source_kind"):
             SourceDocument(

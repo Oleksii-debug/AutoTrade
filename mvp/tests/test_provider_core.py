@@ -71,6 +71,23 @@ class ProviderCoreTests(unittest.TestCase):
                 passed_cases=REQUIRED_QUALIFICATION_CASES,
             )
 
+    def test_live_evidence_cannot_be_mislabeled_as_nonlive_qualification(self):
+        evidence = QualificationEvidence(
+            provider_id="BYBIT",
+            product_family="SPOT",
+            environment=" live ",
+            adapter_code_sha=CODE_SHA,
+            documentation_ref="official-live-docs-snapshot",
+            observed_at=NOW,
+            expires_at=NOW + timedelta(days=1),
+            passed_cases=REQUIRED_QUALIFICATION_CASES,
+        )
+        self.assertEqual(evidence.environment, "LIVE")
+        self.assertEqual(
+            evidence.status(now=NOW, exact_code_sha=CODE_SHA),
+            "LIVE_REQUIRES_BOUNDED_REAL",
+        )
+
     def test_incomplete_qualification_fails_closed(self):
         evidence = QualificationEvidence(
             provider_id="ALPACA",

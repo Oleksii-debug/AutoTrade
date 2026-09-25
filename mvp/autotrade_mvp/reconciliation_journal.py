@@ -15,6 +15,7 @@ from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .dispatch import submission_attempt_aggregate_id
 from .persistence import JournalStore, canonical_json, payload_digest
+from .provider_core import ProviderResponseObservation
 from .reconciliation import ReconciliationResult, UnknownSubmission
 from .securities_borrow import (
     BorrowAvailabilityEvidence,
@@ -314,6 +315,7 @@ def record_reconciliation_checkpoint(
     host_id: str,
     owner_epoch: str,
     evidence_artifact_store: ArtifactStore | None = None,
+    snapshot_observations: Iterable[ProviderResponseObservation] = (),
 ) -> dict[str, Any]:
     """Persist one exact reconciliation outcome, idempotently for retries."""
 
@@ -324,6 +326,58 @@ def record_reconciliation_checkpoint(
     host = _text(host_id, name="host_id")
     epoch = _text(owner_epoch, name="owner_epoch")
     payload = reconciliation_payload(result, observed_at=observed_at)
+    observations = tuple(snapshot_observations)
+    if observations:
+        if (
+            result.snapshot_consistent is not True
+            or result.snapshot_mode not in {"ATOMIC", "COMPOSED"}
+            or result.snapshot_query_started_at is None
+            or result.snapshot_query_completed_at is None
+        ):
+            raise ValueError(
+                "snapshot observations require a consistent timestamped reconciliation snapshot"
+            )
+        started_text = _instant(
+            result.snapshot_query_started_at,
+            name="snapshot_query_started_at",
+        )
+        completed_text = _instant(
+            result.snapshot_query_completed_at,
+            name="snapshot_query_completed_at",
+        )
+        started = datetime.fromisoformat(started_text.replace("Z", "+00:00"))
+        completed = datetime.fromisoformat(completed_text.replace("Z", "+00:00"))
+        refs: list[str] = []
+        for observation in observations:
+            if not isinstance(observation, ProviderResponseObservation):
+                raise TypeError(
+                    "snapshot_observations must contain ProviderResponseObservation"
+                )
+            if (
+                observation.provider_id != result.provider_id
+                or observation.account_id != result.account_id
+                or observation.environment != result.environment
+                or observation.provider_environment != result.provider_environment
+            ):
+                raise ValueError(
+                    "snapshot observation scope differs from reconciliation"
+                )
+            prepared = datetime.fromisoformat(
+                observation.query_binding.prepared_at.replace("Z", "+00:00")
+            )
+            observed = datetime.fromisoformat(
+                observation.observed_at.replace("Z", "+00:00")
+            )
+            if not (started <= prepared <= observed <= completed):
+                raise ValueError(
+                    "snapshot observation lies outside reconciliation query window"
+                )
+            if observation.evidence_ref in refs:
+                raise ValueError(
+                    "snapshot observation evidence identities must be unique"
+                )
+            refs.append(observation.evidence_ref)
+        payload["snapshot_evidence_refs"] = sorted(refs)
     payload["checkpoint_owner"] = {
         "host_id": host,
         "owner_epoch": epoch,

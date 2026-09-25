@@ -33,7 +33,21 @@ def _identifier(value: str | None = None) -> str:
     return str(UUID(value)) if value is not None else str(uuid4())
 
 
+def _reject_binary_float(value: Any, *, path: str = "$") -> None:
+    if isinstance(value, float):
+        raise TypeError(
+            f"binary float is not permitted in immutable experience evidence: {path}"
+        )
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _reject_binary_float(item, path=f"{path}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _reject_binary_float(item, path=f"{path}[{index}]")
+
+
 def _canonical(value: Any) -> str:
+    _reject_binary_float(value)
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 

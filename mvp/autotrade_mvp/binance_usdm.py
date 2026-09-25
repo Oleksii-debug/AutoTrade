@@ -103,6 +103,13 @@ def _uuid(value: object, *, name: str) -> str:
         raise BinanceUsdmAdapterError(f"{name} must be a UUID") from error
 
 
+def _provider_symbol(value: object, *, name: str) -> str:
+    symbol = _text(value, name=name)
+    if symbol != symbol.upper():
+        raise BinanceUsdmAdapterError("Binance USD-M symbol must be uppercase")
+    return symbol
+
+
 def validate_client_order_id(value: object) -> str:
     client_id = _text(value, name="client_order_id")
     if _CLIENT_ID.fullmatch(client_id) is None:
@@ -139,9 +146,7 @@ class BinanceUsdmOrderIntent:
         reduce_only: bool = False,
     ) -> "BinanceUsdmOrderIntent":
         instrument = _text(instrument_version, name="instrument_version")
-        provider_symbol = _text(symbol, name="symbol")
-        if provider_symbol != provider_symbol.upper():
-            raise BinanceUsdmAdapterError("Binance USD-M symbol must be uppercase")
+        provider_symbol = _provider_symbol(symbol, name="symbol")
 
         normalized_side = _text(side, name="side").upper()
         if normalized_side not in {"BUY", "SELL"}:
@@ -333,7 +338,7 @@ def parse_order_ack(
             "Binance USD-M clientOrderId does not match request"
         )
 
-    symbol = _text(response.get("symbol"), name="response.symbol")
+    symbol = _provider_symbol(response.get("symbol"), name="response.symbol")
     order_id = response.get("orderId")
     if isinstance(order_id, bool) or not isinstance(order_id, int) or order_id < 0:
         raise BinanceUsdmAdapterError(
@@ -377,7 +382,7 @@ def parse_account_trades(
                 f"trade row {index} must be an object"
             )
 
-        symbol = _text(raw.get("symbol"), name=f"trade[{index}].symbol")
+        symbol = _provider_symbol(raw.get("symbol"), name=f"trade[{index}].symbol")
         if symbol not in instrument_versions:
             raise BinanceUsdmAdapterError(
                 f"unmapped Binance USD-M symbol: {symbol}"

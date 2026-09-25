@@ -374,6 +374,17 @@ def parse_account_trades(
         raise BinanceUsdmAdapterError(
             "client_ids_by_order_id must be a mapping"
         )
+    normalized_client_map: dict[int, str] = {}
+    for order_id, client_id in client_map.items():
+        if (
+            isinstance(order_id, bool)
+            or not isinstance(order_id, int)
+            or order_id < 0
+        ):
+            raise BinanceUsdmAdapterError(
+                "client_ids_by_order_id keys must be non-negative integer order ids"
+            )
+        normalized_client_map[order_id] = validate_client_order_id(client_id)
 
     by_id: dict[str, ProviderFillEvidence] = {}
     for index, raw in enumerate(rows):
@@ -411,9 +422,7 @@ def parse_account_trades(
             )
 
         execution_id = f"BINANCE-USDM:{symbol}:{trade_id}"
-        client_id = client_map.get(order_id)
-        if client_id is not None:
-            client_id = validate_client_order_id(client_id)
+        client_id = normalized_client_map.get(order_id)
 
         fill = ProviderFillEvidence.create(
             provider_execution_id=execution_id,

@@ -21,6 +21,7 @@ from .accounting import (
     AccountingConflict,
     JournalTransaction,
     Posting,
+    book_equity_split_adjustment,
     reverse_transaction,
     transaction_digest,
     validate_transaction,
@@ -35,7 +36,7 @@ from .persistence import JournalStore, canonical_json, payload_digest
 from .provider_activity_accounting import DurableProviderEconomicBook
 
 
-_SUPPORTED_DURABLE_KINDS = frozenset({"CASH_DIVIDEND"})
+_SUPPORTED_DURABLE_KINDS = frozenset({"CASH_DIVIDEND", "SPLIT"})
 
 
 def _identity(kind: str, *parts: str) -> str:
@@ -129,7 +130,12 @@ def _canonical_entitlement_position_proof(
     contributors: list[dict[str, str]] = []
 
     economic_book.refresh()
+    current_order_key = _order_key(accepted.external_event_id)
     for transaction in economic_book.transactions:
+        # Exact retry of a position-changing action must reconstruct the
+        # pre-action entitlement cut, not count its own already-durable effect.
+        if transaction.economic_order_key == current_order_key:
+            continue
         position_postings = tuple(
             posting
             for posting in transaction.postings
@@ -279,6 +285,54 @@ def _dividend_transaction(
     return transaction
 
 
+def _split_transaction(
+    accepted: AuthoritativeCorporateAction,
+    transition: Transition,
+    *,
+    order_key: str,
+    observed_at: str,
+) -> JournalTransaction | None:
+    before = transition.before
+    after = transition.after
+    if (
+        after.total_basis != before.total_basis
+        or after.settled_cash != before.settled_cash
+        or after.unsettled_cash != before.unsettled_cash
+        or after.currency != before.currency
+        or after.symbol != before.symbol
+    ):
+        raise AccountingConflict(
+            "equity split durable mapping requires zero cash/P&L and unchanged basis"
+        )
+    if after.quantity == before.quantity:
+        return None
+    try:
+        numerator = accepted.event.payload["numerator"]
+        denominator = accepted.event.payload["denominator"]
+    except KeyError as error:
+        raise AccountingConflict(
+            "equity split evidence lacks exact numerator/denominator"
+        ) from error
+    return book_equity_split_adjustment(
+        transaction_id=_transaction_id(accepted, "effect"),
+        cause_event_id=_identity(
+            "corporate-action-cause",
+            accepted.external_event_id,
+            accepted.provenance_digest,
+            "effect",
+        ),
+        instrument=after.symbol,
+        pre_split_quantity=before.quantity,
+        numerator=numerator,
+        denominator=denominator,
+        economic_effective_at=(
+            accepted.event.effective_at.isoformat().replace("+00:00", "Z")
+        ),
+        economic_order_key=order_key,
+        observed_at=observed_at,
+    )
+
+
 def _active_for_order_key(
     economic_book: DurableProviderEconomicBook,
     order_key: str,
@@ -418,6 +472,10 @@ def _economic_transactions(
         )
 
     if accepted.corrects_external_event_id is not None:
+        if accepted.event.kind != "CASH_DIVIDEND":
+            raise AccountingConflict(
+                "equity split correction/reversal accounting is not yet qualified"
+            )
         return _correction_transactions(
             economic_book,
             accepted,
@@ -426,12 +484,28 @@ def _economic_transactions(
         )
 
     order_key = _order_key(accepted.external_event_id)
-    transaction = _dividend_transaction(
-        accepted,
-        transition,
-        order_key=order_key,
-        observed_at=transaction_observed_at,
-    )
+    if accepted.event.kind == "CASH_DIVIDEND":
+        transaction = _dividend_transaction(
+            accepted,
+            transition,
+            order_key=order_key,
+            observed_at=transaction_observed_at,
+        )
+    elif accepted.event.kind == "SPLIT":
+        if transaction_observed_at is None:
+            raise AccountingConflict(
+                "equity split durable accounting requires causal observation time"
+            )
+        transaction = _split_transaction(
+            accepted,
+            transition,
+            order_key=order_key,
+            observed_at=transaction_observed_at,
+        )
+    else:
+        raise AccountingConflict(
+            f"{accepted.event.kind} has no qualified durable corporate-action accounting mapping"
+        )
     active = _active_for_order_key(economic_book, order_key)
     if active and not exact_retry:
         raise AccountingConflict(

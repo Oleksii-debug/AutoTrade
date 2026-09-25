@@ -22,9 +22,10 @@ public partial class MainWindow : Window
         ConnectionStatus.Text = "Host unavailable; new exposure cannot be confirmed blocked from this window.";
     }
 
-    private void LiveRegion_TextChanged(object sender, TextChangedEventArgs e)
+    private void SetLiveRegionText(TextBlock element, string text)
     {
-        if (!IsLoaded || sender is not UIElement element)
+        element.Text = text;
+        if (!IsLoaded)
         {
             return;
         }
@@ -101,8 +102,9 @@ public partial class MainWindow : Window
             ConnectionStatus.Text = status.Message;
             if (announce)
             {
-                HostStatusAnnouncement.Text =
-                    $"Host status refreshed. {status.Message} State version {status.StateVersion}.";
+                SetLiveRegionText(
+                    HostStatusAnnouncement,
+                    $"Host status refreshed. {status.Message} State version {status.StateVersion}.");
             }
 
             return;
@@ -130,8 +132,9 @@ public partial class MainWindow : Window
 
         if (announce)
         {
-            HostStatusAnnouncement.Text =
-                $"{ConnectionStatus.Text} No cancellation, flattening, or provider outcome is implied.";
+            SetLiveRegionText(
+                HostStatusAnnouncement,
+                $"{ConnectionStatus.Text} No cancellation, flattening, or provider outcome is implied.");
         }
     }
 
@@ -147,7 +150,7 @@ public partial class MainWindow : Window
     {
         EmergencyOperationValue.Text = result.OperationId;
         string inFlight = DescribeInFlightActions(result.InFlightActions);
-        EmergencyResult.Text = result switch
+        SetLiveRegionText(EmergencyResult, result switch
         {
             { Accepted: false } =>
                 result.Message
@@ -162,7 +165,7 @@ public partial class MainWindow : Window
                 + " Request accepted, but the durable block is not yet confirmed. "
                 + "Outstanding in-flight actions: " + inFlight
                 + ". The same operation identity will be used for recovery; do not resubmit with a new idempotency identity.",
-        };
+        });
     }
 
     private async Task RecoverEmergencyOperationAsync(string operationId)
@@ -187,7 +190,7 @@ public partial class MainWindow : Window
                 " Outstanding in-flight actions: " + inFlight
                 + ". Remaining uncertainty: " + recovered.RemainingUncertainty + ".";
 
-            EmergencyResult.Text = recovered.State switch
+            SetLiveRegionText(EmergencyResult, recovered.State switch
             {
                 EmergencyOperationState.Succeeded =>
                     recovered.Message + " Durable block confirmed by the host." + suffix,
@@ -205,7 +208,7 @@ public partial class MainWindow : Window
                     + " The accepted operation is still in progress; the durable block is not yet confirmed."
                     + suffix
                     + " Recover this same operation identity rather than creating a new command.",
-            };
+            });
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
@@ -214,12 +217,13 @@ public partial class MainWindow : Window
         catch (Exception)
         {
             EmergencyOperationValue.Text = operationId;
-            EmergencyResult.Text =
+            SetLiveRegionText(
+                EmergencyResult,
                 "The emergency request was accepted as operation "
                 + operationId
                 + ", but the same operation could not be recovered. "
                 + "Its durable block outcome and outstanding in-flight actions are unknown. "
-                + "Do not resubmit with a new idempotency identity; recover this same operation.";
+                + "Do not resubmit with a new idempotency identity; recover this same operation.");
         }
     }
 
@@ -227,7 +231,9 @@ public partial class MainWindow : Window
     {
         BlockNewExposureButton.IsEnabled = false;
         EmergencyOperationValue.Text = "Unavailable";
-        EmergencyResult.Text = "Requesting a durable block of new exposure from the host.";
+        SetLiveRegionText(
+            EmergencyResult,
+            "Requesting a durable block of new exposure from the host.");
 
         try
         {
@@ -249,20 +255,25 @@ public partial class MainWindow : Window
         catch (EmergencyCommandUncertainException uncertain)
         {
             EmergencyOperationValue.Text = uncertain.CommandId;
-            EmergencyResult.Text =
+            SetLiveRegionText(
+                EmergencyResult,
                 uncertain.Message
                 + " No durable block has been confirmed. Outstanding in-flight actions are unknown. "
-                + "A later Block new exposure action will recover this exact command identity rather than minting a new command.";
+                + "A later Block new exposure action will recover this exact command identity rather than minting a new command.");
         }
         catch (OperationCanceledException)
         {
             EmergencyOperationValue.Text = "Unavailable";
-            EmergencyResult.Text = "The request was cancelled before a confirmed host result. No durable block has been confirmed. Outstanding in-flight actions are unknown.";
+            SetLiveRegionText(
+                EmergencyResult,
+                "The request was cancelled before a confirmed host result. No durable block has been confirmed. Outstanding in-flight actions are unknown.");
         }
         catch (Exception)
         {
             EmergencyOperationValue.Text = "Unavailable";
-            EmergencyResult.Text = "The host request failed before a confirmed result. No durable block has been confirmed. Outstanding in-flight actions are unknown.";
+            SetLiveRegionText(
+                EmergencyResult,
+                "The host request failed before a confirmed result. No durable block has been confirmed. Outstanding in-flight actions are unknown.");
         }
         finally
         {

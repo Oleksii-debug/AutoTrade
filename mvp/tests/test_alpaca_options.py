@@ -48,6 +48,8 @@ class AlpacaOptionEvidenceTests(unittest.TestCase):
             require_option_entitlement(
                 intent,
                 account=account(),
+                account_id="paper-account",
+                environment="PAPER",
                 required_level=2,
                 at=NOW,
             ),
@@ -59,6 +61,8 @@ class AlpacaOptionEvidenceTests(unittest.TestCase):
             require_option_entitlement(
                 option_intent(),
                 account=account(expires_at=NOW - timedelta(minutes=1)),
+                account_id="paper-account",
+                environment="PAPER",
                 required_level=2,
                 at=NOW,
             )
@@ -66,6 +70,8 @@ class AlpacaOptionEvidenceTests(unittest.TestCase):
             require_option_entitlement(
                 option_intent(),
                 account=account(trading_blocked=True),
+                account_id="paper-account",
+                environment="PAPER",
                 required_level=2,
                 at=NOW,
             )
@@ -75,6 +81,8 @@ class AlpacaOptionEvidenceTests(unittest.TestCase):
             require_option_entitlement(
                 option_intent(),
                 account=account(options_trading_level=1),
+                account_id="paper-account",
+                environment="PAPER",
                 required_level=2,
                 at=NOW,
             )
@@ -93,7 +101,29 @@ class AlpacaOptionEvidenceTests(unittest.TestCase):
             require_option_entitlement(
                 equity,
                 account=account(),
+                account_id="paper-account",
+                environment="PAPER",
                 required_level=1,
+                at=NOW,
+            )
+
+    def test_entitlement_is_bound_to_exact_account_and_environment(self):
+        with self.assertRaisesRegex(AlpacaAdapterError, "account_id mismatch"):
+            require_option_entitlement(
+                option_intent(),
+                account=account(),
+                account_id="other-account",
+                environment="PAPER",
+                required_level=2,
+                at=NOW,
+            )
+        with self.assertRaisesRegex(AlpacaAdapterError, "environment mismatch"):
+            require_option_entitlement(
+                option_intent(),
+                account=account(environment="PAPER"),
+                account_id="paper-account",
+                environment="LIVE",
+                required_level=2,
                 at=NOW,
             )
 

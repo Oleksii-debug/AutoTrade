@@ -12,7 +12,7 @@ from hashlib import sha256
 from typing import Any, Callable
 
 from mvp.autotrade_mvp.model_gateway import BudgetLedger, BudgetSnapshot
-from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
 
 
 _AGGREGATE_TYPE = "model_budget"
@@ -37,14 +37,33 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _identity_digest(*parts: str) -> str:
+    return sha256(canonical_json(list(parts)).encode("utf-8")).hexdigest()
+
+
 def _event_id(aggregate_id: str, idempotency_key: str) -> str:
-    material = f"{aggregate_id}|{idempotency_key}".encode("utf-8")
-    return "model-budget-" + sha256(material).hexdigest()
+    return "model-budget-" + _identity_digest(
+        "event",
+        aggregate_id,
+        idempotency_key,
+    )
 
 
 def _command_id(aggregate_id: str, idempotency_key: str) -> str:
-    material = f"command|{aggregate_id}|{idempotency_key}".encode("utf-8")
-    return "model-budget-command-" + sha256(material).hexdigest()
+    return "model-budget-command-" + _identity_digest(
+        "command",
+        aggregate_id,
+        idempotency_key,
+    )
+
+
+def _idempotency_key(*, budget_id: str, action: str, identity: str) -> str:
+    return "model-budget:" + action + ":" + _identity_digest(
+        "idempotency",
+        budget_id,
+        action,
+        identity,
+    )
 
 
 class DurableModelBudget:
@@ -172,7 +191,11 @@ class DurableModelBudget:
         validate: Callable[[BudgetLedger], None],
     ) -> bool:
         identity = _text(identity, name="identity")
-        idempotency_key = f"model-budget:{self.budget_id}:{action}:{identity}"
+        idempotency_key = _idempotency_key(
+            budget_id=self.budget_id,
+            action=action,
+            identity=identity,
+        )
         command_id = _command_id(self.budget_id, idempotency_key)
         event_id = _event_id(self.budget_id, idempotency_key)
 

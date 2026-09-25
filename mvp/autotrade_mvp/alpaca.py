@@ -277,11 +277,15 @@ class AlpacaOrderObservation:
 def parse_order_observation(payload: Mapping[str, object]) -> AlpacaOrderObservation:
     if not isinstance(payload, Mapping):
         raise TypeError("payload must be a mapping")
-    provider_order_id = _text(str(payload.get("id", "")), name="id")
-    client_id = validate_client_order_id(str(payload.get("client_order_id", "")))
-    symbol = _text(str(payload.get("symbol", "")), name="symbol").upper()
-    status = _text(str(payload.get("status", "")), name="status").lower()
-    filled = _decimal(payload.get("filled_qty", "0"), name="filled_qty")
+    provider_order_id = _text(payload.get("id"), name="id")
+    client_id = validate_client_order_id(payload.get("client_order_id"))
+    symbol = _text(payload.get("symbol"), name="symbol").upper()
+    status = _text(payload.get("status"), name="status").lower()
+    if "filled_qty" not in payload or payload["filled_qty"] is None:
+        raise AlpacaAdapterError(
+            "filled_qty is required; missing financial quantity cannot be treated as zero"
+        )
+    filled = _decimal(payload["filled_qty"], name="filled_qty")
     if filled < 0:
         raise AlpacaAdapterError("filled_qty cannot be negative")
     average_value = payload.get("filled_avg_price")
@@ -290,6 +294,10 @@ def parse_order_observation(payload: Mapping[str, object]) -> AlpacaOrderObserva
         average = _decimal(average_value, name="filled_avg_price", positive=True)
         if filled == 0:
             raise AlpacaAdapterError("filled_avg_price cannot exist when filled_qty is zero")
+    elif filled > 0:
+        raise AlpacaAdapterError(
+            "filled_avg_price is required when filled_qty is positive"
+        )
     return AlpacaOrderObservation(
         provider_order_id=provider_order_id,
         client_order_id=client_id,
@@ -404,9 +412,10 @@ def parse_submission_response(
     *,
     attempt_id: str,
     client_order_id: str,
-    response: Mapping[str, object],
+    response: Mapping[str, object] | None,
     observed_at: str,
     environment: str,
+    transport_ambiguous: bool = False,
 ) -> dict[str, object]:
     """Map a recorded successful create-order response to SubmissionResult.
 
@@ -414,10 +423,32 @@ def parse_submission_response(
     filled, unique execution economics must come from activity evidence.
     """
 
-    if not isinstance(response, Mapping):
-        raise TypeError("response must be a mapping")
     aid = _uuid_text(attempt_id, name="attempt_id")
     cid = validate_client_order_id(client_order_id)
+    when = _utc_text(observed_at, name="observed_at")
+    env = _text(environment, name="environment").upper()
+    if env not in {"PAPER", "LIVE"}:
+        raise AlpacaAdapterError("response environment must be PAPER or LIVE")
+    if type(transport_ambiguous) is not bool:
+        raise TypeError("transport_ambiguous must be boolean")
+    if transport_ambiguous:
+        if response is not None:
+            raise AlpacaAdapterError(
+                "ambiguous transport must not fabricate a provider response"
+            )
+        return {
+            "attempt_id": aid,
+            "outcome": "UNKNOWN",
+            "client_order_id": cid,
+            "provider_received_at": None,
+            "observed_at": when,
+            "provider_environment": env,
+            "reason_code": "ALPACA_TRANSPORT_AMBIGUOUS",
+            "evidence": [],
+            "retry_disposition": "RECONCILE_FIRST",
+        }
+    if not isinstance(response, Mapping):
+        raise TypeError("response must be a mapping")
     provider_order_id = _uuid_text(response.get("id"), name="response.id")
     echoed = validate_client_order_id(
         _text(response.get("client_order_id"), name="response.client_order_id")
@@ -426,7 +457,6 @@ def parse_submission_response(
         raise AlpacaAdapterError(
             "Alpaca client_order_id response does not match request"
         )
-    when = _utc_text(observed_at, name="observed_at")
     return {
         "attempt_id": aid,
         "outcome": "ACKNOWLEDGED",
@@ -437,7 +467,7 @@ def parse_submission_response(
             _response_evidence(
                 response,
                 observed_at=when,
-                environment=environment,
+                environment=env,
             )
         ],
         "retry_disposition": "NEVER",
@@ -550,4 +580,240 @@ def coverage_evidence(
         pagination_complete=pagination_complete,
         consistency_horizon_satisfied=consistency_horizon_satisfied,
         provider_semantics_exclude_execution=qualified_exclusion_semantics,
+    )
+
+
+# Multi-leg options remain a narrow provider translation over the same
+# capability and reconciliation authorities. The foundation intentionally
+# supports option-only legs; equity-option combinations require separate
+# deliverable/margin qualification before they can be admitted.
+
+_ALPACA_MLEG_DOC = "https://docs.alpaca.markets/us/docs/options-level-3-trading"
+_MLEG_POSITION_INTENTS = frozenset(
+    {"buy_to_open", "buy_to_close", "sell_to_open", "sell_to_close"}
+)
+
+
+def _positive_integer(value, *, name: str) -> int:
+    exact = _decimal(value, name=name, positive=True)
+    if exact != exact.to_integral_value():
+        raise AlpacaAdapterError(f"{name} must be a positive whole number")
+    return int(exact)
+
+
+@dataclass(frozen=True)
+class AlpacaMlegLeg:
+    instrument_version: str
+    underlying_version: str
+    symbol: str
+    ratio_quantity: int
+    side: str
+    position_intent: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        instrument_version: str,
+        underlying_version: str,
+        symbol: str,
+        ratio_quantity,
+        side: str,
+        position_intent: str,
+    ) -> "AlpacaMlegLeg":
+        normalized_side = _text(side, name="side").upper()
+        if normalized_side not in _SIDES:
+            raise AlpacaAdapterError("leg side must be BUY or SELL")
+        intent = _text(position_intent, name="position_intent").lower()
+        if intent not in _MLEG_POSITION_INTENTS:
+            raise AlpacaAdapterError("unsupported multi-leg position_intent")
+        if intent.startswith("buy_") and normalized_side != "BUY":
+            raise AlpacaAdapterError("buy position_intent requires BUY leg side")
+        if intent.startswith("sell_") and normalized_side != "SELL":
+            raise AlpacaAdapterError("sell position_intent requires SELL leg side")
+        return cls(
+            instrument_version=_text(
+                instrument_version, name="instrument_version"
+            ),
+            underlying_version=_text(
+                underlying_version, name="underlying_version"
+            ),
+            symbol=_text(symbol, name="symbol").upper(),
+            ratio_quantity=_positive_integer(
+                ratio_quantity, name="ratio_quantity"
+            ),
+            side=normalized_side,
+            position_intent=intent,
+        )
+
+
+@dataclass(frozen=True)
+class AlpacaMlegOrderIntent:
+    underlying_version: str
+    quantity: int
+    order_type: str
+    time_in_force: str
+    legs: tuple[AlpacaMlegLeg, ...]
+    limit_price: Decimal | None
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        underlying_version: str,
+        quantity,
+        order_type: str,
+        time_in_force: str,
+        legs,
+        limit_price=None,
+    ) -> "AlpacaMlegOrderIntent":
+        underlying = _text(underlying_version, name="underlying_version")
+        qty = _positive_integer(quantity, name="quantity")
+        order = _text(order_type, name="order_type").upper()
+        if order not in {"MARKET", "LIMIT"}:
+            raise AlpacaAdapterError(
+                "multi-leg options foundation supports only MARKET and LIMIT"
+            )
+        tif = _text(time_in_force, name="time_in_force").upper()
+        # Current Trading API reference remains DAY-only for options. GTC has
+        # separate changelog evidence but is not silently generalized to MLeg.
+        if tif != "DAY":
+            raise AlpacaAdapterError(
+                "multi-leg options foundation currently requires DAY"
+            )
+        if isinstance(legs, (str, bytes)):
+            raise AlpacaAdapterError("legs must be a collection")
+        try:
+            leg_values = tuple(legs)
+        except TypeError as error:
+            raise AlpacaAdapterError("legs must be a collection") from error
+        if not 2 <= len(leg_values) <= 4:
+            raise AlpacaAdapterError("multi-leg order requires 2 to 4 legs")
+        if any(not isinstance(leg, AlpacaMlegLeg) for leg in leg_values):
+            raise AlpacaAdapterError("legs must contain AlpacaMlegLeg values")
+        if any(leg.underlying_version != underlying for leg in leg_values):
+            raise AlpacaAdapterError(
+                "every multi-leg option must share the canonical underlying"
+            )
+        instrument_versions = [leg.instrument_version for leg in leg_values]
+        if len(instrument_versions) != len(set(instrument_versions)):
+            raise AlpacaAdapterError(
+                "multi-leg instrument versions must be unique; use ratio_quantity"
+            )
+        provider_symbols = [leg.symbol for leg in leg_values]
+        if len(provider_symbols) != len(set(provider_symbols)):
+            raise AlpacaAdapterError(
+                "multi-leg provider symbols must be unique; use ratio_quantity"
+            )
+
+        common_divisor = 0
+        for leg in leg_values:
+            a, b = common_divisor, leg.ratio_quantity
+            while b:
+                a, b = b, a % b
+            common_divisor = a
+        if common_divisor != 1:
+            raise AlpacaAdapterError(
+                "multi-leg ratio quantities must be in simplest form"
+            )
+
+        price = None
+        if limit_price is not None:
+            price = _decimal(limit_price, name="limit_price")
+            if price == 0:
+                raise AlpacaAdapterError(
+                    "multi-leg limit_price must be non-zero debit or credit"
+                )
+        if order == "LIMIT" and price is None:
+            raise AlpacaAdapterError("LIMIT multi-leg order requires limit_price")
+        if order == "MARKET" and price is not None:
+            raise AlpacaAdapterError(
+                "MARKET multi-leg order must not carry limit_price"
+            )
+
+        return cls(
+            underlying_version=underlying,
+            quantity=qty,
+            order_type=order,
+            time_in_force=tif,
+            legs=leg_values,
+            limit_price=price,
+        )
+
+
+def prepare_mleg_order_request(
+    intent: AlpacaMlegOrderIntent,
+    *,
+    client_order_id: str,
+    capabilities: Mapping[str, CapabilitySnapshot],
+    at: datetime,
+) -> AlpacaPreparedRequest:
+    """Prepare an option-only MLeg request without signing or sending it."""
+
+    if not isinstance(intent, AlpacaMlegOrderIntent):
+        raise TypeError("intent must be AlpacaMlegOrderIntent")
+    if not isinstance(capabilities, Mapping):
+        raise TypeError("capabilities must be a mapping")
+    point = _instant(at, name="at")
+    client_id = validate_client_order_id(client_order_id)
+
+    identities: set[tuple[str, str, str]] = set()
+    for leg in intent.legs:
+        capability = capabilities.get(leg.instrument_version)
+        if not isinstance(capability, CapabilitySnapshot):
+            raise AlpacaAdapterError(
+                f"missing exact capability for leg {leg.instrument_version}"
+            )
+        if capability.provider_id.upper() != "ALPACA":
+            raise AlpacaAdapterError("multi-leg capability belongs to another provider")
+        if capability.instrument_version != leg.instrument_version:
+            raise AlpacaAdapterError(
+                "multi-leg capability instrument version does not match leg"
+            )
+        if not capability.admits(
+            at=point,
+            order_type=intent.order_type,
+            time_in_force=intent.time_in_force,
+            permission_scope="ORDER_WRITE",
+        ):
+            raise AlpacaAdapterError(
+                "exact capability evidence does not admit every multi-leg option"
+            )
+        identities.add(
+            (
+                capability.account_id,
+                capability.environment,
+                capability.entity_id,
+            )
+        )
+    if len(identities) != 1:
+        raise AlpacaAdapterError(
+            "all multi-leg capabilities must bind the same account/environment/entity"
+        )
+
+    body: dict[str, object] = {
+        "order_class": "mleg",
+        "qty": str(intent.quantity),
+        "type": intent.order_type.lower(),
+        "time_in_force": intent.time_in_force.lower(),
+        "client_order_id": client_id,
+        "legs": [
+            {
+                "symbol": leg.symbol,
+                "ratio_qty": str(leg.ratio_quantity),
+                "side": leg.side.lower(),
+                "position_intent": leg.position_intent,
+            }
+            for leg in intent.legs
+        ],
+    }
+    if intent.limit_price is not None:
+        body["limit_price"] = _decimal_text(intent.limit_price)
+
+    first_capability = capabilities[intent.legs[0].instrument_version]
+    return AlpacaPreparedRequest(
+        endpoint="/v2/orders",
+        body=body,
+        capability_snapshot_id=first_capability.snapshot_id,
+        documentation_refs=tuple(ALPACA_DOCS.values()) + (_ALPACA_MLEG_DOC,),
     )

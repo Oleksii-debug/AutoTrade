@@ -1,3 +1,4 @@
+from functools import partial
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import unittest
@@ -48,6 +49,11 @@ def capability(*, order_types=("MARKET", "LIMIT", "STOP", "STOP_LIMIT"), tif=("D
         sources=frozenset({"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"}),
     )
 
+
+
+# Bind only test fixtures; production APIs require explicit account/environment scope.
+parse_trade_activities = partial(parse_trade_activities, account_id="acct-alpaca", environment="PAPER")
+coverage_evidence = partial(coverage_evidence, account_id="acct-alpaca", environment="PAPER")
 
 class AlpacaAdapterTests(unittest.TestCase):
     def test_equity_limit_request_preserves_decimal_strings(self):

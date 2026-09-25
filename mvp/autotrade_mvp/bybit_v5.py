@@ -333,13 +333,13 @@ def parse_submission_response(
             raise ProviderCoreError(
                 "ambiguous transport requires explicit local observed_at"
             )
+        # Local observed_at and provider environment belong to the durable
+        # SubmissionAttempt. With no authoritative provider response there is
+        # deliberately no provider_received_at and no response EvidenceRef.
         return {
             "attempt_id": aid,
             "outcome": "UNKNOWN",
             "client_order_id": cid,
-            "provider_received_at": None,
-            "observed_at": _utc_text(observed_at, name="observed_at"),
-            "environment": normalized_environment,
             "reason_code": "BYBIT_TRANSPORT_AMBIGUOUS",
             "evidence": [],
             "retry_disposition": "RECONCILE_FIRST",

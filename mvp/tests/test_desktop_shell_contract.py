@@ -61,6 +61,15 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
             code,
         )
 
+    def test_connected_host_status_is_validated_before_becoming_current_evidence(self):
+        client = CLIENT.read_text(encoding="utf-8")
+        code = CODE.read_text(encoding="utf-8")
+        self.assertIn("public EmergencyHostStatus Validated()", client)
+        self.assertIn("Host status evidence time must be a non-default UTC instant.", client)
+        self.assertIn("Connected host status requires canonical", client)
+        self.assertIn("StringComparison.OrdinalIgnoreCase", client)
+        self.assertIn(").Validated();", code)
+        self.assertLess(code.index(").Validated();"), code.index("if (status.Connected)"))
     def test_emergency_control_is_named_keyboard_reachable_and_truthful(self):
         text = XAML.read_text(encoding="utf-8")
         code = CODE.read_text(encoding="utf-8")

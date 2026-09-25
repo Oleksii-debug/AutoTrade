@@ -199,6 +199,22 @@ class HostCommandStateTests(unittest.TestCase):
                 remaining_uncertainty=("provider_outcome_unresolved",),
             )
 
+    def test_operation_evidence_text_arrays_reject_type_coercion(self):
+        accepted = self.store.submit(self.command())
+        with self.assertRaisesRegex(ValueError, "affected_refs must contain"):
+            self.store.update_operation(
+                accepted.operation_id,
+                "RUNNING",
+                affected_refs=(123,),
+            )
+        with self.assertRaisesRegex(ValueError, "remaining_uncertainty must contain"):
+            self.store.update_operation(
+                accepted.operation_id,
+                "RUNNING",
+                remaining_uncertainty=(123,),
+            )
+        self.assertEqual(self.store.state_version, 1)
+
     def test_resumable_events_return_only_newer_items(self):
         accepted = self.store.submit(self.command())
         self.store.update_operation(accepted.operation_id, "RUNNING")

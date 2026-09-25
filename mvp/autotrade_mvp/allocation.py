@@ -953,6 +953,14 @@ def allocate_objective_targets(
         ),
     )
 
+# Evidence-bound allocation convergence for WP-20/WP-32/WP-47.
+
+_ALLOWED_EVIDENCE_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
+_ALLOWED_ALLOCATION_EVIDENCE_KINDS = frozenset(
+    {"OBJECTIVE", "MARKET_CONSTRAINT", "CAPITAL_STATE", "STRESS_SCENARIO"}
+)
+
+
 def _canonical_evidence_value(value):
     if isinstance(value, Decimal):
         return str(value)

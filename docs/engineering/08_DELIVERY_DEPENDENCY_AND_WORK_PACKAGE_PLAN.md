@@ -805,8 +805,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through src/AutoTrade.Desktop/ and its contract/qualification evidence.
 - **Forbidden scope:** Separate desktop trading engine or local-PC-off uptime claim; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: DESKTOP / windows-shell; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Native WPF emergency/status lifecycle and keyboard-oriented shell contract are merged in main. Real packaged Windows host integration, clean-machine behavior and final accessibility evidence remain; this is implementation progress, not release qualification.
 
 ### WP-46 — secrets-auth
 
@@ -941,8 +941,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through qualification/nvda/ and its contract/qualification evidence.
 - **Forbidden scope:** Automated accessibility scan presented as full NVDA proof; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: ACCESSIBILITY / nvda-qualification; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** NVDA qualification gate/checker and qualification scaffold are merged in main. Independent real Windows/NVDA evidence against the exact delivered artifact is still required; automated/structural checks are not accepted as final accessibility proof.
 
 ### WP-54 — release-candidate
 
@@ -958,8 +958,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through build/release/ and its contract/qualification evidence.
 - **Forbidden scope:** Floating dependencies or missing transitive license evidence; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: RELEASE / release-candidate; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Deterministic exact-evidence release-candidate freeze gate and focused regressions are merged in main. No real RC is frozen until exact WP-50/51/52/53/64 artifacts, signatures, compatibility, clean-install and blocker evidence are accepted.
 
 ### WP-55 — whole-simulator-flow
 
@@ -1043,8 +1043,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through docs/qualification/recovery/ and its contract/qualification evidence.
 - **Forbidden scope:** Claiming external broker/funds recovery is guaranteed; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: QUALIFICATION / recovery-release; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Recovery qualification model, tests and foundation evidence are merged in main. Actual delivered-artifact power/network/storage/session/split-brain/upgrade qualification and measured limits remain outstanding.
 
 ### WP-60 — whole-product-final
 
@@ -1077,8 +1077,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through tests/Integration/AssetProvider/ and its contract/qualification evidence.
 - **Forbidden scope:** Assuming all providers expose all assets or one test covers all combinations; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: INTEGRATION / asset-provider-crosswalk; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Fail-closed asset×provider crosswalk implementation, tests and foundation evidence are merged in main. Exhaustive advertised provider×asset lifecycle economic/reconciliation evidence remains incomplete and must not be inferred from one adapter or one test.
 
 ### WP-62 — zero-model-economics
 
@@ -1128,8 +1128,8 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Integration target:** Protected main through docs/qualification/security/ and its contract/qualification evidence.
 - **Forbidden scope:** Architecture-date license snapshot treated as permanent approval; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: SECURITY / release-supply-chain; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
-- **Status:** PLANNED
-- **Status evidence / remaining work:** Architecture bank only; readiness/completion must be derived from future live repository evidence.
+- **Status:** IN_PROGRESS
+- **Status evidence / remaining work:** Release supply-chain qualification model, tests and foundation evidence are merged in main. Exact final-release SBOM/provenance/advisory/license review remains outstanding until a concrete distribution candidate exists.
 
 ### WP-65 — runtime-resource-budget
 

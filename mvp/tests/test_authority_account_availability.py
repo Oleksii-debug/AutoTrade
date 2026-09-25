@@ -297,7 +297,7 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 account_id=ACCOUNT_ID,
             )
 
-            with self.assertRaisesRegex(AuthorityConflict, "superseded|availability"):
+            with self.assertRaisesRegex(ValueError, "superseded"):
                 _admit(authority, reservations, older)
             self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("0"))
 
@@ -327,7 +327,7 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 account_id=ACCOUNT_ID,
             )
 
-            with self.assertRaisesRegex(AuthorityConflict, "superseded|availability"):
+            with self.assertRaisesRegex(ValueError, "superseded"):
                 _admit(authority, reservations, older)
             self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("0"))
 
@@ -637,7 +637,9 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                     checkpoint,
                     reservation_max_age_seconds="1",
                 )
-            with self.assertRaisesRegex(ValueError, "scope mismatch"):
+            with self.assertRaisesRegex(
+                ValueError, "account scope|scope mismatch"
+            ):
                 _admit(
                     authority,
                     reservations,

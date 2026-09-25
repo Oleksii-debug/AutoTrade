@@ -84,6 +84,26 @@ def validate_coid(value: str) -> str:
     return coid
 
 
+def _brokerage_session_fingerprint(session: "IbkrBrokerageSessionStatus") -> str:
+    payload = {
+        "account_id": session.account_id,
+        "environment": session.environment,
+        "connected": session.connected,
+        "authenticated": session.authenticated,
+        "established": session.established,
+        "competing": session.competing,
+        "observed_at": session.observed_at.isoformat(),
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
 @dataclass(frozen=True)
 class IbkrBrokerageSessionStatus:
     account_id: str
@@ -291,11 +311,29 @@ class IbkrNormalizedOrder:
     exact_limit_price_text: str | None
     exact_stop_price_text: str | None
     capability_snapshot_id: str
+    brokerage_session_fingerprint: str
     documentation_refs: tuple[str, ...]
     provider_serialization_qualified: bool = False
 
     def __post_init__(self) -> None:
+        fingerprint = _text(
+            self.brokerage_session_fingerprint,
+            name="brokerage_session_fingerprint",
+        )
+        if (
+            len(fingerprint) != 71
+            or not fingerprint.startswith("sha256:")
+            or any(ch not in "0123456789abcdef" for ch in fingerprint[7:])
+        ):
+            raise IbkrWebAdapterError(
+                "brokerage_session_fingerprint must be canonical lowercase SHA-256"
+            )
         object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
+        object.__setattr__(
+            self,
+            "brokerage_session_fingerprint",
+            fingerprint,
+        )
 
 
 def prepare_normalized_order(
@@ -384,6 +422,7 @@ def prepare_normalized_order(
             None if intent.stop_price is None else _decimal_text(intent.stop_price)
         ),
         capability_snapshot_id=capability.snapshot_id,
+        brokerage_session_fingerprint=_brokerage_session_fingerprint(session),
         documentation_refs=tuple(IBKR_WEB_DOCS.values()),
     )
 

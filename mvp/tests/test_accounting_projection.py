@@ -257,21 +257,49 @@ class EquityPositionProjectionTests(unittest.TestCase):
 
     def test_reversed_fill_history_fails_closed_until_effective_time_exists(self):
         book = EconomicBook()
-        original = book_equity_fill(
-            transaction_id="buy",
+        legacy_fill = book_equity_fill(
+            transaction_id="legacy-buy",
+            cause_event_id="legacy-fill-buy",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="1",
+            price="90",
+        )
+        corrected = book_equity_fill(
+            transaction_id="buy-original",
             cause_event_id="fill-buy",
             instrument="ABC",
             settlement_currency="USD",
             side="BUY",
             quantity="2",
             price="100",
+            economic_effective_at="2026-01-01T10:00:00Z",
+            economic_order_key="provider:A:execution:1",
         )
-        book.append(original)
-        book.append(reverse_transaction(
-            original,
+        book.append(legacy_fill)
+        book.append(corrected)
+        reversal = reverse_transaction(
+            corrected,
             transaction_id="reverse-buy",
-            cause_event_id="provider-correction",
-        ))
+            cause_event_id="provider-correction-reversal",
+            observed_at="2026-01-03T10:00:00Z",
+        )
+        replacement = book_equity_fill(
+            transaction_id="buy-r2",
+            cause_event_id="provider-correction-replacement",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="2",
+            price="101",
+            economic_effective_at="2026-01-01T10:00:00Z",
+            economic_order_key="provider:A:execution:1",
+            observed_at="2026-01-03T10:00:00Z",
+            corrects_transaction_id=corrected.transaction_id,
+        )
+        book.append_batch((reversal, replacement))
+
         with self.assertRaisesRegex(AccountingConflict, "effective-time"):
             project_equity_position(
                 book,

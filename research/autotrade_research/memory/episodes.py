@@ -139,18 +139,37 @@ class CoveragePopulationSnapshot:
             != self.instrument_family
         ):
             raise MemoryIntegrityError("coverage instrument_family is not canonical")
+        # Detach the snapshot from mutable caller-owned row objects at creation.
+        # The stored rows remain ordinary JSON mappings for compatibility, so every
+        # qualification consumer must still re-verify the root through verified_rows().
+        object.__setattr__(self, "rows", self.verified_rows())
+
+    def verified_rows(self) -> tuple[dict[str, Any], ...]:
+        """Recompute the canonical population root and return detached verified rows.
+
+        A frozen dataclass does not make nested dict/list values immutable.  This
+        boundary therefore canonicalizes a fresh copy and verifies the root every
+        time a qualification consumer asks for population rows.  Post-construction
+        top-level or nested mutation can never be consumed under the stale root.
+        """
+
         if not isinstance(self.rows, tuple):
             raise MemoryIntegrityError("coverage rows must be an immutable tuple")
-        if any(not isinstance(row, dict) for row in self.rows):
+        try:
+            copied = json.loads(_canonical(self.rows))
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise MemoryIntegrityError("coverage rows are not canonical JSON") from error
+        if not isinstance(copied, list) or any(not isinstance(row, dict) for row in copied):
             raise MemoryIntegrityError("coverage rows must contain canonical mappings")
+        rows = tuple(copied)
         if (
             not isinstance(self.eligible_count, int)
             or isinstance(self.eligible_count, bool)
             or self.eligible_count < 0
-            or self.eligible_count != len(self.rows)
+            or self.eligible_count != len(rows)
         ):
             raise MemoryIntegrityError("coverage eligible_count does not match rows")
-        episode_ids = tuple(row.get("episode_id") for row in self.rows)
+        episode_ids = tuple(row.get("episode_id") for row in rows)
         if any(not isinstance(value, str) or not value for value in episode_ids):
             raise MemoryIntegrityError("coverage rows require episode identities")
         if len(set(episode_ids)) != len(episode_ids):
@@ -163,13 +182,14 @@ class CoveragePopulationSnapshot:
                 "task": self.task,
                 "instrument_family": self.instrument_family,
                 "eligible_count": self.eligible_count,
-                "rows": self.rows,
+                "rows": rows,
             }
         )
         if self.root_hash != expected:
             raise MemoryIntegrityError(
                 "coverage population root does not match canonical ExperienceMemory snapshot"
             )
+        return rows
 
 
 class ExperienceMemory:

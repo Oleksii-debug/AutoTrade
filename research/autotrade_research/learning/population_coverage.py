@@ -380,6 +380,10 @@ def build_population_coverage(
         raise TypeError(
             "population must be a canonical CoveragePopulationSnapshot from ExperienceMemory"
         )
+    # Recompute the population root from a detached canonical copy before any
+    # qualification decision consumes the snapshot.  Frozen dataclass identity
+    # alone is insufficient because nested JSON mappings can otherwise mutate.
+    population_rows = population.verified_rows()
     candidate = _sha_identity(candidate_hash, name="candidate_hash")
     protocol = _sha_identity(frozen_protocol_hash, name="frozen_protocol_hash")
     snapshot = _sha_identity(population.root_hash, name="population root_hash")
@@ -418,7 +422,6 @@ def build_population_coverage(
             "population snapshot instrument_family does not match frozen scope"
         )
 
-    population_rows = population.rows
     if population.eligible_count != len(population_rows):
         raise ValueError("population snapshot eligible_count does not match rows")
 

@@ -13,7 +13,10 @@ from research.autotrade_research.learning.retention import (
     RetentionPolicy,
     evaluate_population_bound_retention,
 )
-from research.autotrade_research.memory.episodes import ExperienceMemory
+from research.autotrade_research.memory.episodes import (
+    ExperienceMemory,
+    MemoryIntegrityError,
+)
 
 
 H1 = "sha256:" + "1" * 64
@@ -157,6 +160,54 @@ class PopulationCoverageTests(unittest.TestCase):
                     candidate_hash=H1,
                     frozen_protocol_hash=H2,
                     input_snapshot_hash=H3,
+                    causal_cutoff=CUTOFF,
+                    permission_classes=["research"],
+                    included_episode_ids=[negative, no_trade],
+                    exclusions={},
+                    task="research",
+                    instrument_family="equity",
+                )
+
+    def test_population_consumer_rejects_top_level_post_construction_mutation(self):
+        with TemporaryDirectory() as directory:
+            store, negative, no_trade = self._store_with_negative_and_no_trade(directory)
+            snapshot = store.coverage_population_snapshot(
+                causal_cutoff=CUTOFF,
+                granted_permissions={"research"},
+                task="research",
+                instrument_family="equity",
+            )
+            snapshot.rows[0]["regime"] = "forged-regime"
+            with self.assertRaisesRegex(MemoryIntegrityError, "population root"):
+                build_population_coverage(
+                    snapshot,
+                    candidate_hash=H1,
+                    frozen_protocol_hash=H2,
+                    input_snapshot_hash=snapshot.root_hash,
+                    causal_cutoff=CUTOFF,
+                    permission_classes=["research"],
+                    included_episode_ids=[negative, no_trade],
+                    exclusions={},
+                    task="research",
+                    instrument_family="equity",
+                )
+
+    def test_population_consumer_rejects_nested_post_construction_mutation(self):
+        with TemporaryDirectory() as directory:
+            store, negative, no_trade = self._store_with_negative_and_no_trade(directory)
+            snapshot = store.coverage_population_snapshot(
+                causal_cutoff=CUTOFF,
+                granted_permissions={"research"},
+                task="research",
+                instrument_family="equity",
+            )
+            snapshot.rows[0]["effective_payload"]["outcome"]["label"] = "forged-label"
+            with self.assertRaisesRegex(MemoryIntegrityError, "population root"):
+                build_population_coverage(
+                    snapshot,
+                    candidate_hash=H1,
+                    frozen_protocol_hash=H2,
+                    input_snapshot_hash=snapshot.root_hash,
                     causal_cutoff=CUTOFF,
                     permission_classes=["research"],
                     included_episode_ids=[negative, no_trade],

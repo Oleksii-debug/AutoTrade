@@ -526,11 +526,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
         self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("-1"))
         self.assertEqual(self.book.position("ABC"), Decimal("-100"))
-        self.assertEqual(self.book.cash("USD"), Decimal("5001"))
-        self.assertEqual(
-            len(self.store.load_events("option_lifecycle", self.authority.aggregate_id)),
-            1,
-        )
+        # The -2 seed is itself canonical economics: selling two contracts at\n        # 1 USD credits 2 USD before the -1 assignment adds 5000 USD. Rejected\n        # correction evidence must leave that exact 5002 USD state unchanged.\n        self.assertEqual(self.book.cash("USD"), Decimal("5002"))\n        self.assertEqual(\n            len(self.store.load_events("option_lifecycle", self.authority.aggregate_id)),\n            1,\n        )
 
     def test_correction_atomically_reverses_and_replaces_economics(self):
         self.seed_option_position("-2")
@@ -726,7 +722,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
     def test_unsupported_lifecycle_event_fails_closed(self):
         with self.assertRaisesRegex(
             OptionLifecycleError,
-            "normalization failed",
+            "unsupported option lifecycle event",
         ):
             self.authority.apply(self.evidence(event_kind="CASH_IN_LIEU"))
 

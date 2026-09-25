@@ -324,7 +324,6 @@ def parse_spot_submission_response(
             "attempt_id": aid,
             "outcome": "REJECTED",
             "client_order_id": cid,
-            "provider_received_at": when,
             "reason_code": "KRAKEN_SPOT_" + ";".join(nonempty_errors),
             "evidence": evidence,
             "retry_disposition": "NEVER",
@@ -348,7 +347,6 @@ def parse_spot_submission_response(
         "outcome": "ACKNOWLEDGED",
         "provider_order_id": normalized[0],
         "client_order_id": cid,
-        "provider_received_at": when,
         "evidence": evidence,
         "retry_disposition": "NEVER",
     }

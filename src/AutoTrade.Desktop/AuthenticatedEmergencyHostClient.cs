@@ -482,17 +482,33 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
             "event_cursor");
         DateTimeOffset observed = RequiredUtcInstant(value, "server_time");
 
+        if (ContainsSecret(value, session.Token))
+        {
+            throw new InvalidOperationException(
+                "Host snapshot must not echo the reusable session credential.");
+        }
+
         JsonElement permissions = RequiredObject(value, "permission_summary");
+        if (permissions.TryGetProperty("session", out _))
+        {
+            throw new InvalidOperationException(
+                "Host snapshot permission metadata must not expose a reusable session credential.");
+        }
+
         if (!string.Equals(
                 RequiredString(permissions, "actor"),
                 session.Actor,
-                StringComparison.Ordinal)
-            || !FixedTimeEquals(
-                RequiredString(permissions, "session"),
-                session.Token))
+                StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                "Host snapshot authenticated session identity does not match the local paired session.");
+                "Host snapshot authenticated actor does not match the local paired session.");
+        }
+
+        string role = RequiredString(permissions, "role");
+        if (role is not ("OWNER" or "OPERATOR" or "RESEARCHER" or "OBSERVER"))
+        {
+            throw new InvalidOperationException(
+                "Host snapshot permission role is not canonical.");
         }
 
         JsonElement freshness = RequiredObject(value, "connection_freshness");
@@ -556,6 +572,28 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         }
 
         return property;
+    }
+
+    private static bool ContainsSecret(JsonElement value, string secret)
+    {
+        if (string.IsNullOrEmpty(secret))
+        {
+            return false;
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.String =>
+                (value.GetString() ?? string.Empty).Contains(
+                    secret,
+                    StringComparison.Ordinal),
+            JsonValueKind.Object => value.EnumerateObject().Any(
+                property => property.Name.Contains(secret, StringComparison.Ordinal)
+                    || ContainsSecret(property.Value, secret)),
+            JsonValueKind.Array => value.EnumerateArray().Any(
+                item => ContainsSecret(item, secret)),
+            _ => false,
+        };
     }
 
     private static string RequiredString(JsonElement value, string name)

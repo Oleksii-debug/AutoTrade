@@ -184,12 +184,25 @@ class SettlementBook:
         """
         if not isinstance(settlement_evidence, Mapping):
             raise TypeError("settlement_evidence must be a mapping")
+        normalized_evidence: dict[str, str] = {}
+        for raw_id, raw_ref in settlement_evidence.items():
+            obligation_id = _text(raw_id, name="settlement_evidence obligation_id")
+            evidence_ref = _text(raw_ref, name="settlement_evidence_ref")
+            if obligation_id not in self._obligations:
+                raise SettlementConflict(
+                    "settlement evidence references an unknown obligation"
+                )
+            if obligation_id in normalized_evidence:
+                raise SettlementConflict(
+                    "settlement evidence contains duplicate normalized obligation ids"
+                )
+            normalized_evidence[obligation_id] = evidence_ref
         settled: list[str] = []
         for obligation in sorted(
             self._obligations.values(),
             key=lambda item: (item.settlement_date, item.obligation_id),
         ):
-            evidence_ref = settlement_evidence.get(obligation.obligation_id)
+            evidence_ref = normalized_evidence.get(obligation.obligation_id)
             if (
                 obligation.obligation_id not in self._settled_ids
                 and obligation.settlement_date <= as_of

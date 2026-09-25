@@ -1066,8 +1066,16 @@ class WhiteBitExecutionDeal:
     fee_currency: str
     trade_time: str
 
-    def to_reconciliation_fill(self) -> ProviderFillEvidence:
+    def to_reconciliation_fill(
+        self,
+        *,
+        account_id: str,
+        environment: str,
+    ) -> ProviderFillEvidence:
         return ProviderFillEvidence.create(
+            provider_id="WHITEBIT",
+            account_id=account_id,
+            environment=environment,
             provider_execution_id=self.provider_execution_id,
             client_order_id=self.client_order_id,
             instrument=self.market,

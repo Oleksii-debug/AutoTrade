@@ -333,11 +333,20 @@ class JournalStore:
                         for row in connection.execute(
                             "SELECT command_id, result_json FROM command_dedupe"
                         ):
+                            result_json = str(row["result_json"])
+                            try:
+                                result_value = json.loads(result_json)
+                            except (json.JSONDecodeError, TypeError) as error:
+                                raise ValueError(
+                                    "legacy command result is not valid JSON"
+                                ) from error
+                            if canonical_json(result_value) != result_json:
+                                raise ValueError(
+                                    "legacy command result is not canonical JSON"
+                                )
                             result_hash = (
                                 "sha256:"
-                                + sha256(
-                                    str(row["result_json"]).encode("utf-8")
-                                ).hexdigest()
+                                + sha256(result_json.encode("utf-8")).hexdigest()
                             )
                             connection.execute(
                                 "UPDATE command_dedupe SET result_hash = ? "
@@ -345,18 +354,70 @@ class JournalStore:
                                 (result_hash, row["command_id"]),
                             )
                         # v4's atomic commit path could leave envelope_hash NULL.
-                        # Backfill only missing evidence during this explicit
-                        # migration; a non-NULL mismatch remains corruption and
-                        # is rejected by normal reads.
+                        # Backfill only after the hashless bytes are proven to be
+                        # canonical JSON and consistent with the authoritative
+                        # journal row. Migration must never bless pre-existing
+                        # corruption merely by hashing it.
                         for row in connection.execute(
-                            "SELECT outbox_id, payload_json FROM outbox "
-                            "WHERE envelope_hash IS NULL"
+                            """
+                            SELECT
+                                outbox.outbox_id,
+                                outbox.payload_json AS outbox_payload_json,
+                                events.event_id,
+                                events.event_type,
+                                events.aggregate_type,
+                                events.aggregate_id,
+                                events.aggregate_version,
+                                events.payload_json AS event_payload_json,
+                                events.payload_hash,
+                                events.committed_at
+                            FROM outbox
+                            JOIN events ON events.event_id = outbox.event_id
+                            WHERE outbox.envelope_hash IS NULL
+                            """
                         ):
+                            raw_outbox_payload = str(row["outbox_payload_json"])
+                            try:
+                                outbox_payload = json.loads(raw_outbox_payload)
+                            except (json.JSONDecodeError, TypeError) as error:
+                                raise ValueError(
+                                    "legacy outbox payload is not valid JSON"
+                                ) from error
+                            if canonical_json(outbox_payload) != raw_outbox_payload:
+                                raise ValueError(
+                                    "legacy outbox payload is not canonical JSON"
+                                )
+                            event = self._decode_event_row(
+                                {
+                                    "event_id": row["event_id"],
+                                    "event_type": row["event_type"],
+                                    "aggregate_type": row["aggregate_type"],
+                                    "aggregate_id": row["aggregate_id"],
+                                    "aggregate_version": row["aggregate_version"],
+                                    "payload_json": row["event_payload_json"],
+                                    "payload_hash": row["payload_hash"],
+                                    "committed_at": row["committed_at"],
+                                }
+                            )
+                            expected_envelope = {
+                                "event_id": event["event_id"],
+                                "event_type": event["event_type"],
+                                "aggregate_type": event["aggregate_type"],
+                                "aggregate_id": event["aggregate_id"],
+                                "aggregate_version": str(event["aggregate_version"]),
+                                "payload": event["payload"],
+                                "payload_hash": event["payload_hash"],
+                                "committed_at": event["committed_at"],
+                            }
+                            for key, expected in expected_envelope.items():
+                                if outbox_payload.get(key) != expected:
+                                    raise ValueError(
+                                        "legacy outbox payload does not match "
+                                        "authoritative journal event"
+                                    )
                             envelope_hash = (
                                 "sha256:"
-                                + sha256(
-                                    str(row["payload_json"]).encode("utf-8")
-                                ).hexdigest()
+                                + sha256(raw_outbox_payload.encode("utf-8")).hexdigest()
                             )
                             connection.execute(
                                 "UPDATE outbox SET envelope_hash = ? "

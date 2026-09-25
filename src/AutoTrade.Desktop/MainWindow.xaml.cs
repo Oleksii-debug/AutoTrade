@@ -9,7 +9,7 @@ public partial class MainWindow : Window
     private EmergencyHostStatus? _lastKnownConnectedStatus;
 
     public MainWindow()
-        : this(new DisconnectedEmergencyHostClient())
+        : this(DesktopHostClientFactory.Create())
     {
     }
 
@@ -178,6 +178,8 @@ public partial class MainWindow : Window
                     recovered.Message + " Durable block confirmed by the host." + suffix,
                 EmergencyOperationState.Failed =>
                     recovered.Message + " The accepted operation failed; no durable block is confirmed." + suffix,
+                EmergencyOperationState.Cancelled =>
+                    recovered.Message + " The accepted operation was cancelled; no durable block is confirmed." + suffix,
                 EmergencyOperationState.Unknown =>
                     recovered.Message
                     + " The accepted operation outcome is unknown; no durable block is confirmed."
@@ -229,15 +231,23 @@ public partial class MainWindow : Window
         {
             return;
         }
+        catch (EmergencyCommandUncertainException uncertain)
+        {
+            EmergencyOperationValue.Text = uncertain.CommandId;
+            EmergencyResult.Text =
+                uncertain.Message
+                + " No durable block has been confirmed. Outstanding in-flight actions are unknown. "
+                + "A later Block new exposure action will recover this exact command identity rather than minting a new command.";
+        }
         catch (OperationCanceledException)
         {
             EmergencyOperationValue.Text = "Unavailable";
-            EmergencyResult.Text = "The request was cancelled. No durable block has been confirmed. Outstanding in-flight actions are unknown.";
+            EmergencyResult.Text = "The request was cancelled before a confirmed host result. No durable block has been confirmed. Outstanding in-flight actions are unknown.";
         }
         catch (Exception)
         {
             EmergencyOperationValue.Text = "Unavailable";
-            EmergencyResult.Text = "The host request failed. No durable block has been confirmed. Outstanding in-flight actions are unknown.";
+            EmergencyResult.Text = "The host request failed before a confirmed result. No durable block has been confirmed. Outstanding in-flight actions are unknown.";
         }
         finally
         {

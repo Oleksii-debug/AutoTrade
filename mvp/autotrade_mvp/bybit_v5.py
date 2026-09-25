@@ -421,6 +421,8 @@ def parse_submission_response(
 def parse_executions(
     response: Mapping[str, Any],
     *,
+    account_id: str,
+    environment: str,
     instrument_versions: Mapping[str, str],
     qualified_fee_currencies: Mapping[str, str] | None = None,
 ) -> tuple[ProviderFillEvidence, ...]:
@@ -486,6 +488,9 @@ def parse_executions(
             )
 
         fill = ProviderFillEvidence.create(
+            provider_id="BYBIT",
+            account_id=account_id,
+            environment=environment,
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=instrument,
@@ -507,6 +512,8 @@ def parse_executions(
 
 def coverage_evidence(
     *,
+    account_id: str,
+    environment: str,
     surface: str,
     coverage_start: str,
     coverage_end: str,
@@ -537,6 +544,9 @@ def coverage_evidence(
         if type(value) is not bool:
             raise ProviderCoreError(f"{name} must be boolean")
     return CoverageSurfaceEvidence(
+        provider_id="BYBIT",
+        account_id=account_id,
+        environment=environment,
         surface=normalized,
         coverage_start=coverage_start,
         coverage_end=coverage_end,

@@ -54,6 +54,7 @@ def envelope(**overrides):
         source_sha=SHA,
         account_id="account-1",
         provider_id="provider-1",
+        environment="LIVE",
         policy_id="policy-1",
         allowed_actions={"ORDER.SUBMIT", "ORDER.CANCEL", "FLATTEN"},
         max_capital="1000",
@@ -75,6 +76,7 @@ def ref(label, *, evidence_kind, **overrides):
         envelope_digest=envelope().envelope_digest,
         provider_id="provider-1",
         account_id="account-1",
+        environment="LIVE",
     )
     values.update(overrides)
     return ImmutableEvidenceRef(**values)
@@ -111,6 +113,7 @@ def observation_refs(
     envelope_digest=None,
     provider_id="provider-1",
     account_id="account-1",
+    environment="LIVE",
 ):
     envelope_digest = envelope_digest or envelope().envelope_digest
     return tuple(
@@ -122,6 +125,7 @@ def observation_refs(
             envelope_digest=envelope_digest,
             provider_id=provider_id,
             account_id=account_id,
+            environment=environment,
         )
         for kind in OBSERVATION_KINDS
     )
@@ -136,6 +140,7 @@ def observations(**overrides):
         ),
         "provider_id": overrides.get("provider_id", "provider-1"),
         "account_id": overrides.get("account_id", "account-1"),
+        "environment": overrides.get("environment", "LIVE"),
     }
     values = dict(
         **scope,
@@ -173,6 +178,7 @@ def _publish_ref(store, evidence_ref, *, payload=None, metadata_overrides=None):
         "envelope_digest": evidence_ref.envelope_digest,
         "provider_id": evidence_ref.provider_id,
         "account_id": evidence_ref.account_id,
+        "environment": evidence_ref.environment,
         "outcome": "PASS",
         "producer_id": "qualification-harness",
         "evidence_version": "1",
@@ -674,6 +680,55 @@ class BoundedRealQualificationTests(unittest.TestCase):
             ).envelope_digest,
             original.envelope_digest,
         )
+
+    def test_bounded_real_envelope_is_live_only_and_environment_is_in_digest(self):
+        live = envelope()
+        self.assertEqual(live.environment, "LIVE")
+        self.assertEqual(
+            BoundedRealEnvelope.create(
+                envelope_id="bounded-1",
+                source_sha=SHA,
+                account_id="account-1",
+                provider_id="provider-1",
+                environment="live",
+                policy_id="policy-1",
+                allowed_actions={"ORDER.SUBMIT", "ORDER.CANCEL", "FLATTEN"},
+                max_capital="1000",
+                max_single_notional="100",
+                max_gross_leverage="1.5",
+            ).envelope_digest,
+            live.envelope_digest,
+        )
+        for environment in ("PAPER", "SIMULATION", "REPLAY"):
+            with self.subTest(environment=environment), self.assertRaisesRegex(
+                ValueError, "must be LIVE"
+            ):
+                envelope(environment=environment)
+
+    def test_immutable_bounded_real_evidence_cannot_be_replayed_from_non_live_environment(self):
+        with self.assertRaisesRegex(ValueError, "must be LIVE"):
+            ref(
+                "paper-artifact",
+                evidence_kind="ACTUAL_FILL",
+                environment="PAPER",
+            )
+        with self.assertRaisesRegex(ValueError, "must be LIVE"):
+            observations(environment="PAPER")
+
+    def test_artifact_store_semantics_bind_live_environment(self):
+        evidence_ref = ref("live-environment", evidence_kind="ACTUAL_FILL")
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _publish_ref(
+                store,
+                evidence_ref,
+                metadata_overrides={"environment": "PAPER"},
+            )
+            verification = artifact_store_evidence_verifier(store).verify(
+                evidence_ref
+            )
+        self.assertFalse(verification.valid)
+        self.assertTrue(verification.conflicted)
 
     def test_single_notional_cannot_exceed_bounded_capital(self):
         with self.assertRaisesRegex(ValueError, "cannot exceed max_capital"):

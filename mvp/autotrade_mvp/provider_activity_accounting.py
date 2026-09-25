@@ -533,6 +533,8 @@ def commit_economic_batch_with_reservation_consumption(
     reservation_id: str,
     usage: Mapping[str, object],
     transactions: Iterable[JournalTransaction],
+    reservation_expected_snapshot_digest: str | None = None,
+    reservation_evidence_binding: Mapping[str, object] | None = None,
     committed_at: str | None = None,
     settlement_book: DurableSettlementBook | None = None,
     settlement_obligations: Iterable[SettlementObligation] = (),
@@ -616,6 +618,8 @@ def commit_economic_batch_with_reservation_consumption(
         reservation_id=rid,
         usage=usage,
         committed_at=when,
+        expected_snapshot_digest=reservation_expected_snapshot_digest,
+        evidence_binding=reservation_evidence_binding,
     )
     economic_plan = economic_book.prepare_batch_mutation(
         transactions,
@@ -814,7 +818,10 @@ def commit_provider_fill_with_reservation_consumption(
     barrier. It deliberately accepts no caller-authored transaction batch and
     no caller-authored reservation usage map. Both are derived from the same
     normalized provider/projected fill evidence and the admission-bound
-    reservation envelope before JournalStore mutation.
+    reservation envelope before JournalStore mutation. The exact reservation
+    cut and the immutable financial-plan digest are persisted in the canonical
+    reservation mutation request, so a concurrent cut change or a replay with
+    different provider economics fails closed.
     """
 
     if not isinstance(economic_book, DurableProviderEconomicBook):
@@ -848,6 +855,15 @@ def commit_provider_fill_with_reservation_consumption(
         reservation_id=rid,
         usage=plan.usage,
         transactions=(plan.transaction,),
+        reservation_expected_snapshot_digest=plan.reservation_cut_digest,
+        reservation_evidence_binding={
+            "schema_version": "1.0.0",
+            "provider_execution_id": plan.provider_execution_id,
+            "intent_id": plan.intent_id,
+            "reservation_id": plan.reservation_id,
+            "reservation_cut_digest": plan.reservation_cut_digest,
+            "provider_fill_financial_plan_digest": plan.plan_digest,
+        },
         committed_at=committed_at,
         settlement_book=settlement_book,
         settlement_obligations=settlement_obligations,

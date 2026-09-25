@@ -562,6 +562,10 @@ def _amount_map(
 
 def _absence_coverage_index(
     evidence: Sequence[CoverageSurfaceEvidence],
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
 ) -> dict[str, CoverageSurfaceEvidence]:
     result: dict[str, CoverageSurfaceEvidence] = {}
     for item in evidence:
@@ -569,6 +573,12 @@ def _absence_coverage_index(
             raise TypeError(
                 "absence_coverage must contain CoverageSurfaceEvidence"
             )
+        if (
+            item.provider_id != provider_id
+            or item.account_id != account_id
+            or item.environment != environment
+        ):
+            raise ValueError("absence coverage scope mismatch")
         if item.surface in result:
             raise ValueError(
                 f"duplicate absence coverage surface: {item.surface}"
@@ -597,6 +607,7 @@ def reconcile_account(
     *,
     provider_id: str,
     account_id: str,
+    environment: str,
     local_cash: Mapping[str, object],
     provider_cash: Mapping[str, object],
     local_positions: Mapping[str, object],
@@ -633,6 +644,7 @@ def reconcile_account(
 
     provider_scope = _text(provider_id, name="provider_id").upper()
     account_scope = _text(account_id, name="account_id")
+    environment_scope = _text(environment, name="environment").upper()
     if not isinstance(pagination_complete, bool):
         raise TypeError("pagination_complete must be boolean")
     if not isinstance(require_activity_reconciliation, bool):
@@ -670,6 +682,8 @@ def reconcile_account(
             raise ValueError("provider fill evidence provider_id mismatch")
         if fill.account_id != account_scope:
             raise ValueError("provider fill evidence account_id mismatch")
+        if fill.environment != environment_scope:
+            raise ValueError("provider fill evidence environment mismatch")
         if fill.provider_execution_id in provider_by_id:
             if provider_by_id[fill.provider_execution_id] != fill:
                 raise ValueError("provider execution id has conflicting observations")
@@ -702,6 +716,8 @@ def reconcile_account(
             raise ValueError("provider working-order evidence provider_id mismatch")
         if order.account_id != account_scope:
             raise ValueError("provider working-order evidence account_id mismatch")
+        if order.environment != environment_scope:
+            raise ValueError("provider working-order evidence environment mismatch")
         existing_provider = provider_working_by_id.get(order.provider_order_id)
         if existing_provider is not None:
             if existing_provider != order:
@@ -741,6 +757,12 @@ def reconcile_account(
         )
     snapshot_window_covered = False
     if snapshot_consistency is not None:
+        if (
+            snapshot_consistency.provider_id != provider_scope
+            or snapshot_consistency.account_id != account_scope
+            or snapshot_consistency.environment != environment_scope
+        ):
+            raise ValueError("provider snapshot consistency scope mismatch")
         snapshot_started = _instant(
             snapshot_consistency.query_started_at,
             name="snapshot_consistency.query_started_at",
@@ -796,9 +818,9 @@ def reconcile_account(
         if provider_activity_account_id is None
         else _text(provider_activity_account_id, name="provider_activity_account_id")
     )
-    if provider_activities and (activity_provider is None or activity_account is None):
+    if (activity_provider is None) != (activity_account is None):
         raise ValueError(
-            "provider activity reconciliation requires exact provider/account scope"
+            "provider activity scope must provide provider/account together"
         )
     if activity_provider is not None and activity_provider != provider_scope:
         raise ValueError("provider activity scope differs from reconciliation provider_id")
@@ -809,10 +831,12 @@ def reconcile_account(
             raise TypeError(
                 "provider_activities must contain ProviderActivityEvidence"
             )
-        if activity.provider_id != activity_provider:
+        if activity.provider_id != provider_scope:
             raise ValueError("provider activity evidence provider_id mismatch")
-        if activity.account_id != activity_account:
+        if activity.account_id != account_scope:
             raise ValueError("provider activity evidence account_id mismatch")
+        if activity.environment != environment_scope:
+            raise ValueError("provider activity evidence environment mismatch")
         existing = provider_activity_by_id.get(activity.activity_id)
         if existing is not None:
             if existing != activity:
@@ -844,6 +868,12 @@ def reconcile_account(
         activity_coverage, CoverageSurfaceEvidence
     ):
         raise TypeError("activity_coverage must be CoverageSurfaceEvidence")
+    if activity_coverage is not None and (
+        activity_coverage.provider_id != provider_scope
+        or activity_coverage.account_id != account_scope
+        or activity_coverage.environment != environment_scope
+    ):
+        raise ValueError("provider activity coverage scope mismatch")
     activity_coverage_complete = True
     if require_activity_reconciliation:
         activity_coverage_complete = bool(
@@ -856,11 +886,22 @@ def reconcile_account(
         _text(value, name="searched_client_order_id")
         for value in searched_client_order_ids
     }
-    absence_evidence = _absence_coverage_index(absence_coverage)
+    absence_evidence = _absence_coverage_index(
+        absence_coverage,
+        provider_id=provider_scope,
+        account_id=account_scope,
+        environment=environment_scope,
+    )
     resolutions: list[SubmissionResolution] = []
     for submission in unknown_submissions:
         if not isinstance(submission, UnknownSubmission):
             raise TypeError("unknown_submissions must contain UnknownSubmission")
+        if (
+            submission.provider_id != provider_scope
+            or submission.account_id != account_scope
+            or submission.environment != environment_scope
+        ):
+            raise ValueError("unknown submission scope mismatch")
         submission_time = _instant(
             submission.started_at, name="unknown_submission.started_at"
         )
@@ -906,6 +947,7 @@ def reconcile_account(
         resolutions.append(
             SubmissionResolution(
                 attempt_id=submission.attempt_id,
+                intent_id=submission.intent_id,
                 client_order_id=submission.client_order_id,
                 outcome=outcome,
                 evidence_reason=reason,
@@ -1012,6 +1054,9 @@ def reconcile_account(
         and all(item.outcome != "UNKNOWN" for item in resolutions)
     )
     return ReconciliationResult(
+        provider_id=provider_scope,
+        account_id=account_scope,
+        environment=environment_scope,
         complete=complete,
         matched_execution_ids=matched,
         unexpected_execution_ids=unexpected,

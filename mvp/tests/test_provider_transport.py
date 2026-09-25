@@ -435,6 +435,8 @@ class AlpacaProviderTransportTests(unittest.TestCase):
                     alpaca_guarded_order_projection(alpaca_prepared_request())
                 )
                 request[field] = value
+                if field == "capability_snapshot_id":
+                    request["capability_snapshot_ids"] = [value]
                 with self.assertRaisesRegex(
                     ProviderTransportScopeError,
                     message,

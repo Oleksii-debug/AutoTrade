@@ -207,6 +207,11 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 evidence["resource_snapshot_id"],
                 "availability-snapshot",
             )
+            self.assertEqual(
+                evidence["resource_evidence_refs"],
+                ["provider:availability-snapshot"],
+            )
+            self.assertIsInstance(evidence["resource_evidence_refs"], list)
 
             restarted_store = JournalStore(path)
             restarted_authority = AuthorityService(restarted_store)

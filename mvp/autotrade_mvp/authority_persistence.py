@@ -50,7 +50,12 @@ def persist_authority_snapshot(
         "aggregate_version": str(aggregate_version),
         "payload": payload,
         "payload_hash": payload_digest(payload),
-        "committed_at": committed_at.strip(),
+        # Lost-reply retries for an existing immutable event must reproduce the
+        # original envelope byte-for-byte; caller wall-clock drift is not a
+        # new financial fact.
+        "committed_at": (
+            existing["committed_at"] if existing is not None else committed_at.strip()
+        ),
     }
     return store.append_event(envelope)
 

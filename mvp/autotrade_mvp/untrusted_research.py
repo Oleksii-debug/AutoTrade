@@ -11,11 +11,53 @@ from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
 import json
+from math import isfinite
 from typing import Iterable, Mapping
 
 
 class ResearchBoundaryError(ValueError):
     pass
+
+
+class _FrozenDict(dict):
+    """JSON-compatible dict that cannot be mutated after construction."""
+
+    @staticmethod
+    def _blocked(*args, **kwargs):
+        raise TypeError("model proposal is immutable")
+
+    __setitem__ = _blocked
+    __delitem__ = _blocked
+    clear = _blocked
+    pop = _blocked
+    popitem = _blocked
+    setdefault = _blocked
+    update = _blocked
+
+
+def _freeze_proposal(value: object, *, depth: int = 0) -> object:
+    if depth > 32:
+        raise ResearchBoundaryError("model proposal exceeds maximum nesting depth")
+    if isinstance(value, Mapping):
+        frozen = _FrozenDict()
+        for key, nested in value.items():
+            if not isinstance(key, str):
+                raise ResearchBoundaryError("model proposal object keys must be strings")
+            dict.__setitem__(frozen, key, _freeze_proposal(nested, depth=depth + 1))
+        return frozen
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_proposal(item, depth=depth + 1) for item in value)
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ResearchBoundaryError(
+                "model proposal numbers must be finite JSON values"
+            )
+        return value
+    raise ResearchBoundaryError(
+        "model proposal values must be JSON-compatible scalars, objects, or arrays"
+    )
 
 
 class ResearchCapability(StrEnum):
@@ -170,7 +212,7 @@ class ResearchModelResult:
         object.__setattr__(self, "result_id", _text(self.result_id, name="result_id"))
         if not isinstance(self.proposal, Mapping):
             raise ResearchBoundaryError("proposal must be an object")
-        object.__setattr__(self, "proposal", dict(self.proposal))
+        object.__setattr__(self, "proposal", _freeze_proposal(self.proposal))
         refs = tuple(_text(item, name="evidence_ref") for item in self.evidence_refs)
         if not refs:
             raise ResearchBoundaryError("model result requires evidence references")
@@ -184,6 +226,53 @@ class ResearchModelResult:
             raise ResearchBoundaryError("model result cannot grant authority")
 
 
+_FORBIDDEN_PRIVILEGED_FIELDS = frozenset(
+    {
+        "credentials",
+        "credential",
+        "secret",
+        "token",
+        "apikey",
+        "accesstoken",
+        "refreshtoken",
+        "password",
+        "privatekey",
+        "signingkey",
+        "authorization",
+        "bearertoken",
+        "sessioncookie",
+        "authoritygrant",
+        "toolgrant",
+        "tradingauthority",
+        "executionauthority",
+        "withdrawalauthority",
+    }
+)
+_MAX_PROPOSAL_DEPTH = 32
+
+
+def _privileged_key(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())
+
+
+def _scan_privileged_fields(value: object, *, depth: int = 0) -> frozenset[str]:
+    if depth > _MAX_PROPOSAL_DEPTH:
+        raise ResearchBoundaryError("model proposal exceeds maximum nesting depth")
+    found: set[str] = set()
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            if not isinstance(key, str):
+                raise ResearchBoundaryError("model proposal object keys must be strings")
+            normalized = _privileged_key(key.strip())
+            if normalized in _FORBIDDEN_PRIVILEGED_FIELDS:
+                found.add(normalized)
+            found.update(_scan_privileged_fields(nested, depth=depth + 1))
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            found.update(_scan_privileged_fields(nested, depth=depth + 1))
+    return frozenset(found)
+
+
 def validate_model_result(result: ResearchModelResult) -> ResearchModelResult:
     """Reject capability-seeking model output instead of interpreting it as policy."""
 
@@ -193,16 +282,7 @@ def validate_model_result(result: ResearchModelResult) -> ResearchModelResult:
         raise PermissionError(
             "model output cannot request or expand runtime capabilities"
         )
-    forbidden_top_level = {
-        "credentials",
-        "credential",
-        "secret",
-        "token",
-        "authority_grant",
-        "tool_grant",
-    }
-    normalized_keys = {str(key).strip().lower() for key in result.proposal}
-    overlap = forbidden_top_level & normalized_keys
+    overlap = _scan_privileged_fields(result.proposal)
     if overlap:
         raise PermissionError(
             "model output contains forbidden privileged fields: "

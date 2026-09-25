@@ -7,6 +7,7 @@ from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.reconciliation import (
     ProviderActivityEvidence,
     ProviderFillEvidence,
+    ResourceAvailabilityEvidence,
     SnapshotConsistencyEvidence,
     UnknownSubmission,
     reconcile_account,
@@ -47,6 +48,21 @@ def fill():
         price="100",
         fee_currency="USD",
         trade_time="2026-09-24T18:00:00Z",
+    )
+
+
+def availability():
+    return ResourceAvailabilityEvidence(
+        provider_id="TEST_PROVIDER",
+        account_id="test-account",
+        environment="PAPER",
+        snapshot_id="snapshot-capacity-1",
+        query_started_at="2026-09-24T17:00:00Z",
+        query_completed_at="2026-09-24T19:00:00Z",
+        provider_as_of="2026-09-24T18:59:59Z",
+        valid_until="2026-09-24T19:05:00Z",
+        available_resources={"CASH:USD": "850", "MARGIN:USD": "1200.50"},
+        evidence_refs=("provider:snapshot-capacity-1",),
     )
 
 
@@ -92,7 +108,10 @@ class ReconciliationJournalTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
             store = JournalStore(path)
-            result = reconciliation(provider_cash={"USD": "899.50"})
+            result = reconciliation(
+                provider_cash={"USD": "899.50"},
+                resource_availability=availability(),
+            )
 
             first = record_reconciliation_checkpoint(
                 store,
@@ -117,6 +136,24 @@ class ReconciliationJournalTests(unittest.TestCase):
                 "-0.50",
             )
             self.assertEqual(
+                first["payload"]["resource_availability"],
+                {
+                    "provider_id": "TEST_PROVIDER",
+                    "account_id": "test-account",
+                    "environment": "PAPER",
+                    "snapshot_id": "snapshot-capacity-1",
+                    "query_started_at": "2026-09-24T17:00:00Z",
+                    "query_completed_at": "2026-09-24T19:00:00Z",
+                    "provider_as_of": "2026-09-24T18:59:59Z",
+                    "valid_until": "2026-09-24T19:05:00Z",
+                    "available_resources": {
+                        "CASH:USD": "850",
+                        "MARGIN:USD": "1200.50",
+                    },
+                    "evidence_refs": ["provider:snapshot-capacity-1"],
+                },
+            )
+            self.assertEqual(
                 len(
                     store.load_events(
                         "account_reconciliation",
@@ -139,6 +176,14 @@ class ReconciliationJournalTests(unittest.TestCase):
             self.assertEqual(
                 latest["payload"]["blocking_resources"],
                 ["CASH:USD"],
+            )
+            self.assertEqual(
+                latest["payload"]["resource_availability"]["snapshot_id"],
+                "snapshot-capacity-1",
+            )
+            self.assertEqual(
+                latest["payload"]["resource_availability"]["available_resources"]["CASH:USD"],
+                "850",
             )
 
     def test_owner_transfer_requires_new_readiness_checkpoint(self):

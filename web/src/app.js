@@ -40,7 +40,12 @@
   const byId = (id) => document.getElementById(id);
   const RESTORABLE_FOCUS_IDS = new Set([
     "main",
+    "permissions-region",
+    "strategy-region",
+    "portfolio-region",
     "operations-region",
+    "risk-region",
+    "jobs-region",
     "host-action",
     "submit-command",
     "refresh-state",

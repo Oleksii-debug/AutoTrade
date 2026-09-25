@@ -13,7 +13,11 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from .durable_reservations import DurableReservationBook
 from .persistence import JournalStore, canonical_json, payload_digest
 from .risk import (
+    RiskContext,
     RiskDecision,
+    RiskIntent,
+    RiskPolicy,
+    evaluate_bound_risk,
     normalize_reservation_requirements,
     reservation_requirements_payload,
     risk_decision_fingerprint,
@@ -1099,6 +1103,149 @@ class AuthorityService:
         return record
 
     def admit(
+        self,
+        *,
+        command_id: str,
+        idempotency_key: str,
+        admission_id: str,
+        policy_id: str,
+        intent_id: str,
+        intent_hash: str,
+        account_id: str,
+        environment: str,
+        instrument_id: str,
+        instrument_version: int,
+        action: str,
+        notional,
+        capability_snapshot_id: str,
+        risk_intent: RiskIntent,
+        risk_context: RiskContext,
+        risk_policy: RiskPolicy,
+        risk_valid_until: str,
+        reservation_book: DurableReservationBook,
+        reservation_id: str,
+        reservation_requirements,
+        reservation_available,
+        now: str,
+        confirmation_id: str | None = None,
+        risk_reducing: bool = False,
+    ) -> AdmissionRecord:
+        """Evaluate final risk inside the financial-writer boundary, then commit.
+
+        Callers provide typed intent/context/policy inputs, never an ALLOW boolean
+        or a pre-approved RiskDecision. Exact retries re-evaluate the same inputs
+        against the original immutable risk binding, while new commands bind to
+        the current reservation journal version immediately before Transaction A.
+        """
+
+        if not isinstance(risk_intent, RiskIntent):
+            raise TypeError("risk_intent must be a RiskIntent")
+        if not isinstance(risk_context, RiskContext):
+            raise TypeError("risk_context must be a RiskContext")
+        if not isinstance(risk_policy, RiskPolicy):
+            raise TypeError("risk_policy must be a RiskPolicy")
+        if self.store is None:
+            raise AuthorityConflict(
+                "durable financial admission requires a JournalStore"
+            )
+        if not isinstance(reservation_book, DurableReservationBook):
+            raise TypeError("reservation_book must be DurableReservationBook")
+        if reservation_book.store is not self.store:
+            raise AuthorityConflict(
+                "authority and reservation book must share one JournalStore"
+            )
+
+        aid = _text(admission_id, name="admission_id")
+        pid = _text(policy_id, name="policy_id")
+        capability = _text(
+            capability_snapshot_id, name="capability_snapshot_id"
+        )
+        policy = self._policies.get(pid)
+        if policy is None:
+            raise KeyError(pid)
+
+        existing = self._admissions.get(aid)
+        if existing is None:
+            reservation_version = reservation_book.version
+            evaluated_at = _text(now, name="now")
+            valid_until = _text(risk_valid_until, name="risk_valid_until")
+        else:
+            if existing.risk_decision_id is None:
+                raise AuthorityConflict(
+                    "existing admission was not created by financial risk admission"
+                )
+            risk_events = self.store.load_events(
+                "risk_decision", existing.risk_decision_id
+            )
+            if (
+                len(risk_events) != 1
+                or risk_events[0]["event_type"] != "RiskDecisionRecorded"
+                or not isinstance(risk_events[0].get("payload"), dict)
+            ):
+                raise AuthorityConflict(
+                    "existing admission risk evidence is missing or ambiguous"
+                )
+            payload = risk_events[0]["payload"]
+            reservation_version = payload.get("reservation_version")
+            if (
+                not isinstance(reservation_version, int)
+                or isinstance(reservation_version, bool)
+                or reservation_version < 0
+            ):
+                raise AuthorityConflict(
+                    "existing admission reservation version is invalid"
+                )
+            evaluated_at = _text(
+                payload.get("evaluated_at"), name="risk.evaluated_at"
+            )
+            valid_until = _text(
+                payload.get("valid_until"), name="risk.valid_until"
+            )
+            if _instant(
+                risk_valid_until, name="risk_valid_until"
+            ) != _instant(valid_until, name="risk.valid_until"):
+                raise AuthorityConflict(
+                    "risk_valid_until changed for an existing financial command"
+                )
+
+        decision = evaluate_bound_risk(
+            risk_intent,
+            risk_context,
+            risk_policy,
+            intent_hash=_text(intent_hash, name="intent_hash"),
+            policy_version=policy.version,
+            reservation_version=reservation_version,
+            reservation_requirements=reservation_requirements,
+            capability_snapshot_id=capability,
+            evaluated_at=evaluated_at,
+            valid_until=valid_until,
+        )
+        return self._admit_bound_risk(
+            command_id=command_id,
+            idempotency_key=idempotency_key,
+            admission_id=aid,
+            policy_id=pid,
+            intent_id=intent_id,
+            intent_hash=intent_hash,
+            account_id=account_id,
+            environment=environment,
+            instrument_id=instrument_id,
+            instrument_version=instrument_version,
+            action=action,
+            notional=notional,
+            current_state_version=risk_context.state_version,
+            capability_snapshot_id=capability,
+            risk_decision=decision,
+            reservation_book=reservation_book,
+            reservation_id=reservation_id,
+            reservation_requirements=reservation_requirements,
+            reservation_available=reservation_available,
+            now=now,
+            confirmation_id=confirmation_id,
+            risk_reducing=risk_reducing,
+        )
+
+    def _admit_bound_risk(
         self,
         *,
         command_id: str,

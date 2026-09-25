@@ -118,6 +118,10 @@ class RecoveryController:
     def record_reconciliation(self, *, consistent: bool, uncertainty: Iterable[str] = ()) -> None:
         if self.owner is None:
             raise RuntimeError("No active owner")
+        if not self.storage_writable:
+            raise PermissionError(
+                "Reconciliation cannot establish readiness without durable journal"
+            )
         unresolved = {item for item in uncertainty if item}
         self.unresolved_attempts = unresolved
         self.provider_reconciled = bool(consistent and not unresolved)
@@ -129,11 +133,15 @@ class RecoveryController:
         self._recompute_state()
 
     def set_storage_writable(self, writable: bool) -> None:
+        if not isinstance(writable, bool):
+            raise TypeError("writable must be a boolean")
         self.storage_writable = writable
         if writable:
             self.reason_codes.discard("durable_journal_unavailable")
         else:
+            self.provider_reconciled = False
             self.reason_codes.add("durable_journal_unavailable")
+            self.reason_codes.add("startup_reconciliation_required")
         self._recompute_state()
 
     def set_clock_trusted(self, trusted: bool) -> None:

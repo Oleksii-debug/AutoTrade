@@ -388,6 +388,28 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(reference, source.evidence_ref)
 
+    def test_durable_evidence_binds_exact_parser_contract(self):
+        self.seed_option_position("1")
+        reference = self.evidence()
+
+        self.authority.apply(reference)
+
+        events = self.store.load_events(
+            "option_lifecycle",
+            self.authority.aggregate_id,
+        )
+        self.assertEqual(len(events), 1)
+        evidence = events[0]["payload"]["provider_evidence"]
+        self.assertEqual(
+            evidence["parser_id"],
+            "autotrade.option-lifecycle.sealed-json",
+        )
+        self.assertEqual(evidence["parser_version"], "1.0.0")
+        self.assertRegex(
+            evidence["parser_contract_digest"],
+            r"^sha256:[0-9a-f]{64}$",
+        )
+
     def test_lifecycle_cannot_consume_contracts_absent_from_canonical_position(self):
         reference = self.evidence()
         with self.assertRaisesRegex(

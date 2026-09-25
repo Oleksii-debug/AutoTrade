@@ -263,5 +263,22 @@ class FillAccountingTests(unittest.TestCase):
             )
 
 
+    def test_provider_identity_case_cannot_double_book_same_execution(self):
+        observed, provider = matched_fill()
+        book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
+        common = dict(
+            book=book,
+            projected_fill=observed,
+            provider_fill=provider,
+            expected_instrument="ABC",
+            settlement_currency="USD",
+        )
+        self.assertTrue(book_provider_fill(provider_id="provider-a", **common))
+        self.assertFalse(book_provider_fill(provider_id=" PROVIDER-A ", **common))
+        self.assertEqual(book.position("ABC"), Decimal("2"))
+        self.assertEqual(book.cash("USD"), Decimal("-201"))
+        self.assertEqual(len(book.transactions), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1367,10 +1367,7 @@ class AuthorityService:
                 risk_intent,
                 risk_context,
             )
-            borrow_journal = BorrowLifecycleJournal(
-                self.store,
-                borrow_resource,
-            )
+            borrow_journal = self._borrow_journal(borrow_resource)
         effective_requirements: dict[str, object] = dict(
             caller_requirement_map
         )

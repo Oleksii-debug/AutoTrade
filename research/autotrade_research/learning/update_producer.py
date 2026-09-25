@@ -691,6 +691,56 @@ def _row_evidence(row: _LearningRow) -> dict[str, Any]:
     }
 
 
+def _producer_config_evidence(config: UpdateProducerConfig) -> dict[str, Any]:
+    value = {
+        "source_sha": config.source_sha,
+        "algorithm_id": _ALGORITHM_ID,
+        "algorithm_version": config.algorithm_version,
+        "feature_schema_hash": config.feature_schema_hash,
+        "label_version": config.label_version,
+        "learning_rate": str(config.learning_rate),
+        "min_update_episodes": config.min_update_episodes,
+        "min_calibration_episodes": config.min_calibration_episodes,
+        "target_false_alarm_rate": str(config.target_false_alarm_rate),
+        "max_compute_units": str(config.max_compute_units),
+        "update_task": config.update_task,
+        "calibration_task": config.calibration_task,
+        "test_evidence_refs": sorted(config.test_evidence_refs),
+        "instrument_family": config.instrument_family,
+    }
+    return value
+
+
+def _online_envelope_evidence(
+    envelope: OnlineUpdateEnvelope,
+) -> dict[str, Any]:
+    return {
+        "envelope_id": envelope.envelope_id,
+        "champion_artifact_hash": envelope.champion_artifact_hash,
+        "parameter_rules": [
+            {
+                "name": rule.name,
+                "minimum": str(rule.minimum),
+                "maximum": str(rule.maximum),
+                "max_absolute_step": str(rule.max_absolute_step),
+            }
+            for rule in sorted(
+                envelope.parameter_rules,
+                key=lambda item: item.name,
+            )
+        ],
+        "eligible_label_versions": sorted(
+            envelope.eligible_label_versions
+        ),
+        "min_seconds_between_updates": envelope.min_seconds_between_updates,
+        "max_updates_per_window": envelope.max_updates_per_window,
+        "max_compute_units_per_update": str(
+            envelope.max_compute_units_per_update
+        ),
+        "max_drift_score": str(envelope.max_drift_score),
+    }
+
+
 def produce_bounded_online_update(
     *,
     memory: ExperienceMemory,
@@ -725,6 +775,12 @@ def produce_bounded_online_update(
         )
     if not isinstance(granted_permissions, set) or not granted_permissions:
         raise ValueError("granted_permissions must be a non-empty set")
+    canonical_permissions = tuple(
+        sorted(
+            _text(value, name="granted_permission")
+            for value in granted_permissions
+        )
+    )
 
     checkpoint_reference, checkpoint = _load_checkpoint(
         artifact_store,
@@ -734,13 +790,13 @@ def produce_bounded_online_update(
     )
     update_population = memory.coverage_population_snapshot(
         causal_cutoff=update_time,
-        granted_permissions=granted_permissions,
+        granted_permissions=set(canonical_permissions),
         task=config.update_task,
         instrument_family=config.instrument_family,
     )
     calibration_population = memory.coverage_population_snapshot(
         causal_cutoff=calibration_time,
-        granted_permissions=granted_permissions,
+        granted_permissions=set(canonical_permissions),
         task=config.calibration_task,
         instrument_family=config.instrument_family,
     )
@@ -852,6 +908,8 @@ def produce_bounded_online_update(
                 status = decision.status
                 reasons.extend(decision.reasons)
 
+    producer_config = _producer_config_evidence(config)
+    online_envelope = _online_envelope_evidence(envelope)
     artifact = {
         "schema_version": _SCHEMA_VERSION,
         "artifact_kind": "ONLINE_UPDATE_PRODUCTION_RESULT",
@@ -869,6 +927,23 @@ def produce_bounded_online_update(
                 "artifact grants no trading or promotion authority",
             ],
         },
+        "producer_config": producer_config,
+        "producer_config_sha256": _digest_bytes(
+            _canonical_bytes(producer_config)
+        ),
+        "online_envelope": online_envelope,
+        "online_envelope_sha256": _digest_bytes(
+            _canonical_bytes(online_envelope)
+        ),
+        "runtime_state": {
+            "last_update_at": (
+                None
+                if runtime_state.last_update_at is None
+                else _iso(runtime_state.last_update_at)
+            ),
+            "updates_in_window": runtime_state.updates_in_window,
+        },
+        "granted_permissions": list(canonical_permissions),
         "checkpoint": {
             "artifact_ref": checkpoint_reference,
             "parameters": {

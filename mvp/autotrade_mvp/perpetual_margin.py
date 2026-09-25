@@ -424,6 +424,7 @@ def evaluate_perpetual_margin(
     collateral_amount,
     unrealized_pnl_settlement,
     evidence: PerpetualMarginEvidence,
+    artifact_store: object,
     stress: PerpetualStress,
     evaluated_at: str,
     maximum_evidence_age_seconds: int,
@@ -443,6 +444,10 @@ def evaluate_perpetual_margin(
         raise TypeError("evidence must be PerpetualMarginEvidence")
     if not isinstance(stress, PerpetualStress):
         raise TypeError("stress must be PerpetualStress")
+    if artifact_store is None:
+        raise PerpetualMarginError(
+            "immutable margin evidence artifact store is required"
+        )
 
     # Scope compatibility is an authority boundary and must be checked before
     # tier selection or any financial arithmetic.
@@ -465,7 +470,7 @@ def evaluate_perpetual_margin(
         )
     if capability.snapshot_id != evidence.capability_snapshot_id:
         raise PerpetualMarginError("capability snapshot does not match margin evidence")
-    if capability.position_mode.upper() != evidence.position_mode:
+    if capability.position_mode != evidence.position_mode:
         raise PerpetualMarginError("position mode does not match margin evidence")
     if requested_margin_mode != evidence.margin_mode:
         raise PerpetualMarginError("margin mode does not match margin evidence")
@@ -477,6 +482,8 @@ def evaluate_perpetual_margin(
         raise PerpetualMarginError("risk tier revision does not match margin evidence")
     if capability.status != "VERIFIED":
         raise PerpetualMarginError("verified capability snapshot is required")
+
+    evidence.verify_immutable_artifacts(artifact_store)
 
     now = _instant(evaluated_at, name="evaluated_at")
     if not (capability.observed_at <= now < capability.expires_at):

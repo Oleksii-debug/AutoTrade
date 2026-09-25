@@ -36,8 +36,8 @@ _EMBEDDED_SECRET_PATTERNS = (
         r"(?i)\b(authorization|proxy-authorization)\s*[:=]\s*(bearer|basic)\s+[^\s,;]+"
     ),
     re.compile(
-        r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|"
-        r"client[_-]?secret|password)\s*[:=]\s*([^&\s;,]+)"
+        r"(?i)\b(api[_-]?key|token|access[_-]?token|refresh[_-]?token|session|session[_-]?token|"
+        r"secret|credential|client[_-]?secret|private[_-]?key|password)\s*[:=]\s*([^&\s;,]+)"
     ),
 )
 _PRIVATE_KEY_MARKERS = (

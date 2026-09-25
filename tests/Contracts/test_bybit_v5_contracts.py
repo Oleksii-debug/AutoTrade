@@ -39,6 +39,7 @@ class BybitV5ContractTests(unittest.TestCase):
         accepted = parse_submission_response(
             attempt_id=str(uuid4()),
             client_order_id="contract-ok",
+            environment="MAINNET",
             response={
                 "retCode": 0,
                 "retMsg": "OK",
@@ -49,12 +50,22 @@ class BybitV5ContractTests(unittest.TestCase):
                 "retExtInfo": {},
                 "time": 1790280000123,
             },
+            observed_at="2026-09-24T21:00:00Z",
+        )
+        self.assertEqual(
+            accepted["provider_received_at"],
+            "2026-09-24T20:00:00.123Z",
+        )
+        self.assertEqual(
+            accepted["evidence"][0]["observed_at"],
+            "2026-09-24T21:00:00Z",
         )
         self.validate_submission(accepted)
 
         unknown = parse_submission_response(
             attempt_id=str(uuid4()),
             client_order_id="contract-unknown",
+            environment="MAINNET",
             response={
                 "retCode": 10000,
                 "retMsg": "Server Timeout",
@@ -62,8 +73,28 @@ class BybitV5ContractTests(unittest.TestCase):
                 "retExtInfo": {},
                 "time": 1790280000123,
             },
+            observed_at="2026-09-24T21:00:01Z",
+        )
+        self.assertEqual(
+            unknown["provider_received_at"],
+            "2026-09-24T20:00:00.123Z",
+        )
+        self.assertEqual(
+            unknown["evidence"][0]["observed_at"],
+            "2026-09-24T21:00:01Z",
         )
         self.validate_submission(unknown)
+
+        transport_unknown = parse_submission_response(
+            attempt_id=str(uuid4()),
+            client_order_id="contract-transport-unknown",
+            environment="MAINNET",
+            response=None,
+            observed_at="2026-09-24T20:00:00Z",
+            transport_ambiguous=True,
+        )
+        self.assertNotIn("provider_received_at", transport_unknown)
+        self.validate_submission(transport_unknown)
 
 
 if __name__ == "__main__":

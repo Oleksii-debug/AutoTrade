@@ -6,15 +6,16 @@ from uuid import uuid4
 from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
 
-from mvp.autotrade_mvp.kraken_futures import parse_submission_response
+from mvp.autotrade_mvp.kraken_spot import parse_spot_submission_response
 
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMAS = ROOT / "contracts" / "jsonschema"
 NOW = "2026-09-24T20:00:00Z"
+SOURCE = "https://api.kraken.com/0/private/AddOrder"
 
 
-class KrakenFuturesContractTests(unittest.TestCase):
+class KrakenSpotContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.schemas = {
@@ -33,31 +34,52 @@ class KrakenFuturesContractTests(unittest.TestCase):
             format_checker=FormatChecker(),
         ).validate(value)
 
-    def test_acknowledged_and_unknown_match_canonical_provider_contract(self):
-        acknowledged = parse_submission_response(
+    def test_ack_reject_and_transport_unknown_match_canonical_contract(self):
+        acknowledged = parse_spot_submission_response(
             attempt_id=str(uuid4()),
-            client_order_id="fut-contract-1",
-            environment="DEMO",
+            client_order_id="spot-contract-1",
+            environment="LIVE",
             observed_at=NOW,
-            response={
-                "result": "success",
-                "sendStatus": {"order_id": "provider-order-1", "status": "placed"},
-            },
+            source_uri=SOURCE,
+            payload={"error": [], "result": {"txid": ["OABC-D123-E456"]}},
         )
         self.assertNotIn("provider_received_at", acknowledged)
         self.validate_submission(acknowledged)
 
-        unknown = parse_submission_response(
+        rejected = parse_spot_submission_response(
             attempt_id=str(uuid4()),
-            client_order_id="fut-contract-2",
+            client_order_id="spot-contract-2",
             environment="LIVE",
             observed_at=NOW,
-            response=None,
+            source_uri=SOURCE,
+            payload={"error": ["EOrder:Insufficient funds"], "result": None},
+        )
+        self.assertNotIn("provider_received_at", rejected)
+        self.validate_submission(rejected)
+
+        unknown = parse_spot_submission_response(
+            attempt_id=str(uuid4()),
+            client_order_id="spot-contract-3",
+            environment="LIVE",
+            observed_at=NOW,
+            source_uri=SOURCE,
+            payload=None,
             transport_ambiguous=True,
         )
         self.assertNotIn("provider_received_at", unknown)
         self.assertNotIn("observed_at", unknown)
         self.validate_submission(unknown)
+
+        with self.assertRaisesRegex(ValueError, "environment"):
+            parse_spot_submission_response(
+                attempt_id=str(uuid4()),
+                client_order_id="spot-invalid-env",
+                environment="MARS",
+                observed_at=NOW,
+                source_uri=SOURCE,
+                payload=None,
+                transport_ambiguous=True,
+            )
 
 
 if __name__ == "__main__":

@@ -270,6 +270,10 @@ class ImmutableEvidenceRef:
         object.__setattr__(
             self, "account_id", _text(self.account_id, name="account_id")
         )
+        environment = _text(self.environment, name="environment").upper()
+        if environment != "LIVE":
+            raise ValueError("bounded-real evidence environment must be LIVE")
+        object.__setattr__(self, "environment", environment)
 
 
 @dataclass(frozen=True)

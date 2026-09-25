@@ -123,6 +123,7 @@ def sealed_funding(
     observed_offset=1,
     corrects=None,
     instrument_id="BTCUSDT",
+    price_reference_at="2026-09-25T10:00:00Z",
 ):
     binding = prepare_authenticated_read_query(
         capability=funding_capability(),
@@ -137,6 +138,7 @@ def sealed_funding(
         "provider_revision": revision,
         "funding_period_id": "2026-09-25T10:00:00Z",
         "effective_at": "2026-09-25T10:00:00Z",
+        "price_reference_at": price_reference_at,
         "instrument_id": instrument_id,
         "signed_contracts": contracts,
         "funding_rate": rate,
@@ -169,6 +171,7 @@ def normalize(source):
         funding_period_id=payload["funding_period_id"],
         effective_at=_instant(payload["effective_at"]),
         observed_at=_instant(source.observed_at),
+        price_reference_at=_instant(payload["price_reference_at"]),
         signed_contracts=payload["signed_contracts"],
         funding_rate=payload["funding_rate"],
         mark_price=payload["mark_price"],
@@ -252,6 +255,7 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
                     funding_period_id="forged-period",
                     effective_at=valid.effective_at + timedelta(hours=8),
                     observed_at=valid.observed_at,
+                    price_reference_at=valid.price_reference_at,
                     signed_contracts=Decimal("999"),
                     funding_rate=Decimal("0.99"),
                     mark_price=Decimal("1"),
@@ -278,6 +282,29 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
                 store.load_events_by_aggregate_type("perpetual_funding"),
                 [],
             )
+            self.assertEqual(len(book.transactions), 1)
+
+    def test_late_price_reference_cannot_be_backdated_to_funding_cut(self):
+        evidence = sealed_funding(
+            observed_offset=30,
+            price_reference_at="2026-09-25T10:00:30Z",
+        )
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, book = self.authority(store, [evidence])
+            before = book.audit_digest()
+
+            with self.assertRaisesRegex(
+                PerpetualFundingError,
+                "exact funding cut",
+            ):
+                authority.apply(evidence.evidence_ref)
+
+            self.assertEqual(
+                store.load_events_by_aggregate_type("perpetual_funding"),
+                [],
+            )
+            self.assertEqual(book.audit_digest(), before)
             self.assertEqual(len(book.transactions), 1)
 
     def test_sealed_funding_uses_canonical_registry_and_durable_position_cut(self):

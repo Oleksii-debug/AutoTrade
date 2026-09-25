@@ -8,6 +8,7 @@ from mvp.autotrade_mvp.risk import (
     evaluate_risk,
     risk_decision_fingerprint,
     stress_scenario_digest,
+    tail_scenario_set_digest,
 )
 
 
@@ -1001,6 +1002,9 @@ class IndependentRiskTests(unittest.TestCase):
                 },
                 max_expected_shortfall="0",
                 expected_shortfall_tail_fraction="1",
+                required_tail_scenario_set_digest=tail_scenario_set_digest(
+                    ({"ABC": "-0.10"},)
+                ),
             ),
         )
         regime = next(
@@ -1055,6 +1059,7 @@ class IndependentRiskTests(unittest.TestCase):
             policy(
                 max_expected_shortfall="90",
                 expected_shortfall_tail_fraction="0.50",
+                required_tail_scenario_set_digest=tail_scenario_set_digest(tail),
             ),
         )
         rule = next(x for x in boundary.rules if x.rule == "expected_shortfall")
@@ -1067,6 +1072,7 @@ class IndependentRiskTests(unittest.TestCase):
             policy(
                 max_expected_shortfall="89.99",
                 expected_shortfall_tail_fraction="0.50",
+                required_tail_scenario_set_digest=tail_scenario_set_digest(tail),
             ),
         )
         self.assertFalse(blocked.admitted)
@@ -1079,9 +1085,11 @@ class IndependentRiskTests(unittest.TestCase):
             symbol="ABC", side="BUY", quantity="1", price="100",
             expected_state_version=7,
         )
+        frozen_tail = ({"ABC": "-0.10", "XYZ": "-0.10"},)
         configured = policy(
             max_expected_shortfall="500",
             expected_shortfall_tail_fraction="0.25",
+            required_tail_scenario_set_digest=tail_scenario_set_digest(frozen_tail),
         )
         missing = evaluate_risk(
             intent,
@@ -1108,6 +1116,22 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertFalse(coverage.passed)
         self.assertEqual(coverage.observed, "XYZ")
 
+        cherry_picked = evaluate_risk(
+            intent,
+            context(
+                positions={"ABC": "2", "XYZ": "1"},
+                tail_scenarios=({"ABC": "-0.01", "XYZ": "-0.01"},),
+                stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.10"},),
+            ),
+            configured,
+        )
+        cherry_coverage = next(
+            x for x in cherry_picked.rules if x.rule == "tail_coverage"
+        )
+        self.assertFalse(cherry_coverage.passed)
+        self.assertEqual(cherry_coverage.observed, "DISTRIBUTION_MISMATCH")
+        self.assertFalse(cherry_picked.admitted)
+
     def test_expected_shortfall_policy_requires_explicit_tail_fraction(self):
         with self.assertRaisesRegex(ValueError, "configured together"):
             policy(max_expected_shortfall="100")
@@ -1117,6 +1141,11 @@ class IndependentRiskTests(unittest.TestCase):
             policy(
                 max_expected_shortfall="100",
                 expected_shortfall_tail_fraction="1.01",
+            )
+        with self.assertRaisesRegex(ValueError, "frozen tail distribution digest"):
+            policy(
+                max_expected_shortfall="100",
+                expected_shortfall_tail_fraction="0.05",
             )
 
     def test_liquidation_headroom_is_fail_closed_and_exact_at_boundary(self):
@@ -1209,6 +1238,9 @@ class IndependentRiskTests(unittest.TestCase):
                 max_abs_position="5",
                 max_expected_shortfall="405",
                 expected_shortfall_tail_fraction="1",
+                required_tail_scenario_set_digest=tail_scenario_set_digest(
+                    ({"ABC": "0.10", "XYZ": "-1.00"},)
+                ),
                 min_liquidation_headroom="0.25",
             ),
         )
@@ -1235,6 +1267,9 @@ class IndependentRiskTests(unittest.TestCase):
             max_abs_position="0.5",
             max_expected_shortfall="10",
             expected_shortfall_tail_fraction="1",
+            required_tail_scenario_set_digest=tail_scenario_set_digest(
+                ({"HEDGE": "0.50", "CORE": "-0.50"},)
+            ),
             min_liquidation_headroom="0.25",
             max_stress_loss="10",
         )
@@ -1299,6 +1334,9 @@ class IndependentRiskTests(unittest.TestCase):
                 max_abs_position="5",
                 max_expected_shortfall="100",
                 expected_shortfall_tail_fraction="1",
+                required_tail_scenario_set_digest=tail_scenario_set_digest(
+                    ({"ABC": "-0.50"},)
+                ),
                 min_liquidation_headroom="0.25",
                 max_stress_loss="100",
             ),
@@ -1396,29 +1434,31 @@ class IndependentRiskTests(unittest.TestCase):
             symbol="ABC", side="BUY", quantity="1", price="100",
             expected_state_version=7,
         )
-        configured = policy(
-            max_expected_shortfall="100",
-            expected_shortfall_tail_fraction="0.50",
+        first_tail = (
+            {"ABC": "-0.10"},
+            {"ABC": "-0.20"},
+        )
+        changed_tail = (
+            {"ABC": "-0.05"},
+            {"ABC": "-0.20"},
         )
         first = evaluate_risk(
             intent,
-            context(
-                tail_scenarios=(
-                    {"ABC": "-0.10"},
-                    {"ABC": "-0.20"},
-                ),
+            context(tail_scenarios=first_tail),
+            policy(
+                max_expected_shortfall="100",
+                expected_shortfall_tail_fraction="0.50",
+                required_tail_scenario_set_digest=tail_scenario_set_digest(first_tail),
             ),
-            configured,
         )
         changed_evidence = evaluate_risk(
             intent,
-            context(
-                tail_scenarios=(
-                    {"ABC": "-0.05"},
-                    {"ABC": "-0.20"},
-                ),
+            context(tail_scenarios=changed_tail),
+            policy(
+                max_expected_shortfall="100",
+                expected_shortfall_tail_fraction="0.50",
+                required_tail_scenario_set_digest=tail_scenario_set_digest(changed_tail),
             ),
-            configured,
         )
         first_es = next(x for x in first.rules if x.rule == "expected_shortfall")
         changed_es = next(

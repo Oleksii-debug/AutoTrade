@@ -227,6 +227,13 @@ class BackupDurabilityTests(unittest.TestCase):
             self.assertGreaterEqual(fsync_mock.call_count, 1)
             directory_sync.assert_called_once_with(target.parent)
 
+    def test_fsync_file_flushes_regular_payload_without_mutating_bytes(self):
+        with TemporaryDirectory() as directory:
+            payload = Path(directory) / "payload.bin"
+            payload.write_bytes(b"durable-payload")
+            _fsync_file(payload)
+            self.assertEqual(payload.read_bytes(), b"durable-payload")
+
     def test_fsync_file_rejects_symlink_or_non_file(self):
         with TemporaryDirectory() as directory:
             missing = Path(directory) / "missing.bin"

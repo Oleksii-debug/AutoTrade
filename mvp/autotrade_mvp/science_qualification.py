@@ -153,14 +153,37 @@ class ScientificQualificationResult:
 def _required_signed_bindings(
     evidence: ScientificQualificationInput,
 ) -> frozenset[str]:
+    """Semantic facts that independent science qualification must sign.
+
+    Artifact digests alone do not bind the caller-visible interpretation of those
+    artifacts. Terminal trust therefore covers the exact gate status, each
+    gate-to-digest mapping, the requested economic claim and causal-control flags.
+    """
+
     bindings = {
         _QUALIFICATION_REQUIREMENT,
         f"candidate/{evidence.candidate_hash}",
         f"input/{evidence.input_snapshot_hash}",
-        *(f"gate/{gate_id}" for gate_id in _REQUIRED_GATES),
+        f"claim/{evidence.economic_claim}",
+        "holdout_used_for_tuning/"
+        + ("true" if evidence.holdout_used_for_tuning else "false"),
+        "future_information_used_for_routing/"
+        + ("true" if evidence.future_information_used_for_routing else "false"),
     }
+    for gate in evidence.gates:
+        bindings.add(f"gate/{gate.gate_id}/status/{gate.status}")
+        for digest in gate.evidence_hashes:
+            bindings.add(f"gate/{gate.gate_id}/evidence/{digest}")
+        for reason in gate.reason_codes:
+            reason_digest = "sha256:" + sha256(reason.encode("utf-8")).hexdigest()
+            bindings.add(f"gate/{gate.gate_id}/reason/{reason_digest}")
+    for gate_id in _REQUIRED_GATES:
+        if gate_id not in {gate.gate_id for gate in evidence.gates}:
+            bindings.add(f"gate/{gate_id}/missing")
     if evidence.population_coverage_hash is not None:
         bindings.add(f"population/{evidence.population_coverage_hash}")
+    else:
+        bindings.add("population/missing")
     return frozenset(bindings)
 
 
@@ -279,9 +302,23 @@ def qualify_scientific_learning(
             reasons.append("SCIENCE.EVIDENCE_BINDING_MISMATCH:" + gate_id)
             continue
 
+        gate_bindings = {
+            f"gate/{gate_id}/status/{gate.status}",
+            *(
+                f"gate/{gate_id}/evidence/{digest}"
+                for digest in gate.evidence_hashes
+            ),
+            *(
+                "gate/"
+                + gate_id
+                + "/reason/sha256:"
+                + sha256(reason.encode("utf-8")).hexdigest()
+                for reason in gate.reason_codes
+            ),
+        }
         verified = (
             trust_status == "PASS"
-            and f"gate/{gate_id}" in signed_requirement_set
+            and gate_bindings <= signed_requirement_set
             and all(digest in signed_digest_set for digest in gate.evidence_hashes)
         )
         if not verified:

@@ -1,6 +1,9 @@
 import hashlib
+from tempfile import TemporaryDirectory
 import unittest
 from uuid import NAMESPACE_URL, uuid5
+
+from autotrade_research.artifacts.store import ArtifactStore
 
 from mvp.autotrade_mvp.bounded_real import (
     BoundedRealEnvelope,
@@ -51,12 +54,14 @@ def envelope(**overrides):
 
 
 def ref(label, *, evidence_kind, **overrides):
+    artifact_id = str(uuid5(NAMESPACE_URL, "autotrade:" + label))
     values = dict(
-        artifact_id=str(uuid5(NAMESPACE_URL, "autotrade:" + label)),
-        sha256="sha256:" + hashlib.sha256(label.encode("utf-8")).hexdigest(),
+        artifact_id=artifact_id,
+        sha256="sha256:" + hashlib.sha256(artifact_id.encode("utf-8")).hexdigest(),
         evidence_kind=evidence_kind,
         source_sha=SHA,
         envelope_id="bounded-1",
+        envelope_digest=envelope().envelope_digest,
         provider_id="provider-1",
         account_id="account-1",
     )
@@ -71,6 +76,7 @@ def evidence(kind, **overrides):
         evidence_kind=kind,
         source_sha=SHA,
         envelope_id="bounded-1",
+        envelope_digest=envelope().envelope_digest,
         passed=True,
         evidence_ref=ref(
             "prerequisite:" + kind,
@@ -87,13 +93,22 @@ def prerequisites():
     return [evidence(kind) for kind in PREREQUISITE_KINDS]
 
 
-def observation_refs(*, source_sha=SHA, envelope_id="bounded-1", provider_id="provider-1", account_id="account-1"):
+def observation_refs(
+    *,
+    source_sha=SHA,
+    envelope_id="bounded-1",
+    envelope_digest=None,
+    provider_id="provider-1",
+    account_id="account-1",
+):
+    envelope_digest = envelope_digest or envelope().envelope_digest
     return tuple(
         ref(
             "observation:" + kind,
             evidence_kind=kind,
             source_sha=source_sha,
             envelope_id=envelope_id,
+            envelope_digest=envelope_digest,
             provider_id=provider_id,
             account_id=account_id,
         )
@@ -105,6 +120,9 @@ def observations(**overrides):
     scope = {
         "source_sha": overrides.get("source_sha", SHA),
         "envelope_id": overrides.get("envelope_id", "bounded-1"),
+        "envelope_digest": overrides.get(
+            "envelope_digest", envelope().envelope_digest
+        ),
         "provider_id": overrides.get("provider_id", "provider-1"),
         "account_id": overrides.get("account_id", "account-1"),
     }
@@ -125,7 +143,49 @@ def observations(**overrides):
 
 
 def valid_verifier(_ref):
+    """Deliberately untrusted verifier used to prove callback bypass is closed."""
     return EvidenceVerification(valid=True)
+
+
+def _publish_ref(store, evidence_ref, *, payload=None, metadata_overrides=None):
+    payload = (
+        evidence_ref.artifact_id.encode("utf-8")
+        if payload is None
+        else payload
+    )
+    metadata = {
+        "artifact_kind": "BOUNDED_REAL_EVIDENCE",
+        "schema_version": 1,
+        "evidence_kind": evidence_ref.evidence_kind,
+        "source_sha": evidence_ref.source_sha,
+        "envelope_id": evidence_ref.envelope_id,
+        "envelope_digest": evidence_ref.envelope_digest,
+        "provider_id": evidence_ref.provider_id,
+        "account_id": evidence_ref.account_id,
+        "outcome": "PASS",
+        "producer_id": "qualification-harness",
+        "evidence_version": "1",
+    }
+    metadata.update(metadata_overrides or {})
+    manifest = store.publish_bytes(
+        artifact_id=evidence_ref.artifact_id,
+        data=payload,
+        media_type="application/octet-stream",
+        rights={"storage": True, "export": False},
+        source_refs=["test:bounded-real"],
+        metadata=metadata,
+    )
+    return manifest
+
+
+def _populate_bundle(store, prerequisite_items, observed, *, exclude=()):
+    excluded = set(exclude)
+    for item in prerequisite_items:
+        if item.evidence_ref.artifact_id not in excluded:
+            _publish_ref(store, item.evidence_ref)
+    for evidence_ref in observed.evidence_refs:
+        if evidence_ref.artifact_id not in excluded:
+            _publish_ref(store, evidence_ref)
 
 
 class _ArtifactStoreStub:
@@ -138,6 +198,7 @@ class _ArtifactStoreStub:
             "evidence_kind": evidence_ref.evidence_kind,
             "source_sha": evidence_ref.source_sha,
             "envelope_id": evidence_ref.envelope_id,
+            "envelope_digest": evidence_ref.envelope_digest,
             "provider_id": evidence_ref.provider_id,
             "account_id": evidence_ref.account_id,
             "outcome": "PASS",
@@ -164,16 +225,28 @@ class _ArtifactStoreStub:
 
 class BoundedRealQualificationTests(unittest.TestCase):
     def test_complete_bundle_is_evidence_complete_but_never_authority(self):
-        result = assess_bounded_real_qualification(
-            envelope=envelope(),
-            prerequisite_evidence=prerequisites(),
-            observations=observations(),
-            evidence_verifier=valid_verifier,
-        )
+        bounded = envelope()
+        prerequisite_items = prerequisites()
+        observed = observations()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _populate_bundle(store, prerequisite_items, observed)
+            result = assess_bounded_real_qualification(
+                envelope=bounded,
+                prerequisite_evidence=prerequisite_items,
+                observations=observed,
+                evidence_verifier=artifact_store_evidence_verifier(store),
+            )
         self.assertTrue(result.complete)
         self.assertEqual(result.reason_codes, ())
         self.assertFalse(result.authorizes_trading)
         self.assertEqual(result.exact_source_sha, SHA)
+        self.assertEqual(result.envelope_digest, bounded.envelope_digest)
+        self.assertTrue(
+            result.evidence_verifier_identity.startswith(
+                "AUTOTRADE_ARTIFACT_STORE_BOUNDED_REAL_V1:"
+            )
+        )
 
     def test_caller_booleans_without_immutable_verifier_never_pass(self):
         result = assess_bounded_real_qualification(
@@ -182,7 +255,23 @@ class BoundedRealQualificationTests(unittest.TestCase):
             observations=observations(),
         )
         self.assertFalse(result.complete)
-        self.assertIn("immutable_evidence_verifier_required", result.reason_codes)
+        self.assertIn(
+            "trusted_immutable_evidence_verifier_required",
+            result.reason_codes,
+        )
+
+        callback = assess_bounded_real_qualification(
+            envelope=envelope(),
+            prerequisite_evidence=prerequisites(),
+            observations=observations(),
+            evidence_verifier=valid_verifier,
+        )
+        self.assertFalse(callback.complete)
+        self.assertIn(
+            "untrusted_immutable_evidence_verifier",
+            callback.reason_codes,
+        )
+        self.assertIsNone(callback.evidence_verifier_identity)
 
     def test_missing_failed_or_blocked_prerequisite_fails_closed(self):
         missing = assess_bounded_real_qualification(
@@ -294,19 +383,24 @@ class BoundedRealQualificationTests(unittest.TestCase):
         )
 
     def test_evidence_verifier_failure_or_conflict_blocks_qualification(self):
-        target = prerequisites()[0].evidence_ref
+        prerequisite_items = prerequisites()
+        observed = observations()
+        target = prerequisite_items[0].evidence_ref
 
-        def verifier(item):
-            if item.artifact_id == target.artifact_id:
-                return EvidenceVerification(valid=False, reason="missing")
-            return EvidenceVerification(valid=True)
-
-        result = assess_bounded_real_qualification(
-            envelope=envelope(),
-            prerequisite_evidence=prerequisites(),
-            observations=observations(),
-            evidence_verifier=verifier,
-        )
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _populate_bundle(
+                store,
+                prerequisite_items,
+                observed,
+                exclude={target.artifact_id},
+            )
+            result = assess_bounded_real_qualification(
+                envelope=envelope(),
+                prerequisite_evidence=prerequisite_items,
+                observations=observed,
+                evidence_verifier=artifact_store_evidence_verifier(store),
+            )
         self.assertTrue(
             any(
                 reason.startswith("immutable_evidence_unverified:")
@@ -314,21 +408,17 @@ class BoundedRealQualificationTests(unittest.TestCase):
             )
         )
 
-        def conflicted(item):
-            if item.artifact_id == target.artifact_id:
-                return EvidenceVerification(
-                    valid=False,
-                    conflicted=True,
-                    reason="digest changed",
-                )
-            return EvidenceVerification(valid=True)
-
-        result = assess_bounded_real_qualification(
-            envelope=envelope(),
-            prerequisite_evidence=prerequisites(),
-            observations=observations(),
-            evidence_verifier=conflicted,
-        )
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _populate_bundle(store, prerequisite_items, observed)
+            digest = target.sha256.removeprefix("sha256:")
+            store._object_path(digest).write_bytes(b"tampered")
+            result = assess_bounded_real_qualification(
+                envelope=envelope(),
+                prerequisite_evidence=prerequisite_items,
+                observations=observed,
+                evidence_verifier=artifact_store_evidence_verifier(store),
+            )
         self.assertTrue(
             any(
                 reason.startswith("immutable_evidence_conflicted:")
@@ -345,6 +435,7 @@ class BoundedRealQualificationTests(unittest.TestCase):
             evidence_kind="PREREQUISITE:SCIENTIFIC_QUALIFICATION",
             source_sha=SHA,
             envelope_id="bounded-1",
+            envelope_digest=original.envelope_digest,
             provider_id="provider-1",
             account_id="account-1",
         )
@@ -368,6 +459,7 @@ class BoundedRealQualificationTests(unittest.TestCase):
             evidence_kind=refs[0].evidence_kind,
             source_sha=refs[0].source_sha,
             envelope_id=refs[0].envelope_id,
+            envelope_digest=refs[0].envelope_digest,
             provider_id=refs[0].provider_id,
             account_id=refs[0].account_id,
         )
@@ -386,27 +478,92 @@ class BoundedRealQualificationTests(unittest.TestCase):
             evidence_kind="ACTUAL_FILL",
             sha256="sha256:" + hashlib.sha256(payload).hexdigest(),
         )
-        good = artifact_store_evidence_verifier(
-            _ArtifactStoreStub(good_ref, payload=payload)
-        )(good_ref)
-        self.assertTrue(good.valid)
-        self.assertFalse(good.conflicted)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _publish_ref(store, good_ref, payload=payload)
+            verifier = artifact_store_evidence_verifier(store)
+            good = verifier.verify(good_ref)
+            self.assertTrue(good.valid)
+            self.assertFalse(good.conflicted)
 
-        tampered_store = _ArtifactStoreStub(good_ref, payload=payload)
-        tampered_store.payload = b"changed after manifest"
-        bad = artifact_store_evidence_verifier(tampered_store)(good_ref)
-        self.assertFalse(bad.valid)
-        self.assertTrue(bad.conflicted)
+            digest = good_ref.sha256.removeprefix("sha256:")
+            store._object_path(digest).write_bytes(b"changed after manifest")
+            bad = verifier.verify(good_ref)
+            self.assertFalse(bad.valid)
+            self.assertTrue(bad.conflicted)
 
-        wrong_scope = artifact_store_evidence_verifier(
-            _ArtifactStoreStub(
-                good_ref,
-                payload=payload,
+        wrong_ref = ref("wrong-scope-store", evidence_kind="ACTUAL_FILL")
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _publish_ref(
+                store,
+                wrong_ref,
                 metadata_overrides={"account_id": "wrong-account"},
             )
-        )(good_ref)
-        self.assertFalse(wrong_scope.valid)
-        self.assertTrue(wrong_scope.conflicted)
+            wrong_scope = artifact_store_evidence_verifier(store).verify(wrong_ref)
+            self.assertFalse(wrong_scope.valid)
+            self.assertTrue(wrong_scope.conflicted)
+
+        with self.assertRaisesRegex(TypeError, "canonical ArtifactStore"):
+            artifact_store_evidence_verifier(_ArtifactStoreStub(good_ref, payload=payload))
+
+    def test_evidence_is_bound_to_exact_bounded_real_envelope_content(self):
+        original = envelope()
+        prerequisite_items = prerequisites()
+        observed = observations()
+        changed = (
+            {"max_capital": "1001"},
+            {"max_single_notional": "101"},
+            {"policy_id": "policy-2"},
+            {
+                "allowed_actions": {
+                    "ORDER.SUBMIT",
+                    "ORDER.CANCEL",
+                    "ORDER.REPLACE",
+                    "FLATTEN",
+                }
+            },
+        )
+        for overrides in changed:
+            with self.subTest(overrides=overrides):
+                candidate = envelope(**overrides)
+                self.assertNotEqual(
+                    candidate.envelope_digest,
+                    original.envelope_digest,
+                )
+                result = assess_bounded_real_qualification(
+                    envelope=candidate,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_verifier=valid_verifier,
+                )
+                self.assertFalse(result.complete)
+                self.assertIn("observation_scope_mismatch", result.reason_codes)
+                self.assertTrue(
+                    any(
+                        reason.startswith("envelope_digest_mismatch:")
+                        for reason in result.reason_codes
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        reason.startswith("immutable_evidence_scope_mismatch:")
+                        for reason in result.reason_codes
+                    )
+                )
+
+        self.assertEqual(
+            envelope(
+                max_capital="1000.00",
+                max_single_notional="100.0",
+                max_gross_leverage="1.500",
+            ).envelope_digest,
+            original.envelope_digest,
+        )
+
+    def test_single_notional_cannot_exceed_bounded_capital(self):
+        with self.assertRaisesRegex(ValueError, "cannot exceed max_capital"):
+            envelope(max_capital="100", max_single_notional="101")
 
     def test_exact_source_and_artifact_digests_reject_uppercase_spelling(self):
         with self.assertRaisesRegex(ValueError, "lowercase Git SHA"):
@@ -433,6 +590,7 @@ class BoundedRealQualificationTests(unittest.TestCase):
                 evidence_kind="RECOVERY",
                 source_sha=SHA,
                 envelope_id="bounded-1",
+                envelope_digest=envelope().envelope_digest,
                 passed=1,
                 evidence_ref=ref(
                     "bad-bool",

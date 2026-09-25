@@ -29,8 +29,10 @@ from .accounting import (
     canonical_transaction,
 )
 from .durable_reservations import DurableReservationBook
+from .durable_settlement import DurableSettlementBook
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reconciliation import ProviderActivityEvidence
+from .settlement import SettlementObligation
 
 
 _ALLOWED_EXTERNAL_CASH_TYPES = frozenset({"DEPOSIT", "WITHDRAWAL"})
@@ -528,6 +530,8 @@ def commit_economic_batch_with_reservation_consumption(
     usage: Mapping[str, object],
     transactions: Iterable[JournalTransaction],
     committed_at: str | None = None,
+    settlement_book: DurableSettlementBook | None = None,
+    settlement_obligations: Iterable[SettlementObligation] = (),
 ) -> bool:
     """Atomically commit canonical economics and reservation consumption.
 
@@ -555,6 +559,31 @@ def commit_economic_batch_with_reservation_consumption(
         raise ValueError(
             "economic and reservation books must share account/environment scope"
         )
+
+    settlement_items = tuple(settlement_obligations)
+    if settlement_book is None and settlement_items:
+        raise ValueError(
+            "settlement obligations require the canonical durable settlement book"
+        )
+    if settlement_book is not None:
+        if not isinstance(settlement_book, DurableSettlementBook):
+            raise TypeError("settlement_book must be DurableSettlementBook or None")
+        if settlement_book.store is not economic_book.store:
+            raise ValueError(
+                "economic, reservation and settlement books must share one JournalStore"
+            )
+        if (
+            settlement_book.scope.provider_id != economic_book.provider_id
+            or settlement_book.scope.account_id != economic_book.account_id
+            or settlement_book.scope.environment != economic_book.environment
+        ):
+            raise ValueError(
+                "settlement book must share provider/account/environment scope"
+            )
+        if not settlement_items:
+            raise ValueError(
+                "settlement_book requires explicit settlement obligations"
+            )
 
     cid = _text(command_id, name="command_id")
     idem = _text(idempotency_key, name="idempotency_key")
@@ -589,18 +618,94 @@ def commit_economic_batch_with_reservation_consumption(
         committed_at=when,
     )
 
-    if reservation_plan.already_committed != economic_plan.already_committed:
-        reservation_book.refresh()
-        economic_book.refresh()
-        raise AccountingConflict(
-            "reservation/economic fill state is only partially committed"
+    settlement_plan = None
+    if settlement_book is not None:
+        batch_transaction_ids = {
+            item.transaction_id for item in economic_plan.transactions
+        }
+        expected_cash_legs: dict[tuple[str, str], Decimal] = {}
+        for transaction in economic_plan.transactions:
+            for posting in transaction.postings:
+                if (
+                    posting.ledger_account
+                    == f"CASH:{posting.asset_or_currency}"
+                ):
+                    key = (
+                        transaction.transaction_id,
+                        posting.asset_or_currency,
+                    )
+                    expected_cash_legs[key] = (
+                        expected_cash_legs.get(key, Decimal("0"))
+                        + posting.signed_amount
+                    )
+        expected_cash_legs = {
+            key: value
+            for key, value in expected_cash_legs.items()
+            if value != 0
+        }
+
+        bound_cash_legs: dict[tuple[str, str], Decimal] = {}
+        for obligation in settlement_items:
+            if not isinstance(obligation, SettlementObligation):
+                raise TypeError(
+                    "settlement_obligations must contain SettlementObligation"
+                )
+            if obligation.source_transaction_id not in batch_transaction_ids:
+                raise AccountingConflict(
+                    "settlement obligation source is absent from atomic economic batch"
+                )
+            key = (
+                obligation.source_transaction_id,
+                obligation.currency,
+            )
+            if key in bound_cash_legs:
+                raise AccountingConflict(
+                    "atomic fill has duplicate settlement coverage for one cash leg"
+                )
+            bound_cash_legs[key] = obligation.amount
+
+        if set(bound_cash_legs) != set(expected_cash_legs):
+            raise AccountingConflict(
+                "settlement obligations do not cover every atomic fill cash leg"
+            )
+        for key, expected_amount in expected_cash_legs.items():
+            if bound_cash_legs[key] != expected_amount:
+                raise AccountingConflict(
+                    "settlement obligation amount differs from atomic fill cash effect"
+                )
+
+        settlement_plan = settlement_book.prepare_register_mutation(
+            settlement_items,
+            committed_at=when,
         )
-    if reservation_plan.already_committed:
+
+    commit_states = [
+        reservation_plan.already_committed,
+        economic_plan.already_committed,
+    ]
+    if settlement_plan is not None:
+        commit_states.append(settlement_plan.already_committed)
+    if any(commit_states) and not all(commit_states):
         reservation_book.refresh()
         economic_book.refresh()
+        if settlement_book is not None:
+            settlement_book.refresh()
+        raise AccountingConflict(
+            "reservation/economic/settlement fill state is only partially committed"
+        )
+    if all(commit_states):
+        reservation_book.refresh()
+        economic_book.refresh()
+        if settlement_book is not None:
+            settlement_book.refresh()
         return False
+
     if reservation_plan.envelope is None or economic_plan.envelope is None:
         raise AccountingConflict("fresh atomic fill plan is missing durable events")
+    if settlement_plan is not None and settlement_plan.envelope is None:
+        raise AccountingConflict(
+            "fresh atomic fill settlement plan is missing durable event"
+        )
 
     request = {
         "schema_version": "1.0.0",
@@ -609,10 +714,16 @@ def commit_economic_batch_with_reservation_consumption(
         "environment": economic_book.environment,
         "reservation": reservation_plan.request,
         "economic_batch": economic_plan.request,
+        "settlement": (
+            None if settlement_plan is None else settlement_plan.request
+        ),
     }
     result = {
         "reservation": reservation_plan.snapshot_payload,
         "economic_batch": economic_plan.result,
+        "settlement": (
+            None if settlement_plan is None else settlement_plan.result
+        ),
     }
     command_identity = str(
         uuid5(
@@ -645,19 +756,33 @@ def commit_economic_batch_with_reservation_consumption(
             state_version=max(
                 reservation_plan.aggregate_version,
                 economic_plan.aggregate_version,
+                0
+                if settlement_plan is None
+                else settlement_plan.aggregate_version,
             ),
-            events=[
-                (reservation_plan.envelope, None),
-                (economic_plan.envelope, "autotrade.economic.events"),
-            ],
+            events=(
+                [
+                    (reservation_plan.envelope, None),
+                    (economic_plan.envelope, "autotrade.economic.events"),
+                ]
+                + (
+                    []
+                    if settlement_plan is None
+                    else [(settlement_plan.envelope, None)]
+                )
+            ),
         )
     except Exception:
         reservation_book.refresh()
         economic_book.refresh()
+        if settlement_book is not None:
+            settlement_book.refresh()
         raise
 
     reservation_book.refresh()
     economic_book.refresh()
+    if settlement_book is not None:
+        settlement_book.refresh()
     return inserted
 
 

@@ -7,6 +7,8 @@ class HostCommandStateTests(unittest.TestCase):
     def setUp(self):
         self.sessions = {("session-a", "alice"), ("session-b", "bob")}
         self.store = HostCommandStore(
+            account_id="paper-account-1",
+            environment="PAPER",
             session_validator=lambda session, actor: (session, actor) in self.sessions,
             max_events=3,
         )
@@ -19,6 +21,8 @@ class HostCommandStateTests(unittest.TestCase):
         version="0",
         actor="alice",
         session="session-a",
+        account_id="paper-account-1",
+        environment="PAPER",
         action="BLOCK_NEW_EXPOSURE",
         payload=None,
     ):
@@ -28,9 +32,53 @@ class HostCommandStateTests(unittest.TestCase):
             "idempotency_key": key,
             "actor": actor,
             "session": session,
+            "account_id": account_id,
+            "environment": environment,
             "action": action,
             "payload": payload or {},
         }
+
+    def test_v2_scope_is_required_canonical_and_matches_active_host(self):
+        missing_account = self.command()
+        missing_account.pop("account_id")
+        with self.assertRaisesRegex(ValueError, "account_id"):
+            self.store.submit(missing_account)
+
+        missing_environment = self.command()
+        missing_environment.pop("environment")
+        with self.assertRaisesRegex(ValueError, "environment"):
+            self.store.submit(missing_environment)
+
+        with self.assertRaisesRegex(ValueError, "canonical Environment"):
+            self.store.submit(self.command(environment="paper"))
+        with self.assertRaisesRegex(ValueError, "active host"):
+            self.store.submit(self.command(account_id="other-account"))
+        with self.assertRaisesRegex(ValueError, "active host"):
+            self.store.submit(self.command(environment="LIVE"))
+
+        accepted = self.store.submit(self.command())
+        self.assertEqual(accepted.status, "ACCEPTED")
+        event = self.store.events_after(0)[0]
+        self.assertEqual(event.payload["account_id"], "paper-account-1")
+        self.assertEqual(event.payload["environment"], "PAPER")
+        snapshot = self.store.snapshot()
+        self.assertEqual(snapshot["account_id"], "paper-account-1")
+        self.assertEqual(snapshot["environment"], "PAPER")
+
+    def test_idempotency_scope_includes_actor_and_environment(self):
+        first = self.store.submit(self.command(key="shared-key"))
+        self.assertEqual(first.status, "ACCEPTED")
+        second = self.store.submit(
+            self.command(
+                command_id="22222222-2222-2222-2222-222222222222",
+                key="shared-key",
+                version="1",
+                actor="bob",
+                session="session-b",
+            )
+        )
+        self.assertEqual(second.status, "ACCEPTED")
+        self.assertEqual(self.store.state_version, 2)
 
     def test_acceptance_is_not_reported_as_financial_completion(self):
         result = self.store.submit(self.command())
@@ -150,6 +198,22 @@ class HostCommandStateTests(unittest.TestCase):
                 "FAILED",
                 remaining_uncertainty=("provider_outcome_unresolved",),
             )
+
+    def test_operation_evidence_text_arrays_reject_type_coercion(self):
+        accepted = self.store.submit(self.command())
+        with self.assertRaisesRegex(ValueError, "affected_refs must contain"):
+            self.store.update_operation(
+                accepted.operation_id,
+                "RUNNING",
+                affected_refs=(123,),
+            )
+        with self.assertRaisesRegex(ValueError, "remaining_uncertainty must contain"):
+            self.store.update_operation(
+                accepted.operation_id,
+                "RUNNING",
+                remaining_uncertainty=(123,),
+            )
+        self.assertEqual(self.store.state_version, 1)
 
     def test_resumable_events_return_only_newer_items(self):
         accepted = self.store.submit(self.command())

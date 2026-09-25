@@ -61,6 +61,34 @@ class ScientificRegistryTests(unittest.TestCase):
             with self.assertRaises(ProtocolConflict):
                 store.register_protocol(changed, protocol_id=identifier)
 
+    def test_protocol_document_is_integrity_checked_and_detached(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            value = protocol()
+            value["online_update_registration"] = {
+                "calibration_population_root_hash": "sha256:" + "c" * 64,
+                "calibration_cutoff": "2026-10-05T00:00:00Z",
+            }
+            registered = store.register_protocol(value)
+            loaded_registration, loaded = store.protocol_document(
+                registered.protocol_id
+            )
+            self.assertEqual(loaded_registration, registered)
+            self.assertEqual(
+                loaded["online_update_registration"],
+                value["online_update_registration"],
+            )
+            loaded["online_update_registration"]["calibration_cutoff"] = (
+                "2099-01-01T00:00:00Z"
+            )
+            _again_registration, again = store.protocol_document(
+                registered.protocol_id
+            )
+            self.assertEqual(
+                again["online_update_registration"]["calibration_cutoff"],
+                "2026-10-05T00:00:00Z",
+            )
+
     def test_missing_registration_fields_fail_closed(self):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")

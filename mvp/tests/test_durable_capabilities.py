@@ -197,6 +197,35 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                     at=NOW + timedelta(seconds=1),
                 )
 
+    def test_foreign_event_type_in_capability_aggregate_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            registry = DurableCapabilityRegistry(JournalStore(path))
+            snapshot = verified(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                NOW,
+            )
+            registry.add(snapshot)
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "UPDATE events SET event_type=? "
+                    "WHERE aggregate_type='capability_history'",
+                    ("ForeignCapabilityEvent.v1",),
+                )
+                connection.commit()
+            with self.assertRaisesRegex(
+                CapabilityError,
+                "unsupported durable capability event type",
+            ):
+                DurableCapabilityRegistry(JournalStore(path)).latest(
+                    provider_id="simulated",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
+                )
+
     def test_stale_writer_cannot_append_older_snapshot(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

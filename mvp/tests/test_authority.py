@@ -229,6 +229,7 @@ def public_authoritative_risk_snapshot(
     *,
     risk_context: RiskContext | None = None,
     risk_policy: RiskPolicy | None = None,
+    valid_until: str = PUBLIC_RISK_VALID_UNTIL,
     evidence_suffix: str = "canonical",
 ) -> AuthoritativeRiskSnapshot:
     if not isinstance(request, RiskAuthorityRequest):
@@ -273,6 +274,7 @@ def public_authoritative_risk_snapshot(
         authority_policy_id=request.authority_policy_id,
         authority_policy_version=request.authority_policy_version,
         evaluated_at=request.evaluated_at,
+        valid_until=valid_until,
         evidence_refs=refs,
     )
 
@@ -1705,6 +1707,51 @@ class AuthorityTests(unittest.TestCase):
                         risk_policy=public_risk_policy(
                             max_single_notional="999999"
                         ),
+                    ),
+                )
+            self.assertEqual(reservations.version, 0)
+            self.assertEqual(store.pending_outbox(), [])
+
+    def test_public_financial_admission_rejects_caller_risk_validity_extension(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authoritative_valid_until = "2026-09-24T18:03:00Z"
+
+            def resolver(request):
+                return public_authoritative_risk_snapshot(
+                    request,
+                    valid_until=authoritative_valid_until,
+                )
+
+            authority = authority_service(store, resolver=resolver)
+            item = policy(autonomous=True)
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "caller risk_valid_until does not match authoritative risk snapshot",
+            ):
+                authority.admit(
+                    command_id="cmd-risk-validity-tamper",
+                    idempotency_key="idem-risk-validity-tamper",
+                    admission_id="admission-risk-validity-tamper",
+                    policy_id=item.policy_id,
+                    intent_id="intent-risk-validity-tamper",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    reservation_book=reservations,
+                    reservation_id="reservation-risk-validity-tamper",
+                    **public_financial_kwargs(
+                        store,
+                        risk_valid_until="2026-09-24T18:30:00Z",
                     ),
                 )
             self.assertEqual(reservations.version, 0)

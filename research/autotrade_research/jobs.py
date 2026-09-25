@@ -112,6 +112,32 @@ def _verify_artifact_ref(
     )
 
 
+def _verify_job_output_artifact(
+    *,
+    artifact_store: ArtifactStore,
+    output_ref: str,
+    job_id: str,
+    generation: int,
+    input_hashes: list[str],
+) -> bool:
+    if not _verify_artifact_ref(artifact_store, output_ref):
+        return False
+    reference = _require_immutable_artifact_ref(output_ref, "output_ref")
+    artifact_id = reference[len("artifact:"):].split("@sha256:", 1)[0]
+    try:
+        manifest = artifact_store.load_manifest(artifact_id)
+    except (FileNotFoundError, UnicodeError, ValueError, TypeError):
+        return False
+    metadata = manifest.get("metadata")
+    return (
+        isinstance(metadata, dict)
+        and metadata.get("artifact_kind") == "RESEARCH_JOB_RESULT"
+        and metadata.get("job_id") == job_id
+        and metadata.get("job_generation") == generation
+        and manifest.get("source_refs") == input_hashes
+    )
+
+
 def _verify_external_resolution_artifact(
     *,
     artifact_store: ArtifactStore,
@@ -190,7 +216,7 @@ def _validate_budget(budget: dict[str, int | float]) -> dict[str, float]:
 
 
 class ResearchJobStore:
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -276,6 +302,21 @@ class ResearchJobStore:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (3, _iso(datetime.now(timezone.utc))),
                 )
+                versions.append(3)
+            if 4 not in versions:
+                columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+                }
+                if "cancel_requested" not in columns:
+                    connection.execute(
+                        "ALTER TABLE jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0 "
+                        "CHECK (cancel_requested IN (0, 1))"
+                    )
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (4, _iso(datetime.now(timezone.utc))),
+                )
             connection.commit()
 
     @staticmethod
@@ -291,6 +332,7 @@ class ResearchJobStore:
             "resource_budget": json.loads(row["resource_budget_json"]),
             "resource_usage": json.loads(row["resource_usage_json"]),
             "lease_requeueable": bool(row["lease_requeueable"]),
+            "cancel_requested": bool(row["cancel_requested"]),
             "output_refs": json.loads(row["output_refs_json"]),
         }
         if row["owner"] is not None:
@@ -579,8 +621,15 @@ class ResearchJobStore:
                 raise JobConflictError(
                     "external resolution requires matching immutable artifact evidence"
                 )
+            input_hashes = json.loads(row["input_hashes_json"])
             if normalized_verdict == "PROVEN_SUCCEEDED" and any(
-                not _verify_artifact_ref(artifact_store, output_ref)
+                not _verify_job_output_artifact(
+                    artifact_store=artifact_store,
+                    output_ref=output_ref,
+                    job_id=identifier,
+                    generation=generation,
+                    input_hashes=input_hashes,
+                )
                 for output_ref in outputs
             ):
                 connection.rollback()
@@ -589,7 +638,7 @@ class ResearchJobStore:
                 )
 
             if normalized_verdict == "PROVEN_NOT_RUN":
-                state = "QUEUED"
+                state = "CANCELLED" if bool(row["cancel_requested"]) else "QUEUED"
                 error_json = None
                 output_json = "[]"
             elif normalized_verdict == "PROVEN_SUCCEEDED":
@@ -720,17 +769,37 @@ class ResearchJobStore:
         current = _utc(now or datetime.now(timezone.utc))
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute("SELECT state FROM jobs WHERE job_id = ?", (identifier,)).fetchone()
+            row = connection.execute(
+                "SELECT state, lease_requeueable, cancel_requested FROM jobs WHERE job_id = ?",
+                (identifier,),
+            ).fetchone()
             if row is None:
                 connection.rollback()
                 raise KeyError(identifier)
             if row["state"] in FINAL_STATES:
                 connection.commit()
                 return False
+            if row["state"] == "WAITING_EXTERNAL" or (
+                row["state"] == "RUNNING" and not bool(row["lease_requeueable"])
+            ):
+                if bool(row["cancel_requested"]):
+                    connection.commit()
+                    return False
+                connection.execute(
+                    """
+                    UPDATE jobs
+                    SET cancel_requested=1, updated_at=?
+                    WHERE job_id=?
+                    """,
+                    (_iso(current), identifier),
+                )
+                connection.commit()
+                return True
             connection.execute(
                 """
                 UPDATE jobs
-                SET state='CANCELLED', owner=NULL, lease_until=NULL, updated_at=?
+                SET state='CANCELLED', cancel_requested=1,
+                    owner=NULL, lease_until=NULL, updated_at=?
                 WHERE job_id=?
                 """,
                 (_iso(current), identifier),
@@ -745,6 +814,7 @@ class ResearchJobStore:
         worker_id: str,
         generation: int,
         output_refs: list[str],
+        artifact_store: ArtifactStore | None = None,
         now: datetime | None = None,
     ) -> bool:
         identifier = str(UUID(_require_text(job_id, "job_id")))
@@ -773,6 +843,21 @@ class ResearchJobStore:
                 connection.rollback()
                 raise JobConflictError("job already published a different accepted result")
             self._require_live_lease(row, worker, generation, current)
+            input_hashes = json.loads(row["input_hashes_json"])
+            if artifact_store is None or any(
+                not _verify_job_output_artifact(
+                    artifact_store=artifact_store,
+                    output_ref=output_ref,
+                    job_id=identifier,
+                    generation=generation,
+                    input_hashes=input_hashes,
+                )
+                for output_ref in outputs
+            ):
+                connection.rollback()
+                raise JobConflictError(
+                    "direct success requires verified job-bound immutable output artifacts"
+                )
             connection.execute(
                 """
                 UPDATE jobs
@@ -831,6 +916,7 @@ class ResearchJobStore:
             rights=rights,
             source_refs=source_refs,
             metadata={
+                "artifact_kind": "RESEARCH_JOB_RESULT",
                 "job_id": identifier,
                 "job_generation": generation,
                 "job_kind": kind,
@@ -843,6 +929,7 @@ class ResearchJobStore:
             worker_id=worker,
             generation=generation,
             output_refs=[output_ref],
+            artifact_store=artifact_store,
             now=now,
         )
         return manifest, accepted

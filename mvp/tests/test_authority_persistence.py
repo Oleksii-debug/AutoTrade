@@ -1,5 +1,6 @@
 import sqlite3
 import tempfile
+from contextlib import closing
 import unittest
 from decimal import Decimal
 from pathlib import Path
@@ -224,7 +225,7 @@ class AuthorityPersistenceTests(unittest.TestCase):
                 event_id="authority-snapshot-1",
                 committed_at="2026-09-25T01:00:01Z",
             )
-            with sqlite3.connect(path) as connection:
+            with closing(sqlite3.connect(path)) as connection:
                 connection.execute(
                     "UPDATE events SET payload_json = ? WHERE event_id = ?",
                     ('{"authority_id":"runtime-authority","state":{}}', "authority-snapshot-1"),

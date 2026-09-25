@@ -314,6 +314,162 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             payload["install_steps"],
         )
 
+    def test_update_plan_orders_verification_quiesce_reconciliation_and_fence(self):
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=self.backup,
+            trust=self.trust,
+        )
+        payload = json.loads(plan.plan_json)
+        self.assertEqual(
+            payload["install_steps"][:5],
+            [
+                "VERIFY_CANDIDATE_SIGNATURE_AND_EXACT_HASH",
+                "QUIESCE_NEW_ADMISSIONS",
+                "SURFACE_AND_RECONCILE_IN_FLIGHT_PROVIDER_SENDS",
+                "VERIFY_PRE_UPDATE_BACKUP",
+                "STOP_AND_FENCE_FINANCIAL_SENDER",
+            ],
+        )
+        self.assertEqual(
+            payload["rollback"]["steps"][:3],
+            [
+                "QUIESCE_NEW_ADMISSIONS",
+                "SURFACE_AND_RECONCILE_IN_FLIGHT_PROVIDER_SENDS",
+                "STOP_AND_FENCE_FINANCIAL_SENDER",
+            ],
+        )
+
+    def test_post_start_update_barriers_match_canonical_recovery_sequence(self):
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=self.backup,
+            trust=self.trust,
+        )
+        payload = json.loads(plan.plan_json)
+        install = payload["install_steps"]
+        degraded = install.index("START_DEGRADED_NO_TRADING_AUTHORITY")
+        self.assertEqual(
+            install[degraded:],
+            [
+                "START_DEGRADED_NO_TRADING_AUTHORITY",
+                "VALIDATE_JOURNAL_STORAGE_CLOCK_SECURITY_IDENTITY",
+                "REESTABLISH_AUTHENTICATED_PROVIDER_SESSIONS",
+                "RUN_POST_UPDATE_RECONCILIATION",
+                "VERIFY_HOST_UI_COMPATIBILITY",
+                "ENTER_READY_FOR_SEPARATE_AUTHORITY_REACQUISITION",
+            ],
+        )
+        rollback = payload["rollback"]["steps"]
+        rollback_degraded = rollback.index("START_DEGRADED_NO_TRADING_AUTHORITY")
+        self.assertEqual(
+            rollback[rollback_degraded:],
+            [
+                "START_DEGRADED_NO_TRADING_AUTHORITY",
+                "VALIDATE_JOURNAL_STORAGE_CLOCK_SECURITY_IDENTITY",
+                "REESTABLISH_AUTHENTICATED_PROVIDER_SESSIONS",
+                "RUN_POST_RESTORE_RECONCILIATION",
+                "VERIFY_HOST_UI_COMPATIBILITY",
+                "ENTER_READY_FOR_SEPARATE_AUTHORITY_REACQUISITION",
+            ],
+        )
+
+    def test_post_start_reconciliation_cannot_skip_identity_or_session_barriers(self):
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=self.backup,
+            trust=self.trust,
+        )
+        checkpoint = start_update_checkpoint(plan, trust=self.trust)
+        payload = json.loads(plan.plan_json)
+        for step in payload["install_steps"]:
+            if step == "VALIDATE_JOURNAL_STORAGE_CLOCK_SECURITY_IDENTITY":
+                break
+            checkpoint = advance_update_checkpoint(
+                plan,
+                checkpoint,
+                step,
+                trust=self.trust,
+            )
+
+        with self.assertRaisesRegex(
+            WindowsUpdateError,
+            "out-of-order update step",
+        ):
+            advance_update_checkpoint(
+                plan,
+                checkpoint,
+                "REESTABLISH_AUTHENTICATED_PROVIDER_SESSIONS",
+                trust=self.trust,
+            )
+        with self.assertRaisesRegex(
+            WindowsUpdateError,
+            "out-of-order update step",
+        ):
+            advance_update_checkpoint(
+                plan,
+                checkpoint,
+                "RUN_POST_UPDATE_RECONCILIATION",
+                trust=self.trust,
+            )
+
+        checkpoint = advance_update_checkpoint(
+            plan,
+            checkpoint,
+            "VALIDATE_JOURNAL_STORAGE_CLOCK_SECURITY_IDENTITY",
+            trust=self.trust,
+        )
+        with self.assertRaisesRegex(
+            WindowsUpdateError,
+            "out-of-order update step",
+        ):
+            advance_update_checkpoint(
+                plan,
+                checkpoint,
+                "RUN_POST_UPDATE_RECONCILIATION",
+                trust=self.trust,
+            )
+
+    def test_authority_reacquisition_requires_host_ui_compatibility_barrier(self):
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=self.backup,
+            trust=self.trust,
+        )
+        checkpoint = start_update_checkpoint(plan, trust=self.trust)
+        payload = json.loads(plan.plan_json)
+        for step in payload["install_steps"]:
+            if step == "VERIFY_HOST_UI_COMPATIBILITY":
+                break
+            checkpoint = advance_update_checkpoint(
+                plan,
+                checkpoint,
+                step,
+                trust=self.trust,
+            )
+        with self.assertRaisesRegex(
+            WindowsUpdateError,
+            "out-of-order update step",
+        ):
+            advance_update_checkpoint(
+                plan,
+                checkpoint,
+                "ENTER_READY_FOR_SEPARATE_AUTHORITY_REACQUISITION",
+                trust=self.trust,
+            )
+
     def test_schema_change_without_verified_migration_is_blocked(self):
         decision = build_windows_update_plan(
             current_release=self.current,
@@ -616,42 +772,45 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
-        trust=self.trust,
+            trust=self.trust,
         )
-        checkpoint = start_update_checkpoint(plan , trust=self.trust)
+        checkpoint = start_update_checkpoint(plan, trust=self.trust)
         with self.assertRaisesRegex(WindowsUpdateError, "out-of-order update step"):
             advance_update_checkpoint(
                 plan,
                 checkpoint,
                 "VERIFY_PRE_UPDATE_BACKUP",
-            trust=self.trust,
+                trust=self.trust,
             )
+
+        expected_prefix = (
+            "VERIFY_CANDIDATE_SIGNATURE_AND_EXACT_HASH",
+            "QUIESCE_NEW_ADMISSIONS",
+            "SURFACE_AND_RECONCILE_IN_FLIGHT_PROVIDER_SENDS",
+            "VERIFY_PRE_UPDATE_BACKUP",
+            "STOP_AND_FENCE_FINANCIAL_SENDER",
+        )
         checkpoint = advance_update_checkpoint(
             plan,
             checkpoint,
-            "STOP_AND_FENCE_FINANCIAL_SENDER",
-        trust=self.trust,
+            expected_prefix[0],
+            trust=self.trust,
         )
         replay = advance_update_checkpoint(
             plan,
             checkpoint,
-            "STOP_AND_FENCE_FINANCIAL_SENDER",
-        trust=self.trust,
+            expected_prefix[0],
+            trust=self.trust,
         )
         self.assertIs(replay, checkpoint)
-        checkpoint = advance_update_checkpoint(
-            plan,
-            checkpoint,
-            "VERIFY_PRE_UPDATE_BACKUP",
-        trust=self.trust,
-        )
-        self.assertEqual(
-            checkpoint.update_completed_steps,
-            (
-                "STOP_AND_FENCE_FINANCIAL_SENDER",
-                "VERIFY_PRE_UPDATE_BACKUP",
-            ),
-        )
+        for step in expected_prefix[1:]:
+            checkpoint = advance_update_checkpoint(
+                plan,
+                checkpoint,
+                step,
+                trust=self.trust,
+            )
+        self.assertEqual(checkpoint.update_completed_steps, expected_prefix)
 
     def test_restart_checkpoint_rejects_nonprefix_history(self):
         plan = build_windows_update_plan(
@@ -681,43 +840,74 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
-        trust=self.trust,
+            trust=self.trust,
         )
-        checkpoint = start_update_checkpoint(plan , trust=self.trust)
-        checkpoint = advance_update_checkpoint(
+        checkpoint = start_update_checkpoint(plan, trust=self.trust)
+        for step in (
+            "VERIFY_CANDIDATE_SIGNATURE_AND_EXACT_HASH",
+            "QUIESCE_NEW_ADMISSIONS",
+        ):
+            checkpoint = advance_update_checkpoint(
+                plan,
+                checkpoint,
+                step,
+                trust=self.trust,
+            )
+        checkpoint = start_rollback_checkpoint(
             plan,
             checkpoint,
-            "STOP_AND_FENCE_FINANCIAL_SENDER",
-        trust=self.trust,
+            trust=self.trust,
         )
-        checkpoint = start_rollback_checkpoint(plan, checkpoint , trust=self.trust)
         with self.assertRaisesRegex(WindowsUpdateError, "cannot continue"):
             advance_update_checkpoint(
                 plan,
                 checkpoint,
-                "VERIFY_PRE_UPDATE_BACKUP",
-            trust=self.trust,
+                "SURFACE_AND_RECONCILE_IN_FLIGHT_PROVIDER_SENDS",
+                trust=self.trust,
             )
-        with self.assertRaisesRegex(WindowsUpdateError, "out-of-order rollback step"):
+        with self.assertRaisesRegex(
+            WindowsUpdateError,
+            "out-of-order rollback step",
+        ):
             advance_rollback_checkpoint(
                 plan,
                 checkpoint,
                 "RUN_POST_RESTORE_RECONCILIATION",
-            trust=self.trust,
+                trust=self.trust,
             )
         checkpoint = advance_rollback_checkpoint(
             plan,
             checkpoint,
-            "STOP_AND_FENCE_FINANCIAL_SENDER",
-        trust=self.trust,
+            "QUIESCE_NEW_ADMISSIONS",
+            trust=self.trust,
         )
         replay = advance_rollback_checkpoint(
             plan,
             checkpoint,
-            "STOP_AND_FENCE_FINANCIAL_SENDER",
-        trust=self.trust,
+            "QUIESCE_NEW_ADMISSIONS",
+            trust=self.trust,
         )
         self.assertIs(replay, checkpoint)
+        checkpoint = advance_rollback_checkpoint(
+            plan,
+            checkpoint,
+            "SURFACE_AND_RECONCILE_IN_FLIGHT_PROVIDER_SENDS",
+            trust=self.trust,
+        )
+        checkpoint = advance_rollback_checkpoint(
+            plan,
+            checkpoint,
+            "STOP_AND_FENCE_FINANCIAL_SENDER",
+            trust=self.trust,
+        )
+        self.assertEqual(
+            checkpoint.rollback_completed_steps,
+            (
+                "QUIESCE_NEW_ADMISSIONS",
+                "SURFACE_AND_RECONCILE_IN_FLIGHT_PROVIDER_SENDS",
+                "STOP_AND_FENCE_FINANCIAL_SENDER",
+            ),
+        )
 
     def test_checkpoint_is_bound_to_exact_plan_digest(self):
         plan = build_windows_update_plan(
@@ -784,28 +974,28 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
-        trust=self.trust,
+            trust=self.trust,
         )
-        checkpoint = start_update_checkpoint(plan , trust=self.trust)
-        checkpoint = advance_update_checkpoint(
-            plan,
-            checkpoint,
-            "STOP_AND_FENCE_FINANCIAL_SENDER",
-        trust=self.trust,
-        )
-        checkpoint = advance_update_checkpoint(
-            plan,
-            checkpoint,
-            "VERIFY_PRE_UPDATE_BACKUP",
-        trust=self.trust,
-        )
+        checkpoint = start_update_checkpoint(plan, trust=self.trust)
+        for step in (
+            "VERIFY_CANDIDATE_SIGNATURE_AND_EXACT_HASH",
+            "QUIESCE_NEW_ADMISSIONS",
+            "SURFACE_AND_RECONCILE_IN_FLIGHT_PROVIDER_SENDS",
+        ):
+            checkpoint = advance_update_checkpoint(
+                plan,
+                checkpoint,
+                step,
+                trust=self.trust,
+            )
         serialized = serialize_update_checkpoint(checkpoint)
-        restored = restore_update_checkpoint(plan, serialized , trust=self.trust)
-        self.assertEqual(restored, checkpoint)
-        self.assertEqual(
-            serialize_update_checkpoint(restored),
+        restored = restore_update_checkpoint(
+            plan,
             serialized,
+            trust=self.trust,
         )
+        self.assertEqual(restored, checkpoint)
+        self.assertEqual(serialize_update_checkpoint(restored), serialized)
 
     def test_checkpoint_restore_fails_closed_on_tamper_or_wrong_plan(self):
         plan = build_windows_update_plan(

@@ -842,6 +842,7 @@ class AuthoritativeRiskSnapshot:
     def _identity_payload(self) -> dict[str, Any]:
         return {
             "context_fingerprint": _risk_context_fingerprint(self.context),
+            "context_state_version": self.context.state_version,
             "risk_policy_fingerprint": _risk_policy_fingerprint(self.risk_policy),
             "account_id": self.account_id,
             "environment": self.environment,
@@ -1361,6 +1362,55 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "durable risk decision is not after its transaction journal cut"
                 )
+        authoritative_snapshot = risk_payload.get(
+            "authoritative_risk_snapshot"
+        )
+        if authoritative_snapshot is not None:
+            if not isinstance(authoritative_snapshot, Mapping):
+                raise AuthorityConflict(
+                    "durable authoritative risk snapshot is malformed"
+                )
+            snapshot_id = _text(
+                authoritative_snapshot.get("snapshot_id"),
+                name="authoritative risk snapshot_id",
+            )
+            identity = dict(authoritative_snapshot)
+            identity.pop("snapshot_id", None)
+            expected_snapshot_id = "risk-snapshot:sha256:" + sha256(
+                json.dumps(
+                    identity,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("utf-8")
+            ).hexdigest()
+            if snapshot_id != expected_snapshot_id:
+                raise AuthorityConflict(
+                    "durable authoritative risk snapshot digest is invalid"
+                )
+            instrument = authoritative_snapshot.get("instrument")
+            if (
+                authoritative_snapshot.get("account_id") != record.account_id
+                or authoritative_snapshot.get("environment")
+                != record.environment
+                or authoritative_snapshot.get("capability_snapshot_id")
+                != record.capability_snapshot_id
+                or authoritative_snapshot.get("authority_policy_id")
+                != record.policy_id
+                or authoritative_snapshot.get("authority_policy_version")
+                != record.policy_version
+                or authoritative_snapshot.get("context_state_version")
+                != record.state_version
+                or not isinstance(instrument, Mapping)
+                or instrument.get("instrument_id")
+                != record.instrument_version.instrument_id
+                or instrument.get("version")
+                != record.instrument_version.version
+            ):
+                raise AuthorityConflict(
+                    "durable authoritative risk snapshot scope is inconsistent"
+                )
+
         risk_digest = record.risk_decision_id.removeprefix("risk:sha256:")
         if (
             risk_payload.get("decision_id") != record.risk_decision_id

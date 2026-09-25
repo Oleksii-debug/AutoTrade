@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
 from tempfile import TemporaryDirectory
+import sqlite3
 import unittest
 
 from mvp.autotrade_mvp.futures import (
@@ -16,8 +17,10 @@ from mvp.autotrade_mvp.futures import (
 from mvp.autotrade_mvp.futures_journal import (
     commit_inverse_variation_margin,
     commit_linear_variation_margin,
+    rebuild_variation_margin_book,
     restore_inverse_variation_margin,
     restore_linear_variation_margin,
+    variation_margin_aggregate_id,
 )
 from mvp.autotrade_mvp.instruments import InstrumentVersion
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -121,7 +124,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             self.assertTrue(inserted)
             self.assertEqual(delta, Decimal("100"))
             self.assertIsNotNone(transaction)
-            events = store.load_events("FUTURES_VARIATION_MARGIN", self._aggregate_id(store, opening))
+            events = store.load_events("FUTURES_VARIATION_MARGIN", variation_margin_aggregate_id(opening))
             self.assertEqual(len(events), 1)
             self.assertEqual(
                 events[0]["payload"]["transaction"]["postings"][0]["signed_amount"],
@@ -143,7 +146,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 len(
                     reopened.load_events(
                         "FUTURES_VARIATION_MARGIN",
-                        self._aggregate_id(reopened, opening),
+                        variation_margin_aggregate_id(opening),
                     )
                 ),
                 1,
@@ -168,35 +171,26 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 corrected.cumulative_variation_margin,
                 Decimal("120"),
             )
+            final_store = JournalStore(path)
             self.assertEqual(
-                restore_linear_variation_margin(JournalStore(path), opening),
+                restore_linear_variation_margin(final_store, opening),
                 corrected,
+            )
+            rebuilt_book = rebuild_variation_margin_book(final_store, opening)
+            self.assertEqual(rebuilt_book.cash("USD"), Decimal("120"))
+            self.assertEqual(
+                rebuilt_book.balance("FUTURES_VARIATION_PNL:USD", "USD"),
+                Decimal("-120"),
             )
             events = reopened.load_events(
                 "FUTURES_VARIATION_MARGIN",
-                self._aggregate_id(reopened, opening),
+                variation_margin_aggregate_id(opening),
             )
             self.assertEqual(len(events), 2)
             self.assertEqual(
                 events[-1]["payload"]["transaction"]["postings"][0]["signed_amount"],
                 "20",
             )
-
-    def _aggregate_id(self, store, opening):
-        # The durable adapter deliberately keeps aggregate identity private.
-        # Discovering it from the exact first event avoids reimplementing its
-        # identity grammar in the test.
-        with store._connect() as connection:
-            rows = connection.execute(
-                "SELECT DISTINCT aggregate_id FROM events WHERE aggregate_type = ?",
-                ("FUTURES_VARIATION_MARGIN",),
-            ).fetchall()
-        if rows:
-            self.assertEqual(len(rows), 1)
-            return rows[0][0]
-        # Before the first commit there is no aggregate row; callers only use
-        # this helper after a successful commit.
-        self.fail("durable futures aggregate is missing")
 
     def test_conflicting_same_observation_is_rejected_without_new_event(self):
         contract = self._contract()
@@ -217,7 +211,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             commit_linear_variation_margin(store, opening, first)
-            aggregate_id = self._aggregate_id(store, opening)
+            aggregate_id = variation_margin_aggregate_id(opening)
             with self.assertRaisesRegex(FuturesError, "conflicts"):
                 commit_linear_variation_margin(store, opening, conflicting)
             self.assertEqual(
@@ -308,10 +302,71 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     exit_price=12000,
                 ),
             )
+            final_store = JournalStore(path)
             self.assertEqual(
-                restore_inverse_variation_margin(JournalStore(path), opening),
+                restore_inverse_variation_margin(final_store, opening),
                 corrected,
             )
+            rebuilt_book = rebuild_variation_margin_book(final_store, opening)
+            self.assertEqual(
+                rebuilt_book.cash("BTC"),
+                sum(
+                    (
+                        Decimal(item["payload"]["settled_cash_delta"])
+                        for item in final_store.load_events(
+                            "FUTURES_VARIATION_MARGIN",
+                            variation_margin_aggregate_id(opening),
+                        )
+                    ),
+                    Decimal("0"),
+                ),
+            )
+
+    def test_sqlite_failure_rolls_back_command_and_settlement_event_together(self):
+        contract = self._contract()
+        opening = VariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("100"),
+            settlement_scope=self._scope(),
+        )
+        settlement = self._settlement(contract, "rollback-period", "105")
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TRIGGER fail_futures_event
+                    BEFORE INSERT ON events
+                    WHEN NEW.aggregate_type = 'FUTURES_VARIATION_MARGIN'
+                    BEGIN
+                        SELECT RAISE(ABORT, 'injected futures commit failure');
+                    END
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(Exception, "injected futures commit failure"):
+                commit_linear_variation_margin(store, opening, settlement)
+
+            aggregate_id = variation_margin_aggregate_id(opening)
+            self.assertEqual(
+                store.load_events("FUTURES_VARIATION_MARGIN", aggregate_id),
+                [],
+            )
+            connection = sqlite3.connect(path)
+            try:
+                command_count = connection.execute(
+                    "SELECT COUNT(*) FROM command_dedupe WHERE actor = ?",
+                    ("autotrade-futures-settlement",),
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(command_count, 0)
 
 
 if __name__ == "__main__":

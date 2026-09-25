@@ -8,6 +8,7 @@ job execution.
 
 from __future__ import annotations
 
+from hashlib import sha256
 import secrets
 from typing import Callable
 
@@ -25,6 +26,19 @@ def _text(value: object, *, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must be non-empty text")
     return value.strip()
+
+
+def _subject_dedupe_key(subject: str, dedupe_key: str) -> str:
+    """Create an injective opaque host namespace without changing job authority."""
+
+    normalized_subject = _text(subject, name="actor")
+    normalized_key = _text(dedupe_key, name="dedupe_key")
+    material = (
+        len(normalized_subject).to_bytes(4, "big")
+        + normalized_subject.encode("utf-8")
+        + normalized_key.encode("utf-8")
+    )
+    return "host-subject:sha256:" + sha256(material).hexdigest()
 
 
 class ResearchJobHostService:
@@ -53,7 +67,7 @@ class ResearchJobHostService:
         session: str,
         actor: str,
         roles: set[str],
-    ) -> None:
+    ) -> str:
         normalized_actor = _text(actor, name="actor")
         origin = _text(
             self._request_origin_provider(),
@@ -66,6 +80,7 @@ class ResearchJobHostService:
         )
         if not secrets.compare_digest(authenticated.subject, normalized_actor):
             raise PermissionError("Authenticated session subject does not match actor")
+        return normalized_actor
 
     def enqueue(
         self,
@@ -79,10 +94,14 @@ class ResearchJobHostService:
         lease_requeueable: bool = False,
         job_id: str | None = None,
     ) -> tuple[dict[str, object], bool]:
-        self._authorize(session=session, actor=actor, roles=_SUBMIT_ROLES)
+        normalized_actor = self._authorize(
+            session=session,
+            actor=actor,
+            roles=_SUBMIT_ROLES,
+        )
         return self._jobs.enqueue(
             kind=kind,
-            dedupe_key=dedupe_key,
+            dedupe_key=_subject_dedupe_key(normalized_actor, dedupe_key),
             input_hashes=input_hashes,
             resource_budget=resource_budget,
             lease_requeueable=lease_requeueable,

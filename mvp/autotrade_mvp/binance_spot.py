@@ -248,12 +248,20 @@ class BinanceSpotSymbolRules:
             if raw_max < 0:
                 raise BinanceSpotAdapterError("maxNotional cannot be negative")
             max_notional = raw_max if raw_max > 0 else None
-            min_market = bool(item.get("applyMinToMarket", False))
-            max_market = bool(item.get("applyMaxToMarket", False))
+            min_market = item.get("applyMinToMarket", False)
+            max_market = item.get("applyMaxToMarket", False)
+            if type(min_market) is not bool or type(max_market) is not bool:
+                raise BinanceSpotAdapterError(
+                    "NOTIONAL market-application flags must be boolean"
+                )
         elif "MIN_NOTIONAL" in by_type:
             item = by_type["MIN_NOTIONAL"]
             min_notional = _decimal(item.get("minNotional"), name="minNotional", positive=True)
-            min_market = bool(item.get("applyToMarket", False))
+            min_market = item.get("applyToMarket", False)
+            if type(min_market) is not bool:
+                raise BinanceSpotAdapterError(
+                    "MIN_NOTIONAL applyToMarket must be boolean"
+                )
 
         canonical = json.dumps(
             symbol_payload,

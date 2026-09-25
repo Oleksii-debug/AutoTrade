@@ -116,6 +116,131 @@ class StressScenarioEvidence:
 
 
 @dataclass(frozen=True)
+class CandidateEconomicValuation:
+    """Exact economic-unit conversion for one allocation candidate.
+
+    This is proposal evidence only. It converts a supported linear instrument
+    unit into one declared portfolio base currency; it grants no trading
+    authority and deliberately refuses unsupported nonlinear payoff shortcuts.
+    """
+
+    symbol: str
+    instrument_version: str
+    payoff_kind: str
+    quote_currency: str
+    settlement_currency: str
+    base_currency: str
+    contract_multiplier: Decimal
+    fx_rate_to_base: Decimal
+    valuation_identity: str
+    observed_at: str
+    valid_until: str
+    fx_evidence_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbol", _text(self.symbol, name="valuation symbol"))
+        object.__setattr__(
+            self,
+            "instrument_version",
+            _text(self.instrument_version, name="valuation instrument_version"),
+        )
+        payoff = _text(self.payoff_kind, name="valuation payoff_kind").upper()
+        if payoff not in {"CASH_EQUITY", "LINEAR_FUTURE", "INVERSE_FUTURE", "OPTION"}:
+            raise ValueError("unsupported valuation payoff_kind")
+        object.__setattr__(self, "payoff_kind", payoff)
+        for field_name in ("quote_currency", "settlement_currency", "base_currency"):
+            value = _text(getattr(self, field_name), name=f"valuation {field_name}").upper()
+            object.__setattr__(self, field_name, value)
+        multiplier = _positive(
+            self.contract_multiplier,
+            name="valuation contract_multiplier",
+        )
+        fx_rate = _positive(self.fx_rate_to_base, name="valuation fx_rate_to_base")
+        object.__setattr__(self, "contract_multiplier", multiplier)
+        object.__setattr__(self, "fx_rate_to_base", fx_rate)
+        object.__setattr__(
+            self,
+            "valuation_identity",
+            _text(self.valuation_identity, name="valuation_identity"),
+        )
+        observed = _instant(self.observed_at, name="valuation observed_at")
+        valid_until = _instant(self.valid_until, name="valuation valid_until")
+        if valid_until < observed:
+            raise ValueError("valuation valid_until must not precede observed_at")
+        object.__setattr__(
+            self,
+            "observed_at",
+            observed.isoformat().replace("+00:00", "Z"),
+        )
+        object.__setattr__(
+            self,
+            "valid_until",
+            valid_until.isoformat().replace("+00:00", "Z"),
+        )
+        if self.quote_currency == self.base_currency:
+            if fx_rate != Decimal("1"):
+                raise ValueError("same-currency valuation requires fx_rate_to_base=1")
+            if self.fx_evidence_id is not None:
+                object.__setattr__(
+                    self,
+                    "fx_evidence_id",
+                    _text(self.fx_evidence_id, name="valuation fx_evidence_id"),
+                )
+        else:
+            object.__setattr__(
+                self,
+                "fx_evidence_id",
+                _text(self.fx_evidence_id, name="valuation fx_evidence_id"),
+            )
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        symbol: str,
+        instrument_version: str,
+        payoff_kind: str,
+        quote_currency: str,
+        settlement_currency: str,
+        base_currency: str,
+        contract_multiplier=1,
+        fx_rate_to_base=1,
+        valuation_identity: str,
+        observed_at: str,
+        valid_until: str,
+        fx_evidence_id: str | None = None,
+    ) -> "CandidateEconomicValuation":
+        return cls(
+            symbol=symbol,
+            instrument_version=instrument_version,
+            payoff_kind=payoff_kind,
+            quote_currency=quote_currency,
+            settlement_currency=settlement_currency,
+            base_currency=base_currency,
+            contract_multiplier=_positive(
+                contract_multiplier,
+                name="valuation contract_multiplier",
+            ),
+            fx_rate_to_base=_positive(
+                fx_rate_to_base,
+                name="valuation fx_rate_to_base",
+            ),
+            valuation_identity=valuation_identity,
+            observed_at=observed_at,
+            valid_until=valid_until,
+            fx_evidence_id=fx_evidence_id,
+        )
+
+    def valid_at(self, instant: str) -> bool:
+        point = _instant(instant, name="valuation decision_time")
+        return (
+            _instant(self.observed_at, name="valuation observed_at")
+            <= point
+            <= _instant(self.valid_until, name="valuation valid_until")
+        )
+
+
+@dataclass(frozen=True)
 class AllocationCandidate:
     symbol: str
     desired_notional: Decimal
@@ -126,6 +251,7 @@ class AllocationCandidate:
     min_notional: Decimal = Decimal("0")
     fee_floor: Decimal = Decimal("0")
     max_executable_notional: Decimal | None = None
+    valuation: CandidateEconomicValuation | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", _text(self.symbol, name="symbol"))
@@ -171,6 +297,11 @@ class AllocationCandidate:
                     allow_zero=True,
                 ),
             )
+        if self.valuation is not None:
+            if not isinstance(self.valuation, CandidateEconomicValuation):
+                raise TypeError("valuation must be CandidateEconomicValuation or None")
+            if self.valuation.symbol != self.symbol:
+                raise ValueError("valuation symbol must match allocation candidate")
 
     @classmethod
     def create(
@@ -185,6 +316,7 @@ class AllocationCandidate:
         min_notional=0,
         fee_floor=0,
         max_executable_notional=None,
+        valuation: CandidateEconomicValuation | None = None,
     ) -> "AllocationCandidate":
         return cls(
             symbol=_text(symbol, name="symbol"),
@@ -207,6 +339,7 @@ class AllocationCandidate:
                     allow_zero=True,
                 )
             ),
+            valuation=valuation,
         )
 
 
@@ -256,6 +389,7 @@ class ObjectiveCandidate:
         min_notional=0,
         fee_floor=0,
         max_executable_notional=None,
+        valuation: CandidateEconomicValuation | None = None,
     ) -> "ObjectiveCandidate":
         return cls(
             candidate=AllocationCandidate.create(
@@ -268,6 +402,7 @@ class ObjectiveCandidate:
                 min_notional=min_notional,
                 fee_floor=fee_floor,
                 max_executable_notional=max_executable_notional,
+                valuation=valuation,
             ),
             expected_return_rate=_decimal(
                 expected_return_rate,
@@ -384,6 +519,7 @@ class AllocationTarget:
     quantity: Decimal
     notional: Decimal
     estimated_cost: Decimal
+    base_currency: str | None = None
 
 
 @dataclass(frozen=True)
@@ -406,6 +542,57 @@ class ObjectiveAllocationResult:
     expected_net_utility: Decimal
     objective_version: str
     reason: str
+
+
+def _candidate_unit_value_in_base(candidate: AllocationCandidate) -> Decimal:
+    valuation = candidate.valuation
+    if valuation is None:
+        return candidate.price
+    if valuation.payoff_kind not in {"CASH_EQUITY", "LINEAR_FUTURE"}:
+        raise ValueError(
+            f"allocation payoff {valuation.payoff_kind} requires canonical nonlinear valuation"
+        )
+    if valuation.settlement_currency != valuation.quote_currency:
+        raise ValueError(
+            "supported allocation valuation requires settlement_currency=quote_currency"
+        )
+    return (
+        candidate.price
+        * valuation.contract_multiplier
+        * valuation.fx_rate_to_base
+    )
+
+
+def _valuation_problem(
+    candidates: Sequence[AllocationCandidate],
+    *,
+    decision_time: str | None,
+) -> str | None:
+    valued = tuple(candidate for candidate in candidates if candidate.valuation is not None)
+    if not valued:
+        return None
+    if len(valued) != len(candidates):
+        return "allocation candidates cannot mix valued and dimensionless economic units"
+    if decision_time is None:
+        return "evidence-bound economic valuation requires an explicit decision_time"
+    base_currencies = {candidate.valuation.base_currency for candidate in valued}
+    if len(base_currencies) != 1:
+        return "allocation candidates must share one portfolio base currency"
+    for candidate in valued:
+        valuation = candidate.valuation
+        assert valuation is not None
+        if not valuation.valid_at(decision_time):
+            return f"valuation evidence is stale or not yet observable for {candidate.symbol}"
+        if valuation.payoff_kind not in {"CASH_EQUITY", "LINEAR_FUTURE"}:
+            return (
+                f"unsupported payoff {valuation.payoff_kind} for {candidate.symbol}; "
+                "canonical nonlinear valuation evidence is required"
+            )
+        if valuation.settlement_currency != valuation.quote_currency:
+            return (
+                f"settlement/quote conversion is not qualified for {candidate.symbol}"
+            )
+    return None
 
 
 def _round_quantity(notional: Decimal, price: Decimal, lot_size: Decimal) -> Decimal:
@@ -503,8 +690,9 @@ def _evaluate(
 
     for candidate in candidates:
         scaled = candidate.desired_notional * scale
-        quantity = _round_quantity(scaled, candidate.price, candidate.lot_size)
-        notional = quantity * candidate.price
+        unit_value = _candidate_unit_value_in_base(candidate)
+        quantity = _round_quantity(scaled, unit_value, candidate.lot_size)
+        notional = quantity * unit_value
         if (
             candidate.max_executable_notional is not None
             and abs(notional) > candidate.max_executable_notional
@@ -514,8 +702,8 @@ def _evaluate(
                 if notional > 0
                 else -candidate.max_executable_notional
             )
-            quantity = _round_quantity(capped, candidate.price, candidate.lot_size)
-            notional = quantity * candidate.price
+            quantity = _round_quantity(capped, unit_value, candidate.lot_size)
+            notional = quantity * unit_value
         if quantity != 0 and abs(notional) < candidate.min_notional:
             quantity = Decimal("0")
             notional = Decimal("0")
@@ -534,6 +722,11 @@ def _evaluate(
                 quantity=quantity,
                 notional=notional,
                 estimated_cost=cost,
+                base_currency=(
+                    candidate.valuation.base_currency
+                    if candidate.valuation is not None
+                    else None
+                ),
             )
         )
 
@@ -596,6 +789,11 @@ def _cash_fallback(
                 quantity=Decimal("0"),
                 notional=Decimal("0"),
                 estimated_cost=Decimal("0"),
+                base_currency=(
+                    candidate.valuation.base_currency
+                    if candidate.valuation is not None
+                    else None
+                ),
             )
             for candidate in candidates
         ),
@@ -624,6 +822,10 @@ def allocate_targets(
 
     if not candidates:
         return _cash_fallback(candidates, reason="no allocation candidates")
+
+    valuation_problem = _valuation_problem(candidates, decision_time=decision_time)
+    if valuation_problem is not None:
+        return _cash_fallback(candidates, reason=valuation_problem)
 
     normalized_stress = _normalize_stress_scenarios(candidates, stress_scenarios)
     if policy.require_adverse_stress_evidence and policy.require_fresh_stress_evidence:
@@ -957,7 +1159,7 @@ def allocate_objective_targets(
 
 _ALLOWED_EVIDENCE_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 _ALLOWED_ALLOCATION_EVIDENCE_KINDS = frozenset(
-    {"OBJECTIVE", "MARKET_CONSTRAINT", "CAPITAL_STATE", "STRESS_SCENARIO"}
+    {"OBJECTIVE", "MARKET_CONSTRAINT", "CAPITAL_STATE", "STRESS_SCENARIO", "VALUATION"}
 )
 
 
@@ -1171,6 +1373,7 @@ class EvidenceBoundObjectiveAllocationResult:
     account_state_version: int
     reservation_state_version: int
     reservation_state_digest: str
+    base_currency: str | None = None
 
 
 def _payload_text(evidence: ImmutableAllocationEvidence, key: str) -> str:
@@ -1318,6 +1521,70 @@ def _candidate_evidence_matches(
     )
 
 
+def _candidate_valuation_matches(
+    candidate: AllocationCandidate,
+    evidence: ImmutableAllocationEvidence,
+    *,
+    instrument_version: str,
+    decision_time: str,
+) -> str:
+    valuation = candidate.valuation
+    if valuation is None:
+        raise ValueError(f"candidate {candidate.symbol} lacks economic valuation")
+    if not valuation.valid_at(decision_time):
+        raise ValueError(f"valuation is stale or not yet observable for {candidate.symbol}")
+    expected = {
+        "symbol": candidate.symbol,
+        "instrument_version": instrument_version,
+        "payoff_kind": valuation.payoff_kind,
+        "quote_currency": valuation.quote_currency,
+        "settlement_currency": valuation.settlement_currency,
+        "base_currency": valuation.base_currency,
+        "contract_multiplier": valuation.contract_multiplier,
+        "fx_rate_to_base": valuation.fx_rate_to_base,
+        "valuation_identity": valuation.valuation_identity,
+        "fx_evidence_id": valuation.fx_evidence_id,
+        "price": candidate.price,
+        "desired_notional_currency": valuation.base_currency,
+    }
+    for key, actual in expected.items():
+        raw = evidence.payload.get(key)
+        if actual is None:
+            if raw is not None:
+                raise ValueError(f"VALUATION payload {key} mismatch for {candidate.symbol}")
+            continue
+        if isinstance(actual, Decimal):
+            if _decimal(raw, name=f"VALUATION payload {key}") != actual:
+                raise ValueError(f"VALUATION payload {key} mismatch for {candidate.symbol}")
+        elif _text(raw, name=f"VALUATION payload {key}") != actual:
+            raise ValueError(f"VALUATION payload {key} mismatch for {candidate.symbol}")
+    cost_components = (
+        "execution_cost_rate",
+        "financing_cost_rate",
+        "funding_cost_rate",
+        "borrow_cost_rate",
+    )
+    explicit_cost = sum(
+        (_payload_decimal(evidence, key) for key in cost_components),
+        Decimal("0"),
+    )
+    if any(_payload_decimal(evidence, key) < 0 for key in cost_components):
+        raise ValueError(f"VALUATION cost components must be non-negative for {candidate.symbol}")
+    if explicit_cost != candidate.cost_rate:
+        raise ValueError(f"VALUATION explicit cost components mismatch for {candidate.symbol}")
+    if _payload_decimal(evidence, "fee_floor_base") != candidate.fee_floor:
+        raise ValueError(f"VALUATION fee_floor_base mismatch for {candidate.symbol}")
+    if valuation.payoff_kind not in {"CASH_EQUITY", "LINEAR_FUTURE"}:
+        raise ValueError(
+            f"VALUATION payoff {valuation.payoff_kind} is not qualified for linear allocation"
+        )
+    if valuation.settlement_currency != valuation.quote_currency:
+        raise ValueError(
+            f"VALUATION settlement/quote conversion is not qualified for {candidate.symbol}"
+        )
+    return valuation.base_currency
+
+
 def _allocation_decision_digest(
     result: ObjectiveAllocationResult,
     *,
@@ -1334,6 +1601,7 @@ def _allocation_decision_digest(
     account_state_version: int,
     reservation_state_version: int,
     reservation_state_digest: str,
+    base_currency: str | None = None,
 ) -> str:
     payload = {
         "environment": environment,
@@ -1354,6 +1622,7 @@ def _allocation_decision_digest(
         "account_state_version": account_state_version,
         "reservation_state_version": reservation_state_version,
         "reservation_state_digest": reservation_state_digest,
+        "base_currency": base_currency,
         "objective_version": result.objective_version,
         "selected_symbols": list(result.selected_symbols),
         "expected_net_utility": str(result.expected_net_utility),
@@ -1371,6 +1640,7 @@ def _allocation_decision_digest(
                     "quantity": str(target.quantity),
                     "notional": str(target.notional),
                     "estimated_cost": str(target.estimated_cost),
+                    "base_currency": target.base_currency,
                 }
                 for target in result.allocation.targets
             ],
@@ -1395,6 +1665,7 @@ def allocate_evidence_bound_objective_targets(
     environment: str,
     decision_time: str,
     policy_version: str,
+    valuation_evidence: Mapping[str, ImmutableAllocationEvidence] | None = None,
     max_candidate_sets: int = 64,
 ) -> EvidenceBoundObjectiveAllocationResult:
     """Validate authoritative inputs, then reuse the existing WP-32 allocator.
@@ -1427,6 +1698,7 @@ def allocate_evidence_bound_objective_targets(
 
     resolved_objective = {}
     resolved_market = {}
+    resolved_valuation = {}
     provider_ids = set()
     account_ids = set()
     instrument_versions = {}
@@ -1464,12 +1736,42 @@ def allocate_evidence_bound_objective_targets(
         account_ids.add(account_id)
         instrument_versions[symbol] = instrument_version
         capability_snapshot_ids[symbol] = capability_snapshot_id
+
+        if item.candidate.valuation is not None:
+            if valuation_evidence is None or set(valuation_evidence) != set(symbols):
+                raise ValueError("valuation evidence must exactly cover valued candidate symbols")
+            valuation_record = _resolve_allocation_evidence(
+                valuation_evidence[symbol],
+                resolved_evidence,
+                expected_kind="VALUATION",
+                expected_environment=normalized_environment,
+                at=normalized_decision_time,
+            )
+            base = _candidate_valuation_matches(
+                item.candidate,
+                valuation_record,
+                instrument_version=instrument_version,
+                decision_time=normalized_decision_time,
+            )
+            resolved_valuation[symbol] = valuation_record
+        elif valuation_evidence is not None:
+            raise ValueError("valuation evidence requires valued allocation candidates")
     if len(provider_ids) != 1:
         raise ValueError("market evidence candidates must share one provider_id")
     if len(account_ids) != 1:
         raise ValueError("market evidence candidates must share one account_id")
     provider_id = next(iter(provider_ids))
     account_id = next(iter(account_ids))
+    base_currency = None
+    if resolved_valuation:
+        base_currencies = {
+            item.candidate.valuation.base_currency
+            for item in materialized
+            if item.candidate.valuation is not None
+        }
+        if len(base_currencies) != 1:
+            raise ValueError("valued allocation candidates must share one base_currency")
+        base_currency = next(iter(base_currencies))
 
     resolved_capital = _resolve_allocation_evidence(
         capital_evidence,
@@ -1567,6 +1869,7 @@ def allocate_evidence_bound_objective_targets(
     all_evidence = [
         *(resolved_objective[symbol] for symbol in sorted(resolved_objective)),
         *(resolved_market[symbol] for symbol in sorted(resolved_market)),
+        *(resolved_valuation[symbol] for symbol in sorted(resolved_valuation)),
         resolved_capital,
         *sorted(resolved_stress, key=lambda evidence: evidence.evidence_id),
     ]
@@ -1591,6 +1894,7 @@ def allocate_evidence_bound_objective_targets(
         account_state_version=account_state_version,
         reservation_state_version=reservation_state_version,
         reservation_state_digest=reservation_state_digest,
+        base_currency=base_currency,
     )
     return EvidenceBoundObjectiveAllocationResult(
         objective=objective_result,
@@ -1608,6 +1912,7 @@ def allocate_evidence_bound_objective_targets(
         account_state_version=account_state_version,
         reservation_state_version=reservation_state_version,
         reservation_state_digest=reservation_state_digest,
+        base_currency=base_currency,
     )
 
 
@@ -1733,6 +2038,7 @@ def revalidate_evidence_bound_allocation(
         account_state_version=result.account_state_version,
         reservation_state_version=result.reservation_state_version,
         reservation_state_digest=result.reservation_state_digest,
+        base_currency=result.base_currency,
     )
     if expected_digest != result.decision_digest:
         raise ValueError("allocation decision digest does not match result content")

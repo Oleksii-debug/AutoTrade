@@ -186,6 +186,33 @@ class EconomicBook:
             self._reversed_transaction_ids.add(normalized.reverses_transaction_id)
         return True
 
+    def append_batch(self, transactions: Iterable[JournalTransaction]) -> bool:
+        """Atomically append an immutable batch or leave the live book unchanged.
+
+        Exact replay of a fully committed batch is idempotent. A mixed state where
+        only part of the batch already exists fails closed rather than silently
+        completing a transaction group whose original atomicity cannot be proven.
+        """
+
+        batch = tuple(transactions)
+        if not batch:
+            raise ValueError("atomic transaction batch must not be empty")
+
+        candidate = EconomicBook(self._transactions)
+        outcomes = tuple(candidate.append(transaction) for transaction in batch)
+        if any(outcomes) and not all(outcomes):
+            raise AccountingConflict(
+                "atomic transaction batch is only partially committed"
+            )
+        if not any(outcomes):
+            return False
+
+        self._transactions = candidate._transactions.copy()
+        self._by_id = candidate._by_id.copy()
+        self._by_cause_event_id = candidate._by_cause_event_id.copy()
+        self._reversed_transaction_ids = candidate._reversed_transaction_ids.copy()
+        return True
+
     def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
         account = _name(ledger_account, field="ledger_account")
         asset = _name(asset_or_currency, field="asset_or_currency")
@@ -254,6 +281,9 @@ class ScopedEconomicBook:
 
     def append(self, transaction: JournalTransaction) -> bool:
         return self._book.append(transaction)
+
+    def append_batch(self, transactions: Iterable[JournalTransaction]) -> bool:
+        return self._book.append_batch(transactions)
 
     def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
         return self._book.balance(ledger_account, asset_or_currency)

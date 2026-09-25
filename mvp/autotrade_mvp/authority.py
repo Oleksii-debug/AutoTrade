@@ -12,7 +12,13 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .durable_reservations import DurableReservationBook
 from .persistence import JournalStore, canonical_json, payload_digest
-from .risk import RiskDecision, risk_decision_fingerprint, validate_bound_risk_decision
+from .risk import (
+    RiskDecision,
+    normalize_reservation_requirements,
+    reservation_requirements_payload,
+    risk_decision_fingerprint,
+    validate_bound_risk_decision,
+)
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -803,6 +809,19 @@ class AuthorityService:
                 "durable admission reservation creation evidence is ambiguous"
             )
         reservation_event = matching_reservations[0]
+        reservation_request = reservation_event["payload"].get("request")
+        if not isinstance(reservation_request, dict):
+            raise AuthorityConflict(
+                "durable reservation request evidence is malformed"
+            )
+        risk_requirements = risk_payload.get("reservation_requirements")
+        if (
+            not isinstance(risk_requirements, dict)
+            or reservation_request.get("requirements") != risk_requirements
+        ):
+            raise AuthorityConflict(
+                "risk decision reservation delta does not match durable reservation"
+            )
         reservation_version = risk_payload.get("reservation_version")
         if (
             not isinstance(reservation_version, int)
@@ -1136,6 +1155,25 @@ class AuthorityService:
             capability_snapshot_id, name="capability_snapshot_id"
         )
         rid = _text(reservation_id, name="reservation_id")
+        try:
+            expected_risk_id = (
+                "risk:sha256:" + risk_decision_fingerprint(risk_decision)
+            )
+        except (TypeError, ValueError) as error:
+            raise AuthorityConflict(
+                "risk decision binding is invalid"
+            ) from error
+        if risk_decision.decision_id != expected_risk_id:
+            raise AuthorityConflict(
+                "risk decision id does not match bound evidence"
+            )
+        normalized_requirements = normalize_reservation_requirements(
+            reservation_requirements
+        )
+        if risk_decision.reservation_requirements != normalized_requirements:
+            raise AuthorityConflict(
+                "reservation requirements do not match risk decision"
+            )
         if (
             not isinstance(current_state_version, int)
             or isinstance(current_state_version, bool)
@@ -1290,6 +1328,9 @@ class AuthorityService:
             "state_version": risk_decision.state_version,
             "policy_version": risk_decision.policy_version,
             "reservation_version": risk_decision.reservation_version,
+            "reservation_requirements": reservation_requirements_payload(
+                risk_decision.reservation_requirements
+            ),
             "capability_snapshot_id": risk_decision.capability_snapshot_id,
             "evaluated_at": risk_decision.evaluated_at,
             "valid_until": risk_decision.valid_until,

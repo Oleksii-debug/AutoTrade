@@ -73,6 +73,39 @@ def aggregate(
 
 
 class SpecialistDagTests(unittest.TestCase):
+    def test_string_collections_cannot_masquerade_as_specialist_evidence(self):
+        with self.assertRaisesRegex(SpecialistDagError, "required_inputs must be a tuple"):
+            SpecialistSpec(
+                role_id="research",
+                correlation_group="g",
+                max_cost=Decimal("1"),
+                expected_incremental_value=Decimal("1"),
+                required_inputs="news",
+            )
+        with self.assertRaisesRegex(SpecialistDagError, "evidence_refs must be a tuple"):
+            SpecialistRun(
+                role_id="research",
+                input_snapshot_id="cut-1",
+                direction="LONG",
+                score=Decimal("0.5"),
+                confidence=Decimal("1"),
+                evidence_refs="artifact:proof",
+                cost=Decimal("0"),
+                completed_at=NOW,
+            )
+
+    def test_dag_plan_rejects_non_exact_numeric_identity(self):
+        canonical = full_plan([spec("a", "g1", cost="1")], budget="1")
+        with self.assertRaisesRegex(SpecialistDagError, "exact decimal input"):
+            type(canonical)(
+                canonical.input_snapshot_id,
+                canonical.scheduled_roles,
+                canonical.skipped_roles,
+                1.0,
+                canonical.available_inputs,
+                Decimal("1"),
+            )
+
     def test_plan_runs_only_positive_value_roles_inside_budget(self):
         plan = plan_specialists(
             [

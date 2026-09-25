@@ -86,3 +86,8 @@ snapshot reconciliation and secret redaction.
 REST `/v5/execution/list` не вважається повним економічним доказом лише через наявність `execFee`. Документований linear-приклад Bybit містить ненульовий `execFee` з порожнім `feeCurrency`, тому адаптер не виводить валюту з символу, котирувальної чи розрахункової валюти. За порожнього `feeCurrency` потрібне окреме кваліфіковане зіставлення для точної версії інструмента; без нього перетворення в канонічний `ProviderFillEvidence` завершується fail-closed.
 
 Поле `extraFees` також входить до provider execution economics. Поки для його юрисдикційних складових немає канонічного представлення й кваліфікованої одиниці, будь-яке непорожнє значення блокує створення повного fill evidence. Порожні форми не додають економічного факту. Це навмисно не є твердженням про повну WP-22 qualification.
+
+
+## Environment-bound response provenance
+
+Recorded order-submission evidence is not environment-neutral. The adapter now requires an explicit `MAINNET`, `TESTNET` or `DEMO` environment for every parsed create-order response and binds the evidence URI to the corresponding documented REST service (`api.bybit.com`, `api-testnet.bybit.com`, or `api-demo.bybit.com`). Unknown environments fail closed. This prevents testnet/demo observations from being mislabeled as mainnet evidence; regional/entity-specific production endpoints remain outside this bounded foundation until separately qualified.

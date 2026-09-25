@@ -324,14 +324,13 @@ class SecurityBoundaryTests(unittest.TestCase):
                 origin=session.origin,
                 ttl_seconds=60,
             )
-        self.assertEqual(
+        self.clock[0] = 1020.0
+        with self.assertRaisesRegex(PermissionError, "idle timeout"):
             boundary.validate_session(
                 session.token,
                 required_roles={"OPERATOR"},
                 origin=session.origin,
-            ).subject,
-            "operator-refresh-fail",
-        )
+            )
 
     def test_origin_binding_blocks_browser_replay(self):
         handle = self._credential()

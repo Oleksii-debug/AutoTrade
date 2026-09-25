@@ -833,6 +833,8 @@ def prepare_mleg_order_request(
     return AlpacaPreparedRequest(
         endpoint="/v2/orders",
         body=body,
+        account_id=first_capability.account_id,
+        environment=first_capability.environment,
         capability_snapshot_id=first_capability.snapshot_id,
         documentation_refs=tuple(ALPACA_DOCS.values()) + (_ALPACA_MLEG_DOC,),
     )

@@ -10,8 +10,12 @@ from mvp.autotrade_mvp.model_call import (
     DurableModelCallOrchestrator,
     ModelCallError,
     ModelCallNotSent,
+    BillingEvidence,
     ModelCallObservation,
     ModelCallSpec,
+    ModelObservationEvidence,
+    PricingEvidenceSnapshot,
+    PricingQuote,
 )
 from mvp.autotrade_mvp.model_gateway import (
     ModelDescriptor,
@@ -19,7 +23,7 @@ from mvp.autotrade_mvp.model_gateway import (
     RoutingMode,
     RoutingPolicy,
 )
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 
 
 NOW = datetime(2026, 9, 25, 10, 0, 0, tzinfo=timezone.utc)
@@ -48,6 +52,114 @@ def open_budget(directory, *, ceiling="5", environment="PAPER"):
         clock=lambda: NOW_TEXT,
     )
     return journal, budget
+
+
+def _pricing_evidence(call_spec, descriptors):
+    material = [
+        {
+            "provider_id": item.provider_id,
+            "model_id": item.model_id,
+            "revision": item.revision,
+            "estimated_cost": str(item.estimated_cost),
+        }
+        for item in descriptors
+    ]
+    return PricingEvidenceSnapshot(
+        evidence_id=call_spec.pricing_evidence_id,
+        evidence_digest=payload_digest(
+            {
+                "pricing_evidence_id": call_spec.pricing_evidence_id,
+                "as_of": call_spec.pricing_as_of,
+                "cost_currency": call_spec.cost_currency,
+                "quotes": material,
+            }
+        ),
+        as_of=call_spec.pricing_as_of,
+        valid_until="2026-09-25T11:00:00Z",
+        cost_currency=call_spec.cost_currency,
+        quotes=tuple(
+            PricingQuote(
+                provider_id=item.provider_id,
+                model_id=item.model_id,
+                revision=item.revision,
+                estimated_cost=item.estimated_cost,
+            )
+            for item in descriptors
+        ),
+    )
+
+
+def _observation_evidence(observed, binding):
+    observation_digest = payload_digest(
+        {
+            "attempt_id": binding.attempt_id,
+            "provider_id": observed.provider_id,
+            "model_id": observed.model_id,
+            "revision": observed.revision,
+            "observed_at": observed.observed_at,
+            "incurred_cost": str(observed.incurred_cost),
+            "estimated_unbilled": str(observed.estimated_unbilled),
+            "output_digest": payload_digest(observed.output),
+            "provider_request_id": observed.provider_request_id,
+            "provider_response_id": observed.provider_response_id,
+            "usage_id": observed.usage_id,
+            "billing_id": observed.billing_id,
+        }
+    )
+    return ModelObservationEvidence(
+        attempt_id=binding.attempt_id,
+        evidence_id="usage-evidence:" + (observed.usage_id or "local"),
+        evidence_digest=payload_digest(
+            {
+                "issuer": observed.provider_id,
+                "observation_digest": observation_digest,
+            }
+        ),
+        issuer=observed.provider_id,
+        observation_digest=observation_digest,
+    )
+
+
+def _billing_evidence(attempt_id, billing_id, billed, observed_payload):
+    return BillingEvidence(
+        attempt_id=attempt_id,
+        billing_id=billing_id,
+        provider_id=observed_payload["provider_id"],
+        model_id=observed_payload["model_id"],
+        revision=observed_payload.get("revision"),
+        billed=billed,
+        cost_currency=observed_payload["cost_currency"],
+        observed_at="2026-09-25T10:05:00Z",
+        evidence_id="billing-evidence:" + billing_id,
+        evidence_digest=payload_digest(
+            {
+                "attempt_id": attempt_id,
+                "billing_id": billing_id,
+                "billed": str(billed),
+                "provider_id": observed_payload["provider_id"],
+            }
+        ),
+        issuer=observed_payload["provider_id"],
+    )
+
+
+def orchestrator_for(
+    *,
+    budget,
+    clock,
+    pricing_evidence_resolver=_pricing_evidence,
+    observation_evidence_resolver=_observation_evidence,
+    billing_evidence_resolver=_billing_evidence,
+    **kwargs,
+):
+    return DurableModelCallOrchestrator(
+        budget=budget,
+        clock=clock,
+        pricing_evidence_resolver=pricing_evidence_resolver,
+        observation_evidence_resolver=observation_evidence_resolver,
+        billing_evidence_resolver=billing_evidence_resolver,
+        **kwargs,
+    )
 
 
 def spec(
@@ -155,7 +267,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
             clock = MutableClock()
-            orchestrator = DurableModelCallOrchestrator(
+            orchestrator = orchestrator_for(
                 budget=budget,
                 clock=clock,
             )
@@ -187,7 +299,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
     def test_local_only_ignores_remote_and_calls_admitted_local_model(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
-            orchestrator = DurableModelCallOrchestrator(
+            orchestrator = orchestrator_for(
                 budget=budget,
                 clock=MutableClock(),
             )
@@ -240,7 +352,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
     def test_call_begins_only_with_exact_active_durable_reservation(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
-            orchestrator = DurableModelCallOrchestrator(
+            orchestrator = orchestrator_for(
                 budget=budget,
                 clock=MutableClock(),
             )
@@ -273,13 +385,13 @@ class ModelCallLifecycleTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
             clock = MutableClock()
-            first = DurableModelCallOrchestrator(
+            first = orchestrator_for(
                 budget=budget,
                 clock=clock,
                 owner_token="owner-a",
                 started_lease_seconds=60,
             )
-            second = DurableModelCallOrchestrator(
+            second = orchestrator_for(
                 budget=budget,
                 clock=clock,
                 owner_token="owner-b",
@@ -341,7 +453,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             journal, budget = open_budget(directory)
             clock = MutableClock()
-            orchestrator = DurableModelCallOrchestrator(
+            orchestrator = orchestrator_for(
                 budget=budget,
                 clock=clock,
             )
@@ -369,7 +481,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
             self.assertEqual(snap.incurred, Decimal("0"))
             self.assertEqual(snap.estimated_unbilled, Decimal("1.2"))
 
-            retry = DurableModelCallOrchestrator(
+            retry = orchestrator_for(
                 budget=budget,
                 clock=clock,
             ).execute(
@@ -396,7 +508,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
             clock = MutableClock()
-            orchestrator = DurableModelCallOrchestrator(
+            orchestrator = orchestrator_for(
                 budget=budget,
                 clock=clock,
                 owner_token="owner-a",
@@ -440,7 +552,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 unique_claim=True,
             )
 
-            active = DurableModelCallOrchestrator(
+            active = orchestrator_for(
                 budget=budget,
                 clock=clock,
                 started_lease_seconds=30,
@@ -457,7 +569,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
             self.assertEqual(budget.snapshot().reserved, Decimal("1.2"))
 
             clock.advance(31)
-            recovered = DurableModelCallOrchestrator(
+            recovered = orchestrator_for(
                 budget=budget,
                 clock=clock,
                 started_lease_seconds=30,
@@ -480,7 +592,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
             clock = MutableClock()
-            orchestrator = DurableModelCallOrchestrator(
+            orchestrator = orchestrator_for(
                 budget=budget,
                 clock=clock,
             )
@@ -523,7 +635,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
     def test_pricing_evidence_change_cannot_rebind_existing_reservation(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
-            orchestrator = DurableModelCallOrchestrator(
+            orchestrator = orchestrator_for(
                 budget=budget,
                 clock=MutableClock(),
             )
@@ -558,7 +670,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
     def test_schema_invalid_result_still_settles_observed_cost(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
-            orchestrator = DurableModelCallOrchestrator(
+            orchestrator = orchestrator_for(
                 budget=budget,
                 clock=MutableClock(),
             )
@@ -586,7 +698,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
     def test_provider_model_mismatch_is_unknown_not_free_release(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
-            orchestrator = DurableModelCallOrchestrator(
+            orchestrator = orchestrator_for(
                 budget=budget,
                 clock=MutableClock(),
             )
@@ -609,7 +721,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
     def test_explicit_not_sent_proof_releases_and_is_idempotent(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
-            orchestrator = DurableModelCallOrchestrator(
+            orchestrator = orchestrator_for(
                 budget=budget,
                 clock=MutableClock(),
             )
@@ -649,7 +761,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
     def test_pre_call_cancellation_releases_without_invocation(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
-            orchestrator = DurableModelCallOrchestrator(
+            orchestrator = orchestrator_for(
                 budget=budget,
                 clock=MutableClock(),
             )
@@ -675,7 +787,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
     def test_observed_billing_reconciliation_is_bound_to_attempt_identity(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
-            orchestrator = DurableModelCallOrchestrator(
+            orchestrator = orchestrator_for(
                 budget=budget,
                 clock=MutableClock(),
             )
@@ -715,7 +827,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
     def test_fallback_lineage_remains_local_only_when_policy_is_local_only(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
-            orchestrator = DurableModelCallOrchestrator(
+            orchestrator = orchestrator_for(
                 budget=budget,
                 clock=MutableClock(),
             )
@@ -752,7 +864,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
     def test_over_reserved_observed_cost_is_conservative_unknown(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
-            orchestrator = DurableModelCallOrchestrator(
+            orchestrator = orchestrator_for(
                 budget=budget,
                 clock=MutableClock(),
             )

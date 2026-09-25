@@ -218,7 +218,7 @@ class SpecialistDagTests(unittest.TestCase):
         result = aggregate_specialists(
             specs,
             [run("a", "0.4")],
-            plan=full_plan(specs),
+            plan=plan_specialists(specs, available_inputs=(), total_budget="2"),
             decision_deadline=NOW,
         )
         self.assertIn(("b", "missing_result"), result.rejected_roles)

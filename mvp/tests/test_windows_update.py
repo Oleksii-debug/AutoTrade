@@ -1,11 +1,25 @@
+import base64
 from hashlib import sha256
 import json
+from tempfile import TemporaryDirectory
 import unittest
 from uuid import NAMESPACE_URL, uuid5
 
+from research.autotrade_research.artifacts.store import ArtifactStore
+
+from mvp.autotrade_mvp.qualification_attestation import (
+    EvidenceArtifactRef,
+    QualificationAttestation,
+    QualificationScope,
+    QualificationTrustPolicy,
+    SignedQualificationAttestation,
+    TrustRoot,
+)
 from mvp.autotrade_mvp.release_candidate import (
     ReleaseArtifactEvidence,
     ReleaseCandidateDecision,
+    ReleaseCandidateInput,
+    freeze_release_candidate,
 )
 from mvp.autotrade_mvp.windows_update import (
     BackupEvidence,
@@ -13,6 +27,7 @@ from mvp.autotrade_mvp.windows_update import (
     WindowsUpdateCheckpoint,
     WindowsUpdateError,
     WindowsUpdatePlan,
+    WindowsUpdateTrustContext,
     advance_rollback_checkpoint,
     advance_update_checkpoint,
     assess_windows_update_restart,
@@ -28,6 +43,8 @@ CURRENT_SOURCE = "1" * 40
 CANDIDATE_SOURCE = "2" * 40
 BASELINE = "sha256:" + "a" * 64
 CONTRACTS = "sha256:" + "b" * 64
+RELEASE_MEDIA_TYPE = "application/vnd.autotrade.release-artifact"
+RELEASE_EVIDENCE_KIND = "AUTOTRADE_RELEASE_EVIDENCE_V1"
 REQUIRED_ROLES = (
     "HOST",
     "WEB",
@@ -42,83 +59,164 @@ REQUIRED_ROLES = (
     "RELEASE_QUALIFICATION",
 )
 
+# Non-production RSA fixture. Runtime trust contains only the public half.
+_RSA_N = int(
+    "ae5f6165c50e6af720388e7649c53e3ec1c539b5d6cfea06c10d9895b362fc9f"
+    "ae4d7afc9c4496d4ef3716fd49f8f9321f81e9794be8861f078cd25c702e57a6"
+    "f135cb6e6cc7ee562c5aee6a52eae29a4b61fd6db7a0e0272525888588247d3b"
+    "86f94992b9fe6471da90a6db05bd1108702adadba98e0130a903e1fa3ee58211b"
+    "61c036a81442fb25824cc4b90dd8ae2eeee4112d01f80c5b44898f03bf3e7d278"
+    "6906aa2ea7d3065074c5a6ab72f20926fa34edef80433f64ab60f57e91e22a700"
+    "f09f442796f17b142331d8b6764c8ccc9545320f11a2f52512915a3085e41beaf"
+    "2e3437e1a2f91cd674c49f165fa296a50d1692d78ea3e4bc0fcc9b021f53",
+    16,
+)
+_RSA_D = int(
+    "43e0b631df1923336af40924ebc79fd8df262eb665d60eb42d5f6507d54a51abb"
+    "936c90adfabe589234baf23cf315f940ee6cbe35f54b72d0a0bdbf186ebcb4c1d"
+    "b682a7cc29b1d212b71cfaffa716a9d8715f2d601f7c5250a8013275d23a7bbb2"
+    "97c65e5082dc29241dfe9ff9c5f2e89376d75b7d5a309f5a920c500c9e7ace61"
+    "f85eefc7665f3dff9bab2e28da848e0ea0c5c32a90043fdaf056c3a21431d4aa2"
+    "9eaed6a2d70bbbaff3b78e1bdd9bbd4a617e3f16d5da358864c538408994097358"
+    "54c4cecdadc8f082693679b823270b8d2402102916cb2b94bb92615d480b184a8d"
+    "cd479ac90fd9c18ee4e341b9bee6238f231b672d8715c649e28cdde9",
+    16,
+)
+_DER_SHA256 = bytes.fromhex("3031300d060960864801650304020105000420")
 
-def frozen_release(release_id: str, source_sha: str, digest_seed: int):
+
+def _trust_root():
+    return TrustRoot(
+        producer_id="qualifier.release.service",
+        verifier_id="autotrade.trust.verifier",
+        public_modulus_hex=format(_RSA_N, "x"),
+        public_exponent=65537,
+        allowed_scopes=(QualificationScope("RELEASE", "FREEZE"),),
+        valid_from="2026-09-01T00:00:00Z",
+    )
+
+
+def _sign(attestation):
+    digest_info = _DER_SHA256 + sha256(attestation.canonical_bytes()).digest()
+    width = (_RSA_N.bit_length() + 7) // 8
+    encoded = (
+        b"\x00\x01"
+        + b"\xff" * (width - len(digest_info) - 3)
+        + b"\x00"
+        + digest_info
+    )
+    signature = pow(
+        int.from_bytes(encoded, "big"), _RSA_D, _RSA_N
+    ).to_bytes(width, "big")
+    return base64.b64encode(signature).decode("ascii")
+
+
+def frozen_release(
+    store,
+    trust_root,
+    trust_policy,
+    release_id: str,
+    source_sha: str,
+    digest_seed: int,
+):
     artifacts = []
     for index, role in enumerate(REQUIRED_ROLES):
         digest_char = hex((digest_seed + index) % 16)[2:]
-        artifacts.append(
-            ReleaseArtifactEvidence.create(
-                role=role,
-                artifact_id=str(
-                    uuid5(
-                        NAMESPACE_URL,
-                        f"autotrade-windows-update-test:{source_sha}:{role}:{digest_char}",
-                    )
-                ),
-                artifact_sha256="sha256:" + digest_char * 64,
-                source_sha=source_sha,
-                signature_status=(
-                    "VERIFIED"
-                    if role in {"HOST", "WEB", "DESKTOP", "WINDOWS_PACKAGE"}
-                    else "NOT_APPLICABLE"
-                ),
-                evidence_status="PASS",
-            )
+        identity = (
+            f"autotrade-windows-update-test:{release_id}:"
+            f"{source_sha}:{role}:{digest_char}"
         )
-    qualification = {
-        "attestation_id": str(
+        artifact_id = str(uuid5(NAMESPACE_URL, identity))
+        data = ("release-evidence:" + identity).encode("utf-8")
+        signature_status = (
+            "VERIFIED"
+            if role in {"HOST", "WEB", "DESKTOP", "WINDOWS_PACKAGE"}
+            else "NOT_APPLICABLE"
+        )
+        artifact = ReleaseArtifactEvidence.create(
+            role=role,
+            artifact_id=artifact_id,
+            artifact_sha256="sha256:" + sha256(data).hexdigest(),
+            source_sha=source_sha,
+            signature_status=signature_status,
+            evidence_status="PASS",
+        )
+        store.publish_bytes(
+            artifact_id=artifact_id,
+            data=data,
+            media_type=RELEASE_MEDIA_TYPE,
+            rights={"storage": True, "export": False},
+            source_refs=[f"git:{source_sha}"],
+            metadata={
+                "evidence_kind": RELEASE_EVIDENCE_KIND,
+                "role": role,
+                "source_sha": source_sha,
+                "signature_status": signature_status,
+                "evidence_status": "PASS",
+            },
+        )
+        artifacts.append(artifact)
+
+    candidate = ReleaseCandidateInput.create(
+        release_id=release_id,
+        source_sha=source_sha,
+        baseline_hash=BASELINE,
+        schema_contract_hash=CONTRACTS,
+        artifacts=tuple(artifacts),
+        unresolved_blockers=(),
+    )
+    evidence_refs = tuple(
+        EvidenceArtifactRef(
+            artifact_id=item.artifact_id,
+            sha256=item.artifact_sha256,
+            media_type=RELEASE_MEDIA_TYPE,
+            evidence_kind=RELEASE_EVIDENCE_KIND,
+            source_sha=item.source_sha,
+        )
+        for item in candidate.artifacts
+    )
+    windows_package = next(
+        item for item in candidate.artifacts if item.role == "WINDOWS_PACKAGE"
+    )
+    attestation = QualificationAttestation(
+        attestation_id=str(
             uuid5(
                 NAMESPACE_URL,
-                f"autotrade-windows-update-test:{source_sha}:{release_id}:attestation",
+                f"autotrade-windows-update-test:{release_id}:qualification",
             )
         ),
-        "attestation_digest": (
-            "sha256:"
-            + sha256(
-                f"{source_sha}:{release_id}:qualified".encode("utf-8")
-            ).hexdigest()
-        ),
-        "policy_id": "windows-update-test-policy",
-        "trust_root_id": "windows-update-test-root",
-    }
-    manifest = {
-        "release_id": release_id,
-        "source_sha": source_sha,
-        "baseline_hash": BASELINE,
-        "schema_contract_hash": CONTRACTS,
-        "qualification": qualification,
-        "artifacts": [
-            {
-                "role": item.role,
-                "artifact_id": item.artifact_id,
-                "artifact_sha256": item.artifact_sha256,
-                "source_sha": item.source_sha,
-                "signature_status": item.signature_status,
-                "evidence_status": item.evidence_status,
-            }
-            for item in sorted(artifacts, key=lambda item: item.role)
-        ],
-    }
-    manifest_json = json.dumps(
-        manifest,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
+        source_sha=source_sha,
+        domain="RELEASE",
+        gate="FREEZE",
+        package_id="WP-54",
+        protocol_id="release-freeze-v1",
+        protocol_version="1.0.0",
+        requirement_ids=("release-candidate-freeze",),
+        evidence_refs=evidence_refs,
+        producer_id=trust_root.producer_id,
+        verifier_id=trust_root.verifier_id,
+        trust_root_id=trust_root.root_id,
+        runner_id="windows-update-test-qualification",
+        harness_version="1.0.0",
+        started_at="2026-09-25T02:00:00Z",
+        completed_at="2026-09-25T02:10:00Z",
+        signed_at="2026-09-25T02:11:00Z",
+        result="PASS",
+        release_artifact_id=windows_package.artifact_id,
+        release_artifact_sha256=windows_package.artifact_sha256,
     )
-    return ReleaseCandidateDecision(
-        status="FROZEN",
-        reasons=(),
-        manifest_json=manifest_json,
-        manifest_sha256=(
-            "sha256:" + sha256(manifest_json.encode("utf-8")).hexdigest()
-        ),
-        qualification_attestation_id=qualification["attestation_id"],
-        qualification_attestation_digest=qualification["attestation_digest"],
-        qualification_policy_id=qualification["policy_id"],
-        qualification_trust_root_id=qualification["trust_root_id"],
+    receipt = SignedQualificationAttestation(attestation, _sign(attestation))
+    decision = freeze_release_candidate(
+        candidate,
+        evidence_store=store,
+        qualification_receipt=receipt,
+        qualification_policy=trust_policy,
+        expected_policy_id=trust_policy.policy_id,
+        expected_policy_version=trust_policy.policy_version,
     )
+    if decision.status != "FROZEN":
+        raise AssertionError(decision.reasons)
+    return decision
 
 
 def rehashed_plan(plan: WindowsUpdatePlan, mutate) -> WindowsUpdatePlan:
@@ -141,8 +239,35 @@ def rehashed_plan(plan: WindowsUpdatePlan, mutate) -> WindowsUpdatePlan:
 
 class WindowsUpdatePlanTests(unittest.TestCase):
     def setUp(self):
-        self.current = frozen_release("autotrade-1.0.0", CURRENT_SOURCE, 3)
-        self.candidate = frozen_release("autotrade-1.1.0", CANDIDATE_SOURCE, 5)
+        self._tempdir = TemporaryDirectory()
+        self.store = ArtifactStore(self._tempdir.name)
+        self.trust_root = _trust_root()
+        self.trust_policy = QualificationTrustPolicy(
+            policy_version="2026.09",
+            roots=(self.trust_root,),
+        )
+        self.trust = WindowsUpdateTrustContext(
+            evidence_store=self.store,
+            qualification_policy=self.trust_policy,
+            expected_policy_id=self.trust_policy.policy_id,
+            expected_policy_version=self.trust_policy.policy_version,
+        )
+        self.current = frozen_release(
+            self.store,
+            self.trust_root,
+            self.trust_policy,
+            "autotrade-1.0.0",
+            CURRENT_SOURCE,
+            3,
+        )
+        self.candidate = frozen_release(
+            self.store,
+            self.trust_root,
+            self.trust_policy,
+            "autotrade-1.1.0",
+            CANDIDATE_SOURCE,
+            5,
+        )
         self.backup = BackupEvidence(
             manifest_sha256="sha256:" + "c" * 64,
             source_sha=CURRENT_SOURCE,
@@ -151,6 +276,9 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             reconciliation_required_after_restore=True,
         )
 
+    def tearDown(self):
+        self._tempdir.cleanup()
+
     def test_same_schema_update_is_deterministic_and_never_grants_authority(self):
         first = build_windows_update_plan(
             current_release=self.current,
@@ -158,6 +286,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
+        trust=self.trust,
         )
         second = build_windows_update_plan(
             current_release=self.current,
@@ -165,6 +294,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
+        trust=self.trust,
         )
         self.assertEqual(first.status, "PLAN_READY")
         self.assertEqual(first.plan_json, second.plan_json)
@@ -191,6 +321,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=2,
             backup_evidence=self.backup,
+        trust=self.trust,
         )
         self.assertEqual(decision.status, "BLOCKED")
         self.assertIn(
@@ -215,6 +346,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             candidate_journal_schema_version=2,
             backup_evidence=self.backup,
             migration_evidence=migration,
+        trust=self.trust,
         )
         self.assertEqual(decision.status, "PLAN_READY")
         payload = json.loads(decision.plan_json)
@@ -247,6 +379,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             candidate_journal_schema_version=2,
             backup_evidence=self.backup,
             migration_evidence=migration,
+        trust=self.trust,
         )
         self.assertEqual(decision.status, "BLOCKED")
         self.assertIn("migration_source_sha_mismatch", decision.reasons)
@@ -265,6 +398,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=wrong_backup,
+        trust=self.trust,
         )
         self.assertEqual(decision.status, "BLOCKED")
         self.assertIn(
@@ -312,6 +446,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
                     current_journal_schema_version=1,
                     candidate_journal_schema_version=1,
                     backup_evidence=backup,
+                trust=self.trust,
                 )
                 self.assertEqual(decision.status, "BLOCKED")
                 self.assertIn(reason, decision.reasons)
@@ -323,6 +458,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
+        trust=self.trust,
         )
         self.assertEqual(decision.status, "BLOCKED")
         self.assertIn(
@@ -346,6 +482,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
             migration_evidence=migration,
+        trust=self.trust,
         )
         self.assertEqual(decision.status, "BLOCKED")
         self.assertIn(
@@ -379,7 +516,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             WindowsUpdateError,
-            "exactly one WINDOWS_PACKAGE",
+            "independently reverified",
         ):
             build_windows_update_plan(
                 current_release=forged,
@@ -387,6 +524,44 @@ class WindowsUpdatePlanTests(unittest.TestCase):
                 current_journal_schema_version=1,
                 candidate_journal_schema_version=1,
                 backup_evidence=self.backup,
+            trust=self.trust,
+            )
+
+    def test_self_published_frozen_release_with_forged_signature_fails_closed(self):
+        payload = json.loads(self.current.manifest_json)
+        payload["qualification"]["receipt"]["signature_b64"] = base64.b64encode(
+            b"x" * 256
+        ).decode("ascii")
+        forged_json = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        forged = ReleaseCandidateDecision(
+            status="FROZEN",
+            reasons=(),
+            manifest_json=forged_json,
+            manifest_sha256=(
+                "sha256:" + sha256(forged_json.encode("utf-8")).hexdigest()
+            ),
+            qualification_attestation_id=self.current.qualification_attestation_id,
+            qualification_attestation_digest=self.current.qualification_attestation_digest,
+            qualification_policy_id=self.current.qualification_policy_id,
+            qualification_trust_root_id=self.current.qualification_trust_root_id,
+        )
+        with self.assertRaisesRegex(
+            WindowsUpdateError,
+            "independently reverified",
+        ):
+            build_windows_update_plan(
+                current_release=forged,
+                candidate_release=self.candidate,
+                current_journal_schema_version=1,
+                candidate_journal_schema_version=1,
+                backup_evidence=self.backup,
+                trust=self.trust,
             )
 
     def test_forged_manifest_digest_is_rejected(self):
@@ -411,6 +586,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
                 current_journal_schema_version=1,
                 candidate_journal_schema_version=1,
                 backup_evidence=self.backup,
+            trust=self.trust,
             )
 
     def test_schema_versions_reject_bool_and_nonpositive_values(self):
@@ -421,6 +597,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
                 current_journal_schema_version=True,
                 candidate_journal_schema_version=1,
                 backup_evidence=self.backup,
+            trust=self.trust,
             )
         with self.assertRaisesRegex(WindowsUpdateError, "positive integer"):
             BackupEvidence(
@@ -439,29 +616,34 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
+        trust=self.trust,
         )
-        checkpoint = start_update_checkpoint(plan)
+        checkpoint = start_update_checkpoint(plan , trust=self.trust)
         with self.assertRaisesRegex(WindowsUpdateError, "out-of-order update step"):
             advance_update_checkpoint(
                 plan,
                 checkpoint,
                 "VERIFY_PRE_UPDATE_BACKUP",
+            trust=self.trust,
             )
         checkpoint = advance_update_checkpoint(
             plan,
             checkpoint,
             "STOP_AND_FENCE_FINANCIAL_SENDER",
+        trust=self.trust,
         )
         replay = advance_update_checkpoint(
             plan,
             checkpoint,
             "STOP_AND_FENCE_FINANCIAL_SENDER",
+        trust=self.trust,
         )
         self.assertIs(replay, checkpoint)
         checkpoint = advance_update_checkpoint(
             plan,
             checkpoint,
             "VERIFY_PRE_UPDATE_BACKUP",
+        trust=self.trust,
         )
         self.assertEqual(
             checkpoint.update_completed_steps,
@@ -478,6 +660,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
+        trust=self.trust,
         )
         corrupt = WindowsUpdateCheckpoint(
             plan_sha256=plan.plan_sha256,
@@ -488,6 +671,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
                 plan,
                 corrupt,
                 "VERIFY_CANDIDATE_SIGNATURE_AND_EXACT_HASH",
+            trust=self.trust,
             )
 
     def test_rollback_blocks_forward_progress_and_has_its_own_order(self):
@@ -497,35 +681,41 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
+        trust=self.trust,
         )
-        checkpoint = start_update_checkpoint(plan)
+        checkpoint = start_update_checkpoint(plan , trust=self.trust)
         checkpoint = advance_update_checkpoint(
             plan,
             checkpoint,
             "STOP_AND_FENCE_FINANCIAL_SENDER",
+        trust=self.trust,
         )
-        checkpoint = start_rollback_checkpoint(plan, checkpoint)
+        checkpoint = start_rollback_checkpoint(plan, checkpoint , trust=self.trust)
         with self.assertRaisesRegex(WindowsUpdateError, "cannot continue"):
             advance_update_checkpoint(
                 plan,
                 checkpoint,
                 "VERIFY_PRE_UPDATE_BACKUP",
+            trust=self.trust,
             )
         with self.assertRaisesRegex(WindowsUpdateError, "out-of-order rollback step"):
             advance_rollback_checkpoint(
                 plan,
                 checkpoint,
                 "RUN_POST_RESTORE_RECONCILIATION",
+            trust=self.trust,
             )
         checkpoint = advance_rollback_checkpoint(
             plan,
             checkpoint,
             "STOP_AND_FENCE_FINANCIAL_SENDER",
+        trust=self.trust,
         )
         replay = advance_rollback_checkpoint(
             plan,
             checkpoint,
             "STOP_AND_FENCE_FINANCIAL_SENDER",
+        trust=self.trust,
         )
         self.assertIs(replay, checkpoint)
 
@@ -536,8 +726,12 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
+        trust=self.trust,
         )
         other_candidate = frozen_release(
+            self.store,
+            self.trust_root,
+            self.trust_policy,
             "autotrade-1.2.0",
             "3" * 40,
             7,
@@ -548,13 +742,15 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
+        trust=self.trust,
         )
-        checkpoint = start_update_checkpoint(plan)
+        checkpoint = start_update_checkpoint(plan , trust=self.trust)
         with self.assertRaisesRegex(WindowsUpdateError, "different update plan"):
             advance_update_checkpoint(
                 other_plan,
                 checkpoint,
                 "STOP_AND_FENCE_FINANCIAL_SENDER",
+            trust=self.trust,
             )
 
     def test_plan_stops_before_separate_authority_reacquisition(self):
@@ -564,6 +760,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
+        trust=self.trust,
         )
         payload = json.loads(plan.plan_json)
         self.assertEqual(
@@ -587,20 +784,23 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
+        trust=self.trust,
         )
-        checkpoint = start_update_checkpoint(plan)
+        checkpoint = start_update_checkpoint(plan , trust=self.trust)
         checkpoint = advance_update_checkpoint(
             plan,
             checkpoint,
             "STOP_AND_FENCE_FINANCIAL_SENDER",
+        trust=self.trust,
         )
         checkpoint = advance_update_checkpoint(
             plan,
             checkpoint,
             "VERIFY_PRE_UPDATE_BACKUP",
+        trust=self.trust,
         )
         serialized = serialize_update_checkpoint(checkpoint)
-        restored = restore_update_checkpoint(plan, serialized)
+        restored = restore_update_checkpoint(plan, serialized , trust=self.trust)
         self.assertEqual(restored, checkpoint)
         self.assertEqual(
             serialize_update_checkpoint(restored),
@@ -614,8 +814,9 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
+        trust=self.trust,
         )
-        checkpoint = start_update_checkpoint(plan)
+        checkpoint = start_update_checkpoint(plan , trust=self.trust)
         serialized = json.loads(serialize_update_checkpoint(checkpoint))
         serialized["update_completed_steps"] = ["VERIFY_PRE_UPDATE_BACKUP"]
         with self.assertRaisesRegex(
@@ -625,20 +826,30 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             restore_update_checkpoint(
                 plan,
                 json.dumps(serialized, sort_keys=True, separators=(",", ":")),
+            trust=self.trust,
             )
 
-        other_candidate = frozen_release("autotrade-1.2.0", "3" * 40, 7)
+        other_candidate = frozen_release(
+            self.store,
+            self.trust_root,
+            self.trust_policy,
+            "autotrade-1.2.0",
+            "3" * 40,
+            7,
+        )
         other_plan = build_windows_update_plan(
             current_release=self.current,
             candidate_release=other_candidate,
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
+        trust=self.trust,
         )
         with self.assertRaisesRegex(WindowsUpdateError, "different update plan"):
             restore_update_checkpoint(
                 other_plan,
                 serialize_update_checkpoint(checkpoint),
+            trust=self.trust,
             )
 
     def test_checkpoint_restore_rejects_unknown_fields_and_schema(self):
@@ -648,14 +859,16 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
+        trust=self.trust,
         )
-        checkpoint = start_update_checkpoint(plan)
+        checkpoint = start_update_checkpoint(plan , trust=self.trust)
         body = json.loads(serialize_update_checkpoint(checkpoint))
         body["surprise"] = True
         with self.assertRaisesRegex(WindowsUpdateError, "structure"):
             restore_update_checkpoint(
                 plan,
                 json.dumps(body, sort_keys=True, separators=(",", ":")),
+            trust=self.trust,
             )
 
         body = json.loads(serialize_update_checkpoint(checkpoint))
@@ -664,6 +877,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             restore_update_checkpoint(
                 plan,
                 json.dumps(body, sort_keys=True, separators=(",", ":")),
+            trust=self.trust,
             )
 
 
@@ -683,17 +897,19 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             candidate_journal_schema_version=2,
             backup_evidence=self.backup,
             migration_evidence=migration,
+        trust=self.trust,
         )
         document = json.loads(plan.plan_json)
         current_package = document["current_release"]["windows_package_sha256"]
         candidate_package = document["candidate_release"]["windows_package_sha256"]
-        checkpoint = start_update_checkpoint(plan)
+        checkpoint = start_update_checkpoint(plan , trust=self.trust)
 
         preinstall = assess_windows_update_restart(
             plan,
             checkpoint,
             observed_windows_package_sha256=current_package,
             observed_journal_schema_version=1,
+        trust=self.trust,
         )
         self.assertEqual(
             preinstall.disposition,
@@ -705,6 +921,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             checkpoint,
             observed_windows_package_sha256=candidate_package,
             observed_journal_schema_version=2,
+        trust=self.trust,
         )
         self.assertEqual(
             candidate_observed.disposition,
@@ -720,6 +937,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             checkpoint,
             observed_windows_package_sha256=candidate_package,
             observed_journal_schema_version=1,
+        trust=self.trust,
         )
         self.assertEqual(mixed.disposition, "ROLLBACK_REQUIRED")
 
@@ -730,13 +948,15 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
+        trust=self.trust,
         )
-        checkpoint = start_update_checkpoint(plan)
+        checkpoint = start_update_checkpoint(plan , trust=self.trust)
         unknown_package = assess_windows_update_restart(
             plan,
             checkpoint,
             observed_windows_package_sha256="sha256:" + "9" * 64,
             observed_journal_schema_version=1,
+        trust=self.trust,
         )
         self.assertEqual(
             unknown_package.disposition,
@@ -750,6 +970,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             checkpoint,
             observed_windows_package_sha256=current_package,
             observed_journal_schema_version=99,
+        trust=self.trust,
         )
         self.assertEqual(
             unknown_schema.disposition,
@@ -772,19 +993,21 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             candidate_journal_schema_version=2,
             backup_evidence=self.backup,
             migration_evidence=migration,
+        trust=self.trust,
         )
         document = json.loads(plan.plan_json)
         current_package = document["current_release"]["windows_package_sha256"]
         candidate_package = document["candidate_release"]["windows_package_sha256"]
         checkpoint = start_rollback_checkpoint(
             plan,
-            start_update_checkpoint(plan),
+            start_update_checkpoint(plan , trust=self.trust),
         )
         restored = assess_windows_update_restart(
             plan,
             checkpoint,
             observed_windows_package_sha256=current_package,
             observed_journal_schema_version=1,
+        trust=self.trust,
         )
         self.assertEqual(
             restored.disposition,
@@ -795,6 +1018,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             checkpoint,
             observed_windows_package_sha256=candidate_package,
             observed_journal_schema_version=2,
+        trust=self.trust,
         )
         self.assertEqual(not_restored.disposition, "ROLLBACK_REQUIRED")
 
@@ -863,6 +1087,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             candidate_journal_schema_version=2,
             backup_evidence=self.backup,
             migration_evidence=migration,
+        trust=self.trust,
         )
         self.assertEqual(plan.status, "PLAN_READY")
         payload = json.loads(plan.plan_json)
@@ -898,6 +1123,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
+        trust=self.trust,
         )
         mutations = (
             (
@@ -929,7 +1155,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             with self.subTest(message=message):
                 forged = rehashed_plan(plan, mutate)
                 with self.assertRaisesRegex(WindowsUpdateError, message):
-                    start_update_checkpoint(forged)
+                    start_update_checkpoint(forged , trust=self.trust)
 
     def test_rehashed_release_identity_or_package_cannot_escape_frozen_manifest(self):
         plan = build_windows_update_plan(
@@ -938,6 +1164,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
+        trust=self.trust,
         )
         mutations = (
             lambda body: body["candidate_release"].__setitem__(
@@ -957,7 +1184,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             with self.subTest(mutate=mutate):
                 forged = rehashed_plan(plan, mutate)
                 with self.assertRaises(WindowsUpdateError):
-                    start_update_checkpoint(forged)
+                    start_update_checkpoint(forged , trust=self.trust)
 
     def test_rehashed_migration_evidence_cannot_bypass_schema_gates(self):
         migration = MigrationEvidence(
@@ -975,6 +1202,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             candidate_journal_schema_version=2,
             backup_evidence=self.backup,
             migration_evidence=migration,
+        trust=self.trust,
         )
         mutations = (
             (
@@ -1006,7 +1234,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             with self.subTest(message=message):
                 forged = rehashed_plan(plan, mutate)
                 with self.assertRaisesRegex(WindowsUpdateError, message):
-                    start_update_checkpoint(forged)
+                    start_update_checkpoint(forged , trust=self.trust)
 
     def test_rehashed_custom_step_sequence_cannot_bypass_canonical_plan(self):
         plan = build_windows_update_plan(
@@ -1015,6 +1243,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
+        trust=self.trust,
         )
         body = json.loads(plan.plan_json)
         body["install_steps"][1] = "ARBITRARY_SIDE_EFFECT"
@@ -1032,7 +1261,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             plan_sha256="sha256:" + sha256(forged_json.encode("utf-8")).hexdigest(),
         )
         with self.assertRaisesRegex(WindowsUpdateError, "step sequence is not canonical"):
-            start_update_checkpoint(forged)
+            start_update_checkpoint(forged , trust=self.trust)
 
     def test_rehashed_plan_cannot_claim_trading_authority(self):
         plan = build_windows_update_plan(
@@ -1041,6 +1270,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             current_journal_schema_version=1,
             candidate_journal_schema_version=1,
             backup_evidence=self.backup,
+        trust=self.trust,
         )
         body = json.loads(plan.plan_json)
         body["trading_authority_granted_by_plan"] = True
@@ -1058,7 +1288,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             plan_sha256="sha256:" + sha256(forged_json.encode("utf-8")).hexdigest(),
         )
         with self.assertRaisesRegex(WindowsUpdateError, "cannot grant trading authority"):
-            start_update_checkpoint(forged)
+            start_update_checkpoint(forged , trust=self.trust)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ from .qualification_attestation import (
     QualificationTrustError,
     QualificationTrustPolicy,
     SignedQualificationAttestation,
+    parse_signed_qualification_attestation,
     verify_qualification_attestation,
 )
 
@@ -412,6 +413,7 @@ class ReleaseCandidateDecision:
                 "attestation_digest",
                 "policy_id",
                 "trust_root_id",
+                "receipt",
             }:
                 raise ReleaseCandidateError(
                     "frozen release candidate requires independently verified attestation"
@@ -422,9 +424,32 @@ class ReleaseCandidateDecision:
                 "policy_id": self.qualification_policy_id,
                 "trust_root_id": self.qualification_trust_root_id,
             }
-            if qualification != expected or any(value is None for value in expected.values()):
+            observed = {
+                key: qualification.get(key)
+                for key in expected
+            }
+            if observed != expected or any(value is None for value in expected.values()):
                 raise ReleaseCandidateError(
                     "frozen release candidate attestation identity mismatch"
+                )
+            try:
+                receipt = parse_signed_qualification_attestation(
+                    qualification.get("receipt")
+                )
+            except QualificationTrustError as error:
+                raise ReleaseCandidateError(
+                    "frozen release candidate qualification receipt is malformed"
+                ) from error
+            if (
+                receipt.attestation.attestation_id
+                != self.qualification_attestation_id
+                or receipt.attestation.content_digest
+                != self.qualification_attestation_digest
+                or receipt.attestation.trust_root_id
+                != self.qualification_trust_root_id
+            ):
+                raise ReleaseCandidateError(
+                    "frozen release candidate qualification receipt identity mismatch"
                 )
         else:
             if not self.reasons:
@@ -452,6 +477,7 @@ class ReleaseCandidateDecision:
 def _canonical_manifest(
     candidate: ReleaseCandidateInput,
     accepted: AcceptedQualificationAttestation,
+    receipt: SignedQualificationAttestation,
 ) -> str:
     body = {
         "release_id": candidate.release_id,
@@ -463,6 +489,10 @@ def _canonical_manifest(
             "attestation_digest": accepted.attestation_digest,
             "policy_id": accepted.policy_id,
             "trust_root_id": accepted.trust_root_id,
+            "receipt": {
+                "attestation": receipt.attestation.canonical_payload(),
+                "signature_b64": receipt.signature_b64,
+            },
         },
         "artifacts": [
             {
@@ -683,11 +713,15 @@ def freeze_release_candidate(
             manifest_sha256=None,
         )
 
-    if accepted is None:
+    if accepted is None or qualification_receipt is None:
         raise ReleaseCandidateError(
             "release freeze reached terminal path without accepted qualification"
         )
-    manifest = _canonical_manifest(candidate, accepted)
+    manifest = _canonical_manifest(
+        candidate,
+        accepted,
+        qualification_receipt,
+    )
     digest = "sha256:" + sha256(manifest.encode("utf-8")).hexdigest()
     return ReleaseCandidateDecision(
         status="FROZEN",

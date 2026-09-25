@@ -42,7 +42,11 @@ def _text(value: str, *, name: str) -> str:
 
 
 def _utc(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
         raise FinancingError(f"{name} must be timezone-aware")
     return value.astimezone(timezone.utc)
 
@@ -58,6 +62,42 @@ class FinancingEvent:
     amount: Decimal
     source_account: str
     evidence_ref: str
+
+    def __post_init__(self) -> None:
+        normalized_kind = _text(self.kind, name="kind").upper()
+        if normalized_kind not in {"INDICATED", "FINAL"}:
+            raise FinancingError("kind must be INDICATED or FINAL")
+        if (
+            isinstance(self.revision, bool)
+            or not isinstance(self.revision, int)
+            or self.revision < 1
+        ):
+            raise FinancingError("revision must be a positive integer")
+        charge = _decimal(self.amount, name="amount")
+        if charge < 0:
+            raise FinancingError("financing charge amount must be non-negative")
+        effective = _utc(self.effective_at, name="effective_at")
+        available = _utc(self.available_at, name="available_at")
+        if normalized_kind == "FINAL" and available < effective:
+            raise FinancingError(
+                "final charge cannot be available before effective_at"
+            )
+        object.__setattr__(self, "charge_id", _text(self.charge_id, name="charge_id"))
+        object.__setattr__(self, "kind", normalized_kind)
+        object.__setattr__(self, "effective_at", effective)
+        object.__setattr__(self, "available_at", available)
+        object.__setattr__(self, "unit", _text(self.unit, name="unit"))
+        object.__setattr__(self, "amount", charge)
+        object.__setattr__(
+            self,
+            "source_account",
+            _text(self.source_account, name="source_account"),
+        )
+        object.__setattr__(
+            self,
+            "evidence_ref",
+            _text(self.evidence_ref, name="evidence_ref"),
+        )
 
     @classmethod
     def create(

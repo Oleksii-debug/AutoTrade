@@ -26,6 +26,12 @@ public sealed record EmergencyHostStatus(
                 "Host status evidence time must be a non-default UTC instant.");
         }
 
+        if (ObservedAtUtc > DateTimeOffset.UtcNow)
+        {
+            throw new InvalidOperationException(
+                "Host status evidence time cannot be in the future.");
+        }
+
         if (Connected)
         {
             ValidateConnectedIdentity(HostId, nameof(HostId));

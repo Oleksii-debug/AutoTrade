@@ -52,7 +52,7 @@ class JournalStore:
     publication intent; a separate qualified dispatcher must perform delivery.
     """
 
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -170,6 +170,10 @@ class JournalStore:
             return (
                 "ALTER TABLE outbox ADD COLUMN envelope_hash TEXT",
             )
+        if version == 5:
+            return (
+                "ALTER TABLE command_dedupe ADD COLUMN result_hash TEXT",
+            )
         raise ValueError(f"Unsupported journal migration version: {version}")
 
     @classmethod
@@ -180,6 +184,8 @@ class JournalStore:
         }
         if cls.SCHEMA_VERSION >= 3:
             command_columns.update({"actor", "environment"})
+        if cls.SCHEMA_VERSION >= 5:
+            command_columns.add("result_hash")
         required = {
             "schema_migrations": frozenset({"version", "applied_at"}),
             "events": frozenset({
@@ -311,6 +317,40 @@ class JournalStore:
                     if version == 4:
                         for row in connection.execute(
                             "SELECT outbox_id, payload_json FROM outbox"
+                        ):
+                            envelope_hash = (
+                                "sha256:"
+                                + sha256(
+                                    str(row["payload_json"]).encode("utf-8")
+                                ).hexdigest()
+                            )
+                            connection.execute(
+                                "UPDATE outbox SET envelope_hash = ? "
+                                "WHERE outbox_id = ?",
+                                (envelope_hash, row["outbox_id"]),
+                            )
+                    if version == 5:
+                        for row in connection.execute(
+                            "SELECT command_id, result_json FROM command_dedupe"
+                        ):
+                            result_hash = (
+                                "sha256:"
+                                + sha256(
+                                    str(row["result_json"]).encode("utf-8")
+                                ).hexdigest()
+                            )
+                            connection.execute(
+                                "UPDATE command_dedupe SET result_hash = ? "
+                                "WHERE command_id = ?",
+                                (result_hash, row["command_id"]),
+                            )
+                        # v4's atomic commit path could leave envelope_hash NULL.
+                        # Backfill only missing evidence during this explicit
+                        # migration; a non-NULL mismatch remains corruption and
+                        # is rejected by normal reads.
+                        for row in connection.execute(
+                            "SELECT outbox_id, payload_json FROM outbox "
+                            "WHERE envelope_hash IS NULL"
                         ):
                             envelope_hash = (
                                 "sha256:"
@@ -861,6 +901,19 @@ class JournalStore:
                 "use a new key"
             )
 
+    @staticmethod
+    def _decode_command_result(row: sqlite3.Row) -> Any:
+        result_json = str(row["result_json"])
+        expected_hash = (
+            "sha256:" + sha256(result_json.encode("utf-8")).hexdigest()
+        )
+        if row["result_hash"] != expected_hash:
+            raise ValueError("command result hash does not match stored result")
+        try:
+            return json.loads(result_json)
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ValueError("command result is not valid JSON") from error
+
     def record_command(
         self,
         *,
@@ -886,6 +939,9 @@ class JournalStore:
             raise ValueError("state_version must be a non-negative integer")
         request_hash = payload_digest(request)
         result_json = canonical_json(result)
+        result_hash = (
+            "sha256:" + sha256(result_json.encode("utf-8")).hexdigest()
+        )
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -896,11 +952,12 @@ class JournalStore:
                 (actor, environment, idempotency_key),
             ).fetchone()
             if existing is not None:
+                saved_result = self._decode_command_result(existing)
                 if existing["request_hash"] != request_hash:
                     connection.rollback()
                     raise ValueError("idempotency_key was already used for a different request")
                 connection.commit()
-                return json.loads(existing["result_json"]), False
+                return saved_result, False
             if connection.execute(
                 "SELECT 1 FROM command_dedupe WHERE command_id = ?", (command_id,)
             ).fetchone() is not None:
@@ -910,12 +967,12 @@ class JournalStore:
                 """
                 INSERT INTO command_dedupe(
                     command_id, actor, environment, idempotency_key,
-                    request_hash, result_json, state_version, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    request_hash, result_json, result_hash, state_version, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     command_id, actor, environment, idempotency_key,
-                    request_hash, result_json, state_version, self._now(),
+                    request_hash, result_json, result_hash, state_version, self._now(),
                 ),
             )
             connection.commit()
@@ -948,6 +1005,9 @@ class JournalStore:
 
         request_hash = payload_digest(request)
         result_json = canonical_json(result)
+        result_hash = (
+            "sha256:" + sha256(result_json.encode("utf-8")).hexdigest()
+        )
         prepared: list[dict[str, Any]] = []
         seen_event_ids: set[str] = set()
 
@@ -1005,12 +1065,13 @@ class JournalStore:
                     (actor, environment, idempotency_key),
                 ).fetchone()
                 if existing is not None:
+                    saved_result = self._decode_command_result(existing)
                     if existing["request_hash"] != request_hash:
                         raise ValueError(
                             "idempotency_key was already used for a different request"
                         )
                     connection.commit()
-                    return json.loads(existing["result_json"]), False, ()
+                    return saved_result, False, ()
 
                 if connection.execute(
                     "SELECT 1 FROM command_dedupe WHERE command_id = ?",
@@ -1045,8 +1106,9 @@ class JournalStore:
                     """
                     INSERT INTO command_dedupe(
                         command_id, actor, environment, idempotency_key,
-                        request_hash, result_json, state_version, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        request_hash, result_json, result_hash,
+                        state_version, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         command_id,
@@ -1055,6 +1117,7 @@ class JournalStore:
                         idempotency_key,
                         request_hash,
                         result_json,
+                        result_hash,
                         state_version,
                         self._now(),
                     ),

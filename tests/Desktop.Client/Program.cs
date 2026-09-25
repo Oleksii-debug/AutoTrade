@@ -22,7 +22,7 @@ internal static class Program
             "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'",
             System.Globalization.CultureInfo.InvariantCulture);
     
-    static object Snapshot(string version = "0") => new
+    static object Snapshot(string token, string version = "0") => new
     {
         state_version = version,
         event_cursor = version,
@@ -34,7 +34,7 @@ internal static class Program
         {
             actor = "owner",
             role = "OWNER",
-            session_id = "non-secret-session-reference",
+            session_id = AuthenticatedEmergencyHostClient.PublicSessionReference(token),
         },
         connection_freshness = new { host = "CURRENT", as_of = NowUtc() },
         portfolio = new { },
@@ -69,7 +69,7 @@ internal static class Program
             if (request.Method == HttpMethod.Get
                 && request.RequestUri!.AbsolutePath == "/api/v1/state")
             {
-                return Json(HttpStatusCode.OK, Snapshot("7"));
+                return Json(HttpStatusCode.OK, Snapshot(token, "7"));
             }
     
             if (request.Method == HttpMethod.Get
@@ -133,7 +133,7 @@ internal static class Program
             if (request.Method == HttpMethod.Get
                 && request.RequestUri!.AbsolutePath == "/api/v1/state")
             {
-                return Json(HttpStatusCode.OK, Snapshot());
+                return Json(HttpStatusCode.OK, Snapshot(token));
             }
     
             if (request.Method == HttpMethod.Post
@@ -218,6 +218,15 @@ internal static class Program
         Check.True(
             body.RootElement.GetProperty("command_id").GetString() == uncertainCommandId,
             "surfaced uncertain command identity differs from retried command");
+        string? publicSession =
+            body.RootElement.GetProperty("session").GetString();
+        Check.True(
+            publicSession == AuthenticatedEmergencyHostClient.PublicSessionReference(token),
+            "command did not bind the canonical public session reference");
+        Check.True(
+            publicSession != token
+                && !commandBodies[0].Contains(token, StringComparison.Ordinal),
+            "command payload leaked the reusable bearer credential");
     }
     
     static async Task UncertainCommandCannotRetargetSessionTest()
@@ -232,7 +241,7 @@ internal static class Program
             if (request.Method == HttpMethod.Get)
             {
                 AssertAuth(request, originalToken);
-                return Json(HttpStatusCode.OK, Snapshot());
+                return Json(HttpStatusCode.OK, Snapshot(originalToken));
             }
     
             posts++;
@@ -278,7 +287,7 @@ internal static class Program
                 && request.RequestUri!.AbsolutePath == "/api/v1/state")
             {
                 stateReads++;
-                return Json(HttpStatusCode.OK, Snapshot("11"));
+                return Json(HttpStatusCode.OK, Snapshot(token, "11"));
             }
 
             if (request.Method == HttpMethod.Post
@@ -409,7 +418,7 @@ internal static class Program
             if (request.Method == HttpMethod.Get)
             {
                 AssertAuth(request, originalToken);
-                return Json(HttpStatusCode.OK, Snapshot());
+                return Json(HttpStatusCode.OK, Snapshot(originalToken));
             }
 
             posts++;
@@ -503,7 +512,7 @@ internal static class Program
             () => client.GetStatusAsync(CancellationToken.None),
             "snapshot that echoes the bearer credential must fail closed");
 
-        string safeState = JsonSerializer.Serialize(Snapshot());
+        string safeState = JsonSerializer.Serialize(Snapshot(token));
         Check.True(
             !safeState.Contains(token, StringComparison.Ordinal),
             "canonical snapshot fixture leaked the bearer credential");

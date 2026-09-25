@@ -1,7 +1,12 @@
+from dataclasses import replace
+from tempfile import TemporaryDirectory
 import unittest
+from uuid import uuid4
 
+from research.autotrade_research.artifacts.store import ArtifactStore
 from research.autotrade_research.evaluation.gates import (
     EvaluationEvidence,
+    GateEvidenceRef,
     GateDecision,
     GateProfile,
     evaluate_gates,
@@ -50,6 +55,47 @@ def evidence(**overrides):
     return EvaluationEvidence.create(**values)
 
 
+EVIDENCE_KINDS = (
+    "profile",
+    "code",
+    "data",
+    "model",
+    "config",
+    "cost",
+    "rights",
+    "environment",
+    "trial_log",
+    "causal_audit",
+    "financial_invariants",
+    "retention",
+    "metrics",
+)
+
+
+def evaluate_with_verified_bundle(gate_profile, evaluation_evidence):
+    with TemporaryDirectory() as directory:
+        store = ArtifactStore(directory)
+        refs = {}
+        for kind in EVIDENCE_KINDS:
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=f"{gate_profile.profile_id}:{kind}".encode("utf-8"),
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                metadata={
+                    "evidence_kind": kind,
+                    "profile_id": gate_profile.profile_id,
+                },
+            )
+            refs[kind] = GateEvidenceRef(
+                artifact_id=artifact_id,
+                sha256=manifest["sha256"],
+            )
+        bound = replace(evaluation_evidence, evidence_refs=refs)
+        return evaluate_gates(gate_profile, bound, artifact_store=store)
+
+
 class EvaluationGateTests(unittest.TestCase):
     def test_direct_profile_construction_cannot_bypass_registered_thresholds(self):
         with self.assertRaisesRegex(ValueError, "minimum_net_advantage"):
@@ -96,7 +142,81 @@ class EvaluationGateTests(unittest.TestCase):
             EvaluationEvidence(**{**base, "regime_coverage": frozenset({"normal", 7})})
 
     def test_complete_registered_evidence_can_pass(self):
-        self.assertEqual(evaluate_gates(profile(), evidence()).status, "PASS")
+        self.assertEqual(
+            evaluate_with_verified_bundle(profile(), evidence()).status,
+            "PASS",
+        )
+
+
+    def test_all_true_metrics_without_resolvable_evidence_cannot_pass(self):
+        decision = evaluate_gates(profile(), evidence())
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertEqual(decision.checks["evidence_bundle"], "INCONCLUSIVE")
+
+    def test_incomplete_or_mismatched_evidence_bundle_fails_closed(self):
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"wrong-kind",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                metadata={
+                    "evidence_kind": "code",
+                    "profile_id": gate_profile.profile_id,
+                },
+            )
+            bound = replace(
+                evidence(),
+                evidence_refs={
+                    "code": GateEvidenceRef(
+                        artifact_id=artifact_id,
+                        sha256=manifest["sha256"],
+                    )
+                },
+            )
+            decision = evaluate_gates(
+                gate_profile,
+                bound,
+                artifact_store=store,
+            )
+            self.assertEqual(decision.status, "FAIL")
+            self.assertEqual(decision.checks["evidence_bundle"], "FAIL")
+
+    def test_evidence_digest_and_profile_binding_are_verified(self):
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            refs = {}
+            for kind in EVIDENCE_KINDS:
+                artifact_id = str(uuid4())
+                manifest = store.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=kind.encode("utf-8"),
+                    media_type="application/octet-stream",
+                    rights={"storage": True, "export": False},
+                    metadata={
+                        "evidence_kind": kind,
+                        "profile_id": (
+                            "other-profile"
+                            if kind == "metrics"
+                            else gate_profile.profile_id
+                        ),
+                    },
+                )
+                refs[kind] = GateEvidenceRef(
+                    artifact_id=artifact_id,
+                    sha256=manifest["sha256"],
+                )
+            decision = evaluate_gates(
+                gate_profile,
+                replace(evidence(), evidence_refs=refs),
+                artifact_store=store,
+            )
+            self.assertEqual(decision.status, "FAIL")
+            self.assertEqual(decision.checks["evidence_bundle"], "FAIL")
 
     def test_lower_bound_cannot_exceed_reported_point_estimate(self):
         decision = evaluate_gates(
@@ -114,7 +234,7 @@ class EvaluationGateTests(unittest.TestCase):
         )
 
     def test_consistent_lower_bound_and_point_estimate_can_pass(self):
-        decision = evaluate_gates(
+        decision = evaluate_with_verified_bundle(
             profile(),
             evidence(
                 dependence_aware_lower_bound="0.02",

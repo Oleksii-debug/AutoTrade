@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Mapping
 
+from .population_coverage import PopulationCoverageManifest
+
 
 def _decimal(value, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
@@ -224,6 +226,7 @@ class RetentionDecision:
     recent_improvement: Decimal | None
     regimes: tuple[RegimeDecision, ...]
     reasons: tuple[str, ...]
+    population_coverage_digest: str | None = None
 
 
 def evaluate_retention(
@@ -309,4 +312,71 @@ def evaluate_retention(
         recent_improvement=recent_improvement,
         regimes=tuple(decisions),
         reasons=tuple(reasons),
+    )
+
+
+
+def evaluate_population_bound_retention(
+    metrics: Mapping[str, RegimeMetric],
+    policy: RetentionPolicy,
+    population: PopulationCoverageManifest,
+) -> RetentionDecision:
+    """Require aggregate metrics to reconcile to one complete population manifest.
+
+    The existing retention math remains the only scoring authority.  This bridge
+    only proves that its observation counts and label-completeness flags describe
+    the same causal population that scientific qualification will attest.
+    """
+
+    if not isinstance(population, PopulationCoverageManifest):
+        raise TypeError("population must be PopulationCoverageManifest")
+    base = evaluate_retention(metrics, policy)
+    reasons = list(base.reasons)
+    evidence_incomplete = not population.complete
+    if evidence_incomplete:
+        reasons.append("population coverage manifest is incomplete")
+
+    counts = dict(population.included_regime_counts)
+    labels = dict(population.included_labels_complete_by_regime)
+    required = set(policy.protected_regimes) | set(policy.recent_regimes)
+
+    for regime in sorted(required):
+        metric = metrics.get(regime)
+        if metric is None:
+            continue
+        expected_observations = counts.get(regime, 0)
+        if metric.observations != expected_observations:
+            evidence_incomplete = True
+            reasons.append(
+                f"population observation count mismatch for regime {regime}"
+            )
+        expected_label_complete = labels.get(regime, False)
+        if metric.label_complete != expected_label_complete:
+            evidence_incomplete = True
+            reasons.append(
+                f"population label-completeness mismatch for regime {regime}"
+            )
+
+    unregistered_population = sorted(set(counts) - required)
+    if unregistered_population:
+        evidence_incomplete = True
+        reasons.append(
+            "population contains unregistered scored regimes: "
+            + ", ".join(unregistered_population)
+        )
+
+    if base.status == "FAIL":
+        status = "FAIL"
+    elif evidence_incomplete:
+        status = "INCONCLUSIVE"
+    else:
+        status = base.status
+    promotable = base.promotable and not evidence_incomplete and status == "PASS"
+    return RetentionDecision(
+        promotable=promotable,
+        status=status,
+        recent_improvement=base.recent_improvement,
+        regimes=base.regimes,
+        reasons=tuple(dict.fromkeys(reasons)),
+        population_coverage_digest=population.digest,
     )

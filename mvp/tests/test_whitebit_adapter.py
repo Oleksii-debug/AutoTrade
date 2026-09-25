@@ -7,11 +7,7 @@ import json
 import unittest
 from uuid import uuid4
 
-from mvp.autotrade_mvp.capabilities import (
-    CapabilityClaim,
-    EvidenceVerification,
-    derive_capability_snapshot,
-)
+from mvp.tests.capability_test_helpers import capability_snapshot
 from mvp.autotrade_mvp.whitebit import (
     WhiteBitAbsenceEvidence,
     WhiteBitAdapterError,
@@ -69,39 +65,25 @@ def capability(
     account_id="account-1",
     environment="PAPER",
 ):
-    observed_at = NOW - timedelta(hours=1)
-    claims = tuple(
-        CapabilityClaim(
-            source=source,
-            provider_id="WHITEBIT",
-            account_id=account_id,
-            entity_id="global",
-            environment=environment,
-            instrument_version="BTC_USDT:v1",
-            observed_at=observed_at,
-            expires_at=NOW + timedelta(hours=1),
-            supported_order_types=frozenset(order_types),
-            time_in_force=frozenset(tif),
-            permission_scopes=frozenset({"ORDER_WRITE"}),
-            position_mode="NET",
-            native_protection=frozenset({"STOP"}),
-            rate_limit_policy_id="whitebit-v4-test",
-            data_entitlements=frozenset({"ORDERS"}),
-            evidence_ref={
-                "artifact_id": str(uuid4()),
-                "sha256": "sha256:" + "a" * 64,
-                "observed_at": observed_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
-                "source_uri": "https://docs.whitebit.com/concepts/order-types",
-            },
-        )
-        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
-    )
-    return derive_capability_snapshot(
+    return capability_snapshot(
         snapshot_id=str(uuid4()),
-        claims=claims,
-        observed_at=observed_at,
-        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        provider_id="WHITEBIT",
+        account_id=account_id,
+        entity_id="global",
+        environment=environment,
+        instrument_version="BTC_USDT:v1",
+        observed_at=NOW - timedelta(hours=1),
+        expires_at=NOW + timedelta(hours=1),
+        supported_order_types=order_types,
+        time_in_force=tif,
+        permission_scopes={"ORDER_WRITE"},
+        position_mode="NET",
+        native_protection={"STOP"},
+        rate_limit_policy_id="whitebit-v4-test",
+        data_entitlements={"ORDERS"},
+        source_uri="https://docs.whitebit.com/concepts/order-types",
     )
+
 
 def market_rules(
     *,

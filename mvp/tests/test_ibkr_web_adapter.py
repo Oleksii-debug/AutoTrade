@@ -4,11 +4,7 @@ from decimal import Decimal
 import unittest
 from uuid import uuid4
 
-from mvp.autotrade_mvp.capabilities import (
-    CapabilityClaim,
-    EvidenceVerification,
-    derive_capability_snapshot,
-)
+from mvp.tests.capability_test_helpers import capability_snapshot
 from mvp.autotrade_mvp.ibkr_web import (
     IbkrAbsenceEvidence,
     IbkrBrokerageSessionStatus,
@@ -31,39 +27,25 @@ NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
 def capability(*, account_id="U1234567", order_types=("MARKET", "LIMIT", "STOP", "STOP_LIMIT")):
-    observed_at = NOW - timedelta(hours=1)
-    claims = tuple(
-        CapabilityClaim(
-            source=source,
-            provider_id="IBKR",
-            account_id=account_id,
-            entity_id="web-api",
-            environment="PAPER",
-            instrument_version="AAPL-CONID-265598:v1",
-            observed_at=observed_at,
-            expires_at=NOW + timedelta(hours=1),
-            supported_order_types=frozenset(order_types),
-            time_in_force=frozenset({"DAY", "GTC", "IOC"}),
-            permission_scopes=frozenset({"ORDER_WRITE"}),
-            position_mode="NET",
-            native_protection=frozenset(),
-            rate_limit_policy_id="ibkr-web-paper",
-            data_entitlements=frozenset({"ORDERS", "EXECUTIONS"}),
-            evidence_ref={
-                "artifact_id": str(uuid4()),
-                "sha256": "sha256:" + "e" * 64,
-                "observed_at": observed_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
-                "source_uri": "https://www.interactivebrokers.com/docs/web-api/v1/endpoints/orders/place-order",
-            },
-        )
-        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
-    )
-    return derive_capability_snapshot(
+    return capability_snapshot(
         snapshot_id=str(uuid4()),
-        claims=claims,
-        observed_at=observed_at,
-        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        provider_id="IBKR",
+        account_id=account_id,
+        entity_id="web-api",
+        environment="PAPER",
+        instrument_version="AAPL-CONID-265598:v1",
+        observed_at=NOW - timedelta(hours=1),
+        expires_at=NOW + timedelta(hours=1),
+        supported_order_types=order_types,
+        time_in_force={"DAY", "GTC", "IOC"},
+        permission_scopes={"ORDER_WRITE"},
+        position_mode="NET",
+        native_protection=(),
+        rate_limit_policy_id="ibkr-web-paper",
+        data_entitlements={"ORDERS", "EXECUTIONS"},
+        source_uri="https://www.interactivebrokers.com/docs/web-api/v1/endpoints/orders/place-order",
     )
+
 
 def ready_session(**overrides):
     values = dict(

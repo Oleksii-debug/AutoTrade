@@ -4,13 +4,8 @@ from hashlib import sha256
 import json
 from tempfile import TemporaryDirectory
 import unittest
-from uuid import uuid4
 
-from mvp.autotrade_mvp.capabilities import (
-    CapabilityClaim,
-    EvidenceVerification,
-    derive_capability_snapshot,
-)
+from mvp.tests.capability_test_helpers import capability_snapshot
 from mvp.autotrade_mvp.perpetual_margin import (
     MarginTier,
     PerpetualMarginError,
@@ -45,35 +40,18 @@ def capability(**overrides):
         instrument_version="BTC-PERP@v4",
         observed_at=datetime(2026, 9, 24, tzinfo=timezone.utc),
         expires_at=datetime(2026, 9, 26, tzinfo=timezone.utc),
-        supported_order_types=frozenset({"MARKET", "LIMIT"}),
-        time_in_force=frozenset({"GTC", "IOC"}),
-        permission_scopes=frozenset({"ORDER_WRITE"}),
+        supported_order_types={"MARKET", "LIMIT"},
+        time_in_force={"GTC", "IOC"},
+        permission_scopes={"ORDER_WRITE"},
         position_mode="ONE_WAY",
-        native_protection=frozenset(),
+        native_protection=(),
         rate_limit_policy_id="test-rate",
-        data_entitlements=frozenset({"MARK", "INDEX", "MARGIN"}),
+        data_entitlements={"MARK", "INDEX", "MARGIN"},
+        source_uri="https://example.invalid/autotrade/perpetual-margin-capability",
     )
     values.update(overrides)
-    snapshot_id = values.pop("snapshot_id")
-    observed_at = values["observed_at"]
-    claims = tuple(
-        CapabilityClaim(
-            source=source,
-            **values,
-            evidence_ref={
-                "artifact_id": str(uuid4()),
-                "sha256": "sha256:" + "f" * 64,
-                "observed_at": observed_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
-            },
-        )
-        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
-    )
-    return derive_capability_snapshot(
-        snapshot_id=snapshot_id,
-        claims=claims,
-        observed_at=observed_at,
-        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-    )
+    return capability_snapshot(**values)
+
 
 def evidence(**overrides):
     values = dict(

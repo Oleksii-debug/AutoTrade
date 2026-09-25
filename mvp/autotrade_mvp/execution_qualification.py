@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from .execution_oracle import assert_conservative_execution
 from .execution_realism import (
     ExecutionModel,
     ExecutionRealismError,
@@ -198,4 +199,11 @@ def simulate_qualified_execution(
         protocol_sha256=protocol_sha256,
         purpose=purpose,
     )
-    return simulate_execution(order, observation, model)
+    result = simulate_execution(order, observation, model)
+    assert_conservative_execution(
+        order=order,
+        observation=observation,
+        model=model,
+        result=result,
+    )
+    return result

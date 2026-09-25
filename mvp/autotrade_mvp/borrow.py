@@ -850,6 +850,40 @@ class BorrowLifecycleJournal:
             raise ValueError("borrow authority capacity mismatch")
         return expected
 
+    def current_capacity_for_bound_short(
+        self,
+        snapshot: Mapping[str, object],
+        *,
+        now: str,
+    ) -> dict[str, str]:
+        """Validate current provider truth before dispatch of an admitted short."""
+
+        if not isinstance(snapshot, Mapping):
+            raise TypeError("borrow authority snapshot must be a mapping")
+        raw_resource = snapshot.get("resource")
+        if not isinstance(raw_resource, Mapping) or raw_resource != self.resource.payload():
+            raise ValueError("borrow authority resource identity mismatch")
+        local_short = _decimal(
+            snapshot.get("local_short_quantity"),
+            name="local_short_quantity",
+        )
+        state = self.state()
+        if state.latest_locate is None:
+            raise ValueError("current provider borrow locate evidence is missing")
+        state.latest_locate.assert_fresh(now=now)
+        if state.blocks_new_short:
+            raise ValueError("active provider borrow recall blocks dispatch")
+        if state.latest_loan is None:
+            if local_short != 0:
+                raise ValueError("current provider borrow loan evidence is missing")
+        else:
+            state.latest_loan.assert_fresh(now=now)
+            if state.latest_loan.borrowed_quantity != local_short:
+                raise ValueError(
+                    "current provider borrowed quantity differs from bound local short"
+                )
+        return locate_capacity(state.latest_locate, now=now)
+
     def current_blocks_new_short(self) -> bool:
         """Current dispatch-time recall fence; no historical reinterpretation."""
 

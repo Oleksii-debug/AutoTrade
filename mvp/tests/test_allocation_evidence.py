@@ -354,6 +354,23 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 bundle=(objective, market, capital, stress, resolved),
             )
 
+    def test_same_currency_rejects_non_unit_identity_fx_evidence(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        valuation = resolved["valuation:aaa:v1"]
+        valuation_payload = dict(valuation.payload)
+        valuation_payload["fx_rate"] = "1.01"
+        valuation = self.evidence(
+            evidence_id=valuation.evidence_id,
+            kind="VALUATION",
+            payload=valuation_payload,
+        )
+        resolved = dict(resolved)
+        resolved[valuation.evidence_id] = valuation
+        with self.assertRaisesRegex(ValueError, "must use unit FX"):
+            self.allocate(
+                bundle=(objective, market, capital, stress, resolved),
+            )
+
     def test_bound_allocation_is_deterministic_and_revalidates(self):
         bundle = self.bundle()
         result = self.allocate(bundle=bundle)

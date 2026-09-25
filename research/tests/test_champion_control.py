@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -145,7 +145,34 @@ def online_envelope(candidate="candidate-a", *, interval=60, max_cost="2"):
     )
 
 
+class _NoOffsetTZ(tzinfo):
+    def utcoffset(self, dt):
+        return None
+
+    def dst(self, dt):
+        return None
+
+
 class ChampionRegistryTests(unittest.TestCase):
+    def test_candidate_evidence_time_requires_effective_utc_offset(self):
+        with self.assertRaisesRegex(ValueError, "timezone-aware"):
+            CandidateApproval.create(
+                candidate_id="candidate-a",
+                artifact_hash=digest("candidate-a"),
+                evidence_id="evidence:candidate-a",
+                evidence_valid_until=datetime(
+                    2026, 9, 25, 0, 0, tzinfo=_NoOffsetTZ()
+                ),
+                evaluation_status="PASS",
+                retention_passed=True,
+                risk_passed=True,
+                authority_scope_id="scope-a",
+                protocol_id="protocol-a",
+                protocol_hash=digest("protocol-a"),
+                evaluation_id="evaluation-a",
+                evaluation_result_hash=digest("evaluation-a"),
+            )
+
     def test_direct_candidate_approval_cannot_bypass_identity_or_boolean_guards(self):
         common = dict(
             candidate_id="candidate-a",

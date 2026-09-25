@@ -472,7 +472,7 @@ class AuthorityTests(unittest.TestCase):
         cases = [
             dict(account_id="other", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1, action="ORDER.SUBMIT", notional="10", risk_admitted=True, reason="account_out_of_scope"),
             dict(account_id="paper-1", environment="LIVE", instrument_id=INSTRUMENT_ID, instrument_version=1, action="ORDER.SUBMIT", notional="10", risk_admitted=True, reason="environment_out_of_scope"),
-            dict(account_id="paper-1", environment="PAPER", instrument_id=OTHER_INSTRUMENT_ID, instrument_version=1, action="ORDER.SUBMIT", notional="10", risk_admitted=True, reason="instrument_out_of_scope"),
+            dict(account_id="paper-1", environment="PAPER", instrument_id=OTHER_INSTRUMENT_ID, instrument_version=1, action="ORDER.SUBMIT", notional="10", risk_admitted=True, reason="instrument_version_out_of_scope"),
             dict(account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1, action="WITHDRAW", notional="10", risk_admitted=True, reason="action_out_of_scope"),
             dict(account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1, action="ORDER.SUBMIT", notional="1001", risk_admitted=True, reason="notional_out_of_scope"),
             dict(account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID, instrument_version=1, action="ORDER.SUBMIT", notional="10", risk_admitted=False, reason="risk_rejected"),
@@ -649,7 +649,7 @@ class AuthorityTests(unittest.TestCase):
                 instrument_version=1,
                 action="ORDER.SUBMIT",
             )
-            dispatcher = GuardedDispatcher(store, owner_token="owner")
+            dispatcher = GuardedDispatcher(\n                store, environment="PAPER", account_id="paper-1", owner_token="owner"\n            )
             outbound = 0
 
             def transport(client_id, request, final_guard):
@@ -731,7 +731,7 @@ class AuthorityTests(unittest.TestCase):
                     "event_type": "AuthorityAdmissionRecorded",
                     "aggregate_type": "authority_state",
                     "aggregate_id": "canonical",
-                    "aggregate_version": 2,
+                    "aggregate_version": "2",
                     "payload": payload,
                     "payload_hash": payload_digest(payload),
                     "committed_at": "2026-09-24T18:00:00Z",
@@ -774,7 +774,7 @@ class AuthorityTests(unittest.TestCase):
                     "event_type": "AuthorityAdmissionRecorded",
                     "aggregate_type": "authority_state",
                     "aggregate_id": "canonical",
-                    "aggregate_version": 2,
+                    "aggregate_version": "2",
                     "payload": payload,
                     "payload_hash": payload_digest(payload),
                     "committed_at": "2026-09-24T18:00:00Z",
@@ -843,7 +843,7 @@ class AuthorityTests(unittest.TestCase):
                     "event_type": "AuthorityAdmissionRecorded",
                     "aggregate_type": "authority_state",
                     "aggregate_id": "canonical",
-                    "aggregate_version": 4,
+                    "aggregate_version": "4",
                     "payload": duplicate,
                     "payload_hash": payload_digest(duplicate),
                     "committed_at": "2026-09-24T18:00:01Z",

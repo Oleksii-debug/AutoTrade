@@ -19,7 +19,7 @@ from mvp.autotrade_mvp.simulated_provider import SimulatedProvider
 
 NOW = "2026-09-24T18:00:00Z"
 LATER = "2026-09-24T18:01:00Z"
-INSTRUMENT = "ABC@1"
+INSTRUMENT = "ABC@1"\nAUTH_INSTRUMENT_ID = "ABC"
 
 
 def risk_policy() -> RiskPolicy:
@@ -62,7 +62,7 @@ def authority_service() -> AuthorityService:
             policy_id="sim-policy",
             account_id="sim-account",
             environments={"SIMULATION"},
-            instruments={INSTRUMENT},
+            instruments={(AUTH_INSTRUMENT_ID, 1)},
             actions={"ORDER.SUBMIT"},
             max_notional="1000",
             expires_at="2026-09-25T00:00:00Z",
@@ -109,7 +109,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 intent_hash=intent_hash,
                 account_id="sim-account",
                 environment="SIMULATION",
-                instrument=INSTRUMENT,
+                instrument_id=AUTH_INSTRUMENT_ID, instrument_version=1,
                 action="ORDER.SUBMIT",
                 notional="200",
                 state_version=1,
@@ -132,7 +132,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                     intent_hash=candidate_hash,
                     account_id="sim-account",
                     environment="SIMULATION",
-                    instrument=INSTRUMENT,
+                    instrument_id=AUTH_INSTRUMENT_ID, instrument_version=1,
                     action="ORDER.SUBMIT",
                     now=current_time,
                 )
@@ -140,7 +140,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             attempt_id = str(uuid4())
             dispatcher = GuardedDispatcher(
                 JournalStore(f"{directory}/journal.sqlite3"),
-                owner_token="sim-owner",
+                environment="SIMULATION",\n                account_id="sim-account",\n                owner_token="sim-owner",
             )
             dispatched = dispatcher.dispatch(
                 attempt_id=attempt_id,
@@ -237,7 +237,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             attempt_id = str(uuid4())
             dispatcher = GuardedDispatcher(
                 JournalStore(f"{directory}/journal.sqlite3"),
-                owner_token="sim-owner",
+                environment="SIMULATION",\n                account_id="sim-account",\n                owner_token="sim-owner",
             )
             dispatched = dispatcher.dispatch(
                 attempt_id=attempt_id,
@@ -354,7 +354,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             attempt_id = str(uuid4())
             dispatcher = GuardedDispatcher(
                 JournalStore(f"{directory}/journal.sqlite3"),
-                owner_token="sim-owner",
+                environment="SIMULATION",\n                account_id="sim-account",\n                owner_token="sim-owner",
             )
 
             def timeout_after_send(client_order_id, request, final_guard):
@@ -441,7 +441,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             }
             first_process = GuardedDispatcher(
                 JournalStore(journal_path),
-                owner_token="process-one",
+                environment="SIMULATION",\n                account_id="sim-account",\n                owner_token="process-one",
             )
 
             def crash_after_provider_accepts(client_order_id, outbound, final_guard):
@@ -476,7 +476,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
 
             restarted = GuardedDispatcher(
                 JournalStore(journal_path),
-                owner_token="process-two",
+                environment="SIMULATION",\n                account_id="sim-account",\n                owner_token="process-two",
             )
 
             def forbidden_retry(*_args, **_kwargs):

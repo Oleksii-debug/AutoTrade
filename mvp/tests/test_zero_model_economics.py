@@ -11,6 +11,7 @@ from autotrade_research.economics.after_cost import (
 from mvp.autotrade_mvp.allocation import (
     AllocationCandidate,
     AllocationPolicy,
+    StressScenarioEvidence,
     allocate_targets,
 )
 from mvp.autotrade_mvp.model_gateway import (
@@ -100,7 +101,19 @@ class ZeroModelEconomicsQualificationTests(unittest.TestCase):
             now_utc=NOW,
         )
         self.assertEqual(decision.status, RouteStatus.NO_MODEL)
-        allocation = allocate_targets([candidate()], policy())
+        stress = StressScenarioEvidence.create(
+            name="zero-model-adverse",
+            shocks={"AAA": "-0.20"},
+            observed_at=NOW.isoformat().replace("+00:00", "Z"),
+            valid_until=(NOW + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+            source_ref="qualification:zero-model",
+        )
+        allocation = allocate_targets(
+            [candidate()],
+            policy(),
+            stress_evidence=(stress,),
+            decision_time=NOW.isoformat().replace("+00:00", "Z"),
+        )
         self.assertEqual(allocation.status, "ALLOCATED")
         self.assertGreater(allocation.gross_notional, Decimal("0"))
 

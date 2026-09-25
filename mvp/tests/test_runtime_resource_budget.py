@@ -200,7 +200,7 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
                     "event_type": "FINANCIAL_PROBE",
                     "aggregate_type": "PERFORMANCE_PROBE",
                     "aggregate_id": "burst-a",
-                    "aggregate_version": index + 1,
+                    "aggregate_version": str(index + 1),
                     "payload": payload,
                     "payload_hash": payload_digest(payload),
                     "committed_at": datetime.now(timezone.utc).isoformat(),

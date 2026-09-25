@@ -977,6 +977,7 @@ class DurableReservationBook:
                     environment=self.environment,
                     host_id="reservation-resolution-verifier",
                     owner_epoch="read-only",
+                    evidence_artifact_store=self.resolution_artifact_store,
                 )
                 order = projection.order(client_order_id)
             except (KeyError, ValueError, TypeError) as error:

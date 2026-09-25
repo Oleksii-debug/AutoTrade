@@ -181,6 +181,10 @@ class ArtifactStore:
                 return existing
 
             object_path.parent.mkdir(parents=True, exist_ok=True)
+            if object_path.is_symlink():
+                raise ArtifactIntegrityError(
+                    "content-addressed object path must not be a symlink"
+                )
             if object_path.exists():
                 if object_path.stat().st_size != len(data) or sha256_file(object_path) != digest:
                     raise ArtifactIntegrityError("content-addressed object path is corrupt")
@@ -231,6 +235,8 @@ class ArtifactStore:
             raise ArtifactIntegrityError("manifest digest is invalid")
         digest = digest_value.removeprefix("sha256:")
         object_path = self._object_path(digest)
+        if object_path.is_symlink():
+            raise ArtifactIntegrityError("artifact object must not be a symlink")
         if not object_path.is_file():
             raise ArtifactIntegrityError("artifact object is missing")
         if object_path.stat().st_size != manifest.get("bytes"):

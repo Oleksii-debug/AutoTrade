@@ -246,6 +246,42 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertTrue((restored / "state" / "journal.sqlite3").is_file())
             self.assertTrue((restored / "artifacts" / "objects" / "sha256").is_dir())
 
+    def test_restore_marker_uses_digest_verified_before_copy_to_close_toctou(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            verified_digest = (
+                backup / "backup-manifest.sha256"
+            ).read_text(encoding="ascii").strip()
+            forged_digest = "sha256:" + "f" * 64
+            original_copy2 = shutil.copy2
+            mutated = False
+
+            def mutate_digest_after_verification(source, destination, *args, **kwargs):
+                nonlocal mutated
+                if not mutated:
+                    mutated = True
+                    (backup / "backup-manifest.sha256").write_text(
+                        forged_digest + "\n",
+                        encoding="ascii",
+                    )
+                return original_copy2(source, destination, *args, **kwargs)
+
+            with patch(
+                "mvp.autotrade_mvp.backup.shutil.copy2",
+                side_effect=mutate_digest_after_verification,
+            ):
+                restored = restore_backup(backup, root / "restored")
+
+            marker = json.loads(
+                (restored / "RESTORE_RECONCILIATION_REQUIRED.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(marker["backup_manifest_sha256"], verified_digest)
+            self.assertNotEqual(marker["backup_manifest_sha256"], forged_digest)
+
     def test_immutable_build_identity_binds_source_sha_and_restore(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

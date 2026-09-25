@@ -1,13 +1,20 @@
 from decimal import Decimal
 from tempfile import TemporaryDirectory
+from uuid import uuid4
 import sqlite3
 import unittest
+
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 from mvp.autotrade_mvp.durable_order_projection import (
     DurableOrderBookProjection,
 )
 from mvp.autotrade_mvp.order_projection import OrderProjectionConflict
-from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.persistence import (
+    JournalStore,
+    canonical_json,
+    payload_digest,
+)
 
 
 T0 = "2026-09-25T05:40:00Z"
@@ -17,15 +24,66 @@ T3 = "2026-09-25T05:40:03Z"
 T4 = "2026-09-25T05:40:04Z"
 
 
-def durable(store, *, account_id="acct-1"):
+def durable(
+    store,
+    *,
+    account_id="acct-1",
+    environment="SIMULATION",
+    evidence_artifact_store=None,
+):
     return DurableOrderBookProjection(
         store,
         provider_id="PROVIDER-A",
         account_id=account_id,
-        environment="PAPER",
+        environment=environment,
         host_id="host-1",
         owner_epoch="1",
+        evidence_artifact_store=evidence_artifact_store,
     )
+
+
+def provider_evidence(
+    artifact_store,
+    *,
+    operation,
+    request,
+    observed_at,
+    account_id="acct-1",
+    environment="PAPER",
+    rights_id="provider-test-evidence",
+):
+    artifact_id = str(uuid4())
+    source_uri = "https://provider.example.test/evidence"
+    payload = canonical_json(
+        {
+            "operation": operation,
+            "request": request,
+            "observed_at": observed_at,
+        }
+    ).encode("utf-8")
+    manifest = artifact_store.publish_bytes(
+        artifact_id=artifact_id,
+        data=payload,
+        media_type="application/json",
+        rights={"storage": True, "export": False},
+        source_refs=[source_uri],
+        metadata={
+            "provider_id": "PROVIDER-A",
+            "account_id": account_id,
+            "environment": environment,
+            "order_operation": operation,
+            "request_hash": payload_digest(request),
+            "observed_at": observed_at,
+            "rights_id": rights_id,
+        },
+    )
+    return {
+        "artifact_id": artifact_id,
+        "sha256": manifest["sha256"],
+        "source_uri": source_uri,
+        "observed_at": observed_at,
+        "rights_id": rights_id,
+    }
 
 
 class DurableOrderProjectionTests(unittest.TestCase):
@@ -425,7 +483,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 "scope": {
                     "provider_id": "PROVIDER-A",
                     "account_id": "acct-1",
-                    "environment": "PAPER",
+                    "environment": "SIMULATION",
                 },
                 "event_key": "unsupported-op",
                 "operation": "DELETE_ALL_ECONOMIC_TRUTH",
@@ -442,7 +500,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 "aggregate_version": "2",
                 "host_id": "host-1",
                 "owner_epoch": "1",
-                "environment": "PAPER",
+                "environment": "SIMULATION",
                 "occurred_at": T1,
                 "observed_at": T1,
                 "committed_at": T1,
@@ -488,6 +546,317 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 restarted.order("action-lineage").snapshot().cancel_command_id,
                 "cancel-command-durable",
             )
+
+
+    def test_paper_provider_fact_requires_immutable_evidence(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store, environment="PAPER")
+            book.create_order(
+                event_key="create-paper",
+                client_order_id="paper-1",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "requires immutable evidence",
+            ):
+                book.acknowledge(
+                    event_key="ack-without-evidence",
+                    client_order_id="paper-1",
+                    provider_order_id="provider-1",
+                    committed_at=T1,
+                )
+
+    def test_paper_provider_evidence_must_resolve_in_artifact_store(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-paper",
+                client_order_id="paper-1",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            forged = {
+                "artifact_id": str(uuid4()),
+                "sha256": "sha256:" + ("0" * 64),
+                "source_uri": "https://provider.example.test/evidence",
+                "observed_at": T1,
+                "rights_id": "provider-test-evidence",
+            }
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "not resolvable and intact",
+            ):
+                book.acknowledge(
+                    event_key="ack-forged",
+                    client_order_id="paper-1",
+                    provider_order_id="provider-1",
+                    committed_at=T1,
+                    evidence_refs=[forged],
+                )
+
+    def test_provider_evidence_scope_and_request_are_bound(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-paper",
+                client_order_id="paper-1",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {
+                "client_order_id": "paper-1",
+                "provider_order_id": "provider-1",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            wrong_scope = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+                account_id="acct-other",
+            )
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "metadata mismatch: account_id",
+            ):
+                book.acknowledge(
+                    event_key="ack-wrong-scope",
+                    client_order_id="paper-1",
+                    provider_order_id="provider-1",
+                    committed_at=T1,
+                    evidence_refs=[wrong_scope],
+                )
+
+    def test_verified_ack_and_fill_evidence_survive_restart(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-paper",
+                client_order_id="paper-1",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="2",
+                committed_at=T0,
+            )
+            ack_request = {
+                "client_order_id": "paper-1",
+                "provider_order_id": "provider-1",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            ack_ref = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=ack_request,
+                observed_at=T1,
+            )
+            ack = book.acknowledge(
+                event_key="ack-evidenced",
+                client_order_id="paper-1",
+                provider_order_id="provider-1",
+                committed_at=T1,
+                evidence_refs=[ack_ref],
+            )
+            self.assertEqual(ack.snapshot.state, "WORKING")
+
+            fill_request = {
+                "client_order_id": "paper-1",
+                "fill_id": "fill-1",
+                "provider_execution_id": "execution-1",
+                "quantity": "2",
+                "price": "100",
+                "provider_revision": None,
+            }
+            fill_ref = provider_evidence(
+                artifacts,
+                operation="RECORD_FILL",
+                request=fill_request,
+                observed_at=T2,
+            )
+            fill = book.record_fill(
+                event_key="fill-evidenced",
+                client_order_id="paper-1",
+                fill_id="fill-1",
+                provider_execution_id="execution-1",
+                quantity="2",
+                price="100",
+                committed_at=T2,
+                evidence_refs=[fill_ref],
+            )
+            self.assertEqual(fill.snapshot.state, "FILLED")
+
+            events = store.load_events(
+                "order_projection_book",
+                book.aggregate_id,
+            )
+            self.assertEqual(events[1]["evidence_refs"], [ack_ref])
+            self.assertEqual(events[2]["evidence_refs"], [fill_ref])
+
+            restarted = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            self.assertEqual(restarted.order("paper-1").state, "FILLED")
+            self.assertEqual(
+                restarted.order("paper-1").filled_quantity,
+                Decimal("2"),
+            )
+
+    def test_evidence_identity_participates_in_idempotency(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-paper",
+                client_order_id="paper-1",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {
+                "client_order_id": "paper-1",
+                "provider_order_id": "provider-1",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            first_ref = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+            )
+            first = book.acknowledge(
+                event_key="ack-stable",
+                client_order_id="paper-1",
+                provider_order_id="provider-1",
+                committed_at=T1,
+                evidence_refs=[first_ref],
+            )
+            retry = book.acknowledge(
+                event_key="ack-stable",
+                client_order_id="paper-1",
+                provider_order_id="provider-1",
+                committed_at=T1,
+                evidence_refs=[first_ref],
+            )
+            self.assertTrue(first.inserted)
+            self.assertFalse(retry.inserted)
+
+            second_ref = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+            )
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "different order request",
+            ):
+                book.acknowledge(
+                    event_key="ack-stable",
+                    client_order_id="paper-1",
+                    provider_order_id="provider-1",
+                    committed_at=T1,
+                    evidence_refs=[second_ref],
+                )
+
+    def test_unknown_submission_remains_evidence_free_and_restart_safe(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store, environment="PAPER")
+            book.create_order(
+                event_key="create-unknown",
+                client_order_id="paper-unknown",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            unknown = book.acknowledge(
+                event_key="unknown",
+                client_order_id="paper-unknown",
+                status="UNKNOWN",
+                committed_at=T1,
+            )
+            self.assertEqual(unknown.snapshot.state, "UNKNOWN")
+            restarted = durable(store, environment="PAPER")
+            self.assertEqual(restarted.order("paper-unknown").state, "UNKNOWN")
+
+    def test_local_command_cannot_claim_provider_evidence(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-paper",
+                client_order_id="paper-1",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {"client_order_id": "paper-1"}
+            ref = provider_evidence(
+                artifacts,
+                operation="CONFIRM_CANCEL",
+                request=request,
+                observed_at=T1,
+            )
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "requires immutable evidence",
+            ):
+                book.confirm_cancel(
+                    event_key="cancel-without-evidence",
+                    client_order_id="paper-1",
+                    committed_at=T1,
+                )
+            confirmed = book.confirm_cancel(
+                event_key="cancel-with-evidence",
+                client_order_id="paper-1",
+                committed_at=T1,
+                evidence_refs=[ref],
+            )
+            self.assertTrue(confirmed.snapshot.cancel_confirmed)
 
 
 if __name__ == "__main__":

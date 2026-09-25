@@ -7,6 +7,7 @@ from uuid import uuid4
 from mvp.autotrade_mvp.binance_spot import (
     BinanceSpotAdapterError,
     BinanceSpotOrderIntent,
+    BinanceSpotReferencePrice,
     BinanceSpotSymbolRules,
     coverage_evidence,
     parse_account_trades,
@@ -158,6 +159,30 @@ def symbol_rules(
     )
 
 
+def reference_price(
+    *,
+    instrument_version="BTCUSDT:v1",
+    symbol="BTCUSDT",
+    price="40000",
+    observed_at=NOW - timedelta(seconds=1),
+):
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    delta = observed_at - epoch
+    timestamp_ms = (
+        delta.days * 86_400_000
+        + delta.seconds * 1_000
+        + delta.microseconds // 1_000
+    )
+    return BinanceSpotReferencePrice.from_provider_payload(
+        instrument_version=instrument_version,
+        payload={
+            "symbol": symbol,
+            "referencePrice": price,
+            "timestamp": timestamp_ms,
+        },
+    )
+
+
 class BinanceSpotFoundationTests(unittest.TestCase):
     def test_limit_request_preserves_exact_strings_and_requests_ack_only(self):
         intent = BinanceSpotOrderIntent.create(
@@ -192,17 +217,23 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             order_type="MARKET",
             quantity="0.5",
         )
+        reference = reference_price()
         request = prepare_order_request(
             intent,
             client_order_id="at-market-1",
             capability=capability(),
             symbol_rules=symbol_rules(),
             at=NOW,
-            market_reference_price="40000",
+            market_reference=reference,
+            maximum_market_reference_age_seconds=30,
         )
         self.assertEqual(request.body["quantity"], "0.5")
         self.assertNotIn("quoteOrderQty", request.body)
         self.assertNotIn("timeInForce", request.body)
+        self.assertEqual(
+            request.market_reference_source_sha256,
+            reference.source_sha256,
+        )
         with self.assertRaises(BinanceSpotAdapterError):
             BinanceSpotOrderIntent.create(
                 instrument_version="BTCUSDT:v1",
@@ -293,7 +324,10 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             order_type="MARKET",
             quantity="0.001",
         )
-        with self.assertRaisesRegex(BinanceSpotAdapterError, "reference price"):
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "reference-price evidence",
+        ):
             prepare_order_request(
                 intent,
                 client_order_id="at-filter-2",
@@ -308,7 +342,100 @@ class BinanceSpotFoundationTests(unittest.TestCase):
                 capability=capability(),
                 symbol_rules=symbol_rules(min_notional="50"),
                 at=NOW,
-                market_reference_price="40000",
+                market_reference=reference_price(price="40000"),
+                maximum_market_reference_age_seconds=30,
+            )
+
+    def test_market_reference_must_be_provider_evidence_and_fresh(self):
+        intent = BinanceSpotOrderIntent.create(
+            instrument_version="BTCUSDT:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity="0.01",
+        )
+        rules = symbol_rules(min_notional="5")
+
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "provider reference-price evidence",
+        ):
+            rules.validate(
+                intent,
+                at=NOW,
+                market_reference="40000",
+                maximum_market_reference_age_seconds=30,
+            )
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "stale"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-filter-stale-reference",
+                capability=capability(),
+                symbol_rules=rules,
+                at=NOW,
+                market_reference=reference_price(
+                    observed_at=NOW - timedelta(seconds=31),
+                ),
+                maximum_market_reference_age_seconds=30,
+            )
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "from the future"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-filter-future-reference",
+                capability=capability(),
+                symbol_rules=rules,
+                at=NOW,
+                market_reference=reference_price(
+                    observed_at=NOW + timedelta(seconds=1),
+                ),
+                maximum_market_reference_age_seconds=30,
+            )
+
+    def test_market_reference_is_bound_to_exact_symbol_and_instrument(self):
+        intent = BinanceSpotOrderIntent.create(
+            instrument_version="BTCUSDT:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity="0.01",
+        )
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "instrument version"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-filter-reference-instrument",
+                capability=capability(),
+                symbol_rules=symbol_rules(),
+                at=NOW,
+                market_reference=reference_price(
+                    instrument_version="BTCUSDT:v2",
+                ),
+                maximum_market_reference_age_seconds=30,
+            )
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "symbol"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-filter-reference-symbol",
+                capability=capability(),
+                symbol_rules=symbol_rules(),
+                at=NOW,
+                market_reference=reference_price(symbol="ETHUSDT"),
+                maximum_market_reference_age_seconds=30,
+            )
+
+    def test_reference_price_cannot_be_forged_by_direct_construction(self):
+        parsed = reference_price()
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "canonical provider payload parsing",
+        ):
+            BinanceSpotReferencePrice(
+                instrument_version=parsed.instrument_version,
+                symbol=parsed.symbol,
+                price=parsed.price,
+                observed_at=parsed.observed_at,
+                source_sha256=parsed.source_sha256,
             )
 
     def test_exchange_info_rules_are_bound_to_exact_instrument(self):

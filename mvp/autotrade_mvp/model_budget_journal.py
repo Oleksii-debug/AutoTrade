@@ -117,9 +117,15 @@ class DurableModelBudget:
             try:
                 self.journal.append_event(envelope)
             except ValueError:
-                # Another process may have initialized the same aggregate after
-                # our read. Replay below determines whether the ceiling agrees.
-                pass
+                # A concurrent initializer is benign only when durable truth
+                # actually appeared after our empty read. Never translate a
+                # malformed envelope / journal-contract failure into a later,
+                # misleading "initialization is missing" replay error.
+                if not self.journal.load_events(
+                    _AGGREGATE_TYPE,
+                    self.budget_id,
+                ):
+                    raise
 
         rebuilt = self._replay()
         if rebuilt.snapshot().ceiling != self._ceiling:

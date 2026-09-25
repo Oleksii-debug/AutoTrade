@@ -31,6 +31,7 @@ _REPORT_EVIDENCE_KINDS = frozenset({
     "causal_audit",
     "financial_invariants",
     "retention",
+    "locked_evaluation",
     "metrics",
     "independent_review",
 })
@@ -49,6 +50,7 @@ _REQUIRED_EVIDENCE_KINDS = frozenset({
     "causal_audit",
     "financial_invariants",
     "retention",
+    "locked_evaluation",
     "metrics",
     "independent_review",
 })
@@ -89,6 +91,8 @@ class GateProfile:
     require_complete_trials: bool
     require_causal_audit: bool
     require_financial_invariants: bool
+    require_untouched_holdout: bool = True
+    require_walk_forward: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.profile_id, str) or not self.profile_id.strip():
@@ -154,6 +158,8 @@ class GateProfile:
             "require_complete_trials",
             "require_causal_audit",
             "require_financial_invariants",
+            "require_untouched_holdout",
+            "require_walk_forward",
         ):
             if type(getattr(self, name)) is not bool:
                 raise TypeError(f"{name} must be boolean")
@@ -185,6 +191,8 @@ class GateProfile:
         require_complete_trials: bool = True,
         require_causal_audit: bool = True,
         require_financial_invariants: bool = True,
+        require_untouched_holdout: bool = True,
+        require_walk_forward: bool = True,
     ) -> "GateProfile":
         if not isinstance(profile_id, str) or not profile_id.strip():
             raise ValueError("profile_id is required")
@@ -204,6 +212,8 @@ class GateProfile:
             ("require_complete_trials", require_complete_trials),
             ("require_causal_audit", require_causal_audit),
             ("require_financial_invariants", require_financial_invariants),
+            ("require_untouched_holdout", require_untouched_holdout),
+            ("require_walk_forward", require_walk_forward),
         ):
             if not isinstance(value, bool):
                 raise TypeError(f"{name} must be boolean")
@@ -262,6 +272,8 @@ class GateProfile:
             require_complete_trials=require_complete_trials,
             require_causal_audit=require_causal_audit,
             require_financial_invariants=require_financial_invariants,
+            require_untouched_holdout=require_untouched_holdout,
+            require_walk_forward=require_walk_forward,
         )
 
 
@@ -283,6 +295,8 @@ class EvaluationEvidence:
     selection_correction_applied: str | None
     trials_attempted: int | None
     regime_coverage: frozenset[str] | None
+    untouched_holdout_passed: bool | None = None
+    walk_forward_passed: bool | None = None
     evidence_refs: Mapping[str, GateEvidenceRef] | None = None
 
     def __post_init__(self) -> None:
@@ -315,6 +329,8 @@ class EvaluationEvidence:
             "financial_invariants_passed",
             "trial_log_complete",
             "retention_passed",
+            "untouched_holdout_passed",
+            "walk_forward_passed",
         ):
             value = getattr(self, name)
             if value is not None and type(value) is not bool:
@@ -408,6 +424,7 @@ class EvaluationEvidence:
         for name in (
             "profile_unchanged_after_results", "reproducible", "causal_audit_passed",
             "financial_invariants_passed", "trial_log_complete", "retention_passed",
+            "untouched_holdout_passed", "walk_forward_passed",
         ):
             value = converted.get(name)
             if value is not None and not isinstance(value, bool):
@@ -541,6 +558,8 @@ def gate_report_payload(
             "require_complete_trials": profile.require_complete_trials,
             "require_causal_audit": profile.require_causal_audit,
             "require_financial_invariants": profile.require_financial_invariants,
+            "require_untouched_holdout": profile.require_untouched_holdout,
+            "require_walk_forward": profile.require_walk_forward,
         }
     elif kind == "trial_log":
         value = {
@@ -563,6 +582,12 @@ def gate_report_payload(
         value = {
             "profile_id": profile_id,
             "passed": evidence.retention_passed,
+        }
+    elif kind == "locked_evaluation":
+        value = {
+            "profile_id": profile_id,
+            "untouched_holdout_passed": evidence.untouched_holdout_passed,
+            "walk_forward_passed": evidence.walk_forward_passed,
         }
     elif kind == "metrics":
         value = {
@@ -703,6 +728,20 @@ def evaluate_gates(
         )
     if profile.require_complete_trials:
         check("trial_completeness", evidence.trial_log_complete, "trial log is incomplete", "trial completeness is unknown")
+    if profile.require_walk_forward:
+        check(
+            "walk_forward",
+            evidence.walk_forward_passed,
+            "registered walk-forward evaluation failed",
+            "walk-forward evaluation evidence is missing",
+        )
+    if profile.require_untouched_holdout:
+        check(
+            "untouched_holdout",
+            evidence.untouched_holdout_passed,
+            "locked holdout was contaminated or failed",
+            "untouched locked-holdout evidence is missing",
+        )
 
     if evidence.selection_correction_applied is None:
         check(

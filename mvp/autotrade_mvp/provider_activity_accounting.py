@@ -280,6 +280,8 @@ def _projected_fill_binding_payload(
         "intent_id": projected_fill.intent_id,
         "client_order_id": projected_fill.client_order_id,
         "side": projected_fill.side,
+        "position_side": getattr(projected_fill, "position_side", None),
+        "position_effect": getattr(projected_fill, "position_effect", None),
         "quantity": _decimal_text(projected_fill.quantity),
         "price": _decimal_text(projected_fill.price),
         "provider_revision": projected_fill.provider_revision,
@@ -304,6 +306,7 @@ def _provider_fill_binding_payload(
         "trade_time": _instant_text(provider_fill.trade_time, name="trade_time"),
         "side": provider_fill.side,
         "position_side": provider_fill.position_side,
+        "position_effect": getattr(provider_fill, "position_effect", None),
         "evidence_refs": list(provider_fill.evidence_refs),
     }
 
@@ -346,7 +349,7 @@ def _prepare_provider_fill_binding(
     projected_payload = _projected_fill_binding_payload(projected_fill)
     provider_payload = _provider_fill_binding_payload(provider_fill)
     request = {
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
         "provider_id": economic_book.provider_id,
         "account_id": economic_book.account_id,
         "environment": economic_book.environment,

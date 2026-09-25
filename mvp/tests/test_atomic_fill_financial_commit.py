@@ -705,7 +705,12 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 binding["provider_fill"]["evidence_refs"],
                 ["provider-fill:test"],
             )
+            self.assertEqual(binding["schema_version"], "1.1.0")
+            self.assertEqual(binding["projected_fill"]["position_side"], None)
+            self.assertEqual(binding["projected_fill"]["position_effect"], None)
             self.assertEqual(binding["provider_fill"]["side"], "BUY")
+            self.assertEqual(binding["provider_fill"]["position_side"], None)
+            self.assertEqual(binding["provider_fill"]["position_effect"], None)
             self.assertEqual(binding["provider_fill"]["quantity"], "1")
 
     def test_provider_evidence_retargeting_conflicts_with_existing_fill_binding(self):

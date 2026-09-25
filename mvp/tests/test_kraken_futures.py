@@ -159,6 +159,20 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
             )
 
+    def test_futures_foundation_cannot_self_assert_absence_semantics(self):
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "cannot self-assert provider exclusion semantics",
+        ):
+            coverage_evidence(
+                surface="EXECUTIONS",
+                coverage_start="2026-09-24T19:00:00Z",
+                coverage_end="2026-09-24T21:00:00Z",
+                pagination_complete=True,
+                consistency_horizon_satisfied=True,
+                qualified_exclusion_semantics=True,
+            )
+
     def test_absence_semantics_default_fail_closed(self):
         evidence = coverage_evidence(
             surface="EXECUTIONS",

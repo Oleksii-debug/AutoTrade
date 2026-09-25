@@ -13,6 +13,7 @@ _REQUIRED_ABSENCE_SURFACES = frozenset(
     {"OPEN_ORDERS", "ORDER_HISTORY", "EXECUTIONS", "ACTIVITIES"}
 )
 _ACTIVITY_ORIGINS = frozenset({"AUTOTRADE", "MANUAL", "EXTERNAL", "UNKNOWN"})
+_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -31,6 +32,15 @@ def _text(value: str, *, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
+
+
+def _environment(value: str) -> str:
+    normalized = _text(value, name="environment").upper()
+    if normalized not in _ENVIRONMENTS:
+        raise ValueError(
+            "environment must be one of LIVE, PAPER, REPLAY, SIMULATION"
+        )
+    return normalized
 
 
 def _instant(value: str, *, name: str) -> datetime:
@@ -64,7 +74,7 @@ class CoverageSurfaceEvidence:
             self, "account_id", _text(self.account_id, name="account_id")
         )
         object.__setattr__(
-            self, "environment", _text(self.environment, name="environment").upper()
+            self, "environment", _environment(self.environment)
         )
         object.__setattr__(
             self,
@@ -125,7 +135,7 @@ class SnapshotConsistencyEvidence:
             self, "account_id", _text(self.account_id, name="account_id")
         )
         object.__setattr__(
-            self, "environment", _text(self.environment, name="environment").upper()
+            self, "environment", _environment(self.environment)
         )
         normalized = _text(self.mode, name="mode").upper()
         if normalized not in {"ATOMIC", "COMPOSED"}:
@@ -172,7 +182,7 @@ class ProviderWorkingOrderEvidence:
             self, "account_id", _text(self.account_id, name="account_id")
         )
         object.__setattr__(
-            self, "environment", _text(self.environment, name="environment").upper()
+            self, "environment", _environment(self.environment)
         )
         remaining = _decimal(self.remaining_quantity, name="remaining_quantity")
         if remaining <= 0:
@@ -216,7 +226,7 @@ class ProviderWorkingOrderEvidence:
         return cls(
             provider_id=_text(provider_id, name="provider_id").upper(),
             account_id=_text(account_id, name="account_id"),
-            environment=_text(environment, name="environment").upper(),
+            environment=_environment(environment),
             provider_order_id=_text(provider_order_id, name="provider_order_id"),
             client_order_id=(
                 _text(client_order_id, name="client_order_id")
@@ -250,7 +260,7 @@ class ProviderFillEvidence:
             self, "account_id", _text(self.account_id, name="account_id")
         )
         object.__setattr__(
-            self, "environment", _text(self.environment, name="environment").upper()
+            self, "environment", _environment(self.environment)
         )
         quantity = _decimal(self.quantity, name="quantity")
         price = _decimal(self.price, name="price")
@@ -311,7 +321,7 @@ class ProviderFillEvidence:
         return cls(
             provider_id=_text(provider_id, name="provider_id").upper(),
             account_id=_text(account_id, name="account_id"),
-            environment=_text(environment, name="environment").upper(),
+            environment=_environment(environment),
             provider_execution_id=_text(
                 provider_execution_id, name="provider_execution_id"
             ),
@@ -359,7 +369,7 @@ class ProviderActivityEvidence:
         object.__setattr__(
             self,
             "environment",
-            _text(self.environment, name="environment").upper(),
+            _environment(self.environment),
         )
         object.__setattr__(
             self,
@@ -475,7 +485,7 @@ class UnknownSubmission:
             self, "account_id", _text(self.account_id, name="account_id")
         )
         object.__setattr__(
-            self, "environment", _text(self.environment, name="environment").upper()
+            self, "environment", _environment(self.environment)
         )
         _instant(self.started_at, name="started_at")
 
@@ -498,7 +508,7 @@ class UnknownSubmission:
             client_order_id=_text(client_order_id, name="client_order_id"),
             provider_id=_text(provider_id, name="provider_id").upper(),
             account_id=_text(account_id, name="account_id"),
-            environment=_text(environment, name="environment").upper(),
+            environment=_environment(environment),
             started_at=started_at,
         )
 
@@ -644,7 +654,7 @@ def reconcile_account(
 
     provider_scope = _text(provider_id, name="provider_id").upper()
     account_scope = _text(account_id, name="account_id")
-    environment_scope = _text(environment, name="environment").upper()
+    environment_scope = _environment(environment)
     if not isinstance(pagination_complete, bool):
         raise TypeError("pagination_complete must be boolean")
     if not isinstance(require_activity_reconciliation, bool):

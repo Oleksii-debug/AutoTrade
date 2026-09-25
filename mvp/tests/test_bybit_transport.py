@@ -457,7 +457,6 @@ class BybitV5SharedTransportTests(unittest.TestCase):
 
     def test_read_provider_environment_credential_cannot_cross_testnet_and_demo(self):
         capability = read_capability(
-            family="SPOT",
             account_id="paper-1",
             environment="PAPER",
         )

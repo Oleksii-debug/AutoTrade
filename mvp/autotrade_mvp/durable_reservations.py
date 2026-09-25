@@ -36,7 +36,7 @@ _EVENT_TYPE = "ReservationMutationCommitted"
 _COMMAND_ACTOR = "autotrade-reservation-authority"
 _RESOLUTION_MEDIA_TYPE = "application/vnd.autotrade.reservation-resolution+json"
 _RESOLUTION_EVIDENCE_TYPE = "AUTOTRADE_RESERVATION_RESOLUTION"
-_RESOLUTION_SCHEMA_VERSION = 1
+_RESOLUTION_SCHEMA_VERSION = 2
 
 
 def _text(value: str, *, name: str) -> str:
@@ -653,6 +653,32 @@ class DurableReservationBook:
             raise ReservationConflict(
                 "resolution evidence receipt must be a JSON object"
             )
+
+        try:
+            reconciliation_event_id = _text(
+                receipt.get("reconciliation_event_id"),
+                name="reconciliation_event_id",
+            )
+            reconciliation_payload_hash = _text(
+                receipt.get("reconciliation_payload_hash"),
+                name="reconciliation_payload_hash",
+            )
+        except (ValueError, TypeError) as error:
+            raise ReservationConflict(
+                "resolution evidence receipt does not match reservation scope"
+            ) from error
+        if (
+            not reconciliation_payload_hash.startswith("sha256:")
+            or len(reconciliation_payload_hash) != 71
+            or any(
+                ch not in "0123456789abcdef"
+                for ch in reconciliation_payload_hash.removeprefix("sha256:")
+            )
+        ):
+            raise ReservationConflict(
+                "resolution evidence receipt does not match reservation scope"
+            )
+
         expected = {
             "schema_version": _RESOLUTION_SCHEMA_VERSION,
             "evidence_type": _RESOLUTION_EVIDENCE_TYPE,
@@ -664,6 +690,8 @@ class DurableReservationBook:
             "attempt_id": attempt,
             "outcome": terminal_outcome,
             "reconciliation_complete": True,
+            "reconciliation_event_id": reconciliation_event_id,
+            "reconciliation_payload_hash": reconciliation_payload_hash,
         }
         receipt_canonical = canonical_json(receipt)
         expected_canonical = canonical_json(expected)
@@ -712,6 +740,10 @@ class DurableReservationBook:
             raise ReservationConflict(
                 "resolution evidence does not match durable submission scope"
             )
+        client_order_id = _text(
+            prepared_payload.get("client_order_id"),
+            name="submission client_order_id",
+        )
         if (
             terminal_outcome == "PROVEN_ABSENT"
             and not any(
@@ -721,6 +753,73 @@ class DurableReservationBook:
         ):
             raise ReservationConflict(
                 "PROVEN_ABSENT requires a durable UNKNOWN submission state"
+            )
+
+        reconciliation_event = self.store.get_event(reconciliation_event_id)
+        if (
+            reconciliation_event is None
+            or reconciliation_event.get("event_type") != "AccountReconciled"
+            or reconciliation_event.get("aggregate_type") != "account_reconciliation"
+        ):
+            raise ReservationConflict(
+                "terminal release requires a matching durable reconciliation checkpoint"
+            )
+        reconciliation_payload = reconciliation_event.get("payload")
+        if not isinstance(reconciliation_payload, dict):
+            raise ReservationConflict(
+                "durable reconciliation checkpoint payload is invalid"
+            )
+        if (
+            reconciliation_event.get("payload_hash")
+            != reconciliation_payload_hash
+            or payload_digest(reconciliation_payload)
+            != reconciliation_payload_hash
+        ):
+            raise ReservationConflict(
+                "durable reconciliation checkpoint hash does not match receipt"
+            )
+        if (
+            reconciliation_payload.get("complete") is not True
+            or reconciliation_payload.get("snapshot_consistent") is not True
+            or reconciliation_payload.get("blocking_resources") != []
+        ):
+            raise ReservationConflict(
+                "terminal release requires complete non-blocking reconciliation"
+            )
+        resolutions = reconciliation_payload.get("submission_resolutions")
+        if not isinstance(resolutions, list):
+            raise ReservationConflict(
+                "durable reconciliation checkpoint lacks submission resolutions"
+            )
+        matching = [
+            item
+            for item in resolutions
+            if isinstance(item, dict)
+            and item.get("attempt_id") == attempt
+            and item.get("client_order_id") == client_order_id
+        ]
+        if len(matching) != 1:
+            raise ReservationConflict(
+                "durable reconciliation checkpoint does not uniquely resolve submission"
+            )
+        canonical_outcome = _text(
+            matching[0].get("outcome"),
+            name="reconciliation submission outcome",
+        ).upper()
+        # Reconciliation can prove that at least one execution exists, but an
+        # execution observation alone does not prove that the order is fully
+        # filled.  Keep worst-case reservation capacity held until a canonical
+        # terminal order/fill projection can prove FILLED semantics.
+        required_outcome = {
+            "PROVEN_ABSENT": "PROVEN_ABSENT",
+        }.get(terminal_outcome)
+        if required_outcome is None:
+            raise ReservationConflict(
+                "terminal outcome lacks canonical reconciliation semantics"
+            )
+        if canonical_outcome != required_outcome:
+            raise ReservationConflict(
+                "terminal outcome does not match durable reconciliation resolution"
             )
         return evidence
 

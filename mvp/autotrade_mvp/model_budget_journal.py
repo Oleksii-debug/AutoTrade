@@ -141,7 +141,7 @@ class DurableModelBudget:
             "event_type": event_type,
             "aggregate_type": _AGGREGATE_TYPE,
             "aggregate_id": self.budget_id,
-            "aggregate_version": version,
+            "aggregate_version": str(version),
             "payload": payload,
             "payload_hash": payload_digest(payload),
             "committed_at": self._clock(),

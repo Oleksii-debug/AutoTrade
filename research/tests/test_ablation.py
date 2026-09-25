@@ -1,6 +1,8 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, localcontext
 from hashlib import sha256
+import json
 import unittest
 
 from autotrade_research.evaluation.ablation import (
@@ -784,6 +786,77 @@ class AblationTests(unittest.TestCase):
                 dataset_digest=FINGERPRINT_D,
                 minimum_pairs=2,
                 required_lower_bound=Decimal("0"),
+            )
+
+
+    def test_locked_evidence_constructor_rejects_payload_evaluation_mismatch(self):
+        cases = [
+            pair("constructor-a", "2", full_cost="0.25"),
+            pair("constructor-b", "1.5", full_cost="0.10"),
+        ]
+        locked = build_ablation_evidence_bundle(
+            "agent",
+            cases,
+            source_revision="7" * 40,
+            protocol_digest=FINGERPRINT_C,
+            dataset_digest=FINGERPRINT_D,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        decoded = json.loads(locked.payload)
+        decoded["evaluation"]["reason"] = "tampered_reason"
+        tampered_payload = json.dumps(
+            decoded,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        tampered_digest = "sha256:" + sha256(
+            tampered_payload.encode("utf-8")
+        ).hexdigest()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "payload evaluation does not match bundle evaluation",
+        ):
+            replace(
+                locked,
+                payload=tampered_payload,
+                content_digest=tampered_digest,
+            )
+
+    def test_locked_evidence_constructor_rejects_noncanonical_json(self):
+        cases = [
+            pair("canonical-a", "2", full_cost="0.25"),
+            pair("canonical-b", "1.5", full_cost="0.10"),
+        ]
+        locked = build_ablation_evidence_bundle(
+            "agent",
+            cases,
+            source_revision="8" * 40,
+            protocol_digest=FINGERPRINT_C,
+            dataset_digest=FINGERPRINT_D,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        noncanonical_payload = json.dumps(
+            json.loads(locked.payload),
+            indent=2,
+            ensure_ascii=False,
+        )
+        noncanonical_digest = "sha256:" + sha256(
+            noncanonical_payload.encode("utf-8")
+        ).hexdigest()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "payload must use canonical JSON serialization",
+        ):
+            replace(
+                locked,
+                payload=noncanonical_payload,
+                content_digest=noncanonical_digest,
             )
 
 

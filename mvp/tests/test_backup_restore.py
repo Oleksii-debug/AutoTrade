@@ -14,6 +14,10 @@ from mvp.autotrade_mvp.backup import (
     BackupCompatibilityError,
     BackupError,
     BackupIntegrityError,
+    _copy_file_durable,
+    _fsync_directory,
+    _fsync_directory_tree,
+    _fsync_file,
     _safe_relative_path,
     complete_restore_reconciliation,
     create_backup,
@@ -174,6 +178,60 @@ def _after_restore(marker: dict[str, object], seconds: int) -> str:
     ).astimezone(timezone.utc) + timedelta(seconds=seconds)
     return instant.isoformat().replace("+00:00", "Z")
 
+
+class BackupDurabilityTests(unittest.TestCase):
+    def test_fsync_directory_flushes_directory_descriptor(self):
+        with patch("mvp.autotrade_mvp.backup.os.open", return_value=73) as open_mock, patch(
+            "mvp.autotrade_mvp.backup.os.fsync"
+        ) as fsync_mock, patch("mvp.autotrade_mvp.backup.os.close") as close_mock:
+            _fsync_directory(Path("/durable-parent"))
+
+        self.assertEqual(open_mock.call_args.args[0], Path("/durable-parent"))
+        fsync_mock.assert_called_once_with(73)
+        close_mock.assert_called_once_with(73)
+
+
+    def test_directory_tree_flushes_children_before_staging_root(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "stage"
+            nested = root / "state" / "nested"
+            nested.mkdir(parents=True)
+            (nested / "payload.bin").write_bytes(b"x")
+
+            flushed = []
+            with patch(
+                "mvp.autotrade_mvp.backup._fsync_directory",
+                side_effect=lambda path: flushed.append(path),
+            ):
+                _fsync_directory_tree(root)
+
+            self.assertEqual(flushed[-1], root)
+            self.assertIn(root / "state", flushed)
+            self.assertIn(nested, flushed)
+            self.assertLess(flushed.index(nested), flushed.index(root / "state"))
+            self.assertLess(flushed.index(root / "state"), flushed.index(root))
+
+    def test_durable_copy_flushes_payload_and_parent_directory(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.bin"
+            target = root / "nested" / "target.bin"
+            source.write_bytes(b"durable-payload")
+
+            with patch("mvp.autotrade_mvp.backup.os.fsync") as fsync_mock, patch(
+                "mvp.autotrade_mvp.backup._fsync_directory"
+            ) as directory_sync:
+                _copy_file_durable(source, target)
+
+            self.assertEqual(target.read_bytes(), b"durable-payload")
+            self.assertGreaterEqual(fsync_mock.call_count, 1)
+            directory_sync.assert_called_once_with(target.parent)
+
+    def test_fsync_file_rejects_symlink_or_non_file(self):
+        with TemporaryDirectory() as directory:
+            missing = Path(directory) / "missing.bin"
+            with self.assertRaises(BackupIntegrityError):
+                _fsync_file(missing)
 
 class BackupRestoreTests(unittest.TestCase):
     def _build_sources(self, root: Path) -> tuple[Path, Path]:

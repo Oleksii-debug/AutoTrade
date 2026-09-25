@@ -66,6 +66,17 @@ class ContractSchemaTests(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(match.group(1), version)
 
+        python_anchor = (ROOT / anchors["python"]).read_text(encoding="utf-8")
+        self.assertIn(f'CONTRACT_VERSION = "{version}"', python_anchor)
+
+        typescript_anchor = (ROOT / anchors["typescript"]).read_text(encoding="utf-8")
+        self.assertIn(f'CONTRACT_VERSION: "{version}"', typescript_anchor)
+
+        typescript_runtime = (
+            ROOT / "contracts" / "bindings" / "typescript" / "commonScalars.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn(f'CONTRACT_VERSION = "{version}"', typescript_runtime)
+
         openapi_path = ROOT / self.contract_manifest["openapi"]["path"]
         openapi = openapi_path.read_text(encoding="utf-8")
         self.assertRegex(openapi, r"(?m)^openapi:\s*3\.1\.0\s*$")

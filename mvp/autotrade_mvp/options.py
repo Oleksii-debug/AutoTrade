@@ -357,23 +357,29 @@ def book_physical_option_settlement(
     validate_transaction(transaction)
     return transaction
 def _source_sha(value: str) -> str:
-    text = _text(value, "source_sha")
-    if len(text) != 40 or any(ch not in "0123456789abcdef" for ch in text):
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or value != value.lower()
+        or len(value) not in {40, 64}
+        or any(ch not in "0123456789abcdef" for ch in value)
+    ):
         raise OptionError(
-            "source_sha must be a canonical lowercase 40-character Git SHA"
+            "source_sha must be a canonical lowercase 40- or 64-character Git object id"
         )
-    return text
+    return value
 
 
 def _input_digest(value: str) -> str:
-    text = _text(value, "input_digest")
     if (
-        not text.startswith("sha256:")
-        or len(text) != 71
-        or any(ch not in "0123456789abcdef" for ch in text[7:])
+        not isinstance(value, str)
+        or value != value.strip()
+        or not value.startswith("sha256:")
+        or len(value) != 71
+        or any(ch not in "0123456789abcdef" for ch in value[7:])
     ):
-        raise OptionError("input_digest must be sha256:<64 lowercase hex>")
-    return text
+        raise OptionError("input_digest must be canonical sha256:<64 lowercase hex>")
+    return value
 
 
 @dataclass(frozen=True)

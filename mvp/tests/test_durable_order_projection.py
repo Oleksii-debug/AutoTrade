@@ -302,6 +302,74 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 ["fill-1", "fill-1-r2"],
             )
 
+    def test_canonical_execution_fill_correction_rejects_cross_execution_identity(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            book.create_order(
+                event_key="create",
+                client_order_id="c1",
+                instrument="instrument-v1",
+                side="BUY",
+                requested_quantity="2",
+                committed_at=T0,
+            )
+            book.ingest_execution_fill(
+                event_key="fill-r1",
+                client_order_id="c1",
+                committed_at=T2,
+                execution_fill={
+                    "fill_id": "fill-1",
+                    "provider_execution_id": "exec-1",
+                    "provider_revision": "r1",
+                    "instrument_version": "instrument-v1",
+                    "side": "BUY",
+                    "last_quantity": "1",
+                    "last_price": "100",
+                    "trade_time": T1,
+                    "receipt_time": T2,
+                    "fees": [],
+                    "settlement_date": "2026-09-27",
+                    "evidence": [],
+                },
+            )
+            before_events = len(
+                store.load_events("order_projection_book", book.aggregate_id)
+            )
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "provider_execution_id differs",
+            ):
+                book.ingest_execution_fill(
+                    event_key="fill-cross-exec",
+                    client_order_id="c1",
+                    committed_at=T4,
+                    execution_fill={
+                        "fill_id": "fill-1-r2",
+                        "provider_execution_id": "exec-other",
+                        "provider_revision": "r2",
+                        "instrument_version": "instrument-v1",
+                        "side": "BUY",
+                        "last_quantity": "1.5",
+                        "last_price": "101",
+                        "trade_time": T1,
+                        "receipt_time": T3,
+                        "fees": [],
+                        "settlement_date": "2026-09-27",
+                        "correction_reference": "fill-1",
+                        "evidence": [],
+                    },
+                )
+            self.assertEqual(book.order("c1").filled_quantity, Decimal("1"))
+            self.assertEqual(
+                len(store.load_events("order_projection_book", book.aggregate_id)),
+                before_events,
+            )
+            self.assertEqual(
+                durable(store).order("c1").fill_history[0].provider_execution_id,
+                "exec-1",
+            )
+
     def test_exact_event_retry_is_idempotent_and_conflict_fails_closed(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

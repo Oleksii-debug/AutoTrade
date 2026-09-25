@@ -1380,13 +1380,15 @@ def evaluate_risk(
     worst_stress_loss = Decimal("0")
     if stress_coverage_complete:
         for scenario in context.stress_scenarios:
-            base_pnl = sum(
-                (
-                    notional * scenario.get(symbol, Decimal("0"))
-                    for symbol, notional in base_notionals.items()
-                ),
-                Decimal("0"),
-            )
+            if base_stress_comparison_complete:
+                base_pnl = sum(
+                    (
+                        notional * scenario[symbol]
+                        for symbol, notional in base_notionals.items()
+                    ),
+                    Decimal("0"),
+                )
+                base_worst_stress_loss = max(base_worst_stress_loss, -base_pnl)
             pnl = sum(
                 (
                     notional * scenario[symbol]
@@ -1394,7 +1396,6 @@ def evaluate_risk(
                 ),
                 Decimal("0"),
             )
-            base_worst_stress_loss = max(base_worst_stress_loss, -base_pnl)
             worst_stress_loss = max(worst_stress_loss, -pnl)
 
     tail_coverage_complete = True

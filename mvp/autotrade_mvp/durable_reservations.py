@@ -10,6 +10,7 @@ JournalStore aggregate-version check.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Mapping
@@ -150,6 +151,18 @@ def _journal_identity(
         [environment, account, identity_kind, external]
     )
     return str(uuid5(NAMESPACE_URL, "reservation-identity:" + canonical))
+
+
+@dataclass(frozen=True)
+class PreparedReservationMutation:
+    """One reservation mutation prepared from a single durable journal cut."""
+
+    snapshot: ReservationSnapshot
+    snapshot_payload: dict[str, object]
+    envelope: dict[str, object]
+    idempotency_key: str
+    request: dict[str, object]
+    aggregate_version: int
 
 
 class DurableReservationBook:
@@ -311,6 +324,89 @@ class DurableReservationBook:
                 "idempotency_key was already used for a different reservation request"
             )
         return existing[1]
+
+    def prepare_reserve_mutation(
+        self,
+        *,
+        event_key: str,
+        idempotency_key: str,
+        reservation_id: str,
+        intent_id: str,
+        requirements: Mapping[str, object],
+        available: Mapping[str, object],
+        committed_at: str,
+    ) -> PreparedReservationMutation:
+        """Prepare, but do not commit, a worst-case reservation.
+
+        This is used by the financial admission writer so reservation, risk
+        evidence, confirmation consumption, admission and outbox publication
+        can share one JournalStore.commit_command transaction. The plan is
+        derived from exactly one reservation journal cut; a concurrent writer
+        therefore fails the aggregate-version fence at commit rather than
+        reusing stale availability.
+        """
+
+        key = _text(idempotency_key, name="idempotency_key")
+        request = {
+            "reservation_id": _text(reservation_id, name="reservation_id"),
+            "intent_id": _text(intent_id, name="intent_id"),
+            "requirements": _amount_map(requirements, allow_zero=False),
+            "available": _amount_map(available, allow_zero=True),
+        }
+        events = self._events()
+        candidate, idempotency = self._replay(events)
+        existing = idempotency.get(key)
+        if existing is not None:
+            if existing[0] != payload_digest(request):
+                raise ReservationConflict(
+                    "idempotency_key was already used for a different reservation request"
+                )
+            raise ReservationConflict(
+                "reservation mutation is already committed; replay the financial command"
+            )
+
+        snapshot = self._apply(candidate, "RESERVE", request)
+        snapshot_value = _snapshot_payload(snapshot)
+        next_version = (
+            1 if not events else int(events[-1]["aggregate_version"]) + 1
+        )
+        payload = {
+            "environment": self.environment,
+            "account_id": self.account_id,
+            "operation": "RESERVE",
+            "request": request,
+            "idempotency_key": key,
+            "request_hash": payload_digest(request),
+            "snapshot": snapshot_value,
+        }
+        envelope = {
+            "event_id": _journal_identity(
+                self.environment,
+                self.account_id,
+                "financial-admission-reservation-event",
+                _text(event_key, name="event_key"),
+            ),
+            "event_type": _EVENT_TYPE,
+            "aggregate_type": _AGGREGATE_TYPE,
+            "aggregate_id": self.scope_id,
+            "aggregate_version": str(next_version),
+            "payload": payload,
+            "payload_hash": payload_digest(payload),
+            "committed_at": _text(committed_at, name="committed_at"),
+        }
+        return PreparedReservationMutation(
+            snapshot=snapshot,
+            snapshot_payload=snapshot_value,
+            envelope=envelope,
+            idempotency_key=key,
+            request=request,
+            aggregate_version=next_version,
+        )
+
+    def refresh(self) -> None:
+        """Reload the reservation projection after an external atomic commit."""
+
+        self._reload()
 
     def _commit(
         self,

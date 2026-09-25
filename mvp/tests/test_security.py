@@ -185,5 +185,40 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertNotIn("top-secret", repr(description))
 
 
+    def test_only_read_and_trade_secret_purposes_can_be_registered(self):
+        for purpose in (
+            "WITHDRAWAL",
+            "WITHDRAW",
+            "TRANSFER",
+            "EXTERNAL_TRANSFER",
+            "PAYOUT",
+            "ADMIN",
+            "UNKNOWN",
+        ):
+            with self.subTest(purpose=purpose), self.assertRaisesRegex(
+                PermissionError, "Only READ and TRADE"
+            ):
+                self.boundary.register_secret(
+                    self.owner.token,
+                    origin=self.owner.origin,
+                    owner_identity="windows-user-1",
+                    account_id="paper-1",
+                    provider="SIMULATED",
+                    purpose=purpose,
+                    secret_value="must-not-exist",
+                )
+
+        read_handle = self.boundary.register_secret(
+            self.owner.token,
+            origin=self.owner.origin,
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            purpose="read",
+            secret_value="read-secret",
+        )
+        self.assertEqual(read_handle.purpose, "READ")
+
+
 if __name__ == "__main__":
     unittest.main()

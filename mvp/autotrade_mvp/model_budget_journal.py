@@ -8,10 +8,20 @@ rebuilds that projection after restart. It performs no model/network call.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 from hashlib import sha256
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
-from mvp.autotrade_mvp.model_gateway import BudgetLedger, BudgetSnapshot
+from mvp.autotrade_mvp.model_gateway import (
+    BudgetLedger,
+    BudgetSnapshot,
+    ModelDescriptor,
+    ModelRequest,
+    RouteDecision,
+    RouteStatus,
+    RoutingPolicy,
+    route_model,
+)
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
 
 
@@ -143,7 +153,7 @@ class DurableModelBudget:
         payload = event["payload"]
         if event_type == "ModelBudgetInitialized":
             return
-        if event_type == "ModelCostReserved":
+        if event_type in {"ModelCostReserved", "ModelRouteReserved"}:
             ledger.reserve(payload["request_id"], payload["amount"])
             return
         if event_type == "ModelCostReleased":
@@ -292,6 +302,191 @@ class DurableModelBudget:
                 events=[(envelope, None)],
             )
             return inserted
+
+    @staticmethod
+    def _routing_input(
+        policy: RoutingPolicy,
+        request: ModelRequest,
+        descriptors: tuple[ModelDescriptor, ...],
+    ) -> dict[str, Any]:
+        if not isinstance(policy, RoutingPolicy):
+            raise TypeError("policy must be RoutingPolicy")
+        if not isinstance(request, ModelRequest):
+            raise TypeError("request must be ModelRequest")
+        if not all(isinstance(item, ModelDescriptor) for item in descriptors):
+            raise TypeError("descriptors must contain ModelDescriptor values")
+        return {
+            "policy": {
+                "mode": policy.mode.value,
+                "allowed_model_ids": list(policy.allowed_model_ids),
+                "fixed_model_id": policy.fixed_model_id,
+                "allow_remote": policy.allow_remote,
+                "maximum_cost": str(policy.maximum_cost),
+                "maximum_latency_ms": policy.maximum_latency_ms,
+            },
+            "request": {
+                "request_id": request.request_id,
+                "allowed_model_ids": list(request.allowed_model_ids),
+                "privacy_remote_allowed": request.privacy_remote_allowed,
+                "budget_cap": str(request.budget_remaining),
+                "deadline_utc": request.deadline_utc.isoformat(),
+                "cancelled": request.cancelled,
+            },
+            "descriptors": [
+                {
+                    "model_id": item.model_id,
+                    "provider_id": item.provider_id,
+                    "revision": item.revision,
+                    "remote": item.remote,
+                    "estimated_cost": str(item.estimated_cost),
+                    "latency_ms": item.latency_ms,
+                    "quality_score": str(item.quality_score),
+                }
+                for item in sorted(descriptors, key=lambda value: value.model_id)
+            ],
+        }
+
+    @staticmethod
+    def _decision_from_route_payload(payload: dict[str, Any]) -> RouteDecision:
+        try:
+            status = RouteStatus(payload["route_status"])
+            amount = Decimal(payload["amount"])
+        except (KeyError, ValueError, TypeError) as error:
+            raise ValueError("durable model route payload is invalid") from error
+        if status is not RouteStatus.ADMITTED:
+            raise ValueError("durable model route reservation must be ADMITTED")
+        return RouteDecision(
+            status=status,
+            model_id=_text(payload.get("model_id"), name="model_id"),
+            provider_id=_text(payload.get("provider_id"), name="provider_id"),
+            revision=(
+                _text(payload["revision"], name="revision")
+                if payload.get("revision") is not None
+                else None
+            ),
+            reserved_cost=amount,
+            reason="admitted_durable_budget",
+        )
+
+    def admit_route(
+        self,
+        policy: RoutingPolicy,
+        request: ModelRequest,
+        descriptors: Iterable[ModelDescriptor],
+        *,
+        now_utc: datetime | None = None,
+    ) -> RouteDecision:
+        """Route and durably reserve worst-case model cost before call authority.
+
+        The caller budget is only an optional tighter request cap. It can never
+        enlarge the durable budget. The reservation commit revalidates the
+        latest journal state before this method returns ADMITTED.
+        """
+
+        materialized = tuple(descriptors)
+        routing_input = self._routing_input(policy, request, materialized)
+        idempotency_key = _idempotency_key(
+            budget_id=self.budget_id,
+            action="route_reserve",
+            identity=request.request_id,
+        )
+        event_id = _event_id(self.budget_id, idempotency_key)
+        existing = self.journal.get_event(event_id)
+        if existing is not None:
+            payload = existing.get("payload")
+            if (
+                existing.get("event_type") != "ModelRouteReserved"
+                or not isinstance(payload, dict)
+                or payload.get("routing_input") != routing_input
+            ):
+                raise ValueError(
+                    "model route identity conflicts with durable admission"
+                )
+            decision = self._decision_from_route_payload(payload)
+            self._commit(
+                action="route_reserve",
+                identity=request.request_id,
+                request={"routing_input": routing_input},
+                event_type="ModelRouteReserved",
+                payload=payload,
+                result={
+                    "status": decision.status.value,
+                    "model_id": decision.model_id,
+                    "provider_id": decision.provider_id,
+                    "revision": decision.revision,
+                    "reserved_cost": str(decision.reserved_cost),
+                },
+                validate=lambda _ledger: None,
+            )
+            return decision
+
+        durable_available = self.snapshot().available
+        effective_budget = min(request.budget_remaining, durable_available)
+        authoritative_request = ModelRequest(
+            request_id=request.request_id,
+            allowed_model_ids=request.allowed_model_ids,
+            privacy_remote_allowed=request.privacy_remote_allowed,
+            budget_remaining=effective_budget,
+            deadline_utc=request.deadline_utc,
+            cancelled=request.cancelled,
+        )
+        decision = route_model(
+            policy,
+            authoritative_request,
+            materialized,
+            now_utc=now_utc,
+        )
+        if decision.status is not RouteStatus.ADMITTED:
+            return decision
+
+        payload = {
+            "request_id": request.request_id,
+            "amount": str(decision.reserved_cost),
+            "route_status": decision.status.value,
+            "model_id": decision.model_id,
+            "provider_id": decision.provider_id,
+            "revision": decision.revision,
+            "routing_input": routing_input,
+        }
+
+        def validate(ledger: BudgetLedger) -> None:
+            ledger.reserve(request.request_id, decision.reserved_cost)
+
+        try:
+            self._commit(
+                action="route_reserve",
+                identity=request.request_id,
+                request={"routing_input": routing_input},
+                event_type="ModelRouteReserved",
+                payload=payload,
+                result={
+                    "status": decision.status.value,
+                    "model_id": decision.model_id,
+                    "provider_id": decision.provider_id,
+                    "revision": decision.revision,
+                    "reserved_cost": str(decision.reserved_cost),
+                },
+                validate=validate,
+            )
+        except ValueError as error:
+            if "budget exhausted" not in str(error):
+                raise
+            return RouteDecision(
+                RouteStatus.NO_MODEL,
+                None,
+                None,
+                None,
+                Decimal("0"),
+                "durable_budget_exhausted",
+            )
+        return RouteDecision(
+            decision.status,
+            decision.model_id,
+            decision.provider_id,
+            decision.revision,
+            decision.reserved_cost,
+            "admitted_durable_budget",
+        )
 
     def reserve(self, request_id: str, amount) -> bool:
         request_id = _text(request_id, name="request_id")

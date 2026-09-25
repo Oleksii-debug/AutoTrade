@@ -1202,6 +1202,170 @@ class AuthorityTests(unittest.TestCase):
             )
 
 
+    def test_public_financial_admission_commit_failure_leaves_transaction_a_clean(self):
+        class FailingFinancialJournalStore(JournalStore):
+            def __init__(self, path):
+                super().__init__(path)
+                self.prepared_event_types = ()
+
+            def commit_command(self, **kwargs):
+                self.prepared_event_types = tuple(
+                    envelope["event_type"]
+                    for envelope, _topic in kwargs["events"]
+                )
+                raise RuntimeError("injected financial commit failure")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = FailingFinancialJournalStore(path)
+            authority = AuthorityService(store)
+            item = policy()
+            authority.register_policy(item)
+            confirmation_id = "confirm-transaction-a-fault"
+            authority.add_confirmation(
+                confirmation_id=confirmation_id,
+                policy_id=item.policy_id,
+                intent_hash=PUBLIC_INTENT_HASH,
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                expires_at="2026-09-24T23:00:00Z",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+            )
+            kwargs = dict(
+                command_id="cmd-public-fault",
+                idempotency_key="idem-public-fault",
+                admission_id="admission-public-fault",
+                policy_id=item.policy_id,
+                intent_id="intent-public-fault",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_id="reservation-public-fault",
+                confirmation_id=confirmation_id,
+                **public_financial_kwargs(),
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "injected financial commit failure",
+            ):
+                authority.admit(
+                    reservation_book=reservations,
+                    **kwargs,
+                )
+
+            self.assertEqual(
+                store.prepared_event_types,
+                (
+                    "RiskDecisionRecorded",
+                    "ReservationMutationCommitted",
+                    "AuthorityAdmissionRecorded",
+                ),
+            )
+            self.assertEqual(reservations.version, 0)
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+            self.assertEqual(store.pending_outbox(), [])
+            self.assertNotIn(confirmation_id, authority._used_confirmations)
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    "admission-public-fault",
+                    intent_hash=PUBLIC_INTENT_HASH,
+                    account_id="paper-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    now="2026-09-24T18:02:00Z",
+                ),
+                (False, "admission_missing"),
+            )
+            with store._connect() as connection:
+                financial_events = connection.execute(
+                    """
+                    SELECT event_type
+                    FROM events
+                    WHERE event_type IN (
+                        'RiskDecisionRecorded',
+                        'ReservationMutationCommitted',
+                        'AuthorityAdmissionRecorded'
+                    )
+                    ORDER BY event_type
+                    """
+                ).fetchall()
+                command_count = connection.execute(
+                    "SELECT COUNT(*) FROM command_dedupe"
+                ).fetchone()[0]
+            self.assertEqual(financial_events, [])
+            self.assertEqual(command_count, 0)
+
+            # Restart from durable truth: the failed process must leave no
+            # half-admission, and the same persisted confirmation remains usable.
+            restarted_store = JournalStore(path)
+            restarted_authority = AuthorityService(restarted_store)
+            restarted_reservations = DurableReservationBook(
+                restarted_store,
+                environment="PAPER",
+                account_id="paper-1",
+            )
+            self.assertEqual(restarted_reservations.version, 0)
+            self.assertEqual(
+                restarted_reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+            self.assertNotIn(
+                confirmation_id,
+                restarted_authority._used_confirmations,
+            )
+
+            admitted = restarted_authority.admit(
+                reservation_book=restarted_reservations,
+                **kwargs,
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+            self.assertEqual(
+                restarted_reservations.total_reserved("CASH:USD"),
+                Decimal("100"),
+            )
+            self.assertEqual(len(restarted_store.pending_outbox()), 1)
+            with restarted_store._connect() as connection:
+                counts = {
+                    event_type: connection.execute(
+                        "SELECT COUNT(*) FROM events WHERE event_type = ?",
+                        (event_type,),
+                    ).fetchone()[0]
+                    for event_type in (
+                        "RiskDecisionRecorded",
+                        "ReservationMutationCommitted",
+                        "AuthorityAdmissionRecorded",
+                    )
+                }
+                command_count = connection.execute(
+                    "SELECT COUNT(*) FROM command_dedupe"
+                ).fetchone()[0]
+            self.assertEqual(
+                counts,
+                {
+                    "RiskDecisionRecorded": 1,
+                    "ReservationMutationCommitted": 1,
+                    "AuthorityAdmissionRecorded": 1,
+                },
+            )
+            self.assertEqual(command_count, 1)
+
     def test_public_financial_admission_is_atomic_and_restart_idempotent(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

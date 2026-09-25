@@ -8,9 +8,12 @@ import unittest
 from autotrade_research.evaluation.ablation import (
     AblationOutcome,
     AblationPair,
+    CanonicalAblationOutcomeEvidence,
     CausalInputEvidence,
+    RegisteredAblationPopulation,
     build_ablation_evidence_bundle,
     evaluate_incremental_value,
+    evaluate_qualified_incremental_value,
     summarize_ablation,
     verify_ablation_evidence_bundle,
 )
@@ -131,6 +134,55 @@ def pair(
             population_unit=population_unit,
             decision=ablated_decision,
         ),
+    )
+
+
+def canonical_evidence(matched, *, source_revision="9" * 40, superseded_at=None):
+    return tuple(
+        CanonicalAblationOutcomeEvidence(
+            case_id=item.case_id,
+            variant=item.variant,
+            population_unit_id=item.population_unit_id,
+            utility=item.utility,
+            cost=item.cost,
+            outcome_available_utc=item.outcome_available_utc,
+            source_revision=source_revision,
+            utility_evidence_digest=FINGERPRINT_B,
+            cost_evidence_digest=FINGERPRINT_C,
+            evidence_digest=(
+                "sha256:"
+                + sha256(
+                    f"{item.case_id}:{item.variant}:{item.utility}:{item.cost}".encode()
+                ).hexdigest()
+            ),
+            superseded_at_utc=superseded_at,
+        )
+        for item in (matched.full, matched.ablated)
+    )
+
+
+def registered_population(pairs, *, source_revision="9" * 40, registered_at=None, evaluation_cutoff=None, complete=True, extra_units=()):
+    units = tuple(
+        sorted(
+            {pair.full.population_unit_id for pair in pairs}
+            | set(extra_units)
+        )
+    )
+    return RegisteredAblationPopulation(
+        protocol_digest=FINGERPRINT_A,
+        population_digest=FINGERPRINT_D,
+        stopping_rule_digest=FINGERPRINT_C,
+        source_revision=source_revision,
+        registered_at_utc=(
+            CUT - timedelta(days=1) if registered_at is None else registered_at
+        ),
+        evaluation_cutoff_utc=(
+            CUT + timedelta(hours=2)
+            if evaluation_cutoff is None
+            else evaluation_cutoff
+        ),
+        population_unit_ids=units,
+        complete=complete,
     )
 
 
@@ -858,6 +910,170 @@ class AblationTests(unittest.TestCase):
                 payload=noncanonical_payload,
                 content_digest=noncanonical_digest,
             )
+
+
+    def test_qualified_pass_requires_canonical_outcome_evidence(self):
+        cases = [
+            pair("qualified-a", "2", population_unit="unit-a"),
+            pair("qualified-b", "2", population_unit="unit-b"),
+        ]
+        result = evaluate_qualified_incremental_value(
+            "agent",
+            cases,
+            population=registered_population(cases),
+            canonical_outcomes=(),
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertEqual(result.reason, "missing_canonical_outcome_evidence")
+
+    def test_qualified_population_must_include_every_registered_unit(self):
+        cases = [
+            pair("qualified-a", "2", population_unit="unit-a"),
+            pair("qualified-b", "2", population_unit="unit-b"),
+        ]
+        evidence = tuple(
+            item
+            for matched in cases
+            for item in canonical_evidence(matched)
+        )
+        result = evaluate_qualified_incremental_value(
+            "agent",
+            cases,
+            population=registered_population(cases, extra_units=("unit-negative-null",)),
+            canonical_outcomes=evidence,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertEqual(result.reason, "incomplete_registered_population")
+
+    def test_qualified_stale_pre_cutoff_revision_is_inconclusive(self):
+        cases = [
+            pair("qualified-a", "2", population_unit="unit-a"),
+            pair("qualified-b", "2", population_unit="unit-b"),
+        ]
+        stale = canonical_evidence(
+            cases[0],
+            superseded_at=CUT + timedelta(hours=1, minutes=30),
+        )
+        evidence = stale + canonical_evidence(cases[1])
+        result = evaluate_qualified_incremental_value(
+            "agent",
+            cases,
+            population=registered_population(cases),
+            canonical_outcomes=evidence,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertEqual(result.reason, "stale_canonical_outcome_revision")
+
+    def test_qualified_post_cutoff_correction_does_not_rewrite_frozen_result(self):
+        cases = [
+            pair("qualified-a", "2", population_unit="unit-a"),
+            pair("qualified-b", "2", population_unit="unit-b"),
+        ]
+        evidence = (
+            canonical_evidence(
+                cases[0],
+                superseded_at=CUT + timedelta(hours=3),
+            )
+            + canonical_evidence(cases[1])
+        )
+        result = evaluate_qualified_incremental_value(
+            "agent",
+            cases,
+            population=registered_population(cases),
+            canonical_outcomes=evidence,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(
+            result.reason,
+            "qualified_registered_canonical_ablation_net_of_cost",
+        )
+
+    def test_qualified_post_hoc_registration_cannot_pass(self):
+        cases = [
+            pair("qualified-a", "2", population_unit="unit-a"),
+            pair("qualified-b", "2", population_unit="unit-b"),
+        ]
+        evidence = tuple(
+            item
+            for matched in cases
+            for item in canonical_evidence(matched)
+        )
+        result = evaluate_qualified_incremental_value(
+            "agent",
+            cases,
+            population=registered_population(
+                cases,
+                registered_at=CUT + timedelta(seconds=1),
+            ),
+            canonical_outcomes=evidence,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertEqual(
+            result.reason,
+            "post_hoc_population_or_protocol_registration",
+        )
+
+    def test_qualified_evaluation_is_deterministic_for_exact_registered_population(self):
+        cases = [
+            pair("qualified-a", "2", full_cost="0.25", population_unit="unit-a"),
+            pair("qualified-b", "1.5", full_cost="0.10", population_unit="unit-b"),
+        ]
+        evidence = tuple(
+            item
+            for matched in cases
+            for item in canonical_evidence(matched)
+        )
+        population = registered_population(cases)
+        first = evaluate_qualified_incremental_value(
+            "agent",
+            cases,
+            population=population,
+            canonical_outcomes=evidence,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        second = evaluate_qualified_incremental_value(
+            "agent",
+            list(reversed(cases)),
+            population=population,
+            canonical_outcomes=tuple(reversed(evidence)),
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(first.status, "PASS")
+
+    def test_qualified_canonical_economics_must_match_scored_numbers(self):
+        cases = [
+            pair("qualified-a", "2", population_unit="unit-a"),
+            pair("qualified-b", "2", population_unit="unit-b"),
+        ]
+        evidence = list(
+            item
+            for matched in cases
+            for item in canonical_evidence(matched)
+        )
+        evidence[0] = replace(evidence[0], utility=Decimal("999"))
+        result = evaluate_qualified_incremental_value(
+            "agent",
+            cases,
+            population=registered_population(cases),
+            canonical_outcomes=evidence,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertEqual(result.reason, "canonical_outcome_economic_mismatch")
 
 
 if __name__ == "__main__":

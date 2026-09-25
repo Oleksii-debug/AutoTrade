@@ -369,11 +369,19 @@ class CausalFeederTests(unittest.TestCase):
         later_view = feeder.view()
         self.assertNotEqual(later_view.digest, first_view.digest)
 
-        same_events_later_cutoff = CausalFeeder(
-            CausalDataset.create(manifest_sha256=MANIFEST, events=[dataset.events[0]]),
+        same_dataset_same_events_later_cutoff = CausalFeeder(
+            dataset,
             start_time="2026-01-01T10:00:30Z",
         ).view()
-        self.assertNotEqual(same_events_later_cutoff.digest, first_view.digest)
+        self.assertEqual(same_dataset_same_events_later_cutoff.events, first_view.events)
+        self.assertEqual(
+            same_dataset_same_events_later_cutoff.dataset_sha256,
+            first_view.dataset_sha256,
+        )
+        self.assertNotEqual(
+            same_dataset_same_events_later_cutoff.digest,
+            first_view.digest,
+        )
 
     def test_restore_rejects_tampered_published_prefix(self):
         dataset = CausalDataset.create(

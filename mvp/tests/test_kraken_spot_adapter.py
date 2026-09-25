@@ -122,8 +122,20 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 at=NOW,
             )
 
+    def _parse_submission(self, payload, **overrides):
+        values = {
+            "attempt_id": str(uuid4()),
+            "client_order_id": "at-order-1",
+            "environment": "LIVE",
+            "observed_at": "2026-09-24T20:00:00Z",
+            "source_uri": "https://api.kraken.com/0/private/AddOrder",
+            "payload": payload,
+        }
+        values.update(overrides)
+        return parse_spot_submission_response(**values)
+
     def test_add_order_acknowledgement_never_proves_fill(self):
-        ack = parse_spot_submission_response(
+        result = self._parse_submission(
             {
                 "error": [],
                 "result": {
@@ -132,18 +144,48 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 },
             }
         )
-        self.assertEqual(ack.provider_order_ids, ("OABC-D123-E456",))
-        self.assertFalse(ack.proves_fill)
+        self.assertEqual(result["outcome"], "ACKNOWLEDGED")
+        self.assertEqual(result["provider_order_ids"], ("OABC-D123-E456",))
+        self.assertEqual(result["retry_disposition"], "NEVER")
+        self.assertNotIn("fill", repr(result).lower())
+        self.assertEqual(
+            result["evidence"][0]["source_uri"],
+            "https://api.kraken.com/0/private/AddOrder",
+        )
+        self.assertEqual(result["evidence"][0]["provider_environment"], "LIVE")
 
-    def test_provider_error_is_rejection_not_success(self):
-        with self.assertRaisesRegex(KrakenSpotAdapterError, "rejected"):
-            parse_spot_submission_response(
-                {"error": ["EOrder:Insufficient funds"], "result": None}
+    def test_provider_error_is_canonical_rejection_not_exception_or_success(self):
+        result = self._parse_submission(
+            {"error": ["EOrder:Insufficient funds"], "result": None}
+        )
+        self.assertEqual(result["outcome"], "REJECTED")
+        self.assertEqual(result["retry_disposition"], "NEVER")
+
+    def test_transport_ambiguity_is_unknown_and_reconcile_first(self):
+        result = self._parse_submission(
+            None,
+            transport_ambiguous=True,
+        )
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
+        self.assertEqual(result["evidence"], [])
+
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "must not fabricate"):
+            self._parse_submission(
+                {"error": [], "result": {"txid": ["OABC-D123-E456"]}},
+                transport_ambiguous=True,
+            )
+
+    def test_submission_provenance_requires_exact_https_add_order_endpoint(self):
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "source_uri"):
+            self._parse_submission(
+                {"error": [], "result": {"txid": ["OABC-D123-E456"]}},
+                source_uri="http://example.invalid/0/private/AddOrder",
             )
 
     def test_empty_txid_fails_closed(self):
         with self.assertRaisesRegex(KrakenSpotAdapterError, "transaction ids"):
-            parse_spot_submission_response({"error": [], "result": {"txid": []}})
+            self._parse_submission({"error": [], "result": {"txid": []}})
 
     def test_incomplete_search_never_proves_absence(self):
         evidence = KrakenSpotAbsenceEvidence(

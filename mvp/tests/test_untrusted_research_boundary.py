@@ -164,6 +164,49 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
                     arguments={"nested": {"value": value}},
                 )
 
+    def test_hostile_shallow_container_width_is_rejected_before_copy(self):
+        with self.assertRaisesRegex(ResearchBoundaryError, "maximum object width"):
+            ResearchToolRequest(
+                request_id="wide-object",
+                tool_name="statistics",
+                requested_capabilities=("COMPUTE_STATISTICS",),
+                arguments={f"k-{index}": index for index in range(2049)},
+            )
+        with self.assertRaisesRegex(ResearchBoundaryError, "maximum array width"):
+            ResearchModelResult(
+                result_id="wide-array",
+                proposal={"rows": list(range(2049))},
+                evidence_refs=("evidence:1",),
+            )
+
+    def test_hostile_total_node_budget_is_rejected_even_when_each_container_is_narrow(self):
+        payload = {
+            f"group-{group}": list(range(1000))
+            for group in range(10)
+        }
+        with self.assertRaisesRegex(ResearchBoundaryError, "structural node budget"):
+            ResearchToolRequest(
+                request_id="node-bomb",
+                tool_name="statistics",
+                requested_capabilities=("COMPUTE_STATISTICS",),
+                arguments=payload,
+            )
+
+    def test_hostile_giant_text_and_integer_scalars_are_rejected(self):
+        with self.assertRaisesRegex(ResearchBoundaryError, "text value exceeds"):
+            ResearchModelResult(
+                result_id="giant-text",
+                proposal={"text": "x" * 1_048_577},
+                evidence_refs=("evidence:1",),
+            )
+        with self.assertRaisesRegex(ResearchBoundaryError, "integer exceeds"):
+            ResearchToolRequest(
+                request_id="giant-int",
+                tool_name="statistics",
+                requested_capabilities=("COMPUTE_STATISTICS",),
+                arguments={"value": 1 << 4096},
+            )
+
     def test_host_tool_allowlist_rejects_normalized_name_collision(self):
         with self.assertRaisesRegex(
             ResearchBoundaryError,

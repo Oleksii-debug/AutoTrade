@@ -199,7 +199,17 @@ def normalize_inspected_components(
 
 
 def git_blob_sha(path: Path) -> str:
-    data = path.read_bytes()
+    """Return the canonical Git blob identity for UTF-8 inventory text.
+
+    GitHub stores these source-inventory files with LF line endings, while a
+    Windows checkout may materialize them as CRLF. Hashing raw working-tree
+    bytes therefore makes the release manifest platform-dependent. Read in
+    universal-newline text mode and hash canonical UTF-8/LF bytes so the
+    computed identity matches the repository blob on every supported OS.
+    """
+
+    text = path.read_text(encoding="utf-8")
+    data = text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
     return sha1(b"blob " + str(len(data)).encode("ascii") + b"\0" + data).hexdigest()
 
 

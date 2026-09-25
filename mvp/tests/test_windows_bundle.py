@@ -557,6 +557,36 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             (self.root / "embedded-encrypted-private-key.zip").exists()
         )
 
+    def test_provider_specific_private_key_markers_are_each_rejected(self):
+        cases = (
+            ("rsa", b"-----BEGIN RSA PRIVATE KEY-----"),
+            ("ec", b"-----BEGIN EC PRIVATE KEY-----"),
+            ("openssh", b"-----BEGIN OPENSSH PRIVATE KEY-----"),
+        )
+        for name, marker in cases:
+            with self.subTest(marker=name):
+                disguised = self.staging / f"runtime-{name}-notes.txt"
+                disguised.write_bytes(
+                    b"ordinary prefix\n"
+                    + marker
+                    + b"\nmust-not-ship\n"
+                )
+                output = self.root / f"embedded-{name}-private-key.zip"
+                with self.assertRaisesRegex(
+                    BundleError,
+                    "private-key material",
+                ):
+                    build_bundle(
+                        staging=self.staging,
+                        output=output,
+                        version="0.1.0-dev",
+                        source_sha=SOURCE_SHA,
+                        mode="diagnostics",
+                        provenance_path=self.provenance(eligible=False),
+                    )
+                self.assertFalse(output.exists())
+                disguised.unlink()
+
     def test_escaped_json_vault_keys_cannot_bypass_semantic_content_gate(self):
         disguised = self.staging / "runtime-escaped-state.json"
         disguised.write_text(

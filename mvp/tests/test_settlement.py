@@ -490,5 +490,91 @@ class SettlementBookTests(unittest.TestCase):
             )
 
 
+    def test_history_replay_derives_cash_from_initial_balance_and_evidence(self):
+        obligation = SettlementObligation(
+            "buy-history",
+            "fill-history",
+            "USD",
+            Decimal("-201"),
+            date(2026, 9, 24),
+            date(2026, 9, 25),
+        )
+        running = SettlementBook(
+            settled_cash={"USD": "1000"},
+            obligations=(obligation,),
+        )
+        self.assertTrue(
+            running.settle(
+                "buy-history",
+                as_of=date(2026, 9, 25),
+                settlement_evidence_ref="provider:statement:history",
+            )
+        )
+        self.assertEqual(running.snapshot("USD").settled_cash, Decimal("799"))
+
+        restored = SettlementBook.from_history(
+            initial_settled_cash={"USD": "1000"},
+            obligations=running.obligations,
+            settled_obligation_evidence=running.settled_obligation_evidence,
+        )
+        self.assertEqual(restored.snapshot("USD").settled_cash, Decimal("799"))
+        self.assertEqual(restored.available_to_spend("USD"), Decimal("799"))
+        self.assertEqual(
+            restored.settled_obligation_evidence,
+            {"buy-history": "provider:statement:history"},
+        )
+        self.assertFalse(
+            restored.settle(
+                "buy-history",
+                as_of=date(2026, 9, 26),
+                settlement_evidence_ref="provider:statement:history",
+            )
+        )
+
+    def test_history_replay_rejects_duplicate_normalized_evidence_ids(self):
+        obligation = SettlementObligation(
+            "cash-1",
+            "fill-1",
+            "USD",
+            Decimal("10"),
+            date(2026, 9, 20),
+            date(2026, 9, 22),
+        )
+        with self.assertRaisesRegex(
+            SettlementConflict,
+            "duplicate normalized obligation ids",
+        ):
+            SettlementBook.from_history(
+                initial_settled_cash={"USD": "0"},
+                obligations=(obligation,),
+                settled_obligation_evidence={
+                    "cash-1": "provider:statement:1",
+                    " cash-1 ": "provider:statement:1",
+                },
+            )
+
+    def test_settlement_temporal_boundaries_require_exact_date_values(self):
+        obligation = SettlementObligation(
+            "cash-date",
+            "fill-date",
+            "USD",
+            Decimal("10"),
+            date(2026, 9, 20),
+            date(2026, 9, 22),
+        )
+        book = SettlementBook(obligations=(obligation,))
+        with self.assertRaisesRegex(TypeError, "as_of"):
+            book.settle(
+                "cash-date",
+                as_of="2026-09-22",
+                settlement_evidence_ref="provider:statement:date",
+            )
+        with self.assertRaisesRegex(TypeError, "as_of"):
+            book.settle_due(
+                as_of="2026-09-22",
+                settlement_evidence={"cash-date": "provider:statement:date"},
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -233,7 +233,12 @@ class ScientificRegistry:
                 raise KeyError(protocol)
             existing = con.execute("SELECT * FROM trials WHERE trial_id=?", (identifier,)).fetchone()
             if existing is not None:
-                if existing["protocol_id"] != protocol or existing["status"] != normalized or existing["payload_hash"] != digest:
+                if (
+                    existing["protocol_id"] != protocol
+                    or existing["status"] != normalized
+                    or existing["payload_hash"] != digest
+                    or existing["payload_json"] != canonical
+                ):
                     raise ProtocolConflict("trial identity was reused inconsistently")
                 return identifier
             budget = json.loads(owner["payload_json"])["trial_budget"]
@@ -398,7 +403,7 @@ class ScientificRegistry:
             )
         with self._connect() as con:
             trial_rows = con.execute(
-                "SELECT status, payload_json FROM trials WHERE protocol_id=?",
+                "SELECT status, payload_hash, payload_json FROM trials WHERE protocol_id=?",
                 (expected_protocol,),
             ).fetchall()
         candidate_trial_found = False
@@ -411,6 +416,13 @@ class ScientificRegistry:
                 raise ProtocolViolation("registered trial payload is corrupt") from error
             if not isinstance(payload, dict):
                 raise ProtocolViolation("registered trial payload is invalid")
+            if (
+                _canonical(payload) != row["payload_json"]
+                or _hash(payload) != row["payload_hash"]
+            ):
+                raise ProtocolViolation(
+                    "registered trial payload integrity mismatch"
+                )
             if (
                 payload.get("candidate_id") == candidate_id
                 and payload.get("artifact_hash") == artifact_hash
@@ -492,21 +504,34 @@ class ScientificRegistry:
             budget = protocol_payload["trial_budget"]
             trial_rows = con.execute(
                 """
-                SELECT trial_id,status,payload_hash
+                SELECT trial_id,status,payload_hash,payload_json
                 FROM trials
                 WHERE protocol_id=?
                 ORDER BY trial_id
                 """,
                 (protocol,),
             ).fetchall()
-        log = [
-            {
-                "trial_id": row["trial_id"],
-                "status": row["status"],
-                "payload_hash": row["payload_hash"],
-            }
-            for row in trial_rows
-        ]
+        log = []
+        for row in trial_rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except json.JSONDecodeError as error:
+                raise ProtocolViolation("registered trial payload is corrupt") from error
+            if (
+                not isinstance(payload, dict)
+                or _canonical(payload) != row["payload_json"]
+                or _hash(payload) != row["payload_hash"]
+            ):
+                raise ProtocolViolation(
+                    "registered trial payload integrity mismatch"
+                )
+            log.append(
+                {
+                    "trial_id": row["trial_id"],
+                    "status": row["status"],
+                    "payload_hash": row["payload_hash"],
+                }
+            )
         counts: dict[str, int] = {}
         for row in trial_rows:
             counts[row["status"]] = counts.get(row["status"], 0) + 1

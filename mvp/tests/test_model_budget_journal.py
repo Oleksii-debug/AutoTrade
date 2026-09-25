@@ -4,7 +4,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import sqlite3
 import unittest
-from unittest.mock import patch
 
 from mvp.autotrade_mvp.model_budget_journal import DurableModelBudget
 from mvp.autotrade_mvp.model_gateway import (
@@ -65,30 +64,52 @@ def route_model_descriptor(*, cost="0.6", revision="r1"):
     )
 
 
-class DurableModelBudgetTests(unittest.TestCase):
-    def test_initialization_does_not_mask_journal_contract_failure(self):
+class RecordingJournalStore(JournalStore):
+    def __init__(self, path):
+        self.last_appended_envelope = None
+        super().__init__(path)
+
+    def append_event(self, envelope, *, outbox_topic=None):
+        self.last_appended_envelope = dict(envelope)
+        return super().append_event(envelope, outbox_topic=outbox_topic)
+
+
+class RejectingInitializationJournal(JournalStore):
+    def append_event(self, envelope, *, outbox_topic=None):
+        raise ValueError("synthetic malformed initialization")
+
+
+class DurableModelBudgetTests(unittest.TestCase):\n    def test_initialization_uses_canonical_sequence_text(self):
         with TemporaryDirectory() as directory:
-            journal = JournalStore(Path(directory) / "journal.db")
-            with patch.object(
-                journal,
-                "append_event",
-                side_effect=ValueError("synthetic journal contract violation"),
-            ):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "synthetic journal contract violation",
-                ):
-                    DurableModelBudget(
-                        journal=journal,
-                        budget_id="policy-init-failure",
-                        ceiling="1",
-                        environment="SIMULATION",
-                        clock=lambda: NOW,
-                    )
-            self.assertEqual(
-                journal.load_events("model_budget", "policy-init-failure"),
-                [],
+            journal = RecordingJournalStore(Path(directory) / "journal.db")
+            budget = DurableModelBudget(
+                journal=journal,
+                budget_id="policy-sequence",
+                ceiling="1",
+                environment="SIMULATION",
+                clock=lambda: NOW,
             )
+            self.assertEqual(
+                journal.last_appended_envelope["aggregate_version"],
+                "1",
+            )
+            self.assertEqual(budget.snapshot().ceiling, Decimal("1"))
+
+    def test_initialization_contract_error_is_not_swallowed_as_race(self):
+        with TemporaryDirectory() as directory:
+            journal = RejectingInitializationJournal(Path(directory) / "journal.db")
+            with self.assertRaisesRegex(
+                ValueError,
+                "synthetic malformed initialization",
+            ):
+                DurableModelBudget(
+                    journal=journal,
+                    budget_id="policy-reject",
+                    ceiling="1",
+                    environment="SIMULATION",
+                    clock=lambda: NOW,
+                )
+
 
     def test_durable_route_ignores_inflated_caller_budget(self):
         with TemporaryDirectory() as directory:
@@ -367,7 +388,7 @@ class DurableModelBudgetTests(unittest.TestCase):
                     "event_type": "ModelBudgetInitialized",
                     "aggregate_type": "model_budget",
                     "aggregate_id": "legacy-policy",
-                    "aggregate_version": "1",
+                    "aggregate_version": 1,
                     "payload": payload,
                     "payload_hash": payload_digest(payload),
                     "committed_at": NOW,
@@ -509,14 +530,7 @@ class DurableModelBudgetTests(unittest.TestCase):
 
     def test_release_revalidates_exact_amount_before_commit(self):
         class InterleavingBudget(DurableModelBudget):
-            def _commit(self, *, action, validate, payload, **kwargs):
-                if action != "release":
-                    return super()._commit(
-                        action=action,
-                        validate=validate,
-                        payload=payload,
-                        **kwargs,
-                    )
+            def _commit(self, *, validate, payload, **kwargs):
                 candidate = self._replay()
                 candidate.release(payload["request_id"])
                 validate(candidate)
@@ -611,7 +625,7 @@ class DurableModelBudgetTests(unittest.TestCase):
                     "event_type": "AlienBudgetMutation",
                     "aggregate_type": "model_budget",
                     "aggregate_id": "policy-1",
-                    "aggregate_version": "2",
+                    "aggregate_version": 2,
                     "payload": payload,
                     "payload_hash": payload_digest(payload),
                     "committed_at": NOW,

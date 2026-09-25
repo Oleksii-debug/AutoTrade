@@ -117,13 +117,19 @@ class DurableModelBudget:
             try:
                 self.journal.append_event(envelope)
             except ValueError:
-                # A concurrent initializer is benign only when durable truth
-                # actually appeared after our empty read. Never translate a
-                # malformed envelope / journal-contract failure into a later,
-                # misleading "initialization is missing" replay error.
-                if not self.journal.load_events(
-                    _AGGREGATE_TYPE,
-                    self.budget_id,
+                # A concurrent process may have won the deterministic
+                # initialization event_id after our empty read. Only suppress
+                # the error when durable truth proves that exact initialization
+                # payload already exists. Contract/malformed-envelope errors
+                # must propagate instead of being misreported as a missing init.
+                concurrent = self.journal.get_event(envelope["event_id"])
+                if (
+                    concurrent is None
+                    or concurrent["event_type"] != "ModelBudgetInitialized"
+                    or concurrent["aggregate_type"] != _AGGREGATE_TYPE
+                    or concurrent["aggregate_id"] != self.budget_id
+                    or concurrent["aggregate_version"] != 1
+                    or concurrent["payload"] != payload
                 ):
                     raise
 

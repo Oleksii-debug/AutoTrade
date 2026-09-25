@@ -278,6 +278,73 @@ class PerpetualMarginEvidence:
             self.tier_table_evidence_ref,
         )
 
+    def tier_table_payload(self) -> dict[str, object]:
+        return {
+            "risk_tier_revision": self.risk_tier_revision,
+            "tiers": [
+                {
+                    "notional_upper_bound": _decimal_text(
+                        tier.notional_upper_bound
+                    ),
+                    "maintenance_rate": _decimal_text(tier.maintenance_rate),
+                    "maintenance_adjustment": _decimal_text(
+                        tier.maintenance_adjustment
+                    ),
+                    "adjustment_convention": tier.adjustment_convention,
+                }
+                for tier in self.margin_tiers
+            ],
+        }
+
+    def evidence_bundle_payload(self) -> dict[str, object]:
+        return {
+            "mark_price": _decimal_text(self.mark_price),
+            "index_price": _decimal_text(self.index_price),
+            "collateral_fx_to_settlement": _decimal_text(
+                self.collateral_fx_to_settlement
+            ),
+            "mark_observed_at": self.mark_observed_at,
+            "index_observed_at": self.index_observed_at,
+            "collateral_fx_observed_at": self.collateral_fx_observed_at,
+            "margin_tiers_observed_at": self.margin_tiers_observed_at,
+        }
+
+    def verify_immutable_artifacts(self, store: object) -> None:
+        common_metadata = {
+            "schema_version": 1,
+            "provider_id": self.provider_id,
+            "account_id": self.account_id,
+            "entity_id": self.entity_id,
+            "environment": self.environment,
+            "instrument_version": self.instrument_version,
+            "capability_snapshot_id": self.capability_snapshot_id,
+            "position_mode": self.position_mode,
+            "margin_mode": self.margin_mode,
+            "collateral_currency": self.collateral_currency,
+            "settlement_currency": self.settlement_currency,
+            "risk_tier_revision": self.risk_tier_revision,
+        }
+        _verify_immutable_artifact(
+            store,
+            artifact_id=self.tier_table_evidence_ref,
+            expected_payload=self.tier_table_payload(),
+            expected_metadata={
+                **common_metadata,
+                "artifact_kind": "PERPETUAL_MARGIN_TIER_TABLE",
+                "observed_at": self.margin_tiers_observed_at,
+            },
+        )
+        _verify_immutable_artifact(
+            store,
+            artifact_id=self.evidence_bundle_ref,
+            expected_payload=self.evidence_bundle_payload(),
+            expected_metadata={
+                **common_metadata,
+                "artifact_kind": "PERPETUAL_MARGIN_EVIDENCE_BUNDLE",
+                "observed_at": self.mark_observed_at,
+            },
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class PerpetualStress:

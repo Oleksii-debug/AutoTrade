@@ -192,6 +192,16 @@ def reconciliation_payload(
                 "evidence_refs": list(result.resource_availability.evidence_refs),
             }
         ),
+        **(
+            {
+                "borrow_reconciliations": [
+                    item.payload()
+                    for item in result.borrow_reconciliations
+                ]
+            }
+            if result.borrow_reconciliations
+            else {}
+        ),
         "blocking_resources": list(result.blocking_resources),
         "reasons": list(result.reasons),
     }
@@ -502,10 +512,22 @@ def load_account_resource_availability_evidence(
     if (
         payload.get("complete") is not True
         or payload.get("snapshot_consistent") is not True
-        or payload.get("blocking_resources") != []
     ):
         raise ValueError(
-            "availability evidence requires complete non-blocking reconciliation"
+            "availability evidence requires complete consistent reconciliation"
+        )
+    raw_blocking_resources = payload.get("blocking_resources")
+    if not isinstance(raw_blocking_resources, list):
+        raise ValueError("checkpoint blocking_resources must be a list")
+    blocking_resources = tuple(
+        _text(value, name="blocking_resource")
+        for value in raw_blocking_resources
+    )
+    if len(blocking_resources) != len(set(blocking_resources)):
+        raise ValueError("checkpoint blocking_resources must be unique")
+    if "ACCOUNT" in blocking_resources:
+        raise ValueError(
+            "availability evidence is blocked by account reconciliation"
         )
 
     snapshot = payload.get("snapshot")
@@ -623,6 +645,16 @@ def load_account_resource_availability_evidence(
     requested = tuple(_text(value, name="resource") for value in resources)
     if len(requested) != len(set(requested)):
         raise ValueError("resources must be unique")
+    blocked_requested = tuple(
+        resource
+        for resource in requested
+        if resource in blocking_resources
+    )
+    if blocked_requested:
+        raise ValueError(
+            "requested resource is blocked by reconciliation: "
+            + ", ".join(blocked_requested)
+        )
     availability: dict[str, Decimal] = {}
     for resource in requested:
         if not resource.startswith("CASH:"):

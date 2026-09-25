@@ -446,7 +446,7 @@ def evaluate_incremental_value(
         raise ValueError("uncertainty_multiplier must be non-negative")
 
     target = target_component.strip() if isinstance(target_component, str) else target_component
-    selected = _validate_pairs(target, pairs)
+    selected = _validate_pairs(target, selected_input)
     if any(not pair.full.input_evidence for pair in selected):
         return AblationEvaluation(
             target_component=target,
@@ -1019,23 +1019,46 @@ def evaluate_qualified_incremental_value(
     target_component: str,
     pairs: Iterable[AblationPair],
     *,
-    population: RegisteredAblationPopulation,
-    canonical_outcomes: Iterable[CanonicalAblationOutcomeEvidence],
     minimum_pairs: int,
     required_lower_bound: Decimal,
     uncertainty_multiplier: Decimal = Decimal("2"),
+    authority: AblationQualificationAuthority | None = None,
+    outcome_refs: Iterable[AblationOutcomeArtifactRef] = (),
+    population: RegisteredAblationPopulation | None = None,
+    canonical_outcomes: Iterable[CanonicalAblationOutcomeEvidence] = (),
 ) -> AblationEvaluation:
     """Evaluate only evidence-bound, pre-registered, complete matched populations.
 
     The existing evaluate_incremental_value() remains a descriptive/statistical
-    primitive. This qualification path cannot PASS from caller-authored utility
-    or cost alone: every scored outcome must match immutable canonical evidence,
-    the population must be complete and registered before causal inputs, and
-    stale pre-cutoff outcome revisions fail closed.
+    primitive. A terminal PASS/FAIL is available only when an
+    AblationQualificationAuthority resolves the frozen protocol, complete
+    ExperienceMemory population and immutable outcome artifacts. Caller-authored
+    dataclasses may still be inspected through this function for diagnostic
+    incompatibilities, but they can never produce a terminal qualification.
     """
 
-    if not isinstance(population, RegisteredAblationPopulation):
-        raise TypeError("population must be RegisteredAblationPopulation")
+    selected_input = tuple(pairs)
+    trusted = authority is not None
+    if trusted:
+        if not isinstance(authority, AblationQualificationAuthority):
+            raise TypeError("authority must be AblationQualificationAuthority or None")
+        if population is not None or tuple(canonical_outcomes):
+            raise ValueError(
+                "authority-backed qualification does not accept caller-authored population/outcomes"
+            )
+        population, trusted_outcomes = authority.resolve(
+            selected_input,
+            outcome_refs=tuple(outcome_refs),
+        )
+        canonical_outcomes = trusted_outcomes
+    else:
+        if tuple(outcome_refs):
+            raise ValueError("outcome_refs require AblationQualificationAuthority")
+        if not isinstance(population, RegisteredAblationPopulation):
+            raise TypeError(
+                "population must be RegisteredAblationPopulation for diagnostic evaluation"
+            )
+
     required = _decimal(required_lower_bound, "required_lower_bound")
     multiplier = _decimal(uncertainty_multiplier, "uncertainty_multiplier")
     if multiplier < 0:
@@ -1107,6 +1130,13 @@ def evaluate_qualified_incremental_value(
     )
     if base.status == "INCONCLUSIVE":
         return base
+    if not trusted:
+        return _qualified_inconclusive(
+            target_component=base.target_component,
+            required_lower_bound=base.required_lower_bound,
+            uncertainty_multiplier=base.uncertainty_multiplier,
+            reason="untrusted_caller_authored_qualification_evidence",
+        )
     return AblationEvaluation(
         target_component=base.target_component,
         pair_count=base.pair_count,

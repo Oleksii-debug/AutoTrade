@@ -157,10 +157,20 @@ class ForwardPaperQualificationTests(unittest.TestCase):
         )
         self.assertEqual(reordered_hash, frozen.protocol_hash)
 
+    def test_protocol_registration_at_campaign_start_is_rejected(self):
+        with self.assertRaisesRegex(
+            ForwardPaperError,
+            "strictly before campaign starts_at",
+        ):
+            self.protocol(
+                registered_at="2026-09-24T20:00:00Z",
+                starts_at="2026-09-24T20:00:00Z",
+            )
+
     def test_protocol_cannot_be_registered_after_campaign_start(self):
         with self.assertRaisesRegex(
             ForwardPaperError,
-            "registered_at must not be after campaign starts_at",
+            "registered_at must be strictly before campaign starts_at",
         ):
             self.protocol(registered_at="2026-09-24T20:00:01Z")
 

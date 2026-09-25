@@ -124,6 +124,7 @@ def sealed_funding(
     corrects=None,
     instrument_id="BTCUSDT",
     price_reference_at="2026-09-25T10:00:00Z",
+    collateral_currency="USDT",
 ):
     binding = prepare_authenticated_read_query(
         capability=funding_capability(),
@@ -145,6 +146,7 @@ def sealed_funding(
         "mark_price": "100000",
         "index_price": "100000",
         "price_basis": "MARK",
+        "collateral_currency": collateral_currency,
         "positive_rate_effect": "LONG_PAYS",
         "corrects_external_event_id": corrects,
     }
@@ -177,6 +179,7 @@ def normalize(source):
         mark_price=payload["mark_price"],
         index_price=payload["index_price"],
         price_basis=payload["price_basis"],
+        collateral_currency=payload["collateral_currency"],
         positive_rate_effect=payload["positive_rate_effect"],
         raw_evidence_digest=source.response_sha256,
         corrects_external_event_id=payload["corrects_external_event_id"],
@@ -261,6 +264,7 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
                     mark_price=Decimal("1"),
                     index_price=Decimal("1"),
                     price_basis="INDEX",
+                    collateral_currency=valid.collateral_currency,
                     positive_rate_effect="LONG_RECEIVES",
                     raw_evidence_digest=valid.raw_evidence_digest,
                 )
@@ -475,6 +479,75 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
                 PerpetualFundingConflict, "changed evidence"
             ):
                 restarted.apply(evidence.evidence_ref)
+
+    def test_provider_collateral_currency_is_not_inferred_from_settlement(self):
+        evidence = sealed_funding(collateral_currency="USD")
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, book = self.authority(store, [evidence])
+
+            applied = authority.apply(evidence.evidence_ref)
+
+            self.assertTrue(applied.inserted)
+            self.assertEqual(applied.currency, "USD")
+            self.assertEqual(book.cash("USD"), Decimal("-0.200000"))
+            # The canonical instrument still settles in USDT. Funding collateral
+            # comes only from sealed provider/account evidence, not that field.
+            self.assertEqual(
+                authority.instrument_registry.exact(
+                    f"{FUNDING_ID}@1"
+                ).settlement_currency,
+                "USDT",
+            )
+            event = store.load_events(
+                "perpetual_funding", authority.aggregate_id
+            )[0]
+            self.assertEqual(
+                event["payload"]["observation_digest"],
+                __import__(
+                    "mvp.autotrade_mvp.persistence",
+                    fromlist=["payload_digest"],
+                ).payload_digest(
+                    {
+                        **__import__(
+                            "mvp.autotrade_mvp.perpetual_funding",
+                            fromlist=["canonical_perpetual_funding_observation"],
+                        ).canonical_perpetual_funding_observation(
+                            __import__(
+                                "mvp.autotrade_mvp.perpetual_funding",
+                                fromlist=["_canonical_observation_from_sealed_response"],
+                            )._canonical_observation_from_sealed_response(evidence)
+                        )
+                    }
+                ),
+            )
+
+    def test_missing_provider_collateral_currency_fails_closed(self):
+        source = sealed_funding()
+        payload = dict(source.payload)
+        payload.pop("collateral_currency")
+        binding = source.query_binding
+        malformed = observe_authenticated_json_response(
+            query_binding=binding,
+            http_status=200,
+            response_bytes=json.dumps(
+                payload, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8"),
+            observed_at=_instant(source.observed_at),
+        )
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, book = self.authority(store, [malformed])
+            before = book.audit_digest()
+            with self.assertRaisesRegex(
+                PerpetualFundingError, "shape is not canonical"
+            ):
+                authority.apply(malformed.evidence_ref)
+            self.assertEqual(book.audit_digest(), before)
+            self.assertEqual(
+                store.load_events("perpetual_funding", authority.aggregate_id),
+                [],
+            )
 
     def test_inverse_contract_remains_fail_closed_without_quantization_policy(self):
         evidence = sealed_funding()

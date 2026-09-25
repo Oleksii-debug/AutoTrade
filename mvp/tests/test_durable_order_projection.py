@@ -123,6 +123,163 @@ class DurableOrderProjectionTests(unittest.TestCase):
             self.assertEqual(restarted.order("c1").filled_quantity, Decimal("2"))
             self.assertEqual(len(restarted.effective_fills()), 1)
 
+    def test_canonical_execution_fill_ingest_rebuilds_after_restart(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            book.create_order(
+                event_key="create",
+                client_order_id="c1",
+                instrument="instrument-v1",
+                side="BUY",
+                requested_quantity="2",
+                parent_intent_id="intent-1",
+                committed_at=T0,
+            )
+            result = book.ingest_execution_fill(
+                event_key="canonical-fill",
+                client_order_id="c1",
+                committed_at=T2,
+                execution_fill={
+                    "fill_id": "fill-1",
+                    "provider_execution_id": "exec-1",
+                    "provider_revision": "rev-1",
+                    "order_ref": "c1",
+                    "intent_ref": "intent-1",
+                    "instrument_version": "instrument-v1",
+                    "side": "BUY",
+                    "last_quantity": "1.25",
+                    "last_price": "101.5",
+                    "trade_time": T1,
+                    "receipt_time": T2,
+                    "fees": [],
+                    "settlement_date": "2026-09-27",
+                    "evidence": [],
+                },
+            )
+            self.assertEqual(result.snapshot.filled_quantity, Decimal("1.25"))
+            restarted = durable(store)
+            self.assertEqual(
+                restarted.order("c1").filled_quantity,
+                Decimal("1.25"),
+            )
+            self.assertEqual(
+                restarted.order("c1").fill_history[0].provider_execution_id,
+                "exec-1",
+            )
+
+    def test_canonical_execution_fill_scope_mismatch_fails_before_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            book.create_order(
+                event_key="create",
+                client_order_id="c1",
+                instrument="instrument-v1",
+                side="BUY",
+                requested_quantity="2",
+                committed_at=T0,
+            )
+            base_fill = {
+                "fill_id": "fill-1",
+                "provider_execution_id": "exec-1",
+                "instrument_version": "instrument-v1",
+                "side": "BUY",
+                "last_quantity": "1",
+                "last_price": "100",
+                "trade_time": T1,
+                "receipt_time": T2,
+                "fees": [],
+                "settlement_date": "2026-09-27",
+                "evidence": [],
+            }
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "instrument differs",
+            ):
+                book.ingest_execution_fill(
+                    event_key="bad-instrument",
+                    client_order_id="c1",
+                    committed_at=T2,
+                    execution_fill={
+                        **base_fill,
+                        "instrument_version": "instrument-v2",
+                    },
+                )
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "unsupported fields",
+            ):
+                book.ingest_execution_fill(
+                    event_key="unknown-field",
+                    client_order_id="c1",
+                    committed_at=T2,
+                    execution_fill={**base_fill, "raw_provider_status": "filled"},
+                )
+            self.assertEqual(book.order("c1").filled_quantity, Decimal("0"))
+            self.assertEqual(
+                len(store.load_events("order_projection_book", book.aggregate_id)),
+                1,
+            )
+
+    def test_canonical_execution_fill_correction_uses_existing_fill_lineage(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            book.create_order(
+                event_key="create",
+                client_order_id="c1",
+                instrument="instrument-v1",
+                side="BUY",
+                requested_quantity="2",
+                committed_at=T0,
+            )
+            book.ingest_execution_fill(
+                event_key="fill-r1",
+                client_order_id="c1",
+                committed_at=T2,
+                execution_fill={
+                    "fill_id": "fill-1",
+                    "provider_execution_id": "exec-1",
+                    "provider_revision": "r1",
+                    "instrument_version": "instrument-v1",
+                    "side": "BUY",
+                    "last_quantity": "1",
+                    "last_price": "100",
+                    "trade_time": T1,
+                    "receipt_time": T2,
+                    "fees": [],
+                    "settlement_date": "2026-09-27",
+                    "evidence": [],
+                },
+            )
+            corrected = book.ingest_execution_fill(
+                event_key="fill-r2",
+                client_order_id="c1",
+                committed_at=T4,
+                execution_fill={
+                    "fill_id": "fill-1-r2",
+                    "provider_execution_id": "exec-1",
+                    "provider_revision": "r2",
+                    "instrument_version": "instrument-v1",
+                    "side": "BUY",
+                    "last_quantity": "1.5",
+                    "last_price": "101",
+                    "trade_time": T1,
+                    "receipt_time": T3,
+                    "fees": [],
+                    "settlement_date": "2026-09-27",
+                    "correction_reference": "fill-1",
+                    "evidence": [],
+                },
+            )
+            self.assertEqual(corrected.snapshot.filled_quantity, Decimal("1.5"))
+            restarted = durable(store)
+            self.assertEqual(
+                [item.fill_id for item in restarted.order("c1").fill_history],
+                ["fill-1", "fill-1-r2"],
+            )
+
     def test_exact_event_retry_is_idempotent_and_conflict_fails_closed(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

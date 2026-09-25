@@ -70,6 +70,7 @@ class OptionContract:
     expiry: datetime
     exercise_cutoff: datetime
     deliverable: tuple[DeliverableLeg, ...] = ()
+    exercise_opens_at: datetime | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "instrument", _text(self.instrument, "instrument"))
@@ -88,7 +89,10 @@ class OptionContract:
         )
         if self.settlement_method not in {"CASH", "PHYSICAL"}:
             raise OptionError("settlement_method must be CASH or PHYSICAL")
-        object.__setattr__(self, "exercise_style", _text(self.exercise_style, "exercise_style"))
+        style = _text(self.exercise_style, "exercise_style").upper()
+        if style not in {"AMERICAN", "EUROPEAN"}:
+            raise OptionError("exercise_style must be AMERICAN or EUROPEAN")
+        object.__setattr__(self, "exercise_style", style)
         object.__setattr__(self, "expiry", _utc(self.expiry, "expiry"))
         object.__setattr__(
             self,
@@ -97,6 +101,11 @@ class OptionContract:
         )
         if self.exercise_cutoff > self.expiry:
             raise OptionError("exercise_cutoff cannot be after expiry")
+        if self.exercise_opens_at is not None:
+            opens = _utc(self.exercise_opens_at, "exercise_opens_at")
+            if opens > self.exercise_cutoff:
+                raise OptionError("exercise_opens_at cannot be after exercise_cutoff")
+            object.__setattr__(self, "exercise_opens_at", opens)
         object.__setattr__(self, "deliverable", tuple(self.deliverable))
         if self.settlement_method == "PHYSICAL" and not self.deliverable:
             raise OptionError("physical option requires explicit adjusted deliverable")
@@ -207,6 +216,10 @@ def exercise_gate(contract: OptionContract, at: datetime) -> str:
         return "EXPIRED"
     if point >= contract.exercise_cutoff:
         return "EXERCISE_WINDOW_CLOSED"
+    if contract.exercise_opens_at is None:
+        return "PROVIDER_EXERCISE_WINDOW_REQUIRED"
+    if point < contract.exercise_opens_at:
+        return "EXERCISE_NOT_YET_OPEN"
     return "OPEN"
 
 

@@ -467,7 +467,7 @@ def _validate_stored_reconciliation_payload(payload: object) -> dict[str, Any]:
         or payload["blocking_resources"] != []
     ):
         raise BackupIntegrityError(
-            "Reconciliation completion proof is not fully non-blocking"
+            "Reconciliation completion proof must be a complete non-blocking reconciliation"
         )
     if payload["snapshot_mode"] is not None:
         _nonempty_text(payload["snapshot_mode"], name="snapshot_mode")

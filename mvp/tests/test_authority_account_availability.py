@@ -241,6 +241,74 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 1,
             )
 
+    def test_decimal_scale_is_canonical_across_admission_restart_replay(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            authority = AuthorityService(store)
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store)
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+
+            first = _admit(
+                authority,
+                reservations,
+                checkpoint,
+                notional=Decimal("100.00"),
+                reservation_requirements={"CASH:USD": Decimal("100.00")},
+                reservation_max_age_seconds=Decimal("60.00"),
+            )
+            self.assertEqual(first.outcome, "ADMITTED")
+            risk_event = store.load_events(
+                "risk_decision", first.risk_decision_id
+            )[0]
+            self.assertEqual(
+                risk_event["payload"]["reservation_availability_evidence"][
+                    "max_age_seconds"
+                ],
+                "60",
+            )
+            admission_event = next(
+                item
+                for item in store.load_events("authority_state", "canonical")
+                if item["event_type"] == "AuthorityAdmissionRecorded"
+            )
+            self.assertEqual(admission_event["payload"]["notional"], "100")
+
+            restarted_store = JournalStore(path)
+            restarted_authority = AuthorityService(restarted_store)
+            restarted_reservations = DurableReservationBook(
+                restarted_store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            replay = _admit(
+                restarted_authority,
+                restarted_reservations,
+                checkpoint,
+                notional=Decimal("100.0"),
+                reservation_requirements={"CASH:USD": Decimal("100.0")},
+                reservation_max_age_seconds=Decimal("60.0"),
+            )
+            self.assertEqual(replay, first)
+            self.assertEqual(len(restarted_store.pending_outbox()), 1)
+
+            with self.assertRaises(AuthorityConflict):
+                _admit(
+                    restarted_authority,
+                    restarted_reservations,
+                    checkpoint,
+                    notional=Decimal("101"),
+                    reservation_requirements={"CASH:USD": Decimal("101")},
+                    reservation_max_age_seconds=Decimal("60"),
+                )
+            self.assertEqual(len(restarted_store.pending_outbox()), 1)
+
+
     def test_inflated_caller_availability_cannot_increase_reservation_capacity(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

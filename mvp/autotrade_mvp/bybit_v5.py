@@ -9,17 +9,21 @@ adapter evidence satisfies provider_core.QualificationEvidence.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
 import re
+from types import MappingProxyType
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from .capabilities import CapabilitySnapshot
 from .provider_core import (
     ProviderCoreError,
     ProviderResponseObservation,
+    ProviderSubmissionObservation,
     Surface,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
@@ -59,6 +63,12 @@ _REST_BASE_BY_ENVIRONMENT: Mapping[str, str] = {
     "TESTNET": "https://api-testnet.bybit.com",
     "DEMO": "https://api-demo.bybit.com",
 }
+_RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT: Mapping[str, str] = {
+    "MAINNET": "LIVE",
+    "TESTNET": "PAPER",
+    "DEMO": "PAPER",
+}
+_BYBIT_PREPARED_SUBMISSION_TOKEN = object()
 
 
 def _text(value: object, *, name: str) -> str:
@@ -306,44 +316,223 @@ def build_order_payload(
     return payload
 
 
+
+
+@dataclass(frozen=True)
+class BybitPreparedSubmission:
+    """Capability-bound Bybit order body for the guarded dispatcher."""
+
+    endpoint: str
+    body: Mapping[str, Any]
+    account_id: str
+    environment: str
+    provider_environment: str
+    capability_snapshot_id: str
+    instrument_version: str
+    body_sha256: str = field(init=False)
+    _factory_token: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._factory_token is not _BYBIT_PREPARED_SUBMISSION_TOKEN:
+            raise ProviderCoreError(
+                "BybitPreparedSubmission must come from canonical capability preparation"
+            )
+        if self.endpoint != BYBIT_DOCUMENTED_ENDPOINTS["PLACE_ORDER"]:
+            raise ProviderCoreError("Bybit prepared endpoint mismatch")
+        if not isinstance(self.body, Mapping):
+            raise TypeError("body must be a mapping")
+        rendered = json.dumps(
+            dict(self.body),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        body = json.loads(rendered)
+        client_id = _client_order_id(body.get("orderLinkId"))
+        body["orderLinkId"] = client_id
+        provider_environment = _text(
+            self.provider_environment,
+            name="provider_environment",
+        ).upper()
+        if provider_environment not in _REST_BASE_BY_ENVIRONMENT:
+            raise ProviderCoreError(
+                "Bybit provider_environment must be MAINNET, TESTNET or DEMO"
+            )
+        runtime_environment = _text(self.environment, name="environment").upper()
+        if (
+            _RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT[provider_environment]
+            != runtime_environment
+        ):
+            raise ProviderCoreError(
+                "Bybit provider environment does not match canonical runtime environment"
+            )
+        object.__setattr__(self, "body", MappingProxyType(body))
+        object.__setattr__(
+            self,
+            "account_id",
+            _text(self.account_id, name="account_id"),
+        )
+        object.__setattr__(self, "environment", runtime_environment)
+        object.__setattr__(
+            self,
+            "provider_environment",
+            provider_environment,
+        )
+        object.__setattr__(
+            self,
+            "capability_snapshot_id",
+            _text(self.capability_snapshot_id, name="capability_snapshot_id"),
+        )
+        object.__setattr__(
+            self,
+            "instrument_version",
+            _text(self.instrument_version, name="instrument_version"),
+        )
+        object.__setattr__(
+            self,
+            "body_sha256",
+            "sha256:" + sha256(rendered.encode("utf-8")).hexdigest(),
+        )
+
+    @property
+    def capability_snapshot_ids(self) -> tuple[str, ...]:
+        return (self.capability_snapshot_id,)
+
+    @property
+    def instrument_versions(self) -> tuple[str, ...]:
+        return (self.instrument_version,)
+
+
+def prepare_order_submission(
+    *,
+    capability: CapabilitySnapshot,
+    at: datetime,
+    provider_environment: str,
+    product_family: str,
+    symbol: str,
+    side: str,
+    order_type: str,
+    quantity: object,
+    client_order_id: str,
+    time_in_force: str,
+    price: object | None = None,
+    reduce_only: bool = False,
+    position_idx: int | None = None,
+) -> BybitPreparedSubmission:
+    if not isinstance(capability, CapabilitySnapshot):
+        raise TypeError("capability must be CapabilitySnapshot")
+    if capability.provider_id.upper() != "BYBIT":
+        raise ProviderCoreError("capability belongs to another provider")
+    provider_env = _text(
+        provider_environment,
+        name="provider_environment",
+    ).upper()
+    if provider_env not in _REST_BASE_BY_ENVIRONMENT:
+        raise ProviderCoreError(
+            "Bybit provider_environment must be MAINNET, TESTNET or DEMO"
+        )
+    runtime_env = _RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT[provider_env]
+    if capability.environment.upper() != runtime_env:
+        raise ProviderCoreError(
+            "capability environment does not match Bybit provider environment"
+        )
+    point = at.astimezone(timezone.utc) if isinstance(at, datetime) and at.tzinfo is not None else None
+    if point is None:
+        raise ProviderCoreError("at must be timezone-aware")
+    normalized_type = _text(order_type, name="order_type").upper()
+    normalized_tif = _text(time_in_force, name="time_in_force").upper()
+    if not capability.admits(
+        at=point,
+        order_type=normalized_type,
+        time_in_force=normalized_tif,
+        permission_scope="ORDER_WRITE",
+    ):
+        raise ProviderCoreError(
+            "exact capability evidence does not admit this Bybit order"
+        )
+    body = build_order_payload(
+        product_family=product_family,
+        symbol=symbol,
+        side=side,
+        order_type=order_type,
+        quantity=quantity,
+        client_order_id=client_order_id,
+        time_in_force=time_in_force,
+        price=price,
+        reduce_only=reduce_only,
+        position_idx=position_idx,
+    )
+    return BybitPreparedSubmission(
+        endpoint=BYBIT_DOCUMENTED_ENDPOINTS["PLACE_ORDER"],
+        body=body,
+        account_id=capability.account_id,
+        environment=runtime_env,
+        provider_environment=provider_env,
+        capability_snapshot_id=capability.snapshot_id,
+        instrument_version=capability.instrument_version,
+        _factory_token=_BYBIT_PREPARED_SUBMISSION_TOKEN,
+    )
+
+
+def _submission_evidence(
+    observation: ProviderSubmissionObservation,
+    *,
+    prepared_request: BybitPreparedSubmission,
+) -> dict[str, str]:
+    if not isinstance(observation, ProviderSubmissionObservation):
+        raise TypeError(
+            "observation must be durable ProviderSubmissionObservation"
+        )
+    observation.require_scope(
+        provider_id="BYBIT",
+        endpoint=prepared_request.endpoint,
+        prepared_request_sha256=prepared_request.body_sha256,
+        capability_snapshot_ids=prepared_request.capability_snapshot_ids,
+        instrument_versions=prepared_request.instrument_versions,
+        account_id=prepared_request.account_id,
+        environment=prepared_request.environment,
+        client_order_id=_client_order_id(
+            prepared_request.body.get("orderLinkId")
+        ),
+    )
+    source_uri = (
+        _REST_BASE_BY_ENVIRONMENT[prepared_request.provider_environment]
+        + prepared_request.endpoint
+    )
+    return {
+        "artifact_id": str(
+            uuid5(
+                NAMESPACE_URL,
+                f"{source_uri}#{observation.evidence_ref}",
+            )
+        ),
+        "sha256": observation.response_sha256,
+        "source_uri": source_uri,
+        "observed_at": observation.observed_at,
+        "rights_id": "provider-observation-bybit",
+    }
+
 def parse_submission_response(
     *,
     attempt_id: str,
-    client_order_id: str,
-    response: Mapping[str, Any] | None,
-    environment: str,
-    observed_at: str | None = None,
+    prepared_request: BybitPreparedSubmission,
+    observation: ProviderSubmissionObservation | None = None,
     transport_ambiguous: bool = False,
 ) -> dict[str, Any]:
-    """Map a recorded Bybit create-order response to SubmissionResult.
-
-    A successful HTTP/API acknowledgement is intentionally only ACKNOWLEDGED.
-    It is never converted into a fill. Timeout/server/duplicate ambiguity is
-    UNKNOWN and requires reconciliation before any economic retry.
-    """
+    """Map one exact durable Bybit create-order response to SubmissionResult."""
 
     aid = _uuid_text(attempt_id, name="attempt_id")
-    cid = _client_order_id(client_order_id)
-    normalized_environment = _text(environment, name="environment").upper()
-    if normalized_environment not in _REST_BASE_BY_ENVIRONMENT:
-        raise ProviderCoreError(
-            "Bybit evidence environment must be MAINNET, TESTNET or DEMO"
-        )
+    if not isinstance(prepared_request, BybitPreparedSubmission):
+        raise TypeError("prepared_request must be BybitPreparedSubmission")
+    cid = _client_order_id(prepared_request.body.get("orderLinkId"))
     if type(transport_ambiguous) is not bool:
         raise ProviderCoreError("transport_ambiguous must be boolean")
     if transport_ambiguous:
-        if response is not None:
+        if observation is not None:
             raise ProviderCoreError(
                 "ambiguous transport cannot also claim an authoritative response"
             )
-        if observed_at is None:
-            raise ProviderCoreError(
-                "ambiguous transport requires explicit local observed_at"
-            )
-        _utc_text(observed_at, name="observed_at")
-        # Local observed_at and provider environment belong to the durable
-        # SubmissionAttempt. With no authoritative provider response there is
-        # deliberately no provider_received_at and no response EvidenceRef.
         return {
             "attempt_id": aid,
             "outcome": "UNKNOWN",
@@ -352,35 +541,25 @@ def parse_submission_response(
             "evidence": [],
             "retry_disposition": "RECONCILE_FIRST",
         }
-    if response is None:
-        raise ProviderCoreError(
-            "submission response is required unless transport is explicitly ambiguous"
+    if not isinstance(observation, ProviderSubmissionObservation):
+        raise TypeError(
+            "observation must be durable ProviderSubmissionObservation"
         )
-    envelope = _mapping(response, name="response")
+    if observation.response_binding.attempt_id != aid:
+        raise ProviderCoreError("Bybit submission observation attempt_id mismatch")
+    evidence = [
+        _submission_evidence(
+            observation,
+            prepared_request=prepared_request,
+        )
+    ]
+    envelope = _mapping(observation.payload, name="response")
     code = _integer(envelope.get("retCode"), name="retCode")
-    local_observed_at = (
-        _utc_text(observed_at, name="observed_at")
-        if observed_at is not None
-        else None
-    )
     provider_received_at = (
         _millis_to_utc(envelope.get("time"), name="response.time")
         if envelope.get("time") is not None
         else None
     )
-    evidence_observed_at = local_observed_at or provider_received_at
-    if evidence_observed_at is None:
-        raise ProviderCoreError(
-            "provider response requires observed_at when response.time is absent"
-        )
-    evidence = [
-        _response_evidence(
-            BYBIT_DOCUMENTED_ENDPOINTS["PLACE_ORDER"],
-            envelope,
-            observed_at=evidence_observed_at,
-            environment=normalized_environment,
-        )
-    ]
 
     if code == 0:
         result = _mapping(envelope.get("result"), name="result")
@@ -389,7 +568,9 @@ def parse_submission_response(
             result.get("orderLinkId"), name="result.orderLinkId"
         )
         if echoed_client_id != cid:
-            raise ProviderCoreError("Bybit orderLinkId response does not match request")
+            raise ProviderCoreError(
+                "Bybit orderLinkId response does not match request"
+            )
         return {
             "attempt_id": aid,
             "outcome": "ACKNOWLEDGED",

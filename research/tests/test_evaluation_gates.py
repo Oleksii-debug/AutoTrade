@@ -59,6 +59,16 @@ class EvaluationGateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "adverse_cost_loss must be non-negative"):
             evidence(adverse_cost_loss="-0.01")
 
+    def test_negative_minimum_net_advantage_cannot_make_losses_pass(self):
+        with self.assertRaisesRegex(ValueError, "minimum_net_advantage must be non-negative"):
+            GateProfile.create(
+                profile_id="bad-edge-gate",
+                minimum_net_advantage="-0.02",
+                max_drawdown="0.10",
+                max_adverse_cost_loss="0.03",
+                min_power="0.80",
+            )
+
     def test_negative_adverse_cost_limit_is_invalid_protocol(self):
         with self.assertRaisesRegex(ValueError, "max_adverse_cost_loss must be non-negative"):
             GateProfile.create(

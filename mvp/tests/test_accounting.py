@@ -645,6 +645,7 @@ class AccountingFoundationTests(unittest.TestCase):
                     original,
                     transaction_id="buy-original-reversal",
                     cause_event_id="fill-buy-correction-reversal",
+                    observed_at="2026-01-02T12:00:00Z",
                 ),
                 replacement,
             )

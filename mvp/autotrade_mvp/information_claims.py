@@ -12,6 +12,8 @@ from hashlib import sha256
 import json
 import re
 from typing import Iterable
+from urllib.parse import urlsplit
+from uuid import UUID
 
 
 def _time(value: datetime, *, name: str) -> datetime:
@@ -34,6 +36,31 @@ def _canonical_digest(value: str, *, name: str) -> str:
     normalized = _text(value, name=name)
     if re.fullmatch(r"sha256:[0-9a-f]{64}", normalized) is None:
         raise ValueError(f"{name} must be a canonical SHA-256 digest")
+    return normalized
+
+
+def _canonical_uuid(value: str, *, name: str) -> str:
+    normalized = _text(value, name=name)
+    try:
+        parsed = UUID(normalized)
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ValueError(f"{name} must be a UUID") from exc
+    canonical = str(parsed)
+    if normalized.lower() != canonical:
+        raise ValueError(f"{name} must be a canonical UUID")
+    return canonical
+
+
+def _utc_text(value: datetime, *, name: str) -> str:
+    normalized = _time(value, name=name)
+    return normalized.isoformat().replace("+00:00", "Z")
+
+
+def _uri(value: str, *, name: str) -> str:
+    normalized = _text(value, name=name)
+    parsed = urlsplit(normalized)
+    if not parsed.scheme:
+        raise ValueError(f"{name} must be an absolute URI")
     return normalized
 
 
@@ -139,6 +166,29 @@ class SourceDocument:
         object.__setattr__(self, "published_at", published)
         object.__setattr__(self, "available_at", available)
         object.__setattr__(self, "ingested_at", ingested)
+
+    def to_evidence_ref(
+        self,
+        *,
+        artifact_id: str,
+        sha256: str,
+        observed_at: datetime,
+        source_uri: str | None = None,
+    ) -> dict[str, str]:
+        """Project source-artifact provenance onto canonical EvidenceRef v1.0.0."""
+
+        observed = _time(observed_at, name="observed_at")
+        if observed < self.available_at:
+            raise ValueError("observed_at cannot precede source availability")
+        evidence = {
+            "artifact_id": _canonical_uuid(artifact_id, name="artifact_id"),
+            "sha256": _canonical_digest(sha256, name="sha256"),
+            "observed_at": _utc_text(observed, name="observed_at"),
+            "rights_id": self.rights_basis,
+        }
+        if source_uri is not None:
+            evidence["source_uri"] = _uri(source_uri, name="source_uri")
+        return evidence
 
     @classmethod
     def create(

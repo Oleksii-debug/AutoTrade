@@ -359,7 +359,7 @@ def qualify_supply_chain(
             "SUPPLY_CHAIN.EVIDENCE_STORE_MISSING",
         )
     else:
-        for label, verified in immutable_checks:
+        for label, verified in sorted(immutable_checks, key=lambda item: item[0]):
             record(
                 "immutable:" + label,
                 _PASS if verified else _INCONCLUSIVE,

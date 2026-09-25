@@ -564,6 +564,74 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
 
 
 def evaluate_risk(intent: RiskIntent, context: RiskContext, policy: RiskPolicy) -> RiskDecision:
+    if not isinstance(intent, RiskIntent):
+        raise TypeError("intent must be RiskIntent")
+    if not isinstance(context, RiskContext):
+        raise TypeError("context must be RiskContext")
+    if not isinstance(policy, RiskPolicy):
+        raise TypeError("policy must be RiskPolicy")
+
+    intent = RiskIntent.create(
+        symbol=intent.symbol,
+        side=intent.side,
+        quantity=intent.quantity,
+        price=intent.price,
+        expected_state_version=intent.expected_state_version,
+        reduce_only=intent.reduce_only,
+        action=intent.action,
+        instrument_type=intent.instrument_type,
+    )
+    context = RiskContext.create(
+        state_version=context.state_version,
+        equity=context.equity,
+        positions=context.positions,
+        marks=context.marks,
+        reserved_position_delta=context.reserved_position_delta,
+        daily_pnl=context.daily_pnl,
+        drawdown_fraction=context.drawdown_fraction,
+        market_data_age_seconds=context.market_data_age_seconds,
+        fx_age_seconds=context.fx_age_seconds,
+        margin_headroom=context.margin_headroom,
+        capability_allowed=context.capability_allowed,
+        borrow_available=context.borrow_available,
+        stress_scenarios=context.stress_scenarios,
+        asset_buckets=context.asset_buckets,
+        venues=context.venues,
+        liquidity_capacity=context.liquidity_capacity,
+        factor_loadings=context.factor_loadings,
+        spread_fraction=context.spread_fraction,
+        slippage_fraction=context.slippage_fraction,
+        clock_age_seconds=context.clock_age_seconds,
+        settlement_allowed=context.settlement_allowed,
+        option_deliverable_verified=context.option_deliverable_verified,
+        option_exercise_cash_required=context.option_exercise_cash_required,
+        option_exercise_cash_available=context.option_exercise_cash_available,
+        futures_delivery_headroom_seconds=context.futures_delivery_headroom_seconds,
+    )
+    policy = RiskPolicy.create(
+        max_abs_position=policy.max_abs_position,
+        max_single_notional=policy.max_single_notional,
+        max_gross_leverage=policy.max_gross_leverage,
+        max_net_leverage=policy.max_net_leverage,
+        max_daily_loss=policy.max_daily_loss,
+        max_drawdown_fraction=policy.max_drawdown_fraction,
+        max_data_age_seconds=policy.max_data_age_seconds,
+        max_fx_age_seconds=policy.max_fx_age_seconds,
+        min_margin_headroom=policy.min_margin_headroom,
+        max_stress_loss=policy.max_stress_loss,
+        max_asset_concentration_fraction=policy.max_asset_concentration_fraction,
+        max_venue_concentration_fraction=policy.max_venue_concentration_fraction,
+        max_order_participation_fraction=policy.max_order_participation_fraction,
+        max_abs_factor_exposure=policy.max_abs_factor_exposure,
+        max_spread_fraction=policy.max_spread_fraction,
+        max_slippage_fraction=policy.max_slippage_fraction,
+        max_clock_age_seconds=policy.max_clock_age_seconds,
+        allowed_actions=policy.allowed_actions,
+        require_settlement_evidence=policy.require_settlement_evidence,
+        require_option_exercise_evidence=policy.require_option_exercise_evidence,
+        min_futures_delivery_headroom_seconds=policy.min_futures_delivery_headroom_seconds,
+    )
+
     if intent.symbol not in context.marks:
         raise ValueError(f"Missing mark for {intent.symbol}")
     signed = intent.quantity if intent.side == "BUY" else -intent.quantity

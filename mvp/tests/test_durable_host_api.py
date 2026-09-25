@@ -108,6 +108,10 @@ class JournalBackedHostApiTests(unittest.TestCase):
         )
         self.assertEqual(memory.submit(command), self.store().submit(command))
 
+    def test_whitespace_only_account_scope_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "account_id must be a non-empty string"):
+            self.store(account_id="   ")
+
     def test_account_scope_is_canonicalized_before_aggregate_identity(self):
         canonical = self.store(account_id="paper-account")
         padded = self.store(account_id="  paper-account  ")

@@ -97,6 +97,14 @@ class HostPrincipal:
 
 
 @dataclass(frozen=True)
+class SnapshotPrincipal:
+    """Non-secret identity exposed to presentation-only snapshot projection."""
+
+    actor: str
+    session: str
+
+
+@dataclass(frozen=True)
 class TransportResponse:
     status: int
     content_type: str
@@ -106,7 +114,7 @@ class TransportResponse:
 
 PrincipalResolver = Callable[[Mapping[str, str], str], HostPrincipal]
 SnapshotProvider = Callable[
-    [Mapping[str, object], HostPrincipal], Mapping[str, object]
+    [Mapping[str, object], SnapshotPrincipal], Mapping[str, object]
 ]
 
 
@@ -274,7 +282,7 @@ class AuthenticatedHostApplication:
         durable = self.store.snapshot()
         projected = self._snapshot_provider(
             MappingProxyType(dict(durable)),
-            principal,
+            SnapshotPrincipal(actor=principal.actor, session=principal.session),
         )
         if not isinstance(projected, Mapping):
             raise TypeError("snapshot_provider must return a mapping")
@@ -321,7 +329,9 @@ class AuthenticatedHostApplication:
             is None
         ):
             raise ValueError("UiSnapshot server_time must be a canonical UTC instant")
-        _json_bytes(payload)
+        rendered = _json_bytes(payload)
+        if principal.token.encode("utf-8") in rendered:
+            raise ValueError("UiSnapshot must never contain bearer credential material")
         return MappingProxyType(payload)
 
     @staticmethod
@@ -358,6 +368,12 @@ class AuthenticatedHostApplication:
     ) -> TransportResponse:
         try:
             normalized_headers = _headers(headers)
+            supplied_origin = normalized_headers.get("origin")
+            if (
+                supplied_origin is not None
+                and _authenticated_origin(supplied_origin) != self.public_origin
+            ):
+                raise PermissionError("Request origin does not match authenticated host origin")
             parsed = urlsplit(target)
             if parsed.scheme or parsed.netloc or parsed.fragment:
                 return _error(400, "INVALID_REQUEST_TARGET")
@@ -493,6 +509,14 @@ class _HostRequestHandler(BaseHTTPRequestHandler):
             self.send_error(500)
             return
         try:
+            for name in (
+                "Authorization",
+                "X-AutoTrade-Actor",
+                "Origin",
+                "Content-Length",
+            ):
+                if len(self.headers.get_all(name, [])) > 1:
+                    raise ValueError("Duplicate sensitive request header")
             length_text = self.headers.get("Content-Length", "0")
             length = int(length_text)
             if length < 0 or length > _MAX_BODY_BYTES:

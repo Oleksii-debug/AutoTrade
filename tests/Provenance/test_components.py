@@ -94,5 +94,39 @@ class ProvenanceComponentTests(unittest.TestCase):
         self.assertIn("rights", policy)
 
 
+    def test_release_distribution_state_is_machine_fail_closed(self):
+        canonical_sha256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+        for component in self.components:
+            with self.subTest(component=component["name"]):
+                state = component.get("release_distribution_state")
+                self.assertIn(state, {"BLOCKED", "APPROVED"})
+                if state == "BLOCKED":
+                    continue
+
+                self.assertNotEqual(component["license"], UNRESOLVED)
+                for evidence_field in (
+                    "dependency_graph_sha256",
+                    "notice_sha256",
+                    "advisory_review_sha256",
+                ):
+                    self.assertRegex(
+                        component.get(evidence_field, ""),
+                        canonical_sha256,
+                        msg=(
+                            f"{component['name']} cannot be release-approved "
+                            f"without {evidence_field}"
+                        ),
+                    )
+
+    def test_current_inventory_is_not_release_approved_by_bootstrap_evidence(self):
+        self.assertTrue(self.components)
+        self.assertTrue(
+            all(
+                component["release_distribution_state"] == "BLOCKED"
+                for component in self.components
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

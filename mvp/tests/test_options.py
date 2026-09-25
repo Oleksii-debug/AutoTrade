@@ -437,6 +437,7 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                 theta="0",
                 rho="0",
                 scenarios=(scenario,),
+            )
 
         with self.assertRaisesRegex(OptionError, "40-character"):
             OptionRiskEvidence(
@@ -456,7 +457,6 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                 theta="0",
                 rho="0",
                 scenarios=(scenario,),
-            )
             )
 
     def test_future_stale_and_cross_instrument_evidence_are_blocked(self):

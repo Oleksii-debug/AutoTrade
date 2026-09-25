@@ -265,7 +265,13 @@ class NvdaQualificationGateTests(unittest.TestCase):
 
         valid = complete_evidence()
         valid["environment"]["windows_version"] = "Windows 11"
-        self.assertTrue(validate_evidence(valid, REQUIREMENTS)["qualified"])
+        result = validate_evidence(valid, REQUIREMENTS)
+        self.assertTrue(result["evidence_complete"])
+        self.assertFalse(result["qualified"])
+        self.assertEqual(
+            result["reason"],
+            "SIGNED_QUALIFICATION_ATTESTATION_REQUIRED",
+        )
 
     def test_wrong_os_mouse_input_or_nonrelease_artifact_is_rejected(self):
         cases = (

@@ -13,6 +13,8 @@ from mvp.autotrade_mvp.authority import (
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.reconciliation import SnapshotConsistencyEvidence, reconcile_account
+from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.autotrade_mvp.risk import (
     RiskContext,
     RiskDecision,
@@ -144,7 +146,46 @@ def public_risk_policy(**overrides):
     return RiskPolicy.create(**values)
 
 
-def public_financial_kwargs(**overrides):
+def public_financial_kwargs(store, **overrides):
+    provider_id = "TEST_PROVIDER"
+    result = reconcile_account(
+        provider_id=provider_id,
+        account_id="paper-1",
+        environment="PAPER",
+        local_cash={"USD": "1000"},
+        provider_cash={"USD": "1000"},
+        local_positions={},
+        provider_positions={},
+        local_execution_ids=(),
+        provider_fills=(),
+        snapshot_consistency=SnapshotConsistencyEvidence(
+            provider_id=provider_id,
+            account_id="paper-1",
+            environment="PAPER",
+            mode="ATOMIC",
+            query_started_at="2026-09-24T18:00:00Z",
+            query_completed_at="2026-09-24T18:00:30Z",
+        ),
+        coverage_start="2026-09-24T18:00:00Z",
+        coverage_end="2026-09-24T18:01:00Z",
+        pagination_complete=True,
+        provider_activity_provider_id=provider_id,
+        provider_activity_account_id="paper-1",
+    )
+    checkpoint = record_reconciliation_checkpoint(
+        store,
+        reconciliation_id="paper-1:admission-availability",
+        result=result,
+        observed_at="2026-09-24T18:00:30Z",
+        host_id="authority-test-host",
+        owner_epoch="1",
+    )
+    for pending in store.pending_outbox():
+        if pending["event_id"] == checkpoint["event_id"]:
+            store.mark_outbox_delivered(
+                pending["outbox_id"],
+                expected_envelope_hash=pending["envelope_hash"],
+            )
     values = dict(
         intent_hash=PUBLIC_INTENT_HASH,
         capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
@@ -154,6 +195,9 @@ def public_financial_kwargs(**overrides):
         risk_valid_until=PUBLIC_RISK_VALID_UNTIL,
         reservation_requirements={"CASH:USD": "100"},
         reservation_available={"CASH:USD": "1000"},
+        reservation_checkpoint_event_id=checkpoint["event_id"],
+        reservation_provider_id=provider_id,
+        reservation_max_age_seconds="60",
         now="2026-09-24T18:01:00Z",
     )
     values.update(overrides)
@@ -1255,7 +1299,7 @@ class AuthorityTests(unittest.TestCase):
                 notional="100",
                 reservation_id="reservation-public-fault",
                 confirmation_id=confirmation_id,
-                **public_financial_kwargs(),
+                **public_financial_kwargs(store),
             )
 
             with self.assertRaisesRegex(
@@ -1392,7 +1436,7 @@ class AuthorityTests(unittest.TestCase):
                 action="ORDER.SUBMIT",
                 notional="100",
                 reservation_id="reservation-public",
-                **public_financial_kwargs(),
+                **public_financial_kwargs(store),
             )
             first = authority.admit(
                 reservation_book=reservations,
@@ -1471,6 +1515,7 @@ class AuthorityTests(unittest.TestCase):
                 reservation_book=reservations,
                 reservation_id="reservation-risk-reject",
                 **public_financial_kwargs(
+                    store,
                     risk_policy=public_risk_policy(max_single_notional="50")
                 ),
             )
@@ -1509,6 +1554,7 @@ class AuthorityTests(unittest.TestCase):
                 reservation_book=reservations,
                 reservation_id="reservation-stale-state",
                 **public_financial_kwargs(
+                    store,
                     risk_intent=public_risk_intent(expected_state_version=6),
                     risk_context=public_risk_context(state_version=7),
                 ),
@@ -1542,7 +1588,7 @@ class AuthorityTests(unittest.TestCase):
                 action="ORDER.SUBMIT",
                 notional="100",
                 reservation_id="reservation-retry-delta",
-                **public_financial_kwargs(),
+                **public_financial_kwargs(store),
             )
             first = authority.admit(
                 reservation_book=reservations,
@@ -1600,7 +1646,7 @@ class AuthorityTests(unittest.TestCase):
                 action="ORDER.SUBMIT",
                 notional="100",
                 reservation_id="reservation-replay-scope",
-                **public_financial_kwargs(),
+                **public_financial_kwargs(store),
             )
             authority.admit(reservation_book=reservations, **kwargs)
             restarted = AuthorityService(store)
@@ -1693,7 +1739,7 @@ class AuthorityTests(unittest.TestCase):
                 notional="100",
                 reservation_book=reservations,
                 reservation_id="dispatch-reservation",
-                **public_financial_kwargs(),
+                **public_financial_kwargs(store),
             )
             common = dict(
                 intent_hash=PUBLIC_INTENT_HASH,
@@ -1761,7 +1807,7 @@ class AuthorityTests(unittest.TestCase):
                 notional="100",
                 reservation_book=reservations,
                 reservation_id="first-reservation",
-                **public_financial_kwargs(),
+                **public_financial_kwargs(store),
             )
             reservations.reserve(
                 command_id="second-command",

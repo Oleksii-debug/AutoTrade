@@ -7,9 +7,10 @@ boundary, calls the dispatcher's final guard exactly once, and performs exactly
 one outbound HTTP request. Any exception after the guard is deliberately left
 for GuardedDispatcher to classify as UNKNOWN.
 
-Only Binance Spot PAPER/LIVE signing is wired here as the first concrete signer.
-Other providers must reuse this network lifecycle and supply their own pure
-signer/nonce rules rather than introduce another dispatcher.
+Binance Spot and WhiteBIT reuse this network lifecycle. Provider-specific
+signing/nonce rules remain pure or journal-backed prerequisites to the same
+final guard; future providers must extend this seam rather than introduce
+another dispatcher.
 """
 
 from __future__ import annotations

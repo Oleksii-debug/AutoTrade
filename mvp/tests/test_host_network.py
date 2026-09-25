@@ -277,6 +277,42 @@ class HostNetworkTests(unittest.TestCase):
         self.assertEqual(denied.status, 403)
         self.assertEqual(self.app.store.state_version, 0)
 
+    def test_ambiguous_json_command_body_fails_before_mutation(self):
+        headers = self.headers(json_body=True)
+        duplicate = (
+            b'{"command_id":"11111111-1111-1111-1111-111111111111",'
+            b'"expected_state_version":"0",'
+            b'"idempotency_key":"host-network-key-1",'
+            b'"actor":"owner",'
+            b'"session":"' + public_session_reference(self.owner.token).encode("utf-8") + b'",'
+            b'"account_id":"paper-account-1",'
+            b'"environment":"PAPER",'
+            b'"action":"BLOCK_NEW_EXPOSURE",'
+            b'"action":"PAUSE",'
+            b'"payload":{}}'
+        )
+        response = self.app.dispatch(
+            method="POST",
+            target="/api/v1/commands",
+            headers=headers,
+            body=duplicate,
+        )
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.app.store.state_version, 0)
+
+        non_finite = json.dumps(self.command()).replace(
+            '"payload": {}',
+            '"payload": {"risk": NaN}',
+        ).encode("utf-8")
+        response = self.app.dispatch(
+            method="POST",
+            target="/api/v1/commands",
+            headers=headers,
+            body=non_finite,
+        )
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.app.store.state_version, 0)
+
     def test_expired_session_is_rejected_before_mutation(self):
         self.clock[0] = 2000.0
         response = self.post(self.command())

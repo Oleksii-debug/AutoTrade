@@ -236,7 +236,7 @@ internal static class Program
             }
     
             posts++;
-            _ = await request.Content!.ReadAsStringAsync(cancellationToken);
+            await request.Content!.ReadAsStringAsync(cancellationToken);
             throw new HttpRequestException("response unknown");
         });
     

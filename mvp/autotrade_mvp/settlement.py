@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from typing import Iterable
+from typing import Iterable, Mapping
 
 
 class SettlementConflict(ValueError):
@@ -93,7 +93,7 @@ class SettlementBook:
         *,
         settled_cash: dict[str, Decimal | str | int] | None = None,
         obligations: Iterable[SettlementObligation] = (),
-        settled_obligation_ids: Iterable[str] = (),
+        settled_obligation_evidence: Mapping[str, str] | None = None,
     ) -> None:
         self._settled_cash: dict[str, Decimal] = {}
         for currency, amount in (settled_cash or {}).items():
@@ -106,15 +106,18 @@ class SettlementBook:
         self._obligations: dict[str, SettlementObligation] = {}
         self._by_cause_component: dict[tuple[str, str], SettlementObligation] = {}
         self._settled_ids: set[str] = set()
+        self._settlement_evidence: dict[str, str] = {}
         for obligation in obligations:
             self.add(obligation)
-        for obligation_id in settled_obligation_ids:
+        for obligation_id, evidence_ref in (settled_obligation_evidence or {}).items():
             key = _text(obligation_id, name="settled_obligation_id")
+            evidence = _text(evidence_ref, name="settlement_evidence_ref")
             if key not in self._obligations:
                 raise SettlementConflict(
-                    "settled_obligation_ids cannot reference an unknown obligation"
+                    "settled obligation evidence cannot reference an unknown obligation"
                 )
             self._settled_ids.add(key)
+            self._settlement_evidence[key] = evidence
 
     @property
     def obligations(self) -> tuple[SettlementObligation, ...]:
@@ -143,31 +146,60 @@ class SettlementBook:
     def is_settled(self, obligation_id: str) -> bool:
         return _text(obligation_id, name="obligation_id") in self._settled_ids
 
-    def settle(self, obligation_id: str, *, as_of: date) -> bool:
+    def settle(
+        self,
+        obligation_id: str,
+        *,
+        as_of: date,
+        settlement_evidence_ref: str,
+    ) -> bool:
         key = _text(obligation_id, name="obligation_id")
+        evidence = _text(settlement_evidence_ref, name="settlement_evidence_ref")
         obligation = self._obligations.get(key)
         if obligation is None:
             raise SettlementConflict("Cannot settle an unknown obligation")
         if key in self._settled_ids:
+            if self._settlement_evidence[key] != evidence:
+                raise SettlementConflict(
+                    "settlement retry used different settlement evidence"
+                )
             return False
         if as_of < obligation.settlement_date:
             raise SettlementConflict("Cannot settle before contractual settlement date")
         current = self._settled_cash.get(obligation.currency, Decimal("0"))
         self._settled_cash[obligation.currency] = current + obligation.amount
         self._settled_ids.add(key)
+        self._settlement_evidence[key] = evidence
         return True
 
-    def settle_due(self, *, as_of: date) -> tuple[str, ...]:
+    def settle_due(
+        self,
+        *,
+        as_of: date,
+        settlement_evidence: Mapping[str, str],
+    ) -> tuple[str, ...]:
+        """Settle only due obligations that carry explicit provider/reconciliation evidence.
+
+        Contractual due date alone never makes a receivable spendable.
+        """
+        if not isinstance(settlement_evidence, Mapping):
+            raise TypeError("settlement_evidence must be a mapping")
         settled: list[str] = []
         for obligation in sorted(
             self._obligations.values(),
             key=lambda item: (item.settlement_date, item.obligation_id),
         ):
+            evidence_ref = settlement_evidence.get(obligation.obligation_id)
             if (
                 obligation.obligation_id not in self._settled_ids
                 and obligation.settlement_date <= as_of
+                and evidence_ref is not None
             ):
-                self.settle(obligation.obligation_id, as_of=as_of)
+                self.settle(
+                    obligation.obligation_id,
+                    as_of=as_of,
+                    settlement_evidence_ref=evidence_ref,
+                )
                 settled.append(obligation.obligation_id)
         return tuple(settled)
 

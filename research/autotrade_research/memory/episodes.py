@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any
+from typing import Any, Mapping
 from uuid import UUID, uuid4
 
 
@@ -99,6 +100,131 @@ def _stored_json(value: Any, *, name: str) -> Any:
     if canonical != value:
         raise MemoryIntegrityError(f"{name} is not canonical JSON")
     return parsed
+
+
+@dataclass(frozen=True)
+class QualificationPopulationSnapshot:
+    """Self-verifying causal population projection produced by ExperienceMemory.
+
+    The snapshot binds the exact query scope, ordered eligible row identities and
+    row digests, eligible count, and one canonical root. Consumers must verify it
+    again before qualification so mutated or filtered caller-side rows cannot be
+    substituted for the canonical memory query.
+    """
+
+    causal_cutoff: str
+    permission_classes: tuple[str, ...]
+    task: str | None
+    instrument_family: str | None
+    rows: tuple[dict[str, Any], ...]
+    row_digests: tuple[tuple[str, str], ...]
+    eligible_count: int
+    root_hash: str
+
+    def verify(self) -> None:
+        if not isinstance(self.causal_cutoff, str):
+            raise MemoryIntegrityError("population snapshot causal_cutoff must be text")
+        try:
+            parsed_cutoff = datetime.fromisoformat(self.causal_cutoff)
+            canonical_cutoff = _iso(parsed_cutoff)
+        except (TypeError, ValueError) as error:
+            raise MemoryIntegrityError(
+                "population snapshot causal_cutoff is not canonical UTC time"
+            ) from error
+        if canonical_cutoff != self.causal_cutoff:
+            raise MemoryIntegrityError(
+                "population snapshot causal_cutoff is not canonical UTC time"
+            )
+
+        if not isinstance(self.permission_classes, tuple) or not self.permission_classes:
+            raise MemoryIntegrityError(
+                "population snapshot permissions must be a non-empty tuple"
+            )
+        normalized_permissions = tuple(
+            _text(value, name="population snapshot permission")
+            for value in self.permission_classes
+        )
+        if (
+            normalized_permissions != self.permission_classes
+            or tuple(sorted(set(normalized_permissions))) != normalized_permissions
+        ):
+            raise MemoryIntegrityError(
+                "population snapshot permissions must be canonical, sorted and unique"
+            )
+        for name, value in (
+            ("task", self.task),
+            ("instrument_family", self.instrument_family),
+        ):
+            if value is not None and _text(value, name=name) != value:
+                raise MemoryIntegrityError(
+                    f"population snapshot {name} must use canonical text"
+                )
+
+        if not isinstance(self.rows, tuple) or not isinstance(self.row_digests, tuple):
+            raise MemoryIntegrityError(
+                "population snapshot rows and row digests must be immutable tuples"
+            )
+        if (
+            not isinstance(self.eligible_count, int)
+            or isinstance(self.eligible_count, bool)
+            or self.eligible_count < 0
+        ):
+            raise MemoryIntegrityError(
+                "population snapshot eligible_count must be a non-negative integer"
+            )
+        if self.eligible_count != len(self.rows):
+            raise MemoryIntegrityError(
+                "population snapshot eligible_count does not match canonical rows"
+            )
+
+        computed_digests: list[tuple[str, str]] = []
+        ordering: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for row in self.rows:
+            if not isinstance(row, dict):
+                raise MemoryIntegrityError(
+                    "population snapshot rows must be canonical mappings"
+                )
+            episode_id = _text(row.get("episode_id"), name="population episode_id")
+            if episode_id in seen:
+                raise MemoryIntegrityError(
+                    "population snapshot episode identities must be unique"
+                )
+            seen.add(episode_id)
+            decision = _stored_time(
+                row.get("decision_time"),
+                name="population decision_time",
+            )
+            ordering.append((decision.isoformat(), episode_id))
+            computed_digests.append((episode_id, _hash(row)))
+        if ordering != sorted(ordering):
+            raise MemoryIntegrityError(
+                "population snapshot rows are not in canonical decision/id order"
+            )
+        if tuple(computed_digests) != self.row_digests:
+            raise MemoryIntegrityError(
+                "population snapshot row digest/root evidence does not match rows"
+            )
+        if len(self.row_digests) != self.eligible_count:
+            raise MemoryIntegrityError(
+                "population snapshot row digest count does not match eligible_count"
+            )
+
+        expected_root = _hash(
+            {
+                "schema": "experience-population-v1",
+                "causal_cutoff": self.causal_cutoff,
+                "permission_classes": self.permission_classes,
+                "task": self.task,
+                "instrument_family": self.instrument_family,
+                "eligible_count": self.eligible_count,
+                "row_digests": self.row_digests,
+            }
+        )
+        if expected_root != self.root_hash:
+            raise MemoryIntegrityError(
+                "population snapshot root does not match canonical memory projection"
+            )
 
 
 class ExperienceMemory:
@@ -832,3 +958,53 @@ class ExperienceMemory:
             key=lambda item: (item["decision_time"], item["episode_id"])
         )
         return tuple(population)
+
+    def qualification_population_snapshot(
+        self,
+        *,
+        causal_cutoff: datetime,
+        granted_permissions: set[str],
+        task: str | None = None,
+        instrument_family: str | None = None,
+    ) -> QualificationPopulationSnapshot:
+        """Create one canonical, self-verifying qualification population root."""
+
+        cutoff = _time(causal_cutoff, name="causal_cutoff")
+        rows = self.coverage_population(
+            causal_cutoff=cutoff,
+            granted_permissions=granted_permissions,
+            task=task,
+            instrument_family=instrument_family,
+        )
+        permissions = tuple(sorted(granted_permissions))
+        normalized_task = None if task is None else _text(task, name="task")
+        normalized_family = (
+            None
+            if instrument_family is None
+            else _text(instrument_family, name="instrument_family")
+        )
+        row_digests = tuple(
+            (_text(row["episode_id"], name="population episode_id"), _hash(row))
+            for row in rows
+        )
+        root_hash = _hash(
+            {
+                "schema": "experience-population-v1",
+                "causal_cutoff": cutoff.isoformat(),
+                "permission_classes": permissions,
+                "task": normalized_task,
+                "instrument_family": normalized_family,
+                "eligible_count": len(rows),
+                "row_digests": row_digests,
+            }
+        )
+        return QualificationPopulationSnapshot(
+            causal_cutoff=cutoff.isoformat(),
+            permission_classes=permissions,
+            task=normalized_task,
+            instrument_family=normalized_family,
+            rows=rows,
+            row_digests=row_digests,
+            eligible_count=len(rows),
+            root_hash=root_hash,
+        )

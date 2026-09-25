@@ -32,7 +32,15 @@ class CompositionReport:
 
 
 def is_exact_python_requirement(value: str) -> bool:
-    return isinstance(value, str) and EXACT_PYTHON.fullmatch(value) is not None
+    if not isinstance(value, str) or EXACT_PYTHON.fullmatch(value) is None:
+        return False
+    _, version = value.split("==", 1)
+    if any(token in version for token in ("*", ",", ";", "@", "/", "\\")):
+        return False
+    return re.fullmatch(
+        r"[0-9]+(?:\.[0-9A-Za-z]+)+(?:[-+][0-9A-Za-z.-]+)?",
+        version,
+    ) is not None
 
 
 def _meaningful_requirements(path: Path) -> list[str]:

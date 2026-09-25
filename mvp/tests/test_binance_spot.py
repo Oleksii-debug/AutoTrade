@@ -32,6 +32,7 @@ def execution_observation(
     *,
     account_id="paper-1",
     environment="PAPER",
+    instrument_version="BTCUSDT:v1",
     surface=Surface.AUTHENTICATED_READ,
 ):
     query = prepare_authenticated_read_query(
@@ -210,8 +211,9 @@ class BinanceSpotFoundationTests(unittest.TestCase):
                 "time": 1790272800123,
             }
         ]
+        observation = execution_observation([rows[0], dict(rows[0])])
         fills = parse_account_trades(
-            execution_observation([rows[0], dict(rows[0])]),
+            observation,
             instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
             client_ids_by_order_id={42: "at-ack-1"},
         )
@@ -219,7 +221,8 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         self.assertEqual(fills[0].provider_execution_id, "BINANCE-SPOT:BTCUSDT:7")
         self.assertEqual(fills[0].client_order_id, "at-ack-1")
         self.assertEqual(fills[0].account_id, "paper-1")
-        self.assertTrue(fills[0].evidence_refs)
+        self.assertEqual(fills[0].environment, "PAPER")
+        self.assertTrue(observation.evidence_ref.startswith("provider-read:sha256:"))
         self.assertEqual(fills[0].quantity, Decimal("0.2"))
         self.assertEqual(fills[0].fee_currency, "BNB")
 
@@ -243,6 +246,8 @@ class BinanceSpotFoundationTests(unittest.TestCase):
 
     def test_absence_semantics_are_never_assumed_from_empty_surface(self):
         evidence = coverage_evidence(
+            account_id="paper-1",
+            environment="PAPER",
             surface="ORDER_HISTORY",
             coverage_start="2026-09-24T17:00:00Z",
             coverage_end="2026-09-24T19:00:00Z",
@@ -251,6 +256,8 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         )
         self.assertFalse(evidence.provider_semantics_exclude_execution)
         qualified = coverage_evidence(
+            account_id="paper-1",
+            environment="PAPER",
             surface="ORDER_HISTORY",
             coverage_start="2026-09-24T17:00:00Z",
             coverage_end="2026-09-24T19:00:00Z",

@@ -485,6 +485,23 @@ class CausalFoldTests(unittest.TestCase):
                 max_age_seconds=60,
             )
 
+    def test_late_revision_does_not_make_old_market_event_fresh(self):
+        old_event_late_revision = SourceValue.create(
+            observation_id="AAA-old-revised-late",
+            symbol="AAA",
+            event_time=BASE,
+            available_at=BASE + timedelta(days=10),
+            value="101",
+            source_revision="r2",
+        )
+        with self.assertRaisesRegex(ValueError, "stale cross-market inputs"):
+            causal_cross_market_point(
+                [old_event_late_revision],
+                required_symbols=["AAA"],
+                decision_time=BASE + timedelta(days=10),
+                max_age_seconds=60,
+            )
+
     def test_cross_market_provenance_changes_with_revision(self):
         first = causal_cross_market_point(
             [

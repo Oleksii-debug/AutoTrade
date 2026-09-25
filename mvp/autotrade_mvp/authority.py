@@ -1754,6 +1754,7 @@ class AuthorityService:
             "reservation_id": record.reservation_id,
             "reservation": reservation_event["payload"].get("request"),
             "reservation_availability_evidence": availability_evidence,
+            "authoritative_risk_snapshot": dict(authoritative_risk_snapshot),
             "confirmation_id": record.confirmation_id,
             "risk_reducing": record.risk_reducing,
         }

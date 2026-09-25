@@ -385,6 +385,27 @@ class DurableModelBudget:
 
         materialized = tuple(descriptors)
         routing_input = self._routing_input(policy, request, materialized)
+        now = now_utc or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            raise ValueError("now_utc must be timezone-aware")
+        if request.cancelled:
+            return RouteDecision(
+                RouteStatus.REJECTED,
+                None,
+                None,
+                None,
+                Decimal("0"),
+                "request_cancelled",
+            )
+        if now >= request.deadline_utc:
+            return RouteDecision(
+                RouteStatus.REJECTED,
+                None,
+                None,
+                None,
+                Decimal("0"),
+                "deadline_expired",
+            )
         idempotency_key = _idempotency_key(
             budget_id=self.budget_id,
             action="route_reserve",
@@ -434,7 +455,7 @@ class DurableModelBudget:
             policy,
             authoritative_request,
             materialized,
-            now_utc=now_utc,
+            now_utc=now,
         )
         if decision.status is not RouteStatus.ADMITTED:
             return decision

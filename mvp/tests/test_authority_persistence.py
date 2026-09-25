@@ -232,7 +232,7 @@ class AuthorityPersistenceTests(unittest.TestCase):
                     ('{"authority_id":"runtime-authority","state":{}}', "authority-snapshot-1"),
                 )
                 connection.commit()
-            with self.assertRaisesRegex(ValueError, "integrity"):
+            with self.assertRaisesRegex(ValueError, "payload hash"):
                 restore_authority_snapshot(
                     store, authority_id="runtime-authority"
                 )

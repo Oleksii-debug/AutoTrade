@@ -175,7 +175,19 @@ class ArtifactStore:
                     raise ArtifactConflict("artifact_id is already committed with different content or metadata")
                 self._verify_manifest_object(existing)
                 if not _verify_manifest_integrity(existing, required=False):
-                    existing = dict(existing)
+                    # Legacy manifests have no authenticated metadata boundary.
+                    # Never make caller-editable historical fields trustworthy by
+                    # hashing the bytes in place. Reconstruct the canonical v1
+                    # manifest from the verified object and the exact immutable
+                    # inputs supplied for this rebind. The timestamp is the
+                    # rebind instant, not an unverifiable legacy creation claim.
+                    existing = {
+                        "schema_version": self.SCHEMA_VERSION,
+                        **immutable,
+                        "created_at": datetime.now(timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                    }
                     existing["manifest_hash"] = _manifest_integrity_hash(existing)
                     atomic_write_json(manifest_path, existing)
                 return existing

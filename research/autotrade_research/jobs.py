@@ -293,7 +293,15 @@ class ResearchJobStore:
         if row["lease_until"] is not None:
             record["lease_until"] = row["lease_until"]
         if row["checkpoint_ref"] is not None:
-            record["checkpoint_ref"] = row["checkpoint_ref"]
+            try:
+                record["checkpoint_ref"] = _require_immutable_artifact_ref(
+                    row["checkpoint_ref"],
+                    "checkpoint_ref",
+                )
+            except ValueError as error:
+                raise JobError(
+                    "durable checkpoint reference is not immutable"
+                ) from error
         if row["error_json"] is not None:
             record["error"] = json.loads(row["error_json"])
         if "external_resolution_json" in row.keys() and row["external_resolution_json"] is not None:
@@ -664,7 +672,10 @@ class ResearchJobStore:
     ) -> dict[str, Any]:
         identifier = str(UUID(_require_text(job_id, "job_id")))
         worker = _require_text(worker_id, "worker_id")
-        checkpoint = _require_text(checkpoint_ref, "checkpoint_ref")
+        checkpoint = _require_immutable_artifact_ref(
+            checkpoint_ref,
+            "checkpoint_ref",
+        )
         usage = _validate_budget(resource_usage)
         current = _utc(now or datetime.now(timezone.utc))
 

@@ -720,7 +720,7 @@ class IndependentRiskTests(unittest.TestCase):
         )
         rule = next(item for item in decision.rules if item.rule == "factor_exposure")
         self.assertFalse(rule.passed)
-        self.assertEqual(rule.observed, "460.0")
+        self.assertEqual(rule.observed, "460")
         self.assertFalse(decision.admitted)
 
     def test_factor_exposure_recognizes_signed_hedge(self):
@@ -1343,7 +1343,7 @@ class IndependentRiskTests(unittest.TestCase):
             x for x in increasing.rules if x.rule == "liquidation_headroom"
         )
         self.assertFalse(increasing_rule.passed)
-        self.assertEqual(increasing_rule.observed, "-0.10")
+        self.assertEqual(increasing_rule.observed, "-0.1")
         self.assertFalse(increasing.admitted)
 
         protective = evaluate_risk(
@@ -1367,7 +1367,7 @@ class IndependentRiskTests(unittest.TestCase):
             x for x in protective.rules if x.rule == "liquidation_headroom"
         )
         self.assertTrue(protective_rule.passed)
-        self.assertEqual(protective_rule.observed, "-0.10")
+        self.assertEqual(protective_rule.observed, "-0.1")
         self.assertTrue(protective.admitted)
 
     def test_reduce_only_cannot_use_exception_when_tail_risk_worsens(self):
@@ -1403,7 +1403,7 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertIn("position_limit", failed)
         self.assertEqual(
             next(x for x in decision.rules if x.rule == "expected_shortfall").observed,
-            "410.00",
+            "410",
         )
         self.assertFalse(decision.admitted)
 

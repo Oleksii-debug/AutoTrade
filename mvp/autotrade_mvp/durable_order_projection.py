@@ -902,6 +902,171 @@ class DurableOrderBookProjection:
             evidence_refs=evidence_refs,
         )
 
+    def ingest_execution_fill(
+        self,
+        *,
+        client_order_id: str,
+        execution_fill: Mapping[str, object],
+        event_key: str,
+        committed_at: str,
+    ) -> DurableOrderMutationResult:
+        """Apply one canonical ExecutionFill through the existing order authority.
+
+        Provider adapters and reconciliation normalize provider-specific payloads
+        before this boundary. This method deliberately does not interpret raw
+        provider responses and does not create a second lifecycle state machine.
+        """
+        if not isinstance(execution_fill, Mapping):
+            raise TypeError("execution_fill must be a mapping")
+
+        allowed = {
+            "fill_id",
+            "provider_execution_id",
+            "provider_revision",
+            "order_ref",
+            "intent_ref",
+            "instrument_version",
+            "side",
+            "last_quantity",
+            "last_price",
+            "trade_time",
+            "receipt_time",
+            "fees",
+            "liquidity_flag",
+            "settlement_date",
+            "correction_reference",
+            "evidence",
+        }
+        required = {
+            "fill_id",
+            "provider_execution_id",
+            "instrument_version",
+            "side",
+            "last_quantity",
+            "last_price",
+            "trade_time",
+            "receipt_time",
+            "fees",
+            "settlement_date",
+            "evidence",
+        }
+        unknown = set(execution_fill) - allowed
+        if unknown:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill contains unsupported fields: "
+                + ", ".join(sorted(str(item) for item in unknown))
+            )
+        missing = required - set(execution_fill)
+        if missing:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill is missing required fields: "
+                + ", ".join(sorted(missing))
+            )
+
+        client_id = _text(client_order_id, name="client_order_id")
+        order = self.order(client_id)
+        order_ref = execution_fill.get("order_ref")
+        if order_ref is not None and _text(order_ref, name="order_ref") != client_id:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill order_ref differs from target order"
+            )
+        if (
+            _text(execution_fill.get("instrument_version"), name="instrument_version")
+            != order.instrument
+        ):
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill instrument differs from target order"
+            )
+        if _text(execution_fill.get("side"), name="side").upper() != order.side:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill side differs from target order"
+            )
+
+        intent_ref = execution_fill.get("intent_ref")
+        if intent_ref is not None:
+            normalized_intent_ref = _text(intent_ref, name="intent_ref")
+            if (
+                order.parent_intent_id is None
+                or normalized_intent_ref != order.parent_intent_id
+            ):
+                raise OrderProjectionConflict(
+                    "canonical ExecutionFill intent_ref differs from target order"
+                )
+
+        trade_time = _instant(execution_fill.get("trade_time"), name="trade_time")
+        receipt_time = _instant(
+            execution_fill.get("receipt_time"),
+            name="receipt_time",
+        )
+        committed = _instant(committed_at, name="committed_at")
+        trade_dt = datetime.fromisoformat(trade_time.replace("Z", "+00:00"))
+        receipt_dt = datetime.fromisoformat(receipt_time.replace("Z", "+00:00"))
+        committed_dt = datetime.fromisoformat(committed.replace("Z", "+00:00"))
+        if receipt_dt < trade_dt:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill receipt_time precedes trade_time"
+            )
+        if committed_dt < receipt_dt:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill cannot be committed before receipt_time"
+            )
+
+        fees = execution_fill.get("fees")
+        if isinstance(fees, (str, bytes)) or not isinstance(fees, Sequence):
+            raise OrderProjectionConflict("canonical ExecutionFill fees must be an array")
+        evidence = execution_fill.get("evidence")
+        if isinstance(evidence, (str, bytes)) or not isinstance(evidence, Sequence):
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill evidence must be an array"
+            )
+        _text(execution_fill.get("settlement_date"), name="settlement_date")
+
+        correction_reference = execution_fill.get("correction_reference")
+        if correction_reference is not None:
+            provider_revision = execution_fill.get("provider_revision")
+            if provider_revision is None:
+                raise OrderProjectionConflict(
+                    "corrected ExecutionFill requires provider_revision"
+                )
+            return self.correct_fill(
+                event_key=event_key,
+                client_order_id=client_id,
+                fill_id=_text(
+                    correction_reference,
+                    name="correction_reference",
+                ),
+                correction_fill_id=_text(
+                    execution_fill.get("fill_id"),
+                    name="fill_id",
+                ),
+                quantity=execution_fill.get("last_quantity"),
+                price=execution_fill.get("last_price"),
+                provider_revision=_text(
+                    provider_revision,
+                    name="provider_revision",
+                ),
+                committed_at=committed,
+                evidence_refs=evidence,
+            )
+
+        return self.record_fill(
+            event_key=event_key,
+            client_order_id=client_id,
+            fill_id=_text(execution_fill.get("fill_id"), name="fill_id"),
+            provider_execution_id=_text(
+                execution_fill.get("provider_execution_id"),
+                name="provider_execution_id",
+            ),
+            quantity=execution_fill.get("last_quantity"),
+            price=execution_fill.get("last_price"),
+            provider_revision=_optional_text(
+                execution_fill.get("provider_revision"),
+                name="provider_revision",
+            ),
+            committed_at=committed,
+            evidence_refs=evidence,
+        )
+
     def correct_fill(
         self,
         *,

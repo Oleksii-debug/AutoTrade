@@ -875,6 +875,14 @@ class AuthorityService:
             self._used_confirmations.add(used_confirmation)
         return record
 
+    def _durable_authority_state_current(self) -> bool:
+        if self.store is None:
+            return True
+        durable_version = (
+            self.store.next_aggregate_version("authority_state", "canonical") - 1
+        )
+        return durable_version == self._journal_version
+
     def dispatch_allowed(
         self,
         admission_id: str,
@@ -892,6 +900,8 @@ class AuthorityService:
             return False, "admission_missing"
         if record.outcome != "ADMITTED":
             return False, "admission_not_admitted"
+        if not self._durable_authority_state_current():
+            return False, "authority_state_stale"
         if record.intent_hash != _text(intent_hash, name="intent_hash"):
             return False, "intent_hash_changed"
         scope = (
@@ -916,6 +926,8 @@ class AuthorityService:
             confirmation = self._confirmations[record.confirmation_id]
             if _instant(now, name="now") >= _instant(confirmation.expires_at, name="confirmation.expires_at"):
                 return False, "confirmation_expired"
+        if not self._durable_authority_state_current():
+            return False, "authority_state_stale"
         return True, "allowed"
 
     def dispatch_guard(

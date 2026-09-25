@@ -385,6 +385,8 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
 
     def test_empty_order_history_never_proves_absence_by_default(self):
         evidence = coverage_evidence(
+            account_id="paper-1",
+            environment="PAPER",
             surface="ORDER_HISTORY",
             coverage_start="2026-09-24T20:00:00Z",
             coverage_end="2026-09-25T00:00:00Z",
@@ -394,6 +396,8 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
         self.assertFalse(evidence.provider_semantics_exclude_execution)
 
         qualified = coverage_evidence(
+            account_id="paper-1",
+            environment="PAPER",
             surface="ORDER_HISTORY",
             coverage_start="2026-09-24T20:00:00Z",
             coverage_end="2026-09-25T00:00:00Z",

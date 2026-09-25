@@ -33,6 +33,7 @@ def execution_observation(
     account_id="paper-1",
     environment="PAPER",
     surface=Surface.AUTHENTICATED_READ,
+    instrument_version="BTCUSDT:v1",
 ):
     query = prepare_authenticated_read_query(
         capability=capability(
@@ -75,7 +76,7 @@ def capability(
             account_id=account_id,
             entity_id="global",
             environment=environment,
-            instrument_version="BTCUSDT:v1",
+            instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=NOW + timedelta(hours=1),
             supported_order_types=frozenset(order_types),
@@ -243,6 +244,8 @@ class BinanceSpotFoundationTests(unittest.TestCase):
 
     def test_absence_semantics_are_never_assumed_from_empty_surface(self):
         evidence = coverage_evidence(
+            account_id="paper-1",
+            environment="PAPER",
             surface="ORDER_HISTORY",
             coverage_start="2026-09-24T17:00:00Z",
             coverage_end="2026-09-24T19:00:00Z",
@@ -251,6 +254,8 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         )
         self.assertFalse(evidence.provider_semantics_exclude_execution)
         qualified = coverage_evidence(
+            account_id="paper-1",
+            environment="PAPER",
             surface="ORDER_HISTORY",
             coverage_start="2026-09-24T17:00:00Z",
             coverage_end="2026-09-24T19:00:00Z",

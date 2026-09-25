@@ -17,13 +17,14 @@ import tempfile
 
 from mvp.autotrade_mvp.economics import build_economic_report
 from mvp.autotrade_mvp.model_gateway import (
+    ModelDescriptor,
     ModelRequest,
     RouteStatus,
     RoutingMode,
     RoutingPolicy,
     route_model,
 )
-from mvp.autotrade_mvp.pipeline import run_vertical_slice, verify_replay
+from mvp.autotrade_mvp.pipeline import run_multi_episode, run_vertical_slice, verify_replay
 
 
 FIXED_NOW = datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc)
@@ -56,6 +57,69 @@ def _require_source_sha(value: str) -> str:
     return value
 
 
+def _outage_routes() -> dict[str, object]:
+    """Model routing failures that must not become hidden paid fallbacks."""
+
+    remote_request = ModelRequest(
+        request_id="remote-outage",
+        allowed_model_ids=("remote-only",),
+        privacy_remote_allowed=True,
+        budget_remaining=Decimal("5"),
+        deadline_utc=FIXED_NOW + timedelta(minutes=5),
+    )
+    remote = route_model(
+        RoutingPolicy(
+            mode=RoutingMode.DYNAMIC,
+            allowed_model_ids=remote_request.allowed_model_ids,
+            allow_remote=True,
+            maximum_cost=Decimal("5"),
+            maximum_latency_ms=5_000,
+        ),
+        remote_request,
+        (),
+        now_utc=FIXED_NOW,
+    )
+    if remote.status is not RouteStatus.NO_MODEL or remote.reserved_cost != Decimal("0"):
+        raise RuntimeError("remote outage admitted or reserved model spend")
+
+    local_request = ModelRequest(
+        request_id="local-resource-exhaustion",
+        allowed_model_ids=("local-overloaded",),
+        privacy_remote_allowed=False,
+        budget_remaining=Decimal("0"),
+        deadline_utc=FIXED_NOW + timedelta(minutes=5),
+    )
+    local = route_model(
+        RoutingPolicy(
+            mode=RoutingMode.LOCAL_ONLY,
+            allowed_model_ids=local_request.allowed_model_ids,
+            allow_remote=False,
+            maximum_cost=Decimal("0"),
+            maximum_latency_ms=1_000,
+        ),
+        local_request,
+        (
+            ModelDescriptor(
+                model_id="local-overloaded",
+                provider_id="local-runtime",
+                revision="load-test-v1",
+                remote=False,
+                estimated_cost=Decimal("0"),
+                latency_ms=60_000,
+                quality_score=Decimal("0.90"),
+            ),
+        ),
+        now_utc=FIXED_NOW,
+    )
+    if local.status is not RouteStatus.NO_MODEL or local.reserved_cost != Decimal("0"):
+        raise RuntimeError("local resource exhaustion admitted or reserved model spend")
+
+    return {
+        "remote_outage": remote,
+        "local_resource_exhaustion": local,
+    }
+
+
 def qualify(source_sha: str) -> dict[str, object]:
     source_sha = _require_source_sha(source_sha)
 
@@ -86,6 +150,16 @@ def qualify(source_sha: str) -> dict[str, object]:
         raise RuntimeError("ZERO routing reserved model cost")
     if inventory.touched:
         raise RuntimeError("ZERO routing inspected unavailable model inventory")
+
+    outage_routes = _outage_routes()
+    if any(decision.model_id is not None or decision.provider_id is not None for decision in outage_routes.values()):
+        raise RuntimeError("outage routing returned a hidden fallback identity")
+    model_cost_total = route.reserved_cost + sum(
+        (decision.reserved_cost for decision in outage_routes.values()),
+        Decimal("0"),
+    )
+    if model_cost_total != Decimal("0"):
+        raise RuntimeError("zero-model outage qualification reserved model spend")
 
     with tempfile.TemporaryDirectory(prefix="autotrade-zero-model-") as directory:
         first = run_vertical_slice(PRICES, directory)
@@ -126,6 +200,33 @@ def qualify(source_sha: str) -> dict[str, object]:
             if small_report.trade_count != 0 or small_report.net_pnl != Decimal("0"):
                 raise RuntimeError("small-capital rejection changed economic state")
 
+        with tempfile.TemporaryDirectory(prefix="autotrade-zero-model-campaign-") as campaign_directory:
+            episodes = (
+                ("100", "101", "102", "103"),
+                ("103", "102", "101", "100"),
+            )
+            campaign_first = run_multi_episode(episodes, campaign_directory)
+            first_report = build_economic_report(campaign_directory)
+            campaign_second = run_multi_episode(episodes, campaign_directory)
+            second_report = build_economic_report(campaign_directory)
+
+            if not all(result.reconciled for result in (*campaign_first, *campaign_second)):
+                raise RuntimeError("zero-model campaign failed reconciliation")
+            if not all(result.resumed for result in campaign_second):
+                raise RuntimeError("zero-model campaign did not prove restart/resume")
+            if [result.order_id for result in campaign_first] != [result.order_id for result in campaign_second]:
+                raise RuntimeError("zero-model campaign changed deterministic order identity")
+            if [result.fill_id for result in campaign_first] != [result.fill_id for result in campaign_second]:
+                raise RuntimeError("zero-model campaign changed deterministic fill identity")
+            if first_report != second_report:
+                raise RuntimeError("zero-model campaign changed economics after replay")
+            if first_report.trade_count != 2 or first_report.evidence_count != 2:
+                raise RuntimeError("zero-model campaign did not preserve two independent episodes")
+            if first_report.ending_position != Decimal("0"):
+                raise RuntimeError("zero-model campaign did not return to flat position")
+            if first_report.economic_edge_claim != "UNPROVEN_SIMULATION_ONLY":
+                raise RuntimeError("zero-model campaign manufactured an economic-edge claim")
+
         return {
             "qualification": "WP-62_ZERO_MODEL_FOUNDATION",
             "qualification_schema_version": "1.0.0",
@@ -138,6 +239,17 @@ def qualify(source_sha: str) -> dict[str, object]:
                 "reason": route.reason,
                 "model_inventory_touched": inventory.touched,
             },
+            "outage_routes": {
+                name: {
+                    "status": decision.status.value,
+                    "model_id": decision.model_id,
+                    "provider_id": decision.provider_id,
+                    "reserved_cost": str(decision.reserved_cost),
+                    "reason": decision.reason,
+                }
+                for name, decision in outage_routes.items()
+            },
+            "model_cost_total": str(model_cost_total),
             "deterministic_financial_slice": {
                 "first_status": first.status,
                 "restart_status": second.status,
@@ -148,6 +260,15 @@ def qualify(source_sha: str) -> dict[str, object]:
                 "replay_verified": True,
             },
             "economics": report.as_jsonable(),
+            "multi_episode_economics": {
+                "episode_statuses": [result.status for result in campaign_first],
+                "replay_statuses": [result.status for result in campaign_second],
+                "restart_resumed": all(result.resumed for result in campaign_second),
+                "same_order_identities": [result.order_id for result in campaign_first] == [result.order_id for result in campaign_second],
+                "same_fill_identities": [result.fill_id for result in campaign_first] == [result.fill_id for result in campaign_second],
+                "reconciled": all(result.reconciled for result in campaign_second),
+                "economics": second_report.as_jsonable(),
+            },
             "small_capital": {
                 "status": small_second.status,
                 "resumed": small_second.resumed,

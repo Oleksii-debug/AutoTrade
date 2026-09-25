@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.autotrade.local/2.0.0/ui.schema.json",
+  "$id": "https://schemas.autotrade.local/3.0.0/ui.schema.json",
   "title": "AutoTrade host/UI contracts",
   "$defs": {
     "UiSnapshot": {
@@ -44,7 +44,7 @@
           "$ref": "common.schema.json#/$defs/Environment"
         },
         "permission_summary": {
-          "type": "object"
+          "$ref": "#/$defs/PermissionSummary"
         },
         "connection_freshness": {
           "type": "object"
@@ -104,8 +104,7 @@
           "minLength": 1
         },
         "session": {
-          "type": "string",
-          "minLength": 1
+          "$ref": "#/$defs/SessionReference"
         },
         "action": {
           "type": "string",
@@ -221,6 +220,41 @@
         },
         "remaining_uncertainty": {
           "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "SessionReference": {
+      "type": "string",
+      "pattern": "^sid-[0-9a-f]{64}$",
+      "description": "Public one-way session reference. This is never the reusable bearer credential."
+    },
+    "PermissionSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "actor",
+        "session",
+        "role"
+      ],
+      "properties": {
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session": {
+          "$ref": "#/$defs/SessionReference"
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
           "items": {
             "type": "string",
             "minLength": 1

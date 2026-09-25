@@ -1,3 +1,4 @@
+from decimal import Decimal
 import unittest
 
 from mvp.autotrade_mvp.allocation import (
@@ -291,8 +292,8 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
         target = result.objective.allocation.targets[0]
         self.assertEqual(target.quantity, 10)
         self.assertEqual(target.notional, 120)
-        self.assertEqual(target.estimated_cost, 2.4)
-        self.assertEqual(result.objective.allocation.cash_required, 122.4)
+        self.assertEqual(target.estimated_cost, Decimal("2.4"))
+        self.assertEqual(result.objective.allocation.cash_required, Decimal("122.4"))
 
     def test_cross_currency_rejects_unbound_desired_notional_currency(self):
         candidate = ObjectiveCandidate.create(

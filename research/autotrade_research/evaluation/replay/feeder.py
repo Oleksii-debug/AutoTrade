@@ -273,11 +273,17 @@ class CausalDataView:
         )
         if not isinstance(self.events, tuple):
             raise TypeError("events must be a tuple")
+        ids: set[str] = set()
         for item in self.events:
             if not isinstance(item, CausalEvent):
                 raise TypeError("events must contain CausalEvent")
             if item.available_at > self.simulation_time:
                 raise CausalReplayError("causal view contains a future event")
+            if item.event_id in ids:
+                raise CausalReplayError("causal view contains duplicate event identity")
+            ids.add(item.event_id)
+        if self.events != tuple(sorted(self.events, key=lambda item: item.ordering_key)):
+            raise CausalReplayError("causal view must preserve deterministic causal order")
 
     def by_kind(self, kind: str) -> tuple[CausalEvent, ...]:
         target = _text(kind, name="kind").upper()

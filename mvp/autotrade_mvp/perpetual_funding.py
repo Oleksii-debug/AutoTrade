@@ -89,6 +89,7 @@ class PerpetualFundingObservation:
     funding_period_id: str
     effective_at: datetime
     observed_at: datetime
+    price_reference_at: datetime
     signed_contracts: Decimal
     funding_rate: Decimal
     mark_price: Decimal
@@ -122,8 +123,21 @@ class PerpetualFundingObservation:
         observed = _utc(self.observed_at, "observed_at")
         if observed < effective:
             raise PerpetualFundingError("observed_at cannot precede funding effective_at")
+        price_reference = _utc(
+            self.price_reference_at,
+            "price_reference_at",
+        )
+        if price_reference != effective:
+            raise PerpetualFundingError(
+                "funding mark/index prices must be explicitly bound to the exact funding cut"
+            )
+        if price_reference > observed:
+            raise PerpetualFundingError(
+                "funding price reference cannot be observed after provider evidence"
+            )
         object.__setattr__(self, "effective_at", effective)
         object.__setattr__(self, "observed_at", observed)
+        object.__setattr__(self, "price_reference_at", price_reference)
         object.__setattr__(
             self, "signed_contracts", _decimal(self.signed_contracts, "signed_contracts")
         )
@@ -170,6 +184,7 @@ def canonical_perpetual_funding_observation(
         "funding_period_id": observation.funding_period_id,
         "effective_at": _utc_text(observation.effective_at),
         "observed_at": _utc_text(observation.observed_at),
+        "price_reference_at": _utc_text(observation.price_reference_at),
         "signed_contracts": format(observation.signed_contracts, "f"),
         "funding_rate": format(observation.funding_rate, "f"),
         "mark_price": format(observation.mark_price, "f"),
@@ -199,6 +214,7 @@ def _canonical_observation_from_sealed_response(
         "provider_revision",
         "funding_period_id",
         "effective_at",
+        "price_reference_at",
         "instrument_id",
         "signed_contracts",
         "funding_rate",
@@ -246,6 +262,10 @@ def _canonical_observation_from_sealed_response(
         ),
         effective_at=instant(payload["effective_at"], "effective_at"),
         observed_at=instant(source.observed_at, "observed_at"),
+        price_reference_at=instant(
+            payload["price_reference_at"],
+            "price_reference_at",
+        ),
         signed_contracts=_decimal(
             payload["signed_contracts"],
             "signed_contracts",
@@ -560,7 +580,7 @@ class DurablePerpetualFundingAuthority:
         snapshot = MarketSnapshot(
             mark_price=observation.mark_price,
             index_price=observation.index_price,
-            observed_at=observation.effective_at,
+            observed_at=observation.price_reference_at,
             max_age=timedelta(microseconds=1),
             max_mark_index_deviation=Decimal("1"),
         )

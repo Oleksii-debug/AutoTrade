@@ -66,7 +66,7 @@ class AuthorityPersistenceTests(unittest.TestCase):
         self.assertEqual("ADMITTED", admitted.outcome)
         return service
 
-    def test_restart_preserves_exact_dispatch_authority(self):
+    def test_restart_preserves_legacy_admission_as_non_dispatchable(self):
         with tempfile.TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite")
             persist_authority_snapshot(
@@ -82,7 +82,7 @@ class AuthorityPersistenceTests(unittest.TestCase):
             )
             self.assertEqual(1, restored.epoch)
             self.assertEqual(
-                (True, "allowed"),
+                (False, "financial_evidence_missing"),
                 restored.dispatch_allowed(
                     "admit-1",
                     intent_hash="intent-hash",

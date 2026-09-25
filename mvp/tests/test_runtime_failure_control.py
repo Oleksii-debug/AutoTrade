@@ -282,7 +282,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
                 owner_store=JournalStore(path),
                 owner_scope="paper-account",
             )
-            with self.assertRaisesRegex(RuntimeError, "payload hash mismatch"):
+            with self.assertRaisesRegex(ValueError, "payload hash"):
                 restarted.start("host-c")
 
     def test_tampered_durable_owner_record_blocks_sender_validation(self):
@@ -303,7 +303,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
                 )
                 connection.commit()
 
-            with self.assertRaisesRegex(RuntimeError, "payload hash mismatch"):
+            with self.assertRaisesRegex(ValueError, "payload hash"):
                 controller.validate_sender(owner.owner_id, owner.epoch)
 
     def test_provider_uncertainty_prevents_false_ready(self):

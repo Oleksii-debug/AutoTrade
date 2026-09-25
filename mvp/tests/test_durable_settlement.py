@@ -59,7 +59,11 @@ def raw_rule() -> SettlementRuleBinding:
 
 def bind_rule(store: JournalStore, value=None) -> SettlementRuleBinding:
     value = raw_rule() if value is None else value
-    receipt = settlement_rule_evidence_receipt(value)
+    receipt = settlement_rule_evidence_receipt(
+        value,
+        trade_date=date(2026, 9, 25),
+        expected_settlement_date=date(2026, 9, 26),
+    )
     raw = canonical_json(receipt).encode("utf-8")
     artifact_id = str(
         uuid5(
@@ -74,7 +78,11 @@ def bind_rule(store: JournalStore, value=None) -> SettlementRuleBinding:
         media_type=SETTLEMENT_EVIDENCE_MEDIA_TYPE,
         rights={"storage": True, "export": False},
         source_refs=["provider-doc:test-settlement-rule"],
-        metadata=settlement_rule_evidence_metadata(value),
+        metadata=settlement_rule_evidence_metadata(
+            value,
+            trade_date=date(2026, 9, 25),
+            expected_settlement_date=date(2026, 9, 26),
+        ),
     )
     return replace(
         value,

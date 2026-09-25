@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from typing import Mapping
+from typing import Iterable, Mapping
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -89,7 +89,11 @@ class EquityState:
             "unsettled_cash",
             _decimal(self.unsettled_cash, name="unsettled_cash"),
         )
-        object.__setattr__(self, "currency", _text(self.currency, name="currency"))
+        object.__setattr__(
+            self,
+            "currency",
+            _text(self.currency, name="currency").upper(),
+        )
         object.__setattr__(self, "borrowed_quantity", borrowed)
         object.__setattr__(
             self,
@@ -126,7 +130,7 @@ class EquityState:
             total_basis=_positive(total_basis, name="total_basis", allow_zero=True),
             settled_cash=_decimal(settled_cash, name="settled_cash"),
             unsettled_cash=_decimal(unsettled_cash, name="unsettled_cash"),
-            currency=_text(currency, name="currency"),
+            currency=_text(currency, name="currency").upper(),
             borrowed_quantity=borrowed,
             accrued_financing=_positive(accrued_financing, name="accrued_financing", allow_zero=True),
             recalled_quantity=recalled,
@@ -229,15 +233,31 @@ class Transition:
 
 
 class CorporateActionBook:
-    def __init__(self, state: EquityState):
+    def __init__(
+        self,
+        state: EquityState,
+        history: Iterable[CorporateEvent] = (),
+    ):
+        if not isinstance(state, EquityState):
+            raise TypeError("state must be EquityState")
         self.state = state
         self._events: dict[str, tuple[CorporateEvent, Transition]] = {}
+        for event in history:
+            self.apply(event)
 
     @property
     def applied_event_ids(self) -> tuple[str, ...]:
         return tuple(self._events)
 
+    @property
+    def events(self) -> tuple[CorporateEvent, ...]:
+        """Immutable accepted event history for deterministic restart replay."""
+
+        return tuple(event for event, _transition in self._events.values())
+
     def apply(self, event: CorporateEvent) -> Transition:
+        if not isinstance(event, CorporateEvent):
+            raise TypeError("event must be CorporateEvent")
         existing = self._events.get(event.event_id)
         if existing is not None:
             prior_event, transition = existing

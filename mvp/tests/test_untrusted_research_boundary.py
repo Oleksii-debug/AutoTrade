@@ -167,6 +167,28 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
                     )
                 )
 
+    def test_privileged_field_aliases_and_mixed_separators_are_rejected(self):
+        aliases = (
+            "apiKey",
+            "access-token",
+            "private_key",
+            "executionAuthority",
+            "withdrawal authority",
+            "session.cookie",
+        )
+        for alias in aliases:
+            with self.subTest(alias=alias), self.assertRaisesRegex(
+                PermissionError,
+                "privileged fields",
+            ):
+                validate_model_result(
+                    ResearchModelResult(
+                        result_id="privileged-alias",
+                        proposal={"analysis": {alias: "must-not-pass"}},
+                        evidence_refs=("evidence:1",),
+                    )
+                )
+
     def test_model_proposal_rejects_non_string_nested_keys(self):
         with self.assertRaisesRegex(ResearchBoundaryError, "keys must be strings"):
             validate_model_result(

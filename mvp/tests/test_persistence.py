@@ -313,9 +313,17 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(saved, result)
             self.assertEqual([item.event_id for item in appended], ["evt-1", "evt-2"])
             self.assertEqual(len(store.load_events("account", "paper-1")), 2)
-            self.assertEqual(len(store.pending_outbox()), 1)
 
-            replayed, inserted, appended = store.commit_command(
+            # The atomic path must persist the same integrity evidence as
+            # append_event.  Reopening here exercises the crash/restart
+            # boundary instead of relying on in-process state.
+            reopened = JournalStore(path)
+            pending = reopened.pending_outbox()
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(pending[0]["event_id"], "evt-1")
+            self.assertEqual(pending[0]["topic"], "events")
+
+            replayed, inserted, appended = reopened.commit_command(
                 actor="alice",
                 environment="PAPER",
                 command_id="cmd-retry",
@@ -328,6 +336,7 @@ class JournalStoreTests(unittest.TestCase):
             self.assertFalse(inserted)
             self.assertEqual(replayed, result)
             self.assertEqual(appended, ())
+            self.assertEqual(len(reopened.pending_outbox()), 1)
             self.assertEqual(len(store.load_events("account", "paper-1")), 2)
 
     def test_atomic_command_rolls_back_on_event_version_gap(self):

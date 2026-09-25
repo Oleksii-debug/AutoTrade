@@ -1,7 +1,11 @@
 from decimal import Decimal
 import unittest
 
-from mvp.autotrade_mvp.accounting import (\n    AccountingConflict,\n    ScopedEconomicBook,\n    book_equity_fill,\n)
+from mvp.autotrade_mvp.accounting import (
+    AccountingConflict,
+    ScopedEconomicBook,
+    book_equity_fill,
+)
 from mvp.autotrade_mvp.fill_accounting import (
     ProjectedFillEvidence,
     book_provider_fill,
@@ -404,6 +408,11 @@ class FillAccountingTests(unittest.TestCase):
             ("correction_of", {**base, "correction_of": "other-fill"}, corrected_provider),
             ("intent", {**base, "intent_id": "other-intent"}, corrected_provider),
             (
+                "client_order_id",
+                {**base, "client_order_id": "other-client"},
+                corrected_provider,
+            ),
+            (
                 "instrument",
                 base,
                 ProviderFillEvidence.create(
@@ -476,7 +485,7 @@ class FillAccountingTests(unittest.TestCase):
             expected_instrument="ABC",
             settlement_currency="USD",
         ))
-        reversal, replacement = build_provider_fill_correction_transactions(
+        _reversal, replacement = build_provider_fill_correction_transactions(
             book=book,
             provider_id="provider-a",
             original_projected_fill=original_projected,
@@ -502,7 +511,16 @@ class FillAccountingTests(unittest.TestCase):
         before_digest = book.audit_digest()
 
         with self.assertRaises(AccountingConflict):
-            book.append_batch((reversal, replacement))
+            book_provider_fill_correction(
+                book=book,
+                provider_id="provider-a",
+                original_projected_fill=original_projected,
+                original_provider_fill=original_provider,
+                corrected_projected_fill=corrected_projected,
+                corrected_provider_fill=corrected_provider,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+            )
 
         self.assertEqual(book.transactions, before_transactions)
         self.assertEqual(book.audit_digest(), before_digest)

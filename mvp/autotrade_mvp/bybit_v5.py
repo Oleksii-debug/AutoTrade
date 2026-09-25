@@ -20,7 +20,6 @@ from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .capabilities import CapabilityError, CapabilitySnapshot
-from .capabilities import CapabilitySnapshot
 from .provider_core import (
     ProviderCoreError,
     ProviderResponseObservation,

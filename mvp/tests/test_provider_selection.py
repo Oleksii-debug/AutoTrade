@@ -160,7 +160,9 @@ class ProviderSelectionTests(unittest.TestCase):
         self.assertIn("QUALIFICATION_CODE_MISMATCH", result.decisions[0].reasons)
 
     def test_candidate_requires_actual_hex_code_sha_shape(self):
-        with self.assertRaisesRegex(ValueError, "hex SHA"):
+        with self.assertRaisesRegex(
+            ValueError, "canonical 40- or 64-character lowercase Git object id"
+        ):
             candidate("BYBIT", "SPOT", code_sha="build-label")
 
     def test_adapter_code_sha_requires_canonical_lowercase_hex(self):

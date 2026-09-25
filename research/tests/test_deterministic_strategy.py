@@ -490,7 +490,7 @@ class DeterministicStrategyTests(unittest.TestCase):
         descriptor = self.descriptor()
         strategy = ReturnThresholdBaseline(
             lookback=2,
-            threshold="0.50",
+            threshold="0.10",
             proposal_quantity="2",
             descriptor=descriptor,
         )

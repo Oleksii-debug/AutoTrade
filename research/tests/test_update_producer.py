@@ -921,6 +921,46 @@ class UpdateProducerTests(unittest.TestCase):
                 artifact["population"]["update_exclusions"],
             )
 
+    def test_reconciliation_proof_for_different_episode_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            episode_id = fixture.append_learning(
+                task="update",
+                feature="2",
+                target="1",
+                observation_id="wrong-episode-reconciliation",
+                label_available_at=datetime(
+                    2026, 10, 8, 4, tzinfo=timezone.utc
+                ),
+                outcome_class="POSITIVE",
+                intended_side="BUY",
+            )
+            fixture.bind_reconciliation_evidence(
+                episode_id,
+                observed_at=datetime(
+                    2026, 10, 8, 3, 59, tzinfo=timezone.utc
+                ),
+            )
+            fixture.reconciliation_evidence[episode_id]["episode_id"] = (
+                "00000000-0000-4000-8000-000000000099"
+            )
+
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref),
+            )
+
+            self.assertEqual(produced.status, "NO_UPDATE")
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIn(
+                [episode_id, "RECONCILIATION_EVIDENCE_INVALID"],
+                artifact["population"]["update_exclusions"],
+            )
+
     def test_authority_reconciliation_proof_is_bound_into_learning_row(self):
         with TemporaryDirectory() as directory:
             fixture, checkpoint, test_ref, calibration, envelope = (

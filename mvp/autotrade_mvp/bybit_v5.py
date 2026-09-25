@@ -341,13 +341,11 @@ def parse_submission_response(
             raise ProviderCoreError(
                 "ambiguous transport requires explicit local observed_at"
             )
+        _utc_text(observed_at, name="observed_at")
         return {
             "attempt_id": aid,
             "outcome": "UNKNOWN",
             "client_order_id": cid,
-            "provider_received_at": None,
-            "observed_at": _utc_text(observed_at, name="observed_at"),
-            "environment": normalized_environment,
             "reason_code": "BYBIT_TRANSPORT_AMBIGUOUS",
             "evidence": [],
             "retry_disposition": "RECONCILE_FIRST",

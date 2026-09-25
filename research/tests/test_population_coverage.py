@@ -137,6 +137,36 @@ class PopulationCoverageTests(unittest.TestCase):
             )
             self.assertNotEqual(manifest.digest, changed.digest)
 
+    def test_explicit_exclusion_cannot_grant_terminal_retention_pass(self):
+        with TemporaryDirectory() as directory:
+            store, negative, no_trade = self._store_with_negative_and_no_trade(directory)
+            manifest = self._manifest(
+                store,
+                [negative],
+                {no_trade: "FROZEN_PROTOCOL_EXCLUSION:NO_TRADE_CONTROL"},
+            )
+            self.assertFalse(manifest.complete)
+            metrics = {
+                "calm": RegimeMetric.create(
+                    regime="calm",
+                    champion_net_score="0.10",
+                    candidate_net_score="0.20",
+                    observations=1,
+                    label_complete=True,
+                )
+            }
+            result = evaluate_population_bound_retention(
+                metrics,
+                retention_policy(),
+                manifest,
+            )
+            self.assertEqual(result.status, "INCONCLUSIVE")
+            self.assertFalse(result.promotable)
+            self.assertIn(
+                "population coverage manifest is incomplete",
+                result.reasons,
+            )
+
     def test_late_correction_cannot_rewrite_historical_population_digest(self):
         with TemporaryDirectory() as directory:
             store, negative, no_trade = self._store_with_negative_and_no_trade(directory)

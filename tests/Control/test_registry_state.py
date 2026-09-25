@@ -37,7 +37,6 @@ def request(request_id="req-a", run_id="run-a", scope=None, mode="SOURCE_MUTATIO
         "authority_family": "CONTRACT",
         "semantic_key": "core-schemas",
         "mutation_scope": scope or ["contracts/jsonschema"],
-        "lease_until": "2026-09-22T11:00:00Z",
         "base_head": "base-a",
         "contract_versions": {"contracts": "1.0.0"},
     }
@@ -48,6 +47,38 @@ class RegistryTests(unittest.TestCase):
         registry, created = claim(empty_registry(), request(), expected_generation=0, now=NOW)
         self.assertEqual(registry["generation"], 1)
         self.assertEqual(created["status"], "ACTIVE")
+
+    def test_claim_lease_is_issued_from_service_time_and_bounded_policy(self):
+        registry, created = claim(
+            empty_registry(),
+            request(),
+            expected_generation=0,
+            now=NOW,
+            lease_ttl_seconds=900,
+        )
+        self.assertEqual(created["lease_until"], "2026-09-22T10:15:00Z")
+        self.assertEqual(created["lease_ttl_seconds"], 900)
+        self.assertEqual(registry["claims"][0]["lease_until"], created["lease_until"])
+
+        with self.assertRaisesRegex(RegistryProtocolError, "lease_ttl_seconds"):
+            claim(
+                empty_registry(),
+                request("req-too-long"),
+                expected_generation=0,
+                now=NOW,
+                lease_ttl_seconds=3601,
+            )
+
+    def test_request_cannot_supply_lease_expiry(self):
+        worker_request = request()
+        worker_request["lease_until"] = "2099-01-01T00:00:00Z"
+        with self.assertRaisesRegex(RegistryProtocolError, "service-issued"):
+            claim(
+                empty_registry(),
+                worker_request,
+                expected_generation=0,
+                now=NOW,
+            )
 
     def test_disabled_registry_rejects_mutating_claims_but_allows_read_only(self):
         for mode in ("BOOTSTRAP_NOT_ENABLED", "PROTOCOL_IMPLEMENTED_NOT_ENABLED"):
@@ -122,21 +153,35 @@ class RegistryTests(unittest.TestCase):
             first,
             claim_id=created["claim_id"],
             run_id="run-a",
-            lease_until="2026-09-22T12:00:00Z",
             expected_generation=1,
-            now=NOW,
+            now="2026-09-22T10:30:00Z",
+            lease_ttl_seconds=3600,
         )
         self.assertEqual(renewed["generation"], 2)
-        self.assertEqual(value["lease_until"], "2026-09-22T12:00:00Z")
+        self.assertEqual(value["lease_until"], "2026-09-22T11:30:00Z")
+        self.assertEqual(value["lease_ttl_seconds"], 3600)
         with self.assertRaises(RegistryStaleGenerationError):
             renew(
                 renewed,
                 claim_id=created["claim_id"],
                 run_id="run-a",
-                lease_until="2026-09-22T13:00:00Z",
                 expected_generation=1,
-                now=NOW,
+                now="2026-09-22T10:45:00Z",
             )
+
+    def test_renewal_ttl_is_service_bounded(self):
+        first, created = claim(empty_registry(), request(), expected_generation=0, now=NOW)
+        with self.assertRaisesRegex(RegistryProtocolError, "lease_ttl_seconds"):
+            renew(
+                first,
+                claim_id=created["claim_id"],
+                run_id="run-a",
+                expected_generation=1,
+                now="2026-09-22T10:30:00Z",
+                lease_ttl_seconds=7200,
+            )
+        self.assertEqual(first["generation"], 1)
+        self.assertEqual(first["claims"][0]["lease_until"], "2026-09-22T11:00:00Z")
 
     def test_release_terminates_owner(self):
         first, created = claim(empty_registry(), request(), expected_generation=0, now=NOW)

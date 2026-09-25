@@ -588,6 +588,109 @@ class AuthorityTests(unittest.TestCase):
             )
             self.assertEqual(reused.reason, "confirmation_already_used")
 
+    def test_stale_process_cannot_authorize_after_other_process_revokes(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            process_a = AuthorityService(store)
+            process_a.register_policy(policy(autonomous=True))
+            process_a.admit(
+                admission_id="a-stale-read",
+                policy_id="p1",
+                intent_hash="h-stale-read",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                state_version=1,
+                risk_admitted=True,
+                now="2026-09-24T18:00:00Z",
+            )
+            process_b = AuthorityService(store)
+            process_b.revoke_policy(
+                "p1",
+                reason="operator revoke",
+                revoked_at="2026-09-24T18:01:00Z",
+            )
+
+            self.assertEqual(
+                process_a.dispatch_allowed(
+                    "a-stale-read",
+                    intent_hash="h-stale-read",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    now="2026-09-24T18:02:00Z",
+                ),
+                (False, "authority_state_stale"),
+            )
+
+    def test_final_dispatch_barrier_blocks_stale_process_after_external_revoke(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            process_a = AuthorityService(store)
+            process_a.register_policy(policy(autonomous=True))
+            admitted = process_a.admit(
+                admission_id="a-stale-guard",
+                policy_id="p1",
+                intent_hash="h-stale-guard",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                state_version=1,
+                risk_admitted=True,
+                now="2026-09-24T18:00:00Z",
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+            process_b = AuthorityService(store)
+            guard = process_a.dispatch_guard(
+                "a-stale-guard",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+            )
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+                owner_token="owner-stale-guard",
+            )
+            outbound = 0
+
+            def transport(client_id, request, final_guard):
+                nonlocal outbound
+                process_b.revoke_policy(
+                    "p1",
+                    reason="operator revoke",
+                    revoked_at="2026-09-24T18:00:01Z",
+                )
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            result = dispatcher.dispatch(
+                attempt_id="attempt-stale-guard",
+                intent_id="intent-stale-guard",
+                intent_hash="h-stale-guard",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=guard,
+                transport_send=transport,
+                final_barrier_clock=lambda: "2026-09-24T18:00:02Z",
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "authority_state_stale")
+            self.assertEqual(outbound, 0)
+
     def test_durable_versioned_revocation_survives_restart(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

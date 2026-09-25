@@ -19,6 +19,8 @@
     "RECONCILIATION_REQUIRED",
     "AUTHORITY_REVOKED"
   ]);
+  // Client-side gating only narrows the canonical host policy; the server
+  // remains authoritative and revalidates every command before mutation.
   const HOST_ACTION_ROLES = Object.freeze({
     BLOCK_NEW_EXPOSURE: new Set(["OWNER", "OPERATOR"]),
     REVOKE_AUTHORITY: new Set(["OWNER"])

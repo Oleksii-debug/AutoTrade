@@ -697,5 +697,98 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result.allocation.targets[0].notional, Decimal("120"))
 
 
+    def test_objective_selection_can_skip_expensive_higher_ranked_candidate(self):
+        result = allocate_objective_targets(
+            [
+                ObjectiveCandidate.create(
+                    symbol="EXPENSIVE_HIGH",
+                    desired_notional="1000",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.10",
+                    fee_floor="200",
+                ),
+                ObjectiveCandidate.create(
+                    symbol="CHEAP_LOWER",
+                    desired_notional="1000",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.05",
+                ),
+            ],
+            self.policy(
+                cash_available="3000",
+                max_gross_notional="3000",
+                max_net_notional="3000",
+                max_symbol_notional="3000",
+                max_total_cost="300",
+            ),
+        )
+        self.assertEqual(result.allocation.status, "ALLOCATED")
+        self.assertEqual(result.selected_symbols, ("CHEAP_LOWER",))
+        self.assertEqual(result.expected_net_utility, Decimal("50"))
+        self.assertEqual(
+            tuple(target.symbol for target in result.allocation.targets),
+            ("CHEAP_LOWER",),
+        )
+
+    def test_objective_budget_covers_complete_subset_space(self):
+        result = allocate_objective_targets(
+            [
+                ObjectiveCandidate.create(
+                    symbol="AAA",
+                    desired_notional="100",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.02",
+                ),
+                ObjectiveCandidate.create(
+                    symbol="BBB",
+                    desired_notional="100",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.01",
+                ),
+            ],
+            self.policy(),
+            max_candidate_sets=2,
+        )
+        self.assertEqual(result.allocation.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.selected_symbols, ())
+        self.assertIn("complete subset evaluation", result.reason)
+
+    def test_objective_equal_utility_prefers_lower_cost_subset(self):
+        result = allocate_objective_targets(
+            [
+                ObjectiveCandidate.create(
+                    symbol="COSTLY",
+                    desired_notional="1000",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.06",
+                    fee_floor="10",
+                ),
+                ObjectiveCandidate.create(
+                    symbol="CHEAP",
+                    desired_notional="1000",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.05",
+                ),
+            ],
+            self.policy(
+                cash_available="3000",
+                max_gross_notional="3000",
+                max_net_notional="3000",
+                max_symbol_notional="3000",
+                max_total_cost="100",
+            ),
+        )
+        self.assertEqual(result.allocation.status, "ALLOCATED")
+        self.assertEqual(result.selected_symbols, ("CHEAP",))
+        self.assertEqual(result.expected_net_utility, Decimal("50"))
+        self.assertEqual(result.objective_version, "deterministic-net-utility-v2")
+
+
 if __name__ == "__main__":
     unittest.main()
